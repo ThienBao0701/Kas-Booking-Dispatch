@@ -28,6 +28,7 @@ import {
 } from '../api/chat';
 import { toUserMessage } from '../api/errors';
 import { Card } from '../components/Card';
+import { DataTable, type DataColumn } from '../components/DataTable';
 import { Button } from '../components/Button';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { Modal } from '../components/Modal';
@@ -293,44 +294,30 @@ export function ChatBoxPage() {
             }
           />
         ) : (
-          <ul className="space-y-2" data-testid="chat-conversations">
-            {conversations.map((c) => (
-              <li key={c.id}>
-                <Link
-                  to={`/app/chat/${c.id}`}
-                  className="block rounded-2xl border border-slate-200 bg-white px-4 py-3 transition hover:border-brand-300 hover:bg-brand-50/40"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    {/* `title` — the category's label, or a legacy thread's own typed title. */}
-                    <span className="font-medium text-slate-900">{c.title}</span>
-                    <span className="flex items-center gap-1.5">
-                      {c.anonymous ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
-                          <EyeOff className="h-3 w-3" aria-hidden="true" />
-                          Ẩn danh
-                        </span>
-                      ) : null}
-                      <ChatStatusChip status={c.status} />
-                    </span>
-                  </div>
-                  {isAdmin ? (
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      {/* `senderLabel` is already "Ẩn danh" when it has to be — the
-                          server decided that, so no screen can forget to. */}
-                      {c.senderLabel}
-                      {c.branch ? ` · ${c.branch.hotelName}` : ''}
-                    </p>
-                  ) : null}
-                  <p className="mt-1 line-clamp-1 text-sm text-slate-600">
-                    {c.lastMessagePreview ?? '—'}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {formatDateTime(c.lastMessageAt)} · {c.messageCount} tin nhắn
-                  </p>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          /*
+            ONE ROW PER THREAD, not a card. Forty threads used to be forty tall
+            boxes; a row per thread lets an Admin scan status, subject, sender and
+            age down a column. The last message sits under the subject, clamped
+            to one line — the thread itself is one click away.
+          */
+          <DataTable
+            testId="chat-conversations"
+            title={isAdmin ? 'Cuộc trò chuyện' : 'Câu hỏi của bạn'}
+            badge={conversations.length}
+            columns={chatColumns(isAdmin)}
+            rows={conversations}
+            rowKey={(c) => c.id}
+            emptyTitle="Chưa có cuộc trò chuyện nào"
+            emptyMessage="Hãy đặt câu hỏi đầu tiên."
+            actions={(c) => (
+              <Link
+                to={`/app/chat/${c.id}`}
+                className="inline-flex items-center rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              >
+                Mở
+              </Link>
+            )}
+          />
         )}
       </QueryState>
 
@@ -342,6 +329,76 @@ export function ChatBoxPage() {
       {exportOpen ? <ChatExportModal onClose={() => setExportOpen(false)} /> : null}
     </div>
   );
+}
+
+type Conversation = Awaited<ReturnType<typeof chatApi.listConversations>>['conversations'][number];
+
+/**
+ * The thread list's columns. An Admin sees who asked and from where; a
+ * receptionist already knows both, so those columns would be noise.
+ */
+function chatColumns(isAdmin: boolean): DataColumn<Conversation>[] {
+  return [
+    {
+      key: 'status',
+      header: 'Trạng thái',
+      className: 'w-[1%] whitespace-nowrap',
+      render: (c) => <ChatStatusChip status={c.status} />,
+    },
+    {
+      key: 'subject',
+      header: 'Chủ đề',
+      className: 'min-w-[14rem] max-w-[28rem]',
+      render: (c) => (
+        <>
+          {/* `title` — the category's label, or a legacy thread's own typed title. */}
+          <Link to={`/app/chat/${c.id}`} className="font-medium text-slate-900 hover:text-brand-700">
+            {c.title}
+          </Link>
+          {c.anonymous ? (
+            <span className="ml-1.5 inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+              <EyeOff className="h-3 w-3" aria-hidden="true" />
+              Ẩn danh
+            </span>
+          ) : null}
+          <span className="mt-0.5 block line-clamp-1 text-xs text-slate-500">{c.lastMessagePreview ?? '—'}</span>
+        </>
+      ),
+    },
+    ...(isAdmin
+      ? [
+          {
+            key: 'branch',
+            header: 'Chi nhánh / khách sạn',
+            secondary: true,
+            className: 'whitespace-nowrap text-slate-600',
+            render: (c: Conversation) => c.branch?.hotelName ?? '—',
+          },
+          {
+            key: 'sender',
+            header: 'Người gửi',
+            className: 'whitespace-nowrap text-slate-700',
+            // Already "Ẩn danh" when it has to be — the server decided that, so
+            // no screen can forget to.
+            render: (c: Conversation) => c.senderLabel,
+          },
+        ]
+      : []),
+    {
+      key: 'at',
+      header: 'Thời gian',
+      className: 'whitespace-nowrap text-slate-500',
+      render: (c) => formatDateTime(c.lastMessageAt),
+    },
+    {
+      key: 'count',
+      header: 'Số tin nhắn',
+      align: 'right',
+      secondary: true,
+      className: 'w-[1%] whitespace-nowrap',
+      render: (c) => c.messageCount,
+    },
+  ];
 }
 
 /**

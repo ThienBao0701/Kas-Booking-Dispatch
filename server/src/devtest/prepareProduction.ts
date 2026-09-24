@@ -65,7 +65,7 @@ export interface ResetManifest {
 }
 
 async function counts(client: PrismaClient): Promise<Record<string, number>> {
-  const [bookings, rooms, nights, proofs, analyses, comparisons, notifications, issues, sessions, batches, statusHistory] = await Promise.all([
+  const [bookings, rooms, nights, proofs, analyses, comparisons, notifications, issues, sessions, batches, statusHistory, operationalReports] = await Promise.all([
     client.booking.count(),
     client.bookingRoom.count(),
     client.bookingNightPrice.count(),
@@ -77,8 +77,9 @@ async function counts(client: PrismaClient): Promise<Record<string, number>> {
     client.session.count(),
     client.demoDataBatch.count(),
     client.bookingStatusHistory.count(),
+    client.receptionOperationalReport.count(),
   ]);
-  return { bookings, rooms, nights, proofs, analyses, comparisons, notifications, issues, sessions, batches, statusHistory };
+  return { bookings, rooms, nights, proofs, analyses, comparisons, notifications, issues, sessions, batches, statusHistory, operationalReports };
 }
 
 function timestamp(now: Date): string {
@@ -159,6 +160,22 @@ export async function prepareForProduction(opts: ResetOptions): Promise<ResetMan
   await client.bookingStatusHistory.deleteMany({});
   await client.notification.deleteMany({});
   await client.booking.deleteMany({});
+  /*
+    THE RECEPTION JOURNAL GOES BEFORE THE INCIDENTS, and it must.
+
+    "Sự cố cơ sở vật chất" in "Báo cáo vấn đề" holds a RESTRICT reference to
+    HotelIssue — deliberately, so an incident disappearing cannot silently take
+    the journal entry that reported it. The consequence is that
+    `hotelIssue.deleteMany({})` throws P2003 the moment one such entry exists, so
+    this reset has to clear the journal itself rather than relying on a cascade.
+
+    The audit rows go FIRST: those attached to a report cascade with it, but the
+    ones recording "Tiền đầu ca" belong to the SHIFT and have no report to
+    cascade from. Leaving them behind would carry development cash counts into a
+    production database.
+  */
+  await client.receptionReportAudit.deleteMany({});
+  await client.receptionOperationalReport.deleteMany({});
   await client.hotelIssue.deleteMany({});
   await client.demoDataBatch.deleteMany({});
   await client.session.deleteMany({}); // zero active sessions

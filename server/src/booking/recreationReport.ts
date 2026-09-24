@@ -68,7 +68,7 @@ const REPORT_SELECT = {
       status: true,
       verificationStatus: true,
       deletedAt: true,
-      branch: { select: { id: true, code: true, hotelName: true, address: true } },
+      branch: { select: { id: true, code: true, hotelName: true, address: true, branchNumber: true } },
     },
   },
 } satisfies Prisma.BookingCreationProofSelect;

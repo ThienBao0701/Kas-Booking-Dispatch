@@ -1,4 +1,5 @@
 import { api } from './client';
+import type { CashSummary } from './receptionReports';
 
 export type ShiftType = 'A' | 'B' | 'C' | 'A4' | 'C4';
 
@@ -102,6 +103,33 @@ export interface NewHandoverNoteInput {
   incomingShiftType?: ShiftType;
 }
 
+/** What "Kết thúc ca" is about to close. Read-only; it changes nothing. */
+export interface EndShiftPreview {
+  session: ShiftSession | null;
+  pending: PendingWork;
+  handoverNoteCount: number;
+  reportCount: number;
+  cash: CashSummary | null;
+  /**
+   * TRUE when work is outstanding and this shift has written no handover note.
+   *
+   * A REMINDER, NOT A GATE. The close is never blocked: a receptionist whose
+   * replacement is standing beside them has already handed over in person, and
+   * refusing to let them leave would turn a prompt into an obstacle they learn
+   * to click through. What the system must not do is RECORD a handover that did
+   * not happen.
+   */
+  handoverAdvised: boolean;
+}
+
+export interface EndShiftResult {
+  /** 1 when a shift was closed, 0 when there was nothing open. Idempotent. */
+  closed: number;
+  /** The session with `closedAt` set — the server's instant, never the browser's. */
+  session: ShiftSession | null;
+  cash: CashSummary | null;
+}
+
 export const shiftsApi = {
   options: () => api.get<{ shifts: ShiftOption[] }>('/reception/shifts/options'),
 
@@ -111,7 +139,14 @@ export const shiftsApi = {
   checkIn: (input: CheckInInput) =>
     api.post<{ session: ShiftSession }>('/reception/shifts/check-in', input),
 
-  close: () => api.post<{ closed: number }>('/reception/shifts/close', {}),
+  /**
+   * "Kết thúc ca". Carries NO timestamp: the end instant is the server's, and a
+   * reception PC with a wrong clock must not decide which receptionist owns the
+   * cash around the boundary.
+   */
+  close: () => api.post<EndShiftResult>('/reception/shifts/close', {}),
+
+  endPreview: () => api.get<EndShiftPreview>('/reception/shifts/end-preview'),
 
   /**
    * "Đổi ca". Carries no timestamp — the handover instant is the server's, and

@@ -19,6 +19,7 @@ import { createNotificationsRouter } from './notifications';
 import { createNavBadgesRouter } from './navBadges';
 import { createIssuesRouter } from './issues';
 import { createReceptionShiftsRouter } from './receptionShifts';
+import { createReceptionReportsRouter } from './receptionReports';
 import { createDevTestRouter } from './devTest';
 
 /**
@@ -53,6 +54,7 @@ export function createApiRouter(): Router {
   router.use(createNotificationsRouter());
   router.use(createNavBadgesRouter());
   router.use(createReceptionShiftsRouter());
+  router.use(createReceptionReportsRouter());
   router.use(createIssuesRouter());
   router.use(createDevTestRouter());
 

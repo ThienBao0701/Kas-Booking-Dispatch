@@ -257,4 +257,39 @@ describe('GET /api/admin/users', () => {
     expect(usernames).toContain('alpha');
     expect(usernames).not.toContain('beta');
   });
+
+  /*
+    The account screen's "Admin / Quản trị" section. Opt-in, read-only: the
+    default list is unchanged, and an admin listed here still cannot be locked.
+  */
+  it('lists admins too, only when asked, and still refuses to lock one', async () => {
+    await createReceptionist(branchA, { username: 'alpha', fullName: 'Alpha' });
+
+    const withAdmins = await adminAgent.get('/api/admin/users?includeAdmins=true');
+    expect(withAdmins.status).toBe(200);
+    const admin = withAdmins.body.users.find((u: { username: string }) => u.username === 'admin');
+    expect(admin).toMatchObject({ role: 'ADMIN' });
+    expect(withAdmins.body.users.some((u: { username: string }) => u.username === 'alpha')).toBe(true);
+    expect(JSON.stringify(withAdmins.body)).not.toContain('passwordHash');
+
+    // Without the flag, byte for byte the list it always was.
+    const plain = await adminAgent.get('/api/admin/users');
+    expect(plain.body.users.some((u: { role: string }) => u.role === 'ADMIN')).toBe(false);
+
+    // Listing grants nothing.
+    const lock = await adminAgent.post(`/api/admin/users/${admin.id}/disable`);
+    expect(lock.status).toBe(403);
+    expect((await testPrisma.user.findUniqueOrThrow({ where: { id: admin.id } })).active).toBe(true);
+  });
+
+  it('rejects any other value for includeAdmins', async () => {
+    const res = await adminAgent.get('/api/admin/users?includeAdmins=yes');
+    expect(res.status).toBe(422);
+  });
+
+  it('is refused to a receptionist, flag or not', async () => {
+    await createReceptionist(branchA, { username: 'nosy' });
+    const { agent } = await loginAgent(app, 'nosy', RECEPTIONIST_PASSWORD);
+    expect((await agent.get('/api/admin/users?includeAdmins=true')).status).toBe(403);
+  });
 });

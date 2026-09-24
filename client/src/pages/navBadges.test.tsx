@@ -51,9 +51,10 @@ describe('receptionist sidebar badges', () => {
 
     expect(await screen.findByTestId('nav-badge-new')).toHaveTextContent('3');
     expect(screen.getByTestId('nav-badge-pending-review')).toHaveTextContent('2');
-    expect(screen.getByTestId('nav-badge-rejected')).toHaveTextContent('1');
     expect(screen.getByTestId('nav-badge-chat')).toHaveTextContent('4');
     expect(screen.getByTestId('nav-badge-reminders')).toHaveTextContent('2');
+    // "Cần tạo lại" left reception's menu, so there is no item to carry a badge.
+    expect(screen.queryByTestId('nav-badge-rejected')).not.toBeInTheDocument();
   });
 
   it('renders NO badge for a queue that is empty', async () => {

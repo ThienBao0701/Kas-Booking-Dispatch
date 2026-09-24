@@ -17,6 +17,7 @@ import {
   SHIFT_CODES,
   isPromptDue,
   shiftBoundaries,
+  shiftBusinessDate,
   shiftDefinition,
 } from '../src/shift/shiftTypes';
 
@@ -195,5 +196,37 @@ describe('the prompt fires at the grace end and not a second earlier', () => {
     const fourTen = hcm('2026-09-17', '14:10');
     expect(isPromptDue(a.graceEndAt, fourTen)).toBe(true);
     expect(isPromptDue(a4.graceEndAt, fourTen)).toBe(false);
+  });
+});
+
+/**
+ * THE DAY A SHIFT BELONGS TO — what the Admin report groups by.
+ *
+ * A night shift's entries after midnight belong to the night it began; reading
+ * the day off the entry would file one shift under two dates.
+ */
+describe('shiftBusinessDate', () => {
+  it('is the calendar day for a same-day shift', () => {
+    expect(shiftBusinessDate('A', hcm('2026-09-19', '06:03'))).toBe('2026-09-19');
+    expect(shiftBusinessDate('B', hcm('2026-09-19', '21:50'))).toBe('2026-09-19');
+    expect(shiftBusinessDate('A4', hcm('2026-09-19', '06:00'))).toBe('2026-09-19');
+  });
+
+  it('keeps Ca C on the day it began, for an on-time check-in', () => {
+    expect(shiftBusinessDate('C', hcm('2026-09-19', '22:05'))).toBe('2026-09-19');
+  });
+
+  it('keeps a LATE Ca C check-in after midnight on the same night', () => {
+    // The same rule that gives both check-ins the same 06:00 end.
+    expect(shiftBusinessDate('C', hcm('2026-09-20', '01:30'))).toBe('2026-09-19');
+  });
+
+  it('does the same for the long night shift', () => {
+    expect(shiftBusinessDate('C4', hcm('2026-09-19', '18:02'))).toBe('2026-09-19');
+    expect(shiftBusinessDate('C4', hcm('2026-09-20', '03:00'))).toBe('2026-09-19');
+  });
+
+  it('crosses a month boundary correctly', () => {
+    expect(shiftBusinessDate('C', hcm('2026-10-01', '02:00'))).toBe('2026-09-30');
   });
 });

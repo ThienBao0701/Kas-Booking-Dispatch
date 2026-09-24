@@ -171,19 +171,6 @@ export async function checkInShift(
   }
 }
 
-/** Close the open session, if any. Idempotent. */
-export async function closeOpenSession(
-  actor: ShiftActor,
-  clock: Clock = getClock(),
-  client: PrismaClient = prisma,
-): Promise<number> {
-  const { count } = await client.receptionShiftSession.updateMany({
-    where: { userId: actor.id, closedAt: null },
-    data: { closedAt: clock.now() },
-  });
-  return count;
-}
-
 /**
  * THE GATE for anything a receptionist creates.
  *

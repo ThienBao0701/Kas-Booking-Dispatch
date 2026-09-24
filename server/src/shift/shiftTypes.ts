@@ -112,6 +112,25 @@ export function shiftBoundaries(code: ShiftType, startedAt: Date): ShiftBoundari
 }
 
 /**
+ * The HCM calendar day a shift BELONGS to: the day it nominally starts.
+ *
+ * Ca C of the 22nd runs 22:00 on the 22nd to 06:00 on the 23rd, and every
+ * record entered on it — at 23:40 or at 02:15 — belongs under "22/09". Reading
+ * the day off each record's own timestamp would split one shift across two
+ * dates, and one receptionist's night across two headings.
+ *
+ * Built on {@link shiftBoundaries}, so a late check-in (Ca C at 01:30) lands on
+ * the same day as an on-time one — the same rule that gives both the same end.
+ * For a shift that crosses midnight the end is on the following day; 24 hours
+ * before it is the start's calendar day, exactly, because the offset is fixed.
+ */
+export function shiftBusinessDate(code: ShiftType, startedAt: Date): string {
+  const { nominalEndAt } = shiftBoundaries(code, startedAt);
+  if (!shiftDefinition(code).crossesMidnight) return hcmDateOnly(nominalEndAt);
+  return hcmDateOnly(new Date(nominalEndAt.getTime() - 24 * 60 * 60 * 1000));
+}
+
+/**
  * Has the grace period run out, so the application may ask for the next shift?
  *
  * STRICTLY `>=`: the specification is that Ca A prompts AT 14:10:00 and stays

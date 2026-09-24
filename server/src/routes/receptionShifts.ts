@@ -3,12 +3,8 @@ import { z } from 'zod';
 import { getClock } from '../lib/clock';
 import { ApiError } from '../lib/errors';
 import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/auth';
-import {
-  checkInShift,
-  closeOpenSession,
-  findOpenSession,
-  serializeShiftSession,
-} from '../shift/shiftService';
+import { checkInShift, findOpenSession, serializeShiftSession } from '../shift/shiftService';
+import { endShift, endShiftPreview } from '../shift/endShiftService';
 import { handoverShift, serializeHandoverResult } from '../shift/handoverService';
 import {
   createHandoverNote,
@@ -114,12 +110,57 @@ export function createReceptionShiftsRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/reception/shifts/close — end the shift without starting another.
+  /*
+    GET /api/reception/shifts/end-preview — what "Kết thúc ca" is about to close.
+
+    Read-only, and it changes nothing. The confirmation dialog needs the shift,
+    the receptionist, the start time and the drawer, plus whether there is
+    outstanding work that nobody has written a handover note about. Computing
+    that in the browser would mean three more requests and a second copy of the
+    rule the reminder is based on.
+  */
+  router.get('/reception/shifts/end-preview', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const now = getClock().now();
+      const preview = await endShiftPreview(actor(user));
+      res.json({
+        session: preview.session ? serializeShiftSession(preview.session, now) : null,
+        pending: preview.pending,
+        handoverNoteCount: preview.handoverNoteCount,
+        reportCount: preview.reportCount,
+        cash: preview.cash,
+        handoverAdvised: preview.handoverAdvised,
+      });
+    })().catch(next);
+  });
+
+  /*
+    POST /api/reception/shifts/close — "Kết thúc ca".
+
+    The shift ends and NOTHING opens in its place. The next receptionist checks
+    in and says who they are; until then the desk has no open session, which is
+    the honest state — and it is what stops the shift that just ended from
+    recording anything else.
+
+    NO TIMESTAMP IS ACCEPTED. The actual end is `closedAt`, stamped by the server
+    from the business clock. A reception PC with a wrong clock must not be able
+    to decide which receptionist owns the cash around the boundary.
+
+    DELIBERATELY NOT "Đổi ca": that one hands the desk to a NAMED person in the
+    same instant and records a reason. Folding the two together would make every
+    ordinary 14:00 invent an incoming receptionist who has not arrived yet.
+  */
   router.post('/reception/shifts/close', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
-      const closed = await closeOpenSession(actor(user), getClock());
-      res.json({ closed });
+      const clock = getClock();
+      const result = await endShift(actor(user), clock);
+      res.json({
+        closed: result.closed,
+        session: result.session ? serializeShiftSession(result.session, clock.now()) : null,
+        cash: result.cash,
+      });
     })().catch(next);
   });
 

@@ -68,6 +68,13 @@ const listQuerySchema = z.object({
   branchId: z.coerce.number().int().positive().optional(),
   active: z.enum(['true', 'false']).optional(),
   search: z.string().trim().min(1).max(100).optional(),
+  /**
+   * Also list ADMIN accounts — READ-ONLY, for the account screen's "Admin /
+   * Quản trị" section. Opt-in, so every other caller (the reminder recipient
+   * picker among them) keeps receiving exactly the manageable roles. Listing
+   * grants nothing: `loadReceptionist` still refuses every write to an admin.
+   */
+  includeAdmins: z.enum(['true']).optional(),
 });
 
 function parseUserId(raw: string | undefined): number {
@@ -113,7 +120,10 @@ export function createAdminUsersRouter(): Router {
 
       // Both manageable roles, so a Bộ phận đặt phòng account is visible and
       // editable in the same screen rather than existing only in the database.
-      const where: Prisma.UserWhereInput = { role: { in: [...MANAGEABLE_ROLES] } };
+      const roles: Prisma.UserWhereInput['role'] = {
+        in: query.includeAdmins ? [...MANAGEABLE_ROLES, 'ADMIN'] : [...MANAGEABLE_ROLES],
+      };
+      const where: Prisma.UserWhereInput = { role: roles };
       if (query.branchId !== undefined) where.branchId = query.branchId;
       if (query.active !== undefined) where.active = query.active === 'true';
       if (query.search) {

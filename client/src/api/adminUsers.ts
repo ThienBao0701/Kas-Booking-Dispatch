@@ -41,7 +41,9 @@ export interface CreateUserInput {
 }
 
 export const adminUsersApi = {
-  list: () => api.get<{ users: ManagedUser[] }>('/admin/users'),
+  /** `includeAdmins` adds ADMIN accounts, read-only — only the account screen asks. */
+  list: (params: { includeAdmins?: boolean } = {}) =>
+    api.get<{ users: ManagedUser[] }>(params.includeAdmins ? '/admin/users?includeAdmins=true' : '/admin/users'),
   create: (input: CreateUserInput) => api.post<{ user: ManagedUser }>('/admin/users', input),
   enable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/enable`),
   disable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/disable`),

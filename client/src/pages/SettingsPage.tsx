@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { UserPlus } from 'lucide-react';
-import { adminUsersApi, type CreateUserInput, requiresBranch } from '../api/adminUsers';
+import { adminUsersApi, type CreateUserInput, type ManagedUser, requiresBranch } from '../api/adminUsers';
 import { branchesApi } from '../api/bookings';
-import { branchLabel, type Branch } from '../auth/types';
+import { branchLabel, type Branch, type UserRole } from '../auth/types';
 import { toUserMessage } from '../api/errors';
-import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { DataTable, type DataColumn } from '../components/DataTable';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
@@ -20,7 +20,12 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const users = useQuery({ queryKey: ['admin-users'], queryFn: () => adminUsersApi.list() });
+  // Admins included, so the "Admin / Quản trị" section lists them (read-only).
+  // Under the ['admin-users'] prefix, so the invalidation below refreshes it.
+  const users = useQuery({
+    queryKey: ['admin-users', 'with-admins'],
+    queryFn: () => adminUsersApi.list({ includeAdmins: true }),
+  });
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), staleTime: 5 * 60_000 });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['admin-users'] });
@@ -45,55 +50,30 @@ export function SettingsPage() {
       />
 
       <QueryState isLoading={users.isLoading} isError={users.isError} error={users.error}>
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  <th className="px-4 py-3">Tài khoản</th>
-                  <th className="px-4 py-3">Họ tên</th>
-                  <th className="px-4 py-3">Chi nhánh</th>
-                  <th className="px-4 py-3">Trạng thái</th>
-                  <th className="px-4 py-3">Đăng nhập gần nhất</th>
-                  <th className="px-4 py-3 text-right">Thao tác</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(users.data?.users ?? []).map((u) => (
-                  <tr key={u.id} className="border-b border-slate-100 last:border-b-0">
-                    <td className="px-4 py-3 font-mono text-slate-800">{u.username}</td>
-                    <td className="px-4 py-3 text-slate-800">{u.fullName}</td>
-                    <td className="px-4 py-3 text-slate-600">{u.branch?.address ?? '—'}</td>
-                    <td className="px-4 py-3">
-                      {u.active ? (
-                        <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">Hoạt động</span>
-                      ) : (
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">Đã khoá</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-slate-500">{u.lastLoginAt ? formatDateTime(u.lastLoginAt) : 'Chưa đăng nhập'}</td>
-                    <td className="px-4 py-3 text-right">
-                      <Button
-                        variant={u.active ? 'secondary' : 'primary'}
-                        onClick={() => toggle.mutate({ id: u.id, active: u.active })}
-                        loading={toggle.isPending && toggle.variables?.id === u.id}
-                      >
-                        {u.active ? 'Khoá' : 'Mở khoá'}
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {(users.data?.users.length ?? 0) === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">
-                      Chưa có tài khoản lễ tân nào.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </Card>
+        {/*
+          ONE SECTION PER DEPARTMENT. Reception and technical accounts in one
+          table meant reading a role on every row to know whose account it was;
+          the departments are the roles the system already has, in the order an
+          Admin manages them most. Lễ tân, Kỹ thuật and Admin are always there,
+          with their counts, so an empty one says so rather than disappearing.
+        */}
+        <div className="space-y-4">
+          {DEPARTMENTS.map((role) => {
+            const members = (users.data?.users ?? []).filter((u) => u.role === role);
+            // Lễ tân, Kỹ thuật and Admin always; any other department only
+            // once it has accounts.
+            if (members.length === 0 && !ALWAYS_SHOWN.includes(role)) return null;
+            return (
+              <DepartmentTable
+                key={role}
+                role={role}
+                users={members}
+                togglingId={toggle.isPending ? (toggle.variables?.id ?? null) : null}
+                onToggle={(id, active) => toggle.mutate({ id, active })}
+              />
+            );
+          })}
+        </div>
       </QueryState>
 
       {/* Development-only demo data tools (hidden unless the server enables them). */}
@@ -109,6 +89,95 @@ export function SettingsPage() {
         }}
       />
     </div>
+  );
+}
+
+/**
+ * The departments, in the order an Admin manages them. These are the system's
+ * own roles — nothing here invents a department that has no accounts behind it.
+ */
+const DEPARTMENTS: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'BOOKING_DEPARTMENT', 'ADMIN'];
+
+/** Sections shown even when empty — the departments every property has. */
+const ALWAYS_SHOWN: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'ADMIN'];
+
+const DEPARTMENT_TITLE: Record<UserRole, string> = {
+  RECEPTIONIST: 'Lễ tân',
+  TECHNICAL: 'Kỹ thuật',
+  BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
+  ADMIN: 'Admin / Quản trị',
+};
+
+function DepartmentTable({
+  role,
+  users,
+  togglingId,
+  onToggle,
+}: {
+  role: UserRole;
+  users: ManagedUser[];
+  togglingId: number | null;
+  onToggle: (id: number, active: boolean) => void;
+}) {
+  const columns: DataColumn<ManagedUser>[] = [
+    // Fixed shares, so the columns line up from one department's table to the next.
+    { key: 'username', header: 'Tài khoản', className: 'w-[18%] whitespace-nowrap font-mono text-slate-800', render: (u) => u.username },
+    { key: 'name', header: 'Họ tên', className: 'w-[24%] text-slate-800', render: (u) => u.fullName },
+    {
+      key: 'branch',
+      header: 'Chi nhánh',
+      secondary: true,
+      className: 'w-[22%] whitespace-nowrap text-slate-600',
+      // Technical, booking and admin accounts are global: no branch is the fact.
+      render: (u) => u.branch?.address ?? <span className="text-slate-400">Tất cả chi nhánh</span>,
+    },
+    {
+      key: 'status',
+      header: 'Trạng thái',
+      className: 'w-[14%] whitespace-nowrap',
+      render: (u) =>
+        u.active ? (
+          <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs font-medium text-green-700">Hoạt động</span>
+        ) : (
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-500">Đã khoá</span>
+        ),
+    },
+    {
+      key: 'lastLogin',
+      header: 'Đăng nhập gần nhất',
+      secondary: true,
+      className: 'whitespace-nowrap text-slate-500',
+      render: (u) => (u.lastLoginAt ? formatDateTime(u.lastLoginAt) : 'Chưa đăng nhập'),
+    },
+  ];
+
+  return (
+    <DataTable
+      testId={`department-${role}`}
+      title={DEPARTMENT_TITLE[role]}
+      badge={users.length}
+      columns={columns}
+      rows={users}
+      rowKey={(u) => String(u.id)}
+      rowClassName={(u) => (u.active ? '' : 'text-slate-400')}
+      emptyTitle={`Chưa có tài khoản ${DEPARTMENT_TITLE[role].toLowerCase()}`}
+      emptyMessage=""
+      // An admin is bootstrapped, not managed here — the server refuses to lock
+      // one — so its row says "Chỉ xem" rather than offering a dead button.
+      actions={(u) =>
+        role === 'ADMIN' ? (
+          <span className="text-xs text-slate-400">Chỉ xem</span>
+        ) : (
+          <Button
+            variant={u.active ? 'secondary' : 'primary'}
+            onClick={() => onToggle(u.id, u.active)}
+            loading={togglingId === u.id}
+          >
+            {u.active ? 'Khoá' : 'Mở khoá'}
+          </Button>
+        )
+      }
+    />
   );
 }
 

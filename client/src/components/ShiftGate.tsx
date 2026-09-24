@@ -18,7 +18,7 @@
  */
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Clock3, Repeat2 } from 'lucide-react';
+import { Clock3, LogOut, Repeat2 } from 'lucide-react';
 import { shiftsApi, type ShiftSession, type ShiftType } from '../api/shifts';
 import { useAuth } from '../auth/AuthProvider';
 import {
@@ -32,7 +32,8 @@ import { Button } from './Button';
 import { Input } from './Input';
 import { Modal } from './Modal';
 import { ErrorAlert } from './ErrorAlert';
-import { hcmTimeOfDay } from '../lib/format';
+import { hcmTimeOfDay, formatDateTime } from '../lib/format';
+import { formatVnd } from '../lib/money';
 
 /**
  * "CA A4 · 06:00 – 18:00 · Nguyễn Văn A", and the "Đổi ca" action beside it.
@@ -51,6 +52,7 @@ export function ShiftIndicator() {
   const isReception = useIsReception();
   const { data } = useShiftSession();
   const [handoverOpen, setHandoverOpen] = useState(false);
+  const [endOpen, setEndOpen] = useState(false);
   if (!isReception) return null;
 
   const session = data?.session ?? null;
@@ -60,7 +62,7 @@ export function ShiftIndicator() {
     <>
       <div
         data-testid="shift-indicator"
-        className="hidden items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 sm:flex"
+        className="hidden items-center gap-2 whitespace-nowrap rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 xl:flex"
       >
         <Clock3 className="h-3.5 w-3.5 text-brand-600" aria-hidden="true" />
         <span className="font-semibold text-slate-800">{session.shiftName.toUpperCase()}</span>
@@ -72,16 +74,168 @@ export function ShiftIndicator() {
       <button
         type="button"
         onClick={() => setHandoverOpen(true)}
+        aria-label="Đổi ca"
+        title="Đổi ca"
         data-testid="shift-handover-open"
-        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
       >
         <Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />
-        Đổi ca
+        <span className="hidden md:inline">Đổi ca</span>
+      </button>
+      {/*
+        "KẾT THÚC CA" — a shift ending normally, beside "Đổi ca".
+
+        TWO BUTTONS, NOT ONE WITH A MODE. They are different events with
+        different records: ending a shift closes it and opens nothing, while
+        "Đổi ca" hands the desk to a named person and records a reason. A single
+        control would force the ordinary end of every shift to answer the rare
+        case's questions.
+      */}
+      <button
+        type="button"
+        onClick={() => setEndOpen(true)}
+        aria-label="Kết thúc ca"
+        title="Kết thúc ca"
+        data-testid="shift-end-open"
+        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+      >
+        <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+        <span className="hidden md:inline">Kết thúc ca</span>
       </button>
       {handoverOpen ? (
         <ShiftHandoverDialog session={session} onClose={() => setHandoverOpen(false)} />
       ) : null}
+      {endOpen ? <EndShiftDialog onClose={() => setEndOpen(false)} /> : null}
     </>
+  );
+}
+
+/**
+ * "KẾT THÚC CA" — the confirmation.
+ *
+ * WHAT IT SHOWS AND WHY
+ *
+ * The shift, the receptionist and the start time, because those are what the
+ * operator is confirming they are ending. The drawer, because a cash count that
+ * is wrong is far cheaper to fix while the shift is still open.
+ *
+ * NOTHING HERE BLOCKS, AND NOTHING FABRICATES A HANDOVER. An obstacle gets
+ * clicked through, and a handover record nobody wrote is a lie the next shift
+ * will act on.
+ *
+ * NO TIME IS SENT. The instant displayed is what the operator READS; the server
+ * stamps the real one.
+ */
+function EndShiftDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const preview = useQuery({
+    queryKey: ['reception', 'shift', 'end-preview'],
+    queryFn: () => shiftsApi.endPreview(),
+    // Always fresh: it is read once, at the moment of the decision, and a cached
+    // "no outstanding work" from ten minutes ago is exactly the wrong answer.
+    staleTime: 0,
+  });
+
+  const end = useMutation({
+    mutationFn: () => shiftsApi.close(),
+    onSuccess: async () => {
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: SHIFT_SESSION_KEY });
+      await queryClient.invalidateQueries({ queryKey: HANDOVER_NOTES_KEY });
+      onClose();
+    },
+    onError: (e: unknown) =>
+      setError(e instanceof Error ? e.message : 'Không kết thúc được ca làm việc.'),
+  });
+
+  const data = preview.data;
+  const session = data?.session ?? null;
+  const cash = data?.cash ?? null;
+
+  return (
+    <Modal
+      open
+      title="Kết thúc ca"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} data-testid="end-shift-cancel">
+            Hủy
+          </Button>
+          <Button
+            onClick={() => end.mutate()}
+            disabled={preview.isLoading || !session}
+            loading={end.isPending}
+            data-testid="end-shift-confirm"
+          >
+            Xác nhận kết thúc ca
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+          <div>
+            <span className="text-slate-500">Ca hiện tại:</span>{' '}
+            <span className="font-medium text-slate-800" data-testid="end-shift-name">
+              {session ? `${session.shiftName} · ${session.shiftWindow}` : '—'}
+            </span>
+          </div>
+          <div>
+            <span className="text-slate-500">Nhân viên hiện tại:</span>{' '}
+            <span className="font-medium text-slate-800" data-testid="end-shift-staff">
+              {session?.receptionistName ?? '—'}
+            </span>
+          </div>
+          <div>
+            <span className="text-slate-500">Thời gian bắt đầu:</span>{' '}
+            <span className="font-medium text-slate-800" data-testid="end-shift-started">
+              {session ? formatDateTime(session.startedAt) : '—'}
+            </span>
+          </div>
+          <div>
+            <span className="text-slate-500">Thời điểm kết thúc:</span>{' '}
+            <span className="font-medium text-slate-800">{hcmTimeOfDay()}</span>{' '}
+            <span className="text-xs text-slate-400">(hệ thống ghi nhận giờ chính xác)</span>
+          </div>
+        </div>
+
+        {cash ? (
+          <div className="rounded-xl border border-slate-200 px-3 py-2 text-sm" data-testid="end-shift-cash">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Tiền đầu ca</span>
+              <span>{cash.openingCash === null ? 'Chưa kiểm đếm' : formatVnd(cash.openingCash)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Thu tiền mặt</span>
+              <span>{formatVnd(cash.cashCollected)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Chi tiền mặt</span>
+              <span>{formatVnd(cash.cashExpense)}</span>
+            </div>
+            <div className="mt-1 flex justify-between border-t border-slate-200 pt-1 font-semibold text-slate-800">
+              <span>Tiền cuối ca</span>
+              <span>{cash.endingCash === null ? 'Chưa xác định' : formatVnd(cash.endingCash)}</span>
+            </div>
+          </div>
+        ) : null}
+
+        {/*
+          No "còn nội dung cần bàn giao" advice here any more: "Bàn giao ca" has
+          no screen, and advice that points at a page that no longer exists is
+          worse than none. What is still outstanding is already listed above,
+          and the next shift sees it in "Báo cáo vấn đề".
+        */}
+        <p className="text-xs text-slate-500">
+          Sau khi kết thúc, ca này không ghi thêm được báo cáo nào. Lễ tân tiếp theo chọn ca mới.
+        </p>
+
+        {error ? <ErrorAlert>{error}</ErrorAlert> : null}
+      </div>
+    </Modal>
   );
 }
 

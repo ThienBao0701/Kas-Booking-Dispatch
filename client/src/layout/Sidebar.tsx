@@ -66,8 +66,18 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const badges = useNavBadges(!!user);
   const counts = badges.data?.counts;
 
+  /*
+    THE UNRESOLVED-INCIDENT BADGE FOLLOWS INCIDENT REPORTING.
+
+    Neither reception nor the Admin has a standalone incident entry any more —
+    reporting and watching incidents is "Báo cáo vấn đề" → "Sự cố vật chất
+    đang xử lý". The count moves with it rather than disappearing, so anyone
+    opening the app still sees "2 sự cố chưa xử lý" without opening anything.
+  */
+  const incidentHost = '/app/reports';
+
   function badgeFor(item: NavItem): number | undefined {
-    if (item.to === '/app/issues') return unresolved;
+    if (item.to === incidentHost) return unresolved;
     if (!counts) return undefined;
     switch (item.to) {
       // Reception's "Đơn mới" and Admin's "Chờ chi nhánh tạo" are the same
@@ -109,7 +119,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             item={item}
             onNavigate={onNavigate}
             badge={badgeFor(item)}
-            {...(item.to === '/app/issues'
+            {...(item.to === incidentHost
               ? // Kept verbatim: this badge predates the others and its wording
                 // is more specific than the generic phrasing would be.
                 { badgeLabel: `${unresolved} sự cố chưa xử lý` }

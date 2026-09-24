@@ -353,7 +353,7 @@ describe('receptionist assignment uses the live active branches', () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       ...SHELL_MOCKS,
-      'GET /api/admin/users': () => ({ status: 200, body: { users: [] } }),
+      'GET /api/admin/users?includeAdmins=true': () => ({ status: 200, body: { users: [] } }),
       'GET /api/branches': () => ({ status: 200, body: { branches } }),
       'GET /api/dev-test/status': () => ({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'x' } } }),
     });

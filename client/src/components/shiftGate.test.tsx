@@ -64,6 +64,12 @@ function shellRoutes(
       status: 200,
       body: { counts: { new: 0, pendingReview: 0, rejected: 0, resendOrders: 0, chat: 0, reminders: 0 } },
     }),
+    // The host page: "Báo cáo vấn đề", which every receptionist has.
+    'GET /api/reception/reports/options': () => ({
+      status: 200,
+      body: { categories: [], paymentMethods: [], roomServiceTypes: [], guestRequestItems: [] },
+    }),
+    'GET /api/reception/reports?shiftSessionId=s1': () => ({ status: 200, body: { reports: [], counts: {} } }),
     'GET /api/issues?pageSize=100': () => ({
       status: 200,
       body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } },
@@ -81,7 +87,7 @@ describe('a receptionist with no shift is asked to choose one', () => {
       }),
     );
 
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Chọn ca làm việc' });
     // The options come from their own query, so the first one is awaited.
@@ -109,7 +115,7 @@ describe('a receptionist with no shift is asked to choose one', () => {
     );
 
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Chọn ca làm việc' });
     const confirm = within(dialog).getByTestId('shift-confirm');
@@ -141,7 +147,7 @@ describe('a receptionist with no shift is asked to choose one', () => {
     );
 
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Chọn ca làm việc' });
     await user.click(await within(dialog).findByTestId('shift-option-A4'));
@@ -161,10 +167,10 @@ describe('the shift panel appears only when the server says so', () => {
       }),
     );
 
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     // The page itself renders, and no dialog interrupts it.
-    expect(await screen.findByText('Chưa có báo cáo nào')).toBeInTheDocument();
+    expect(await screen.findByTestId('report-landing')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
@@ -181,7 +187,7 @@ describe('the shift panel appears only when the server says so', () => {
       }),
     );
 
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Ca làm việc đã kết thúc' });
     expect(within(dialog).getByText(/Ca trước đã hết giờ/)).toBeInTheDocument();
@@ -197,7 +203,7 @@ describe('the running shift is shown in the header', () => {
       }),
     );
 
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const indicator = await screen.findByTestId('shift-indicator');
     expect(indicator).toHaveTextContent('CA A4');
@@ -271,7 +277,7 @@ describe('the check-in prompt is required at the start and deferrable at handove
       }),
     );
 
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Chọn ca làm việc' });
     expect(within(dialog).queryByTestId('shift-later')).not.toBeInTheDocument();
@@ -286,7 +292,7 @@ describe('the check-in prompt is required at the start and deferrable at handove
     );
 
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    renderApp('/app/reports');
 
     const dialog = await screen.findByRole('dialog', { name: 'Ca làm việc đã kết thúc' });
     await user.click(within(dialog).getByTestId('shift-later'));
@@ -297,7 +303,7 @@ describe('the check-in prompt is required at the start and deferrable at handove
     expect(banner).toHaveTextContent('Ca làm việc đã kết thúc');
 
     // And the page underneath is usable again.
-    expect(screen.getByText('Chưa có báo cáo nào')).toBeInTheDocument();
+    expect(screen.getByTestId('report-landing')).toBeInTheDocument();
 
     // The banner reopens it on demand.
     await user.click(screen.getByTestId('shift-reopen'));

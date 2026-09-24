@@ -17,10 +17,10 @@ import { remindersApi, REMINDER_POLL_MS, type ReminderView } from '../api/remind
 import { adminUsersApi } from '../api/adminUsers';
 import { toUserMessage } from '../api/errors';
 import { Card } from '../components/Card';
+import { DataTable, type DataColumn } from '../components/DataTable';
 import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
-import { SkeletonList } from '../components/Skeleton';
 import { PageHeader } from '../components/PageState';
 import { Toast } from '../components/Toast';
 import { formatDateTime } from '../lib/format';
@@ -78,8 +78,8 @@ function ComposeReminder({ onSent }: { onSent: () => void }) {
   });
 
   return (
-    <Card className="p-5">
-      <p className="mb-3 text-sm font-semibold text-slate-700">Gửi nhắc nhở</p>
+    <Card className="p-4">
+      <p className="mb-2 text-sm font-semibold text-slate-700">Gửi nhắc nhở</p>
       <div className="space-y-3">
         <div>
           <label className="mb-1 block text-sm text-slate-600" htmlFor="reminder-recipient">
@@ -143,7 +143,8 @@ function ComposeReminder({ onSent }: { onSent: () => void }) {
   );
 }
 
-function ReminderRow({ reminder: r, canRead }: { reminder: ReminderView; canRead: boolean }) {
+/** "Đánh dấu đã đọc" — the receptionist's one action on a reminder. */
+function MarkRead({ reminder: r }: { reminder: ReminderView }) {
   const queryClient = useQueryClient();
   const markRead = useMutation({
     mutationFn: () => remindersApi.markRead(r.id),
@@ -152,45 +153,91 @@ function ReminderRow({ reminder: r, canRead }: { reminder: ReminderView; canRead
       void queryClient.invalidateQueries({ queryKey: ['reminders', 'unread-count'] });
     },
   });
-
   return (
-    <li
-      data-testid="reminder-item"
-      className={`px-4 py-3 ${r.read ? '' : 'bg-amber-50/60'}`}
+    <Button
+      variant="secondary"
+      onClick={() => markRead.mutate()}
+      disabled={markRead.isPending}
+      data-testid={`reminder-read-${r.id}`}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className={`whitespace-pre-wrap break-words text-sm ${r.read ? 'text-slate-700' : 'font-medium text-slate-900'}`}>
-            {r.body}
-          </p>
-          <p className="mt-1 text-xs text-slate-400">
-            {r.sender ? `Từ ${r.sender.fullName} · ` : ''}
-            {r.recipient ? `Gửi ${r.recipient.fullName} · ` : ''}
-            {formatDateTime(r.createdAt)}
-          </p>
-        </div>
-        {r.read ? (
-          <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
-            <Check className="h-3.5 w-3.5" aria-hidden="true" />
-            Đã đọc
-          </span>
-        ) : canRead ? (
-          <Button
-            variant="secondary"
-            onClick={() => markRead.mutate()}
-            disabled={markRead.isPending}
-            data-testid={`reminder-read-${r.id}`}
-          >
-            Đánh dấu đã đọc
-          </Button>
-        ) : (
-          <span className="whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">
-            Chưa đọc
-          </span>
-        )}
-      </div>
-    </li>
+      Đánh dấu đã đọc
+    </Button>
   );
+}
+
+function ReadState({ reminder: r, canRead }: { reminder: ReminderView; canRead: boolean }) {
+  if (r.read) {
+    return (
+      <span className="inline-flex items-center gap-1 whitespace-nowrap rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+        Đã đọc
+        {r.readAt ? <span className="font-normal text-slate-400">· {formatDateTime(r.readAt)}</span> : null}
+      </span>
+    );
+  }
+  if (canRead) return <MarkRead reminder={r} />;
+  return (
+    <span className="whitespace-nowrap rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">
+      Chưa đọc
+    </span>
+  );
+}
+
+/**
+ * ONE ROW PER REMINDER, not a padded block. An Admin reviewing a week of
+ * reminders scans recipient, branch and read status down a column; the message
+ * is clamped to two lines here and shown whole when the row is opened.
+ */
+function reminderColumns(isAdmin: boolean, branchOf: (userId: number) => string | null): DataColumn<ReminderView>[] {
+  const body: DataColumn<ReminderView> = {
+    key: 'body',
+    header: 'Nội dung',
+    className: 'min-w-[16rem] max-w-[32rem]',
+    render: (r) => (
+      <span className={`line-clamp-2 whitespace-pre-wrap break-words ${r.read ? 'text-slate-700' : 'font-medium text-slate-900'}`}>
+        {r.body}
+      </span>
+    ),
+  };
+  const sender: DataColumn<ReminderView> = {
+    key: 'sender',
+    header: 'Người gửi',
+    secondary: true,
+    className: 'whitespace-nowrap text-slate-600',
+    render: (r) => r.sender?.fullName ?? '—',
+  };
+  const at: DataColumn<ReminderView> = {
+    key: 'at',
+    header: 'Thời gian',
+    className: 'whitespace-nowrap text-slate-500',
+    render: (r) => formatDateTime(r.createdAt),
+  };
+  const state: DataColumn<ReminderView> = {
+    key: 'state',
+    header: 'Trạng thái',
+    className: 'w-[1%] whitespace-nowrap',
+    render: (r) => <ReadState reminder={r} canRead={!isAdmin} />,
+  };
+  if (!isAdmin) return [body, sender, at, state];
+  return [
+    {
+      key: 'recipient',
+      header: 'Người nhận',
+      className: 'whitespace-nowrap font-medium text-slate-800',
+      render: (r) => r.recipient?.fullName ?? '—',
+    },
+    body,
+    {
+      key: 'branch',
+      header: 'Chi nhánh',
+      secondary: true,
+      className: 'whitespace-nowrap text-slate-500',
+      render: (r) => (r.recipient ? (branchOf(r.recipient.id) ?? '—') : '—'),
+    },
+    sender,
+    at,
+    state,
+  ];
 }
 
 export function RemindersPage() {
@@ -203,6 +250,16 @@ export function RemindersPage() {
     queryFn: () => remindersApi.list(),
     refetchInterval: isAdmin ? false : REMINDER_POLL_MS,
   });
+
+  // The same account list the recipient picker reads — only the Admin has it,
+  // and only the Admin's table has a branch column.
+  const users = useQuery({
+    queryKey: ['admin-users'],
+    queryFn: () => adminUsersApi.list(),
+    staleTime: 5 * 60_000,
+    enabled: isAdmin,
+  });
+  const branchOf = (id: number) => users.data?.users.find((u) => u.id === id)?.branch?.address ?? null;
 
   const reminders = list.data?.reminders ?? [];
   const unread = reminders.filter((r) => !r.read).length;
@@ -220,24 +277,29 @@ export function RemindersPage() {
 
       {isAdmin ? <ComposeReminder onSent={() => setToast('Đã gửi nhắc nhở.')} /> : null}
 
-      {list.isLoading ? (
-        <SkeletonList rows={3} />
-      ) : list.isError ? (
-        <ErrorAlert>{toUserMessage(list.error)}</ErrorAlert>
-      ) : reminders.length === 0 ? (
+      {reminders.length === 0 && !list.isLoading && !list.isError ? (
         <EmptyState
           icon={<Bell className="h-6 w-6" aria-hidden="true" />}
           title="Chưa có nhắc nhở"
           message={isAdmin ? 'Nhắc nhở bạn gửi sẽ hiện ở đây.' : 'Khi Admin gửi nhắc nhở, nó sẽ hiện ở đây.'}
         />
       ) : (
-        <Card className="overflow-hidden">
-          <ul className="divide-y divide-slate-100" data-testid="reminder-list">
-            {reminders.map((r) => (
-              <ReminderRow key={r.id} reminder={r} canRead={!isAdmin} />
-            ))}
-          </ul>
-        </Card>
+        <DataTable
+          testId="reminder-list"
+          title={isAdmin ? 'Nhắc nhở đã gửi' : 'Nhắc nhở của bạn'}
+          badge={reminders.length}
+          columns={reminderColumns(isAdmin, branchOf)}
+          rows={reminders}
+          rowKey={(r) => r.id}
+          rowClassName={(r) => (r.read ? '' : 'bg-amber-50/60')}
+          isLoading={list.isLoading}
+          isError={list.isError}
+          error={list.error}
+          onRetry={() => void list.refetch()}
+          emptyTitle="Chưa có nhắc nhở"
+          emptyMessage=""
+          renderDetail={(r) => <p className="whitespace-pre-wrap break-words text-sm text-slate-700">{r.body}</p>}
+        />
       )}
 
       <Toast message={toast} onDone={() => setToast(null)} />

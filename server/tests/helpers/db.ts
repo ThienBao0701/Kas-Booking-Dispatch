@@ -48,8 +48,33 @@ export async function resetBookingData(): Promise<void> {
  * directly keeps that ordering knowledge in one place.
  */
 export async function resetIssueData(): Promise<void> {
+  // A reception journal entry can REFERENCE an incident, and that FK is RESTRICT
+  // on purpose — the journal entry must not vanish because an incident was
+  // removed. So the journal goes first or `hotelIssue.deleteMany()` throws P2003
+  // the moment any "Sự cố cơ sở vật chất" report exists.
+  await resetReportData();
   await testPrisma.technicalRepairAttempt.deleteMany();
   await testPrisma.hotelIssue.deleteMany();
+}
+
+/**
+ * Clears the reception operational journal — "Báo cáo vấn đề".
+ *
+ * The five detail tables CASCADE from their report, and so do the audit rows
+ * that belong to one. The audit rows that do NOT belong to one — "Tiền đầu ca",
+ * which is a property of the shift rather than of any payment — cascade from
+ * nothing, so they are deleted explicitly and FIRST. Missing that leaves rows
+ * holding RESTRICT references to User and Branch, and `resetAll` then fails
+ * several files later with a P2003 that names neither.
+ */
+export async function resetReportData(): Promise<void> {
+  await testPrisma.receptionReportAudit.deleteMany();
+  await testPrisma.receptionPayment.deleteMany();
+  await testPrisma.guestRequestReport.deleteMany();
+  await testPrisma.facilityIssueReport.deleteMany();
+  await testPrisma.customerComplaintReport.deleteMany();
+  await testPrisma.roomServiceReport.deleteMany();
+  await testPrisma.receptionOperationalReport.deleteMany();
 }
 
 /**
@@ -62,6 +87,10 @@ export async function resetIssueData(): Promise<void> {
  * handover.
  */
 export async function resetShiftData(): Promise<void> {
+  // Journal entries point at sessions with SET NULL, so they would survive —
+  // but they hold RESTRICT references to Branch and User, and every caller that
+  // clears shifts is about to clear those too.
+  await resetReportData();
   await testPrisma.shiftHandoverNote.deleteMany();
   await testPrisma.shiftHandover.deleteMany();
   await testPrisma.receptionShiftSession.deleteMany();

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, TECHNICAL_USER, installApiMock, renderApp } from '../test/utils';
+import { hcmToday } from '../lib/format';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -99,10 +100,14 @@ const SHIFT_SESSION = {
 /* The dynamic report form                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The report form lives in "Báo cáo vấn đề" → "Sự cố vật chất đang xử lý" now;
+ * the old address still lands there.
+ */
 async function openReportForm() {
   const user = userEvent.setup();
   renderApp('/app/issues');
-  await user.click(await screen.findByRole('button', { name: /Báo cáo mới/ }));
+  await user.click(await screen.findByRole('button', { name: /Báo cáo sự cố/ }));
   const dialog = await screen.findByRole('dialog');
   return { user, dialog };
 }
@@ -114,7 +119,12 @@ function receptionRoutes(onCreate?: (body: FormData) => void) {
     'GET /api/issues/summary': () => SUMMARY,
     'GET /api/nav-badges': () => BADGES,
     'GET /api/reception/shifts/current': () => SHIFT_SESSION,
-    'GET /api/issues?pageSize=100': () => listBody([]),
+    'GET /api/issues?pageSize=100&outstanding=true': () => listBody([]),
+    'GET /api/reception/reports/options': () => ({
+      status: 200,
+      body: { categories: [], paymentMethods: [], roomServiceTypes: [], guestRequestItems: [] },
+    }),
+    'GET /api/reception/reports?shiftSessionId=s1': () => ({ status: 200, body: { reports: [], counts: {} } }),
     'POST /api/issues': (init: RequestInit) => {
       onCreate?.(init.body as FormData);
       return { status: 201, body: { issue: issue() } };
@@ -388,7 +398,9 @@ describe('the Admin monitors and does not act', () => {
     'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
     'GET /api/issues/summary': () => SUMMARY,
     'GET /api/nav-badges': () => BADGES,
-    'GET /api/issues?pageSize=100': () =>
+    'GET /api/admin/branches': () => ({ status: 200, body: { branches: [] } }),
+    // The old address lands on the incident category: every branch, today.
+    [`GET /api/issues?from=${hcmToday()}&to=${hcmToday()}&pageSize=100`]: () =>
       listBody([
         issue({
           status: 'IN_PROGRESS',
@@ -419,7 +431,6 @@ describe('the Admin monitors and does not act', () => {
     installApiMock(adminRoutes);
     renderApp('/app/issues');
 
-    // Scoped to the table: 'Đang sửa' is also a status-filter option.
     const table = await screen.findByRole('table');
     expect(within(table).getByText('Trần Văn B')).toBeInTheDocument();
     expect(within(table).getByText('0901234567')).toBeInTheDocument();

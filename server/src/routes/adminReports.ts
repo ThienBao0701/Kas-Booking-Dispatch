@@ -23,6 +23,17 @@ import {
   serializeHandoverNote,
 } from '../shift/handoverNoteService';
 import { listConversations } from '../chat/chatService';
+import { operationalReport } from '../reception/operationalReport';
+import { countByCategory, countReports, listReports, serializeReport } from '../reception/reportService';
+import { sessionsCashSummary } from '../reception/cashService';
+import {
+  OPEN_SHIFT_WARNING,
+  openShiftNotices,
+  sessionsForBusinessDates,
+} from '../reception/businessDate';
+import { hcmDateOnly } from '../lib/clock';
+import { buildOperationalReportPdf } from '../report/operationalPdf';
+import { buildOperationalReportWorkbook } from '../report/operationalExcel';
 import type { Response } from 'express';
 
 const isoDay = z
@@ -78,6 +89,51 @@ const chatQuery = rangeQuery.and(
  * `no-store` because these files name people and say what they did; `nosniff`
  * so a stored report cannot be coerced into executing as something else.
  */
+const reportCategory = z.enum([
+  'PAYMENT',
+  'GUEST_REQUEST',
+  'FACILITY_ISSUE',
+  'CUSTOMER_COMPLAINT',
+  'ROOM_SERVICE',
+]);
+
+/**
+ * The export's scope: the same period, branch and category the screen shows.
+ *
+ * The category used to be absent here, so a PDF exported while looking at
+ * "Theo dõi thanh toán" contained every category — a file that disagreed with
+ * the screen it was exported from.
+ */
+const operationalExportQuery = rangeQuery.and(z.object({ category: reportCategory.optional() }));
+
+/**
+ * The Admin drill-down: khoảng thời gian · chi nhánh · danh mục → bản ghi.
+ *
+ * DELIBERATELY FEW FILTERS. No employee filter, no status filter, no source
+ * filter, no query builder — a period, a branch, a category and then every
+ * record. Each extra control is one more way to be looking at a subset while
+ * believing you are looking at everything.
+ */
+const drillDownQuery = z
+  .object({
+    branchId: z.coerce.number().int().positive().optional(),
+    category: reportCategory.optional(),
+    from: isoDay.optional(),
+    to: isoDay.optional(),
+  })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
+    path: ['to'],
+  })
+  .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+    message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
+    path: ['from'],
+  });
+
+function operationalFileName(from: string, to: string, ext: 'pdf' | 'xlsx'): string {
+  return `KAS-bao-cao-van-de-le-tan-${from}-${to}.${ext}`;
+}
+
 function sendPdf(res: Response, pdf: Buffer, fileName: string): void {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', contentDisposition(fileName));
@@ -303,6 +359,130 @@ export function createAdminReportsRouter(): Router {
         summary: await computeIncidentRangeSummary({ start, end, branchId: q.branchId }),
       });
       sendPdf(res, pdf, incidentReportFileName(q.from, q.to));
+    })().catch(next);
+  });
+
+  /*
+    GET /api/admin/reports/operational — "Báo cáo vấn đề", the drill-down.
+
+    RETURNS THE ROWS, NOT COUNTS. The counts are beside them for the category
+    buttons; the records themselves are the answer to the only question this
+    screen exists for — what did the desk actually record. A summary that
+    replaces the table is the failure mode the specification names outright.
+
+    Reads go through `listReports`, so an Admin and a receptionist are filtered
+    by the same function. There is no privileged second query path.
+  */
+  router.get('/admin/reports/operational', (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const q = drillDownQuery.parse(req.query);
+      const now = getClock().now();
+      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+
+      /*
+        THE PERIOD IS A RANGE OF BUSINESS DATES, resolved to the SHIFTS that
+        belong to them — never a `createdAt` window. Ca C of the 23rd owns its
+        02:15 entries; a timestamp filter would hand them to the 24th.
+
+        Every shift of the period is on SCREEN, open ones included and flagged:
+        an Admin watching today wants to see the shift that is still running.
+        The official export is the one that leaves open shifts out.
+      */
+      const today = hcmDateOnly(now);
+      const period = q.from && q.to ? { from: q.from, to: q.to } : null;
+      const sessions = await sessionsForBusinessDates({
+        ...(period ?? { from: today, to: today }),
+        branchId: q.branchId,
+      });
+      const sessionIds = sessions.map((s) => s.id);
+      // No period chosen: every record, as before; the drawer is still bounded to today.
+      const scope = period ? { shiftSessionIds: sessionIds } : {};
+      const filter = { branchId: q.branchId, category: q.category, ...scope };
+
+      const [reports, counts, total] = await Promise.all([
+        listReports(admin, filter),
+        /*
+          COUNTED WITHOUT THE CATEGORY FILTER, on purpose: these numbers sit on
+          the five category buttons, and selecting one must not zero the other
+          four. They describe the branch and the period, not the selection.
+        */
+        countByCategory(admin, { branchId: filter.branchId, ...scope }),
+        countReports(admin, filter),
+      ]);
+
+      /*
+        THE DRAWER IS ALWAYS BOUNDED, and the period is stated. It is the drawer
+        of exactly the shifts of the period — with no period, today's.
+      */
+      const cashPeriod = period ?? { from: today, to: today };
+
+      res.json({
+        reports: reports.map((r) => serializeReport(r, now)),
+        counts,
+        /*
+          THE CAP IS DECLARED RATHER THAN APPLIED SILENTLY.
+
+          `listReports` stops at 500 rows. A branch with 1.500 payments would
+          otherwise show "1500" on the button and render 500, with nothing to say
+          the other 1.000 exist — a screen whose whole purpose is that the Admin
+          sees FULL records, quietly showing a third of them.
+        */
+        total,
+        truncated: total > reports.length,
+        /* Cash is per BRANCH by definition — a drawer belongs to one desk — so
+           an all-branch view answers null rather than adding eight drawers
+           together into a number that describes nowhere. */
+        cash: q.branchId === undefined ? null : await sessionsCashSummary(sessionIds),
+        cashPeriod: q.branchId === undefined ? null : cashPeriod,
+        /*
+          THE SHIFTS OF THIS PERIOD THAT HAVE NOT PRESSED "KẾT THÚC CA". They are
+          on screen, but not in the official export — and the screen says so
+          rather than letting an unfinished day pass for a finished one.
+        */
+        openShifts: openShiftNotices(sessions),
+        openShiftWarning: OPEN_SHIFT_WARNING,
+      });
+    })().catch(next);
+  });
+
+  // GET /api/admin/reports/operational.pdf — every record, by branch section.
+  router.get('/admin/reports/operational.pdf', (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const q = operationalExportQuery.parse(req.query);
+      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+      const data = await operationalReport(admin, {
+        from: q.from,
+        to: q.to,
+        branchId: q.branchId,
+        category: q.category,
+      });
+      sendPdf(res, await buildOperationalReportPdf(data), operationalFileName(q.from, q.to, 'pdf'));
+    })().catch(next);
+  });
+
+  // GET /api/admin/reports/operational.xlsx — the same data, six sheets.
+  router.get('/admin/reports/operational.xlsx', (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const q = operationalExportQuery.parse(req.query);
+      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+      const data = await operationalReport(admin, {
+        from: q.from,
+        to: q.to,
+        branchId: q.branchId,
+        category: q.category,
+      });
+      const workbook = await buildOperationalReportWorkbook(data);
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader('Content-Disposition', contentDisposition(operationalFileName(q.from, q.to, 'xlsx')));
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.send(workbook);
     })().catch(next);
   });
 

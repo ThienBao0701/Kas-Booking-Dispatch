@@ -273,6 +273,8 @@ export interface ClearSummary {
   batchesDeleted: number;
   bookingsDeleted: number;
   issuesDeleted: number;
+  /** Journal entries that referenced a demo incident and went with it. */
+  operationalReportsDeleted: number;
   notificationsDeleted: number;
   proofFilesDeleted: number;
   issuePhotosDeleted: number;
@@ -311,6 +313,20 @@ export async function clearDemoData(client: PrismaClient = defaultPrisma): Promi
   const notif = await client.notification.deleteMany({ where: { isDemo: true } });
   // Deleting demo bookings cascades rooms/nights/proofs/analyses/comparisons/history + booking notifications.
   const bookings = await client.booking.deleteMany({ where: { isDemo: true } });
+  /*
+    A JOURNAL ENTRY POINTING AT A DEMO INCIDENT IS ITSELF DEMO-DERIVED.
+
+    "Sự cố cơ sở vật chất" holds a RESTRICT reference to HotelIssue, so the
+    delete below throws P2003 while such an entry exists — and the entry has no
+    meaning without the incident it references anyway. Deleting the REPORT (not
+    just its detail row) cascades to the detail and to the entry's audit rows.
+
+    Only entries about DEMO incidents are removed. A real entry cannot be
+    affected, because a real incident is never `isDemo`.
+  */
+  const facilityReports = await client.receptionOperationalReport.deleteMany({
+    where: { facility: { is: { issue: { is: { isDemo: true } } } } },
+  });
   const issues = await client.hotelIssue.deleteMany({ where: { isDemo: true } });
   const batches = await client.demoDataBatch.deleteMany({});
 
@@ -318,6 +334,7 @@ export async function clearDemoData(client: PrismaClient = defaultPrisma): Promi
     batchesDeleted: batches.count,
     bookingsDeleted: bookings.count,
     issuesDeleted: issues.count,
+    operationalReportsDeleted: facilityReports.count,
     notificationsDeleted: notif.count,
     proofFilesDeleted,
     issuePhotosDeleted,

@@ -27,8 +27,7 @@ import { NewBookingsPage } from '../pages/NewBookingsPage';
 import { PendingReviewPage, RejectedPage } from '../pages/VerificationBookingsPage';
 import { CompletedBookingsPage } from '../pages/CompletedBookingsPage';
 import { HistoryPage } from '../pages/HistoryPage';
-import { IssuesPage } from '../pages/IssuesPage';
-import { HandoverPage } from '../pages/HandoverPage';
+import { OperationalReportsPage } from '../pages/OperationalReportsPage';
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -94,14 +93,27 @@ export function AppRoutes() {
           <Route path="completed" element={<RequireRole role={BOOKING_ROLES}><CompletedBookingsPage /></RequireRole>} />
           <Route path="history" element={<RequireRole role={BOOKING_ROLES}><HistoryPage /></RequireRole>} />
           <Route path="booking/:id" element={<RequireRole role={BOOKING_ROLES}><BookingDetailPage /></RequireRole>} />
-          {/* Reception reports incidents; Admin monitors them. */}
-          <Route path="issues" element={<RequireRole role={BOOKING_ROLES}><IssuesPage /></RequireRole>} />
           {/*
-            "Bàn giao ca". Reception writes and reads; Admin monitors read-only —
-            the server refuses a write from anyone who is not a receptionist on
-            an open shift, so this gate only decides what renders.
+            OLD ADDRESSES, KEPT AS REDIRECTS. Incidents are reported and watched
+            in "Báo cáo vấn đề" → "Sự cố vật chất đang xử lý" now, and "Bàn giao
+            ca" has no screen of its own. A bookmark, a notification or an old
+            link still lands somewhere that works instead of on a blank page.
+            Only the screens went: the incident and handover APIs and every
+            historical row behind them are untouched.
           */}
-          <Route path="handover" element={<RequireRole role={BOOKING_ROLES}><HandoverPage /></RequireRole>} />
+          <Route path="issues" element={<Navigate to="/app/reports?category=FACILITY_ISSUE" replace />} />
+          <Route path="handover" element={<Navigate to="/app/reports" replace />} />
+          {/*
+            "Báo cáo vấn đề". ONE ROUTE FOR TWO SCREENS: reception records, the
+            Admin drills down by branch. They answer different questions but
+            operators call both by the same name, and a second address would
+            make a shared link land on the wrong one.
+
+            This gate only renders a forbidden page; the server refuses a write
+            from anyone who is not a receptionist on an open shift, and refuses
+            the Admin endpoints to everyone else.
+          */}
+          <Route path="reports" element={<RequireRole role={BOOKING_ROLES}><OperationalReportsPage /></RequireRole>} />
           {/*
             Bộ phận kỹ thuật. `queue` is a real path segment so each workflow
             state has its own address and can be bookmarked or opened alongside.

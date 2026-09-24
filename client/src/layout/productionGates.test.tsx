@@ -45,7 +45,7 @@ describe('production frontend gates', () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       ...SHELL,
-      'GET /api/admin/users': () => ({ status: 200, body: { users: [] } }),
+      'GET /api/admin/users?includeAdmins=true': () => ({ status: 200, body: { users: [] } }),
       'GET /api/branches': () => ({ status: 200, body: { branches: [] } }),
       // No /api/dev-test/status mock → 404, exactly like production.
     });

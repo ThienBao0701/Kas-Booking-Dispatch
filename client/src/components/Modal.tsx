@@ -14,13 +14,15 @@ interface ModalProps {
    * room classes carry a name, a code, a toggle and a row of aliases, and at
    * `lg` each one wraps onto three lines.
    */
-  size?: 'lg' | 'xl' | '2xl';
+  /** `4xl` (896px) is for a form that needs a four-column grid, e.g. a payment. */
+  size?: 'lg' | 'xl' | '2xl' | '4xl';
 }
 
 const WIDTH: Record<NonNullable<ModalProps['size']>, string> = {
   lg: 'max-w-lg',
   xl: 'max-w-xl',
   '2xl': 'max-w-2xl',
+  '4xl': 'max-w-4xl',
 };
 
 /** A minimal accessible modal dialog (Escape / overlay to close). */

@@ -153,6 +153,28 @@ describe('Admin opens a receptionist conversation', () => {
     expect(within(list).getByText(/Lễ tân Hai/)).toBeInTheDocument();
   });
 
+  /**
+   * ONE ROW PER CONVERSATION, as a compact table: status, subject, branch,
+   * sender, time, message count and the way in.
+   */
+  it('lays the conversations out as a compact table with the specified columns', async () => {
+    mount(ADMIN_USER);
+    renderApp('/app/chat');
+
+    const list = await screen.findByTestId('chat-conversations');
+    const headers = within(list).getAllByRole('columnheader').map((h) => h.textContent);
+    const wanted = ['Trạng thái', 'Chủ đề', 'Chi nhánh / khách sạn', 'Người gửi', 'Thời gian', 'Số tin nhắn', 'Thao tác'];
+    const at = wanted.map((w) => headers.indexOf(w));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    // In the specified order.
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+
+    const row = within(list).getByTestId('row-convB');
+    expect(within(row).getByText('Elegance Hotel')).toBeInTheDocument();
+    expect(within(row).getByText('Lễ tân Hai')).toBeInTheDocument();
+    expect(within(row).getByRole('link', { name: 'Mở' })).toHaveAttribute('href', '/app/chat/convB');
+  });
+
   it('CLICKING a row navigates to that conversation and loads it', async () => {
     const fetchMock = mount(ADMIN_USER);
     const user = userEvent.setup();

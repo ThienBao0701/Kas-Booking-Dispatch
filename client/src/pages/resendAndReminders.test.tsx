@@ -280,7 +280,8 @@ describe('Nhắc nhở', () => {
     renderApp('/app/reminders');
 
     const list = await screen.findByTestId('reminder-list');
-    expect(within(list).getByText('Đã đọc')).toBeInTheDocument();
+    // Awaited: the table shows its loading state before the rows arrive.
+    expect(await within(list).findByText('Đã đọc')).toBeInTheDocument();
     expect(within(list).queryByRole('button', { name: /Đánh dấu đã đọc/ })).not.toBeInTheDocument();
   });
 
@@ -301,7 +302,25 @@ describe('Nhắc nhở', () => {
     renderApp('/app/reminders');
 
     const list = await screen.findByTestId('reminder-list');
-    expect(within(list).getByText('Đã đọc')).toBeInTheDocument();
-    expect(within(list).getByText(/Gửi Lễ tân Một/)).toBeInTheDocument();
+    expect(await within(list).findByText('Đã đọc')).toBeInTheDocument();
+    // The recipient has a column of its own now, headed "Người nhận".
+    expect(within(list).getByRole('columnheader', { name: 'Người nhận' })).toBeInTheDocument();
+    expect(within(list).getByText('Lễ tân Một')).toBeInTheDocument();
+  });
+
+  /** Người nhận · Nội dung · Chi nhánh · Người gửi · Thời gian · Trạng thái. */
+  it('lays the Admin’s reminders out as a compact table with the specified columns', async () => {
+    mount(ADMIN_USER, {
+      'GET /api/reminders': () => ({ status: 200, body: { reminders: [reminder()] } }),
+    });
+    renderApp('/app/reminders');
+
+    const list = await screen.findByTestId('reminder-list');
+    await within(list).findByText('Chưa đọc');
+    const headers = within(list).getAllByRole('columnheader').map((h) => h.textContent);
+    const wanted = ['Người nhận', 'Nội dung', 'Chi nhánh', 'Người gửi', 'Thời gian', 'Trạng thái'];
+    const at = wanted.map((w) => headers.indexOf(w));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
   });
 });

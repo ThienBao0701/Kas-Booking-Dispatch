@@ -1,10 +1,13 @@
 /**
- * The Admin's incident date-range monitoring.
+ * The Admin's incident date-range monitoring — now the "Sự cố vật chất đang xử
+ * lý" category of "Báo cáo vấn đề", where the old "Sự cố khách sạn" address
+ * lands.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
- *   1. The screen is UNCHANGED until a period is asked for. Defaulting to today
- *      would hide every unresolved incident older than this morning — the ones
- *      that most need looking at.
+ *   1. The period is the PAGE's period — today by default, like every other
+ *      category — and what it leaves out is never silent: the summary counts
+ *      what is still open outside it, and every branch's unresolved total is
+ *      on screen.
  *   2. The narrowing reaches the SERVER. Filtering a loaded page would only ever
  *      narrow the page that happened to load.
  *   3. "Tồn đọng hiện tại" and a date range are mutually exclusive, and the
@@ -17,6 +20,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, renderApp } from '../test/utils';
+import { hcmToday } from '../lib/format';
+import { daysBefore } from '../lib/shiftGroups';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -81,7 +86,7 @@ function issue(over: Record<string, unknown> = {}) {
  * would have to restate today's date. What each test actually cares about is
  * which URLs were requested, which `seen` records.
  */
-function installMocks(onRequest?: (url: string) => void) {
+function installMocks(onRequest?: (url: string) => void, issues: unknown[] = [issue()]) {
   const fetchMock = vi.fn(async (url: string | URL) => {
     const u = String(url);
     onRequest?.(u);
@@ -102,13 +107,15 @@ function installMocks(onRequest?: (url: string) => void) {
           byBranch: [{ branchId: 1, code: BRANCH.code, address: BRANCH.address, hotelName: BRANCH.hotelName, newCount: 2, inProgressCount: 1, totalUnresolved: 3 }],
         },
       });
+    if (u === '/api/admin/branches')
+      return json({ branches: [{ ...BRANCH, branchNumber: 1, active: true }] });
     if (u === '/api/nav-badges')
       return json({ counts: { new: 0, pendingReview: 0, rejected: 0, resendOrders: 0, chat: 0, reminders: 0 } });
     if (u.startsWith('/api/admin/reports/incidents/summary'))
       return json({ range: { from: '', to: '' }, summary: SUMMARY });
     if (u.startsWith('/api/issues'))
       return json({
-        issues: [issue()],
+        issues,
         pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 },
       });
     return new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: `no mock for ${u}` } }), {
@@ -119,130 +126,62 @@ function installMocks(onRequest?: (url: string) => void) {
   vi.stubGlobal('fetch', fetchMock);
 }
 
+/**
+ * The page opens on today; "7 ngày" is today and the six days before it.
+ * Computed from the same clock the page reads.
+ */
+const TODAY = hcmToday();
+const WEEK_FROM = daysBefore(TODAY, 6);
+
+/** The old "Sự cố khách sạn" address: the incident category, every branch. */
+async function openIncidents() {
+  renderApp('/app/issues');
+  return screen.findByTestId('admin-incident-table');
+}
+
 describe('the incident period controls', () => {
-  it('asks for NO period by default — the screen is unchanged', async () => {
+  it('asks the server for the page’s period — today — by default', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
-    const listCalls = seen.filter((u) => u.startsWith('/api/issues?'));
-    expect(listCalls.length).toBeGreaterThan(0);
-    // Byte for byte the request this endpoint has always received.
-    expect(listCalls.every((u) => u === '/api/issues?pageSize=100')).toBe(true);
-    expect(screen.getByTestId('issue-scope-note')).toHaveTextContent('Đang xem toàn bộ sự cố');
+    await waitFor(() =>
+      expect(seen).toContain(`/api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`),
+    );
   });
 
   it('sends the chosen period to the SERVER', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
+    await user.click(await screen.findByTestId('admin-range-6'));
 
     await waitFor(() =>
-      expect(seen.some((u) => u.startsWith('/api/issues?') && u.includes('from=') && u.includes('to=')))
-        .toBe(true),
+      expect(seen).toContain(`/api/issues?from=${WEEK_FROM}&to=${TODAY}&pageSize=100`),
     );
-    expect(screen.getByTestId('issue-scope-note')).toHaveTextContent('báo trong khoảng đã chọn');
   });
 
   it('sends the outstanding flag, and drops the period when it is chosen', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
     const user = userEvent.setup();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
-    await waitFor(() => expect(seen.some((u) => u.includes('from='))).toBe(true));
+    await openIncidents();
 
     seen.length = 0;
-    await user.click(screen.getByTestId('issue-outstanding'));
+    await user.click(screen.getByTestId('admin-incident-outstanding'));
 
     await waitFor(() => expect(seen.some((u) => u.includes('outstanding=true'))).toBe(true));
     // The two are mutually exclusive on the server — "tồn đọng" IS a status set,
     // so combining them would silently answer a different question.
     const outstandingCalls = seen.filter((u) => u.includes('outstanding=true'));
     expect(outstandingCalls.every((u) => !u.includes('from='))).toBe(true);
-    expect(screen.getByTestId('issue-scope-note')).toHaveTextContent('không giới hạn ngày báo');
-  });
-
-  /**
-   * Asserted on the SCOPE, not on a new request.
-   *
-   * Clearing the period returns the query to the key it already fetched at
-   * mount, so React Query serves it from cache and no second request is made —
-   * which is the right behaviour, and would make "a request went out" a test of
-   * the cache rather than of the control.
-   */
-  /**
-   * THE STATUS FILTER IS NOT SILENTLY DISCARDED.
-   *
-   * "Tồn đọng" IS a status set on the server — NEW plus IN_PROGRESS — so
-   * `listIssues` replaces any chosen status with it. For a few hours the
-   * dropdown stayed enabled and still read "Đã hoàn thành" while the table
-   * listed exactly the incidents that filter excludes, with nothing on screen
-   * admitting the filter had been dropped.
-   */
-  it('disables the status filter while the outstanding view is on', async () => {
-    const seen: string[] = [];
-    installMocks((u) => seen.push(u));
-    const user = userEvent.setup();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    const status = screen.getByLabelText('Lọc theo trạng thái') as HTMLSelectElement;
-    await user.selectOptions(status, 'COMPLETED');
-    expect(status.value).toBe('COMPLETED');
-
-    seen.length = 0;
-    await user.click(screen.getByTestId('issue-outstanding'));
-
-    // Visibly overridden rather than quietly ignored.
-    await waitFor(() => expect(status).toBeDisabled());
-    expect(status.value).toBe('');
-    // And the request stops carrying a status the server would have overridden.
-    await waitFor(() => expect(seen.some((u) => u.includes('outstanding=true'))).toBe(true));
-    expect(seen.filter((u) => u.includes('outstanding=true')).every((u) => !u.includes('status='))).toBe(true);
-
-    // Turning it off gives the control back.
-    await user.click(screen.getByTestId('issue-outstanding'));
-    await waitFor(() => expect(status).toBeEnabled());
-  });
-
-  it('clears the period on request', async () => {
-    installMocks();
-    const user = userEvent.setup();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
-    expect(screen.getByTestId('issue-scope-note')).toHaveTextContent('báo trong khoảng đã chọn');
-    await screen.findByTestId('incident-range-summary');
-
-    await user.click(screen.getByTestId('issue-range-clear'));
-
-    await waitFor(() =>
-      expect(screen.getByTestId('issue-scope-note')).toHaveTextContent('Đang xem toàn bộ sự cố'),
-    );
-    expect((screen.getByTestId('issue-range-from') as HTMLInputElement).value).toBe('');
-    // The period summary goes with the period it summarised.
-    expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument();
+    expect(screen.getByTestId('admin-incident-table')).toHaveTextContent('Sự cố còn tồn đọng');
   });
 });
 
 describe('the period summary', () => {
-  it('is hidden until a period is chosen', async () => {
-    installMocks();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument();
-  });
-
   /**
    * TWO NUMBERS THAT SOUND LIKE ONE, SHOWN AS TWO.
    *
@@ -252,11 +191,7 @@ describe('the period summary', () => {
    */
   it('separates failed attempts from incidents needing rework', async () => {
     installMocks();
-    const user = userEvent.setup();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
+    await openIncidents();
 
     const summary = await screen.findByTestId('incident-range-summary');
     const cell = (label: string) =>
@@ -266,26 +201,29 @@ describe('the period summary', () => {
     expect(cell('Cần xử lý lại')).toContain('1');
   });
 
+  /** The period hides nothing silently: what is still open elsewhere is counted. */
   it('reports the outstanding total as explicitly OUTSIDE the period', async () => {
     installMocks();
-    const user = userEvent.setup();
-    renderApp('/app/issues');
-
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
+    await openIncidents();
 
     const summary = await screen.findByTestId('incident-range-summary');
     expect(within(summary).getByText(/Ngoài khoảng thời gian này/)).toBeInTheDocument();
     expect(within(summary).getByText('9')).toBeInTheDocument();
   });
 
-  it('does not add a second table to the page', async () => {
+  it('steps aside for the outstanding view, which has no period', async () => {
     installMocks();
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
+    await screen.findByTestId('incident-range-summary');
+    await user.click(screen.getByTestId('admin-incident-outstanding'));
+    await waitFor(() => expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument());
+  });
+
+  it('does not add a second table to the page', async () => {
+    installMocks();
+    await openIncidents();
     await screen.findByTestId('incident-range-summary');
 
     // `findByRole('table')` has to stay unambiguous — for a screen reader as
@@ -295,30 +233,49 @@ describe('the period summary', () => {
 });
 
 describe('the incident table', () => {
-  it('keeps the branch, status and export controls', async () => {
+  it('keeps the branch and export controls, and every branch’s unresolved count', async () => {
     installMocks();
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
-    expect(screen.getByLabelText('Lọc theo trạng thái')).toBeInTheDocument();
+    expect(await screen.findByTestId('branch-select')).toHaveValue('ALL');
     expect(screen.getByRole('button', { name: /Xuất báo cáo/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Làm mới' })).toBeInTheDocument();
-    expect(screen.getByText('Sự cố theo chi nhánh')).toBeInTheDocument();
+    expect(await screen.findByText('Sự cố chưa xử lý theo chi nhánh')).toBeInTheDocument();
   });
 
-  it('shows the repair duration the server computed', async () => {
-    installMocks();
-    renderApp('/app/issues');
+  it('shows how the latest repair attempt ended, and how long it took', async () => {
+    installMocks(undefined, [
+      issue({
+        status: 'NEW',
+        needsRework: true,
+        attempts: [
+          {
+            id: 'a1',
+            attemptNumber: 1,
+            technicianName: 'Minh',
+            technicianPhone: '0909000222',
+            acceptedByName: 'Minh',
+            acceptedAt: '2026-09-17T02:10:00.000Z',
+            outcome: 'CANNOT_REPAIR',
+            outcomeAt: '2026-09-17T02:40:00.000Z',
+            reason: 'Thiếu phụ tùng',
+            durationSeconds: 1800,
+            durationLabel: '30 phút',
+          },
+        ],
+      }),
+    ]);
+    const table = await openIncidents();
 
-    const table = await screen.findByRole('table');
-    expect(within(table).getByText('Thời gian xử lý')).toBeInTheDocument();
+    const row = await within(table).findByTestId('row-i1');
+    expect(within(row).getByText(/Không sửa được/)).toHaveTextContent('Không sửa được · 30 phút');
+    expect(within(table).getByRole('columnheader', { name: 'Kết quả gần nhất' })).toBeInTheDocument();
   });
 
   it('offers no way to transition anything', async () => {
     installMocks();
-    renderApp('/app/issues');
+    const table = await openIncidents();
+    await within(table).findByTestId('row-i1');
 
-    const table = await screen.findByRole('table');
     expect(within(table).queryByRole('button', { name: 'Tiếp nhận' })).toBeNull();
     expect(within(table).queryByRole('button', { name: /Hoàn thành/ })).toBeNull();
     expect(within(table).queryByRole('button', { name: /Không sửa được/ })).toBeNull();
@@ -332,17 +289,14 @@ describe('the export', () => {
   it('starts from the period already on screen', async () => {
     installMocks();
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
-    await user.click(screen.getByTestId('issue-range-today'));
-    const from = (screen.getByTestId('issue-range-from') as HTMLInputElement).value;
-
+    await user.click(await screen.findByTestId('admin-range-6'));
     await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Xuất báo cáo sự cố' });
 
     // The file and the table cannot silently describe two different weeks.
-    expect((within(dialog).getByTestId('incident-report-range-from') as HTMLInputElement).value).toBe(from);
+    expect((within(dialog).getByTestId('incident-report-range-from') as HTMLInputElement).value).toBe(WEEK_FROM);
   });
 
   it('opens the PDF with the chosen range', async () => {
@@ -350,16 +304,15 @@ describe('the export', () => {
     const open = vi.fn();
     vi.stubGlobal('open', open);
     const user = userEvent.setup();
-    renderApp('/app/issues');
+    await openIncidents();
 
-    await screen.findByRole('table');
     await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
     await user.click(await screen.findByTestId('incident-export-confirm'));
 
     expect(open).toHaveBeenCalledTimes(1);
     const url = String(open.mock.calls[0]![0]);
     expect(url).toContain('/api/admin/reports/incidents.pdf');
-    expect(url).toContain('from=');
-    expect(url).toContain('to=');
+    expect(url).toContain(`from=${TODAY}`);
+    expect(url).toContain(`to=${TODAY}`);
   });
 });

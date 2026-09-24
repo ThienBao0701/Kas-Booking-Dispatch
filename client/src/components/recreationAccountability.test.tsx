@@ -139,7 +139,8 @@ describe('the accountability panel', () => {
 
     await user.click(await screen.findByTestId('recreation-toggle'));
 
-    const table = await screen.findByRole('table');
+    // The order list — the breakdowns beside it are small tables of their own.
+    const table = await screen.findByTestId('recreation-rows');
     expect(within(table).getByText('REP-1')).toBeInTheDocument();
     expect(within(table).getByText('Nguyễn Văn A')).toBeInTheDocument();
     expect(within(table).getByText('Ca A4')).toBeInTheDocument();

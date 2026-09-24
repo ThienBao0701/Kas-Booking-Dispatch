@@ -153,7 +153,7 @@ export function DashboardPage() {
             not lost from the application.
           */}
           <Link
-            to="/app/issues"
+            to="/app/reports?category=FACILITY_ISSUE"
             className="focus-visible:outline-none"
             aria-label={`${issueScopeLabel}: ${issues?.reported ?? 0}`}
           >
