@@ -184,16 +184,20 @@ export async function buildOperationalReportWorkbook(
     // The SHIFT's day, from the session — Ca C's 02:15 entries sit under the day it began.
     { header: 'Ngày ca', key: 'shiftDay', width: 12 },
     { header: 'STT', key: 'stt', width: 6 },
-    { header: 'Ký gửi', key: 'item', width: 18 },
     { header: 'Tên khách', key: 'guest', width: 24 },
-    { header: 'Ghi chú', key: 'note', width: 40 },
+    { header: 'Mã EZ', key: 'ez', width: 16 },
+    { header: 'Nội dung', key: 'content', width: 44 },
     { header: 'Người nhập', key: 'createdBy', width: 20 },
     { header: 'Ca nhập', key: 'createdShift', width: 10 },
-    { header: 'Thời gian nhập', key: 'createdAt', width: 18 },
-    { header: 'Người tiếp nhận', key: 'acceptedBy', width: 20 },
-    { header: 'Ca tiếp nhận', key: 'acceptedShift', width: 12 },
-    { header: 'Thời gian tiếp nhận', key: 'acceptedAt', width: 20 },
-    { header: 'Trạng thái', key: 'state', width: 12 },
+    { header: 'Thời gian tiếp nhận', key: 'createdAt', width: 20 },
+    { header: 'Người hoàn thành', key: 'completedBy', width: 20 },
+    { header: 'Ca hoàn thành', key: 'completedShift', width: 14 },
+    { header: 'Thời gian hoàn thành', key: 'completedAt', width: 20 },
+    { header: 'Cách xử lý (nếu có)', key: 'resolution', width: 40 },
+    { header: 'Trạng thái', key: 'state', width: 14 },
+    // THE COMPLETE RECORD: fields older requests carry and current ones do not.
+    { header: 'Ký gửi (dữ liệu cũ)', key: 'item', width: 18 },
+    { header: 'Số phòng (dữ liệu cũ)', key: 'room', width: 14 },
   ];
   headerRow(requests);
 
@@ -203,16 +207,20 @@ export async function buildOperationalReportWorkbook(
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
         stt: i + 1,
-        item: row.guestRequest?.itemType ?? '',
         guest: row.guestRequest?.guestName ?? '',
-        note: row.guestRequest?.note ?? '',
+        ez: row.guestRequest?.ezCode ?? '',
+        // The note alone: a legacy "Ký gửi" has its own column on this sheet.
+        content: row.guestRequest?.note ?? '',
         createdBy: row.createdByName,
         createdShift: row.shiftName ?? '',
         createdAt: when(row.createdAt),
-        acceptedBy: row.guestRequest?.acceptedByName ?? '',
-        acceptedShift: row.guestRequest?.acceptedShiftName ?? '',
-        acceptedAt: when(row.guestRequest?.acceptedAt ?? null),
-        state: row.voided ? 'Đã hủy' : row.guestRequest?.accepted ? 'Đã tiếp nhận' : 'Chờ tiếp nhận',
+        completedBy: row.guestRequest?.completedByName ?? '',
+        completedShift: row.guestRequest?.completedShiftName ?? '',
+        completedAt: when(row.guestRequest?.completedAt ?? null),
+        resolution: row.guestRequest?.resolution ?? '',
+        state: row.voided ? 'Đã hủy' : row.guestRequest?.completed ? 'Đã hoàn thành' : 'Đã tiếp nhận',
+        item: row.guestRequest?.itemType ?? '',
+        room: row.guestRequest?.roomNumber ?? '',
       });
     });
   }
@@ -264,7 +272,8 @@ export async function buildOperationalReportWorkbook(
     });
   }
 
-  /* ------------------- 5. Khách hàng complain ------------------- */
+  /* ------------- 5. Vấn đề về chất lượng và dịch vụ ------------- */
+  // The label is 31 characters — Excel's sheet-name limit exactly.
   const complaints = wb.addWorksheet(CATEGORY_LABELS.CUSTOMER_COMPLAINT);
   complaints.columns = [
     { header: 'Chi nhánh', key: 'branch', width: 30 },
@@ -272,28 +281,39 @@ export async function buildOperationalReportWorkbook(
     { header: 'Ngày ca', key: 'shiftDay', width: 12 },
     { header: 'STT', key: 'stt', width: 6 },
     { header: 'Tên khách', key: 'guest', width: 24 },
-    { header: 'Phòng / Khác', key: 'location', width: 18 },
-    { header: 'Mô tả', key: 'description', width: 64 },
+    { header: 'Mã EZ', key: 'ez', width: 16 },
+    { header: 'Mô tả', key: 'description', width: 56 },
+    { header: 'Trạng thái', key: 'lifecycle', width: 16 },
+    { header: 'Hướng xử lý (nếu có)', key: 'resolution', width: 40 },
+    { header: 'Người hoàn thành', key: 'completedBy', width: 20 },
+    { header: 'Thời gian hoàn thành', key: 'completedAt', width: 20 },
     { header: 'Nhân viên', key: 'staff', width: 20 },
     { header: 'Ca', key: 'shift', width: 8 },
     { header: 'Thời gian', key: 'at', width: 18 },
-    { header: 'Trạng thái', key: 'state', width: 12 },
+    { header: 'Bản ghi', key: 'state', width: 12 },
+    { header: 'Phòng / Khác (dữ liệu cũ)', key: 'location', width: 18 },
   ];
   headerRow(complaints);
 
   for (const section of data.branches) {
     section.byCategory.CUSTOMER_COMPLAINT.forEach((row, i) => {
+      const c = row.complaint;
       complaints.addRow({
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
         stt: i + 1,
-        guest: row.complaint?.guestName ?? '',
-        location: row.complaint?.location ?? '',
-        description: row.complaint?.description ?? '',
+        guest: c?.guestName ?? '',
+        ez: c?.ezCode ?? '',
+        description: c?.description ?? '',
+        lifecycle: c?.completed ? 'Đã hoàn thành' : 'Đã tiếp nhận',
+        resolution: c?.resolution ?? '',
+        completedBy: c?.completedByName ?? '',
+        completedAt: when(c?.completedAt ?? null),
         staff: row.createdByName,
         shift: row.shiftName ?? '',
         at: when(row.createdAt),
         state: voidState(row),
+        location: c?.location ?? '',
       });
     });
   }
@@ -307,18 +327,21 @@ export async function buildOperationalReportWorkbook(
     { header: 'STT', key: 'stt', width: 6 },
     { header: 'Loại dịch vụ', key: 'type', width: 16 },
     { header: 'Tên khách', key: 'guest', width: 24 },
-    { header: 'SĐT', key: 'phone', width: 16 },
-    { header: 'Số phòng', key: 'room', width: 10 },
+    { header: 'Mã EZ', key: 'ez', width: 16 },
     { header: 'Hạng phòng', key: 'roomClass', width: 18 },
-    { header: 'Từ hạng', key: 'from', width: 18 },
-    { header: 'Lên hạng', key: 'to', width: 18 },
-    { header: 'Loại hình', key: 'serviceName', width: 22 },
+    { header: 'Từ hạng phòng', key: 'from', width: 18 },
+    { header: 'Tới hạng phòng', key: 'to', width: 18 },
+    { header: 'Số đêm', key: 'nights', width: 10 },
     { header: 'Giá tiền', key: 'price', width: 16 },
     { header: 'Ghi chú', key: 'note', width: 32 },
     { header: 'Nhân viên', key: 'staff', width: 20 },
     { header: 'Ca', key: 'shift', width: 8 },
     { header: 'Thời gian', key: 'at', width: 18 },
     { header: 'Trạng thái', key: 'state', width: 12 },
+    // THE COMPLETE RECORD: fields older rows carry and current ones do not.
+    { header: 'SĐT (dữ liệu cũ)', key: 'phone', width: 16 },
+    { header: 'Số phòng (dữ liệu cũ)', key: 'room', width: 14 },
+    { header: 'Loại hình (dữ liệu cũ)', key: 'serviceName', width: 22 },
   ];
   headerRow(services);
 
@@ -331,11 +354,14 @@ export async function buildOperationalReportWorkbook(
         stt: i + 1,
         type: s?.serviceTypeLabel ?? '',
         guest: s?.guestName ?? '',
-        phone: s?.phone ?? '',
-        room: s?.roomNumber ?? '',
+        ez: s?.ezCode ?? '',
         roomClass: s?.roomClass ?? '',
         from: s?.fromRoomClass ?? '',
         to: s?.toRoomClass ?? '',
+        // A real number, like the price — never a "3 đêm" string.
+        nights: s?.nights ?? null,
+        phone: s?.phone ?? '',
+        room: s?.roomNumber ?? '',
         serviceName: s?.serviceName ?? '',
         price: s?.price ?? 0,
         note: s?.note ?? '',

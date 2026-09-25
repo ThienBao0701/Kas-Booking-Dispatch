@@ -28,7 +28,11 @@ import { Input } from './Input';
 import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { parseVnd } from '../lib/money';
-import { roomServiceFields } from '../lib/roomServiceFields';
+import {
+  ROOM_SERVICE_FALLBACK_LABELS,
+  ROOM_SERVICE_ORDER,
+  roomServiceFields,
+} from '../lib/roomServiceFields';
 
 interface FormShellProps {
   title: string;
@@ -90,93 +94,110 @@ function useCreateReport(onCreated: () => void | Promise<void>) {
   return { mutation, error, setError };
 }
 
-/* ---------------------- Vấn đề khách yêu cầu ---------------------- */
+/** A multi-line field with the same look as `Input`. */
+function TextArea({
+  label,
+  value,
+  onChange,
+  testId,
+  maxLength,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  testId: string;
+  maxLength: number;
+}) {
+  return (
+    <label className="block text-sm font-medium text-slate-700">
+      {label}
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={3}
+        maxLength={maxLength}
+        data-testid={testId}
+        className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+      />
+    </label>
+  );
+}
 
+/* ---------------- Vấn đề khách yêu cầu thực hiện (Request) ---------------- */
+
+/**
+ * TÊN KHÁCH, MÃ EZ, NỘI DUNG — and nothing else.
+ *
+ * "Ký gửi" and "Số phòng" are gone: what the guest asked for is written in
+ * full in "Nội dung", and Mã EZ finds the booking. A new request is "Đã tiếp
+ * nhận" from the moment it is saved; completing it is a separate step.
+ */
 export function GuestRequestForm({
-  options,
   onCreated,
   bare,
   onCancel,
 }: {
-  options?: ReportOptions;
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
 }) {
-  const [itemType, setItemType] = useState('');
   const [guestName, setGuestName] = useState('');
-  const [note, setNote] = useState('');
+  const [ezCode, setEzCode] = useState('');
+  const [content, setContent] = useState('');
   const { mutation, error } = useCreateReport(async () => {
-    setItemType('');
     setGuestName('');
-    setNote('');
+    setEzCode('');
+    setContent('');
     await onCreated();
   });
 
-  const suggestions = options?.guestRequestItems ?? ['Balo', 'Hành lý', 'Vật dụng khác'];
-
   return (
     <FormShell
-      title="Vấn đề khách yêu cầu"
+      title="Vấn đề khách yêu cầu thực hiện"
       testId="guest-request-form"
       bare={bare}
       onCancel={onCancel}
-      ready={itemType.trim().length > 0 && guestName.trim().length > 0}
+      ready={guestName.trim().length > 0 && content.trim().length > 0}
       pending={mutation.isPending}
       error={error}
       onSubmit={() =>
         mutation.mutate({
           category: 'GUEST_REQUEST',
           guestRequest: {
-            itemType: itemType.trim(),
             guestName: guestName.trim(),
-            note: note.trim() || undefined,
+            ezCode: ezCode.trim() || undefined,
+            note: content.trim(),
           },
         })
       }
     >
       <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Input
-            label="Ký gửi"
-            value={itemType}
-            onChange={(e) => setItemType(e.target.value)}
-            placeholder="Balo, Hành lý, Vật dụng khác…"
-            data-testid="guest-request-item"
-          />
-          {/*
-            SUGGESTIONS, NOT A CLOSED LIST. A guest leaving a wedding dress or a
-            bicycle must be recorded as that, not forced into "Vật dụng khác",
-            which loses the one fact the record exists to preserve.
-          */}
-          <div className="flex flex-wrap gap-1">
-            {suggestions.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setItemType(s)}
-                data-testid={`guest-request-suggest-${s}`}
-                className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
         <Input
           label="Tên khách"
           value={guestName}
           onChange={(e) => setGuestName(e.target.value)}
           data-testid="guest-request-guest"
         />
+        <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="guest-request-ez" />
       </div>
-      <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="guest-request-note" />
+      <TextArea
+        label="Nội dung"
+        value={content}
+        onChange={setContent}
+        maxLength={2000}
+        testId="guest-request-content"
+      />
     </FormShell>
   );
 }
 
-/* -------------------- Vấn đề về chất lượng dịch vụ -------------------- */
+/* ------------------- Vấn đề về chất lượng và dịch vụ ------------------- */
 
+/**
+ * TÊN KHÁCH, MÃ EZ, MÔ TẢ. No room, no staff field (the shift says who), no
+ * priority. A new report is "Đã tiếp nhận"; completing it — with an optional
+ * "Hướng xử lý" — is a separate step on the table.
+ */
 export function ServiceQualityForm({
   onCreated,
   bare,
@@ -187,24 +208,22 @@ export function ServiceQualityForm({
   onCancel?: () => void;
 }) {
   const [guestName, setGuestName] = useState('');
-  const [location, setLocation] = useState('');
+  const [ezCode, setEzCode] = useState('');
   const [description, setDescription] = useState('');
   const { mutation, error } = useCreateReport(async () => {
     setGuestName('');
-    setLocation('');
+    setEzCode('');
     setDescription('');
     await onCreated();
   });
 
   return (
     <FormShell
-      title="Vấn đề về chất lượng dịch vụ"
+      title="Vấn đề về chất lượng và dịch vụ"
       testId="service-quality-form"
       bare={bare}
       onCancel={onCancel}
-      ready={
-        guestName.trim().length > 0 && location.trim().length > 0 && description.trim().length > 0
-      }
+      ready={guestName.trim().length > 0 && description.trim().length > 0}
       pending={mutation.isPending}
       error={error}
       onSubmit={() =>
@@ -212,20 +231,12 @@ export function ServiceQualityForm({
           category: 'CUSTOMER_COMPLAINT',
           complaint: {
             guestName: guestName.trim(),
-            location: location.trim(),
+            ezCode: ezCode.trim() || undefined,
             description: description.trim(),
           },
         })
       }
     >
-      {/*
-        THREE FIELDS, AND NO MORE. No priority, no severity, no status: this is an
-        operational record for the Admin and for whatever follow-up happens
-        outside this system, not a ticket queue with no worker assigned to it.
-        The category is still `CUSTOMER_COMPLAINT` on the wire — only the label a
-        receptionist reads changed, so the existing audit rows, exports and
-        authorization all keep working unmodified.
-      */}
       <div className="grid gap-3 sm:grid-cols-2">
         <Input
           label="Tên khách"
@@ -233,165 +244,187 @@ export function ServiceQualityForm({
           onChange={(e) => setGuestName(e.target.value)}
           data-testid="service-quality-guest"
         />
-        <Input
-          label="Số phòng / Khác"
-          value={location}
-          onChange={(e) => setLocation(e.target.value)}
-          placeholder="101, Sảnh, Nhà hàng…"
-          data-testid="service-quality-location"
-        />
+        <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="service-quality-ez" />
       </div>
-      <label className="block text-sm font-medium text-slate-700">
-        Mô tả
-        <textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          maxLength={4000}
-          data-testid="service-quality-description"
-          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-        />
-      </label>
+      <TextArea
+        label="Mô tả"
+        value={description}
+        onChange={setDescription}
+        maxLength={4000}
+        testId="service-quality-description"
+      />
     </FormShell>
   );
 }
 
 /* ------------------------- Dịch vụ phòng, KPI ------------------------- */
 
+/** "Số đêm" as typed — a positive whole number, or null. Never a silent zero. */
+function parseNights(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return n >= 1 ? n : null;
+}
+
 /**
- * THE SUBTYPE IS CHOSEN OUTSIDE THIS FORM.
+ * ONE FORM FOR ALL FIVE SERVICES, and it starts by asking which.
  *
- * The records table and this form must show the SAME subtype — "Bán phòng"
- * entries under a "Bán phòng" table, never mixed with "Giặt ủi" — so the
- * selection lives on `OperationalReportsPage` beside the table, and this form
- * only reads it. It renders no picker of its own: two pickers over one piece of
- * state is two places to read it and one to forget.
+ * "Chọn dịch vụ" decides which extra fields appear — Hạng phòng and Số đêm for
+ * a sale, the from/to pair and Số đêm for an upgrade, nothing more for the
+ * other three — from `roomServiceFields`, the same table the tables and the
+ * correction dialog read.
+ *
+ * A HIDDEN FIELD IS NEVER SENT. Typing a room class, switching to "Giặt ủi"
+ * and saving submits no room class: the body is built from the chosen service's
+ * own fields, not from every box that ever had text in it. The server applies
+ * the same rule again on its side.
  */
 export function RoomServiceForm({
-  serviceType,
+  options,
   onCreated,
   bare,
   onCancel,
 }: {
-  serviceType: RoomServiceType;
+  options?: ReportOptions;
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
 }) {
+  const [serviceType, setServiceType] = useState<RoomServiceType | ''>('');
   const [guestName, setGuestName] = useState('');
-  const [phone, setPhone] = useState('');
-  const [roomNumber, setRoomNumber] = useState('');
+  const [ezCode, setEzCode] = useState('');
   const [roomClass, setRoomClass] = useState('');
   const [fromRoomClass, setFromRoomClass] = useState('');
   const [toRoomClass, setToRoomClass] = useState('');
-  const [serviceName, setServiceName] = useState('');
+  const [nights, setNights] = useState('');
   const [price, setPrice] = useState('');
   const [note, setNote] = useState('');
 
   const { mutation, error } = useCreateReport(async () => {
+    setServiceType('');
     setGuestName('');
-    setPhone('');
-    setRoomNumber('');
+    setEzCode('');
     setRoomClass('');
     setFromRoomClass('');
     setToRoomClass('');
-    setServiceName('');
+    setNights('');
     setPrice('');
     setNote('');
     await onCreated();
   });
 
-  // The SAME table the records list and the correction dialog read — the form
-  // RENDERS from it and does not decide validity, so a request made with curl
-  // is refused by the same rule the operator sees.
-  const needs = roomServiceFields(serviceType);
+  const labelOf = (t: RoomServiceType) =>
+    options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
+  const needs = serviceType ? roomServiceFields(serviceType) : null;
 
   const ready =
+    needs !== null &&
     guestName.trim().length > 0 &&
     parseVnd(price) !== null &&
     (!needs.roomClass || roomClass.trim().length > 0) &&
     (!needs.upgrade || (fromRoomClass.trim().length > 0 && toRoomClass.trim().length > 0)) &&
-    (!needs.roomNumber || roomNumber.trim().length > 0) &&
-    (!needs.serviceName || serviceName.trim().length > 0);
+    (!needs.nights || parseNights(nights) !== null);
+
+  const submit = () => {
+    if (!serviceType || !needs) return;
+    mutation.mutate({
+      category: 'ROOM_SERVICE',
+      roomService: {
+        serviceType,
+        guestName: guestName.trim(),
+        ezCode: ezCode.trim() || undefined,
+        price: parseVnd(price) ?? 0,
+        note: note.trim() || undefined,
+        // Only the chosen service's own fields — see the component comment.
+        ...(needs.roomClass ? { roomClass: roomClass.trim() } : {}),
+        ...(needs.upgrade ? { fromRoomClass: fromRoomClass.trim(), toRoomClass: toRoomClass.trim() } : {}),
+        ...(needs.nights ? { nights: parseNights(nights) ?? undefined } : {}),
+      },
+    });
+  };
 
   return (
     <FormShell
-      title="Dịch vụ phòng, KPI"
+      title="Thêm dịch vụ"
       testId="room-service-form"
       bare={bare}
       onCancel={onCancel}
       ready={ready}
       pending={mutation.isPending}
       error={error}
-      onSubmit={() =>
-        mutation.mutate({
-          category: 'ROOM_SERVICE',
-          roomService: {
-            serviceType,
-            guestName: guestName.trim(),
-            phone: phone.trim() || undefined,
-            roomNumber: roomNumber.trim() || undefined,
-            roomClass: roomClass.trim() || undefined,
-            fromRoomClass: fromRoomClass.trim() || undefined,
-            toRoomClass: toRoomClass.trim() || undefined,
-            serviceName: serviceName.trim() || undefined,
-            price: parseVnd(price) ?? 0,
-            note: note.trim() || undefined,
-          },
-        })
-      }
+      onSubmit={submit}
     >
-      {/*
-        NO SUBTYPE PICKER HERE ANY MORE. Choosing which subtype to LOOK at is a
-        view decision and lives on the page; this dialog adds to whichever one
-        is selected, and its title says which. Two pickers with one selection
-        between them is two places to read the same state and one to forget.
-      */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="room-service-guest" />
-        {needs.phone ? (
-          <Input
-            label="SĐT"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            hint="Không bắt buộc."
-            data-testid="room-service-phone"
-          />
-        ) : null}
-        {needs.roomClass ? (
-          <Input label="Loại phòng" value={roomClass} onChange={(e) => setRoomClass(e.target.value)} data-testid="room-service-class" />
-        ) : null}
-        {needs.upgrade ? (
-          <>
-            <Input
-              label="Từ hạng phòng"
-              value={fromRoomClass}
-              onChange={(e) => setFromRoomClass(e.target.value)}
-              data-testid="room-service-from"
-            />
-            <Input
-              label="Lên hạng phòng"
-              value={toRoomClass}
-              onChange={(e) => setToRoomClass(e.target.value)}
-              data-testid="room-service-to"
-            />
-          </>
-        ) : null}
-        {needs.roomNumber ? (
-          <Input label="Phòng" value={roomNumber} onChange={(e) => setRoomNumber(e.target.value)} data-testid="room-service-room" />
-        ) : null}
-        {needs.serviceName ? (
-          <Input
-            label="Loại hình dịch vụ"
-            value={serviceName}
-            onChange={(e) => setServiceName(e.target.value)}
-            data-testid="room-service-name"
-          />
-        ) : null}
-        <MoneyInput label="Giá tiền" required value={price} onChange={setPrice} data-testid="room-service-price" />
+      <div className="space-y-1.5">
+        <label htmlFor="room-service-type" className="block text-sm font-medium text-slate-700">
+          Chọn dịch vụ
+        </label>
+        <select
+          id="room-service-type"
+          value={serviceType}
+          onChange={(e) => setServiceType(e.target.value as RoomServiceType | '')}
+          data-testid="room-service-type"
+          className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+        >
+          <option value="">— Chọn dịch vụ —</option>
+          {ROOM_SERVICE_ORDER.map((t) => (
+            <option key={t} value={t}>
+              {labelOf(t)}
+            </option>
+          ))}
+        </select>
       </div>
 
-      <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
+      {needs ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="room-service-guest" />
+            <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="room-service-ez" />
+          </div>
+
+          {needs.roomClass || needs.upgrade || needs.nights ? (
+            <div className="grid gap-3 sm:grid-cols-3" data-testid="room-service-conditional">
+              {needs.roomClass ? (
+                <Input label="Hạng phòng" value={roomClass} onChange={(e) => setRoomClass(e.target.value)} data-testid="room-service-class" />
+              ) : null}
+              {needs.upgrade ? (
+                <>
+                  <Input
+                    label="Từ hạng phòng"
+                    value={fromRoomClass}
+                    onChange={(e) => setFromRoomClass(e.target.value)}
+                    data-testid="room-service-from"
+                  />
+                  <Input
+                    label="Tới hạng phòng"
+                    value={toRoomClass}
+                    onChange={(e) => setToRoomClass(e.target.value)}
+                    data-testid="room-service-to"
+                  />
+                </>
+              ) : null}
+              {needs.nights ? (
+                <Input
+                  label="Số đêm"
+                  inputMode="numeric"
+                  value={nights}
+                  onChange={(e) => setNights(e.target.value.replace(/\D/g, ''))}
+                  data-testid="room-service-nights"
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MoneyInput label="Giá tiền" required value={price} onChange={setPrice} data-testid="room-service-price" />
+            <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
+          </div>
+        </>
+      ) : (
+        <p className="text-sm text-slate-500" data-testid="room-service-pick-first">
+          Chọn dịch vụ để nhập thông tin.
+        </p>
+      )}
     </FormShell>
   );
 }

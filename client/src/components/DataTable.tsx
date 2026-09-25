@@ -28,6 +28,7 @@ import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { toUserMessage } from '../api/errors';
 import { ErrorAlert } from './ErrorAlert';
+import { ReportSection, type SectionFrame } from './ReportSection';
 
 export interface DataColumn<T> {
   /** Stable key — also the label used in the mobile detail panel. */
@@ -91,6 +92,21 @@ interface DataTableProps<T> {
   testId?: string;
   /** A footer strip under the table, e.g. category totals. */
   footer?: ReactNode;
+  /**
+   * One-line loading and empty states, for a page that stacks several tables —
+   * five tall empty blocks would push everything that has content off screen.
+   */
+  compact?: boolean;
+  /**
+   * Framed as one section of the reception overview (`ReportSection`), with the
+   * stronger table rules that let several stacked tables be told apart.
+   */
+  section?: SectionFrame;
+  /**
+   * The table alone, with the same stronger rules but no frame of its own — for
+   * a table that sits inside a section someone else draws.
+   */
+  embedded?: boolean;
 }
 
 export function DataTable<T>({
@@ -113,6 +129,9 @@ export function DataTable<T>({
   multiExpand = false,
   testId,
   footer,
+  compact = false,
+  section,
+  embedded = false,
 }: DataTableProps<T>) {
   const [openRows, setOpenRows] = useState<ReadonlySet<string>>(() => new Set<string>());
   const toggleRow = (key: string) =>
@@ -131,26 +150,33 @@ export function DataTable<T>({
   // The Admin detail panel is the full record, so the mobile-only <dl> of
   // hidden columns underneath it would be the same fields a second time.
   const detailReplacesSecondary = detailToggle === 'always' && renderDetail !== undefined;
+  /*
+    THE STRONGER RULES, for tables stacked in the overview: a tinted header row
+    set off by a darker rule, and row separators that are visible at a glance
+    instead of barely there. Every other table keeps the lighter default.
+  */
+  const strong = section !== undefined || embedded;
+  // A framed table whose every row opens the full record (the Admin's) also marks
+  // the open row and its panel, so a reader always sees which record is expanded.
+  const recordRows = strong && detailToggle === 'always';
+  // Record tables carry the most columns (the Admin's payment ledger has fifteen),
+  // so their cells are a touch tighter: more of the row stays on a laptop screen.
+  const cellX = recordRows ? 'px-2.5' : 'px-3';
+  // Their scroll box is also a size container, so an open record can be held to
+  // the visible width while the row above it scrolls (see FragmentRow).
+  const headRowClass = strong
+    ? 'border-b border-slate-300 bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600'
+    : 'border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500';
+  const headCellClass = strong ? 'py-2.5 font-semibold' : 'py-2 font-medium';
 
-  return (
-    <section
-      data-testid={testId}
-      className="overflow-hidden rounded-xl border border-slate-200 bg-white"
-    >
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/70 px-4 py-2.5">
-        <h3 className="text-sm font-semibold text-slate-800">
-          {title}
-          {badge !== undefined ? (
-            <span className="ml-2 rounded bg-slate-200/80 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
-              {badge}
-            </span>
-          ) : null}
-        </h3>
-        {headerAction}
-      </header>
-
+  const body = (
+    <>
       {isLoading ? (
-        <p className="flex items-center justify-center gap-2 px-4 py-10 text-sm text-slate-500">
+        <p
+          className={`flex items-center gap-2 px-4 text-sm text-slate-500 ${
+            compact ? 'py-3' : 'justify-center py-10'
+          }`}
+        >
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
           Đang tải…
         </p>
@@ -169,24 +195,30 @@ export function DataTable<T>({
           ) : null}
         </div>
       ) : rows.length === 0 ? (
-        <div
-          data-testid={testId ? `${testId}-empty` : undefined}
-          className="px-4 py-10 text-center"
-        >
-          <p className="text-sm font-medium text-slate-700">{emptyTitle}</p>
-          <p className="mt-1 text-sm text-slate-500">{emptyMessage}</p>
-        </div>
+        compact ? (
+          <p data-testid={testId ? `${testId}-empty` : undefined} className="px-4 py-3 text-sm text-slate-500">
+            {emptyTitle}
+          </p>
+        ) : (
+          <div
+            data-testid={testId ? `${testId}-empty` : undefined}
+            className={strong ? 'px-4 py-4' : 'px-4 py-10 text-center'}
+          >
+            <p className="text-sm font-medium text-slate-700">{emptyTitle}</p>
+            <p className={`text-sm text-slate-500 ${strong ? 'mt-0.5' : 'mt-1'}`}>{emptyMessage}</p>
+          </div>
+        )
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-sm">
+        <div className={recordRows ? 'overflow-x-auto [container-type:inline-size]' : 'overflow-x-auto'}>
+          <table className={`min-w-full text-sm ${strong ? 'text-slate-800' : ''}`}>
             <thead>
-              <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+              <tr className={headRowClass}>
                 {expandable ? <th className={`w-[1%] px-2 py-2 ${toggleHidden}`} /> : null}
                 {columns.map((c) => (
                   <th
                     key={c.key}
                     scope="col"
-                    className={`px-3 py-2 font-medium ${c.align === 'right' ? 'text-right' : 'text-left'} ${
+                    className={`${cellX} ${headCellClass} ${c.align === 'right' ? 'text-right' : 'text-left'} ${
                       c.secondary ? 'hidden md:table-cell' : ''
                     } ${c.className ?? ''}`}
                   >
@@ -194,13 +226,13 @@ export function DataTable<T>({
                   </th>
                 ))}
                 {actions ? (
-                  <th scope="col" className="w-[1%] whitespace-nowrap px-3 py-2 text-right font-medium">
+                  <th scope="col" className={`w-[1%] whitespace-nowrap ${cellX} text-right ${headCellClass}`}>
                     Thao tác
                   </th>
                 ) : null}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className={`divide-y ${strong ? 'divide-slate-200' : 'divide-slate-100'}`}>
               {rows.map((row, index) => {
                 const key = rowKey(row);
                 return (
@@ -219,6 +251,7 @@ export function DataTable<T>({
                     actions={actions}
                     rowClassName={rowClassName}
                     renderDetail={renderDetail}
+                    strong={recordRows}
                   />
                 );
               })}
@@ -228,8 +261,42 @@ export function DataTable<T>({
       )}
 
       {footer && !isLoading && !isError ? (
-        <div className="border-t border-slate-200 bg-slate-50/70 px-4 py-2.5">{footer}</div>
+        <div
+          className={`border-t px-4 py-2.5 ${strong ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-slate-50/70'}`}
+        >
+          {footer}
+        </div>
       ) : null}
+    </>
+  );
+
+  if (embedded) return <div data-testid={testId}>{body}</div>;
+
+  if (section) {
+    return (
+      <ReportSection testId={testId} marker={section.marker} title={title} count={badge} aside={headerAction}>
+        {body}
+      </ReportSection>
+    );
+  }
+
+  return (
+    <section
+      data-testid={testId}
+      className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/70 px-4 py-2.5">
+        <h3 className="text-sm font-semibold text-slate-800">
+          {title}
+          {badge !== undefined ? (
+            <span className="ml-2 rounded bg-slate-200/80 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
+              {badge}
+            </span>
+          ) : null}
+        </h3>
+        {headerAction}
+      </header>
+      {body}
     </section>
   );
 }
@@ -248,6 +315,7 @@ function FragmentRow<T>({
   actions,
   rowClassName,
   renderDetail,
+  strong = false,
 }: {
   rowId: string;
   open: boolean;
@@ -262,13 +330,23 @@ function FragmentRow<T>({
   actions?: (row: T) => ReactNode;
   rowClassName?: (row: T) => string;
   renderDetail?: (row: T) => ReactNode;
+  /** A framed record table: firmer hover, an open row that looks open, an accented panel. */
+  strong?: boolean;
 }) {
   const span = columns.length + (actions ? 1 : 0) + (expandable ? 1 : 0);
+  const cellX = strong ? 'px-2.5' : 'px-3';
+  const rowTone = strong ? (open ? 'bg-brand-50/50' : 'hover:bg-slate-100/70') : 'hover:bg-slate-50';
+  // Every other table keeps its chevron exactly as it was.
+  const toggleClass = strong
+    ? `rounded-md p-1 transition-colors ${
+        open ? 'bg-brand-100 text-brand-700' : 'text-slate-500 hover:bg-brand-50 hover:text-brand-700'
+      }`
+    : 'rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600';
   return (
     <>
       <tr
         data-testid={`row-${rowId}`}
-        className={`transition-colors hover:bg-slate-50 ${rowClassName?.(row) ?? ''}`}
+        className={`transition-colors ${rowTone} ${rowClassName?.(row) ?? ''}`}
       >
         {expandable ? (
           <td className={`px-2 py-2 align-top ${toggleHidden}`}>
@@ -278,7 +356,7 @@ function FragmentRow<T>({
               aria-expanded={open}
               aria-label={open ? 'Thu gọn' : 'Xem thêm'}
               data-testid={`row-toggle-${rowId}`}
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              className={toggleClass}
             >
               {open ? (
                 <ChevronDown className="h-4 w-4" aria-hidden="true" />
@@ -291,7 +369,7 @@ function FragmentRow<T>({
         {columns.map((c) => (
           <td
             key={c.key}
-            className={`px-3 py-2.5 align-top ${c.align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${
+            className={`${cellX} py-2.5 align-top ${c.align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${
               c.secondary ? 'hidden md:table-cell' : ''
             } ${c.className ?? ''}`}
           >
@@ -299,7 +377,7 @@ function FragmentRow<T>({
           </td>
         ))}
         {actions ? (
-          <td className="whitespace-nowrap px-3 py-2.5 text-right align-top">{actions(row)}</td>
+          <td className={`whitespace-nowrap ${cellX} py-2.5 text-right align-top`}>{actions(row)}</td>
         ) : null}
       </tr>
 
@@ -309,28 +387,56 @@ function FragmentRow<T>({
         `renderDetail` has anything left to show.
       */}
       {open ? (
-        <tr data-testid={`row-detail-${rowId}`} className="bg-slate-50/60">
-          <td colSpan={span} className="px-4 py-3">
-            {/*
-              A caller whose detail IS the whole record (detailToggle 'always')
-              would otherwise print every hidden column twice on a phone: once
-              here and once inside its own panel below.
-            */}
-            {secondary.length > 0 && !detailReplacesSecondary ? (
-              <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2 md:hidden">
-                {secondary.map((c) => (
-                  <div key={c.key}>
-                    <dt className="text-xs uppercase tracking-wide text-slate-400">{c.header}</dt>
-                    <dd className="text-sm text-slate-800">{c.render(row, index)}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : null}
-            {renderDetail?.(row)}
+        <tr data-testid={`row-detail-${rowId}`} className={strong ? 'bg-slate-50' : 'bg-slate-50/60'}>
+          <td
+            colSpan={span}
+            className={strong ? 'border-l-[3px] border-brand-500 px-4 py-3' : 'px-4 py-3'}
+          >
+            {strong ? (
+              /*
+                A record table can be wider than the screen and scroll sideways.
+                The record itself is pinned to the part that is visible (100cqw is
+                the scroll box's width, less this cell's padding and accent), so it
+                reads as a panel instead of running off the right-hand edge.
+              */
+              <div className="sticky left-[1.1875rem] max-w-[calc(100cqw-2.25rem)]">
+                {renderSecondary(secondary, detailReplacesSecondary, row, index)}
+                {renderDetail?.(row)}
+              </div>
+            ) : (
+              <>
+                {renderSecondary(secondary, detailReplacesSecondary, row, index)}
+                {renderDetail?.(row)}
+              </>
+            )}
           </td>
         </tr>
       ) : null}
     </>
+  );
+}
+
+/**
+ * The columns that dropped out on a phone, listed under the row. A caller whose
+ * detail IS the whole record (detailToggle 'always') would otherwise print every
+ * hidden column twice on a phone: once here and once inside its own panel.
+ */
+function renderSecondary<T>(
+  secondary: DataColumn<T>[],
+  detailReplacesSecondary: boolean,
+  row: T,
+  index: number,
+): ReactNode {
+  if (secondary.length === 0 || detailReplacesSecondary) return null;
+  return (
+    <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2 md:hidden">
+      {secondary.map((c) => (
+        <div key={c.key}>
+          <dt className="text-xs uppercase tracking-wide text-slate-400">{c.header}</dt>
+          <dd className="text-sm text-slate-800">{c.render(row, index)}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 

@@ -42,6 +42,37 @@ export const CATEGORY_FALLBACK_LABELS: Record<ReportCategory, string> = {
   PAYMENT: 'Theo dõi thanh toán',
   GUEST_REQUEST: 'Vấn đề khách yêu cầu',
   FACILITY_ISSUE: 'Sự cố vật chất đang xử lý',
-  CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng dịch vụ',
+  CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
+};
+
+/**
+ * "Nguồn" for a new payment, before the server has spoken — a fallback copy of
+ * its `PAYMENT_SOURCES`, for the same reason as the labels above. The server
+ * refuses anything outside its own list whatever this one says.
+ */
+export const PAYMENT_SOURCE_FALLBACK = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'];
+
+/**
+ * Each category's number in the official report — the same I–V the exported PDF
+ * heads its sections with (server `CATEGORY_NUMERALS`), so the overview and the
+ * export mark a category identically.
+ */
+export const CATEGORY_MARKERS: Record<ReportCategory, string> = {
+  PAYMENT: 'I',
+  GUEST_REQUEST: 'II',
+  FACILITY_ISSUE: 'III',
+  CUSTOMER_COMPLAINT: 'IV',
+  ROOM_SERVICE: 'V',
+};
+
+/**
+ * Where reception's own screen names a category differently from the server.
+ *
+ * Only the Request category, spelled out in full on the reception journal. The
+ * server label stays short because it also names the XLSX sheet — Excel refuses
+ * a sheet name over 31 characters — and heads the export sections.
+ */
+export const RECEPTION_CATEGORY_TITLES: Partial<Record<ReportCategory, string>> = {
+  GUEST_REQUEST: 'Vấn đề khách yêu cầu thực hiện (Request)',
 };

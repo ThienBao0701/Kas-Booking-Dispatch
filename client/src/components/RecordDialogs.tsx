@@ -96,6 +96,79 @@ export function VoidDialog({
   );
 }
 
+/**
+ * "Hoàn thành" on a guest request or a service-quality report: optionally, how
+ * it was handled — and nothing else.
+ *
+ * THE HANDLING TEXT IS OPTIONAL, so the button is never disabled for an empty
+ * box: plenty of completions need no explanation. Left blank, nothing is sent
+ * and nothing is stored — no placeholder sentence standing in for one.
+ *
+ * The completion time is not shown as an input because it is not one — the
+ * server stamps it, together with who completed it and on which shift.
+ */
+export function CompleteRecordDialog({
+  id,
+  title,
+  fieldLabel,
+  onClose,
+  onCompleted,
+}: {
+  id: string;
+  /** "Hoàn thành yêu cầu" / "Hoàn thành vấn đề". */
+  title: string;
+  /** "Cách xử lý (nếu có)" / "Hướng xử lý (nếu có)". */
+  fieldLabel: string;
+  onClose: () => void;
+  onCompleted: () => void | Promise<void>;
+}) {
+  const [resolution, setResolution] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useMutation({
+    mutationFn: () => reportsApi.complete(id, resolution.trim() || undefined),
+    onSuccess: async () => {
+      setError(null);
+      await onCompleted();
+    },
+    onError: (e) => setError(toUserMessage(e)),
+  });
+
+  return (
+    <Modal
+      open
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Đóng
+          </Button>
+          <Button onClick={() => run.mutate()} loading={run.isPending} data-testid="complete-confirm">
+            Hoàn thành
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <label className="block text-sm font-medium text-slate-700">
+          {fieldLabel}
+          <textarea
+            value={resolution}
+            onChange={(e) => setResolution(e.target.value)}
+            rows={3}
+            maxLength={2000}
+            data-testid="complete-resolution"
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+          />
+        </label>
+        <p className="text-xs text-slate-500">Thời gian hoàn thành do hệ thống ghi nhận.</p>
+        {error ? <ErrorAlert>{error}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * Correcting a record
  * ------------------------------------------------------------------ */
@@ -104,9 +177,18 @@ export interface EditField {
   /** The server's own field name — it is what the audit row will record. */
   name: string;
   label: string;
-  kind?: 'text' | 'textarea' | 'money';
+  /** `integer`: a whole number, such as "Số đêm". */
+  kind?: 'text' | 'textarea' | 'money' | 'integer';
   required?: boolean;
   placeholder?: string;
+}
+
+/** A positive whole number as typed, or null — never a silent zero. */
+function parseWhole(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return n >= 1 ? n : null;
 }
 
 /**
@@ -148,7 +230,12 @@ export function RecordEditDialog({
       const payload: Record<string, unknown> = {};
       for (const f of fields) {
         const value = draft[f.name] ?? '';
-        payload[f.name] = f.kind === 'money' ? (parseVnd(value) ?? 0) : value.trim();
+        payload[f.name] =
+          f.kind === 'money'
+            ? (parseVnd(value) ?? 0)
+            : f.kind === 'integer'
+              ? parseWhole(value)
+              : value.trim();
       }
       const patch = { [block]: payload, reason: reason.trim() || undefined } as UpdateReportInput;
       return reportsApi.update(report.id, patch);
@@ -163,7 +250,9 @@ export function RecordEditDialog({
   const ready = fields.every((f) => {
     const value = (draft[f.name] ?? '').trim();
     if (!f.required) return true;
-    return f.kind === 'money' ? parseVnd(value) !== null : value.length > 0;
+    if (f.kind === 'money') return parseVnd(value) !== null;
+    if (f.kind === 'integer') return parseWhole(value) !== null;
+    return value.length > 0;
   });
 
   return (
@@ -205,6 +294,15 @@ export function RecordEditDialog({
                 required={f.required}
                 value={draft[f.name] ?? ''}
                 onChange={(v) => setDraft((d) => ({ ...d, [f.name]: v }))}
+                data-testid={`record-edit-${f.name}`}
+              />
+            ) : f.kind === 'integer' ? (
+              <Input
+                key={f.name}
+                label={f.label}
+                inputMode="numeric"
+                value={draft[f.name] ?? ''}
+                onChange={(e) => setDraft((d) => ({ ...d, [f.name]: e.target.value.replace(/\D/g, '') }))}
                 data-testid={`record-edit-${f.name}`}
               />
             ) : f.kind === 'textarea' ? (

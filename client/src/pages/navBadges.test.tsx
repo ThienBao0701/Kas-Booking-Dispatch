@@ -50,10 +50,11 @@ describe('receptionist sidebar badges', () => {
     renderApp('/app/new');
 
     expect(await screen.findByTestId('nav-badge-new')).toHaveTextContent('3');
-    expect(screen.getByTestId('nav-badge-pending-review')).toHaveTextContent('2');
     expect(screen.getByTestId('nav-badge-chat')).toHaveTextContent('4');
     expect(screen.getByTestId('nav-badge-reminders')).toHaveTextContent('2');
-    // "Cần tạo lại" left reception's menu, so there is no item to carry a badge.
+    // "Chờ Admin kiểm tra" and "Cần tạo lại" left reception's menu, so there is
+    // no item to carry either badge — even though the server still counts them.
+    expect(screen.queryByTestId('nav-badge-pending-review')).not.toBeInTheDocument();
     expect(screen.queryByTestId('nav-badge-rejected')).not.toBeInTheDocument();
   });
 

@@ -33,6 +33,7 @@ import type {
 } from '../api/receptionReports';
 import { DataTable, type DataColumn } from './DataTable';
 import { OperationalRecordDetail } from './OperationalRecord';
+import type { SectionFrame } from './ReportSection';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
 import { roomServiceFields } from '../lib/roomServiceFields';
@@ -58,6 +59,8 @@ export interface AdminTableProps {
   isError?: boolean;
   error?: unknown;
   onRetry?: () => void;
+  /** Framed as a report section — the same shell as reception's overview. */
+  section?: SectionFrame;
 }
 
 /** A voided row stays on screen, greyed — never removed, never hidden. */
@@ -141,7 +144,10 @@ function status(header = 'Trạng thái'): DataColumn<OperationalReport> {
         );
       }
       return (
-        <span data-testid={`admin-status-${r.id}`} className="text-xs text-slate-400">
+        <span
+          data-testid={`admin-status-${r.id}`}
+          className="inline-flex rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600"
+        >
           Hợp lệ
         </span>
       );
@@ -177,20 +183,27 @@ const SHARED = {
 
 /* ------------------------- Theo dõi thanh toán ------------------------- */
 
+/**
+ * THE CANONICAL PAYMENT FIELDS FIRST — Tên khách, Mã EZ, Nguồn, then the money
+ * split Tiền mặt / Thu CK / Cà thẻ / Công nợ / Chi — and the Admin's own
+ * traceability after them: the method and amount as entered, the room an older
+ * row recorded, the time and the record's integrity. Reception's table is a
+ * subset of this one, never the other way round.
+ */
 export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     staff(),
     shift(),
-    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.ezCode) },
-    { key: 'source', header: 'Nguồn', secondary: true, render: (r) => text(r.payment?.source) },
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'font-medium text-slate-800',
+      // The table scrolls at its narrowest; a name should not break mid-name to save 20px.
+      className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.payment?.guestName),
     },
-    { key: 'room', header: 'Phòng', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.roomNumber) },
+    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.ezCode) },
+    { key: 'source', header: 'Nguồn', secondary: true, render: (r) => text(r.payment?.source) },
     {
       key: 'method',
       header: 'Phương thức',
@@ -210,11 +223,13 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
       className: 'whitespace-nowrap font-medium text-slate-800',
       render: (r) => money(r.payment?.amount),
     },
-    { key: 'cash', header: 'Thu tiền mặt', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.cash) },
+    { key: 'cash', header: 'Tiền mặt', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.cash) },
     { key: 'transfer', header: 'Thu CK', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.transfer) },
     { key: 'card', header: 'Cà thẻ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.card) },
     { key: 'receivable', header: 'Công nợ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.receivable) },
     { key: 'expense', header: 'Chi', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.expense) },
+    // Reception no longer asks for a room; older rows carry one.
+    { key: 'room', header: 'Phòng', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.roomNumber) },
     when('createdAt', 'Thời gian', (r) => r.createdAt),
     status(),
   ];
@@ -236,39 +251,94 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
 
 /* ------------------------ Vấn đề khách yêu cầu ------------------------ */
 
+/** The two-state lifecycle a request and a service-quality report share. */
+interface Completion {
+  completed: boolean;
+  completedAt: string | null;
+  completedByName: string | null;
+  completedShiftName: string | null;
+}
+
+function lifecycleBadge(c: Completion | null | undefined): ReactNode {
+  if (!c) return text(null);
+  return c.completed ? (
+    <span className="inline-flex whitespace-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
+      Đã hoàn thành
+    </span>
+  ) : (
+    <span className="inline-flex whitespace-nowrap rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+      Đã tiếp nhận
+    </span>
+  );
+}
+
+/**
+ * "Thời gian hoàn thành" with who completed it and on which shift beneath — the
+ * Admin's accountability for the second actor, beside the first.
+ */
+function completionCell(c: Completion | null | undefined): ReactNode {
+  if (!c?.completed) return text(null);
+  return (
+    <>
+      <span className="whitespace-nowrap text-slate-700">{formatDateTime(c.completedAt)}</span>
+      <span className="block whitespace-nowrap text-xs text-slate-400">
+        {[c.completedByName, c.completedShiftName].filter(Boolean).join(' · ') || '—'}
+      </span>
+    </>
+  );
+}
+
+/** "Cách xử lý / Hướng xử lý (nếu có)" — optional, so often empty. */
+const handling = (value: string | null | undefined): ReactNode => clamped(value);
+
+/**
+ * REQUEST, IN ITS CANONICAL FIELDS — Tên khách, Mã EZ, Nội dung, the two times,
+ * "Cách xử lý (nếu có)" and "Trạng thái" — with the Admin's creator, shift and
+ * record integrity ("Bản ghi") beside them. "Ký gửi" and "Số phòng" are not
+ * columns: an older request's "Ký gửi" reads as part of its content, and both
+ * legacy values are in the full record one click down.
+ */
 export function AdminGuestRequestTable({ rows, title, grouped, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
-      key: 'item',
-      header: 'Ký gửi',
-      className: 'whitespace-nowrap font-medium text-slate-800',
-      render: (r) => text(r.guestRequest?.itemType),
+      key: 'guest',
+      header: 'Tên khách',
+      className: 'min-w-[7rem] font-medium text-slate-800',
+      render: (r) => text(r.guestRequest?.guestName),
     },
-    { key: 'guest', header: 'Tên khách', render: (r) => text(r.guestRequest?.guestName) },
-    { key: 'note', header: 'Ghi chú', secondary: true, className: 'max-w-[18rem]', render: (r) => clamped(r.guestRequest?.note) },
+    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.guestRequest?.ezCode) },
+    {
+      key: 'content',
+      header: 'Nội dung',
+      className: 'min-w-[12rem] max-w-[22rem]',
+      render: (r) => clamped(r.guestRequest?.content),
+    },
     staff('Người tạo'),
     shift(),
-    when('createdAt', 'Thời gian', (r) => r.createdAt),
+    when('createdAt', 'Thời gian tiếp nhận', (r) => r.createdAt),
     {
-      key: 'accepted',
-      header: 'Người nhận',
-      className: 'whitespace-nowrap',
-      render: (r) =>
-        r.guestRequest?.accepted ? (
-          <>
-            {r.guestRequest.acceptedByName ?? '—'}
-            {r.guestRequest.acceptedShiftName ? (
-              <span className="block text-xs text-slate-400">{r.guestRequest.acceptedShiftName}</span>
-            ) : null}
-          </>
-        ) : (
-          <span className="inline-flex rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
-            Chưa tiếp nhận
-          </span>
-        ),
+      key: 'completedAt',
+      header: 'Thời gian hoàn thành',
+      // A shift with nothing completed yet shows only "—" here; without a floor
+      // the header then wraps a word per line and doubles the row's height.
+      className: 'min-w-[7rem]',
+      render: (r) => completionCell(r.guestRequest),
     },
-    status(),
+    {
+      key: 'resolution',
+      header: 'Cách xử lý (nếu có)',
+      secondary: true,
+      className: 'min-w-[9rem] max-w-[18rem]',
+      render: (r) => handling(r.guestRequest?.resolution),
+    },
+    {
+      key: 'lifecycle',
+      header: 'Trạng thái',
+      className: 'whitespace-nowrap',
+      render: (r) => lifecycleBadge(r.guestRequest),
+    },
+    status('Bản ghi'),
   ];
 
   return (
@@ -286,33 +356,51 @@ export function AdminGuestRequestTable({ rows, title, grouped, ...state }: Admin
   );
 }
 
-/* ------------------- Vấn đề về chất lượng dịch vụ ------------------- */
+/* ----------------- Vấn đề về chất lượng và dịch vụ ----------------- */
 
+/**
+ * SERVICE QUALITY, IN ITS CANONICAL FIELDS — Tên khách, Mã EZ, Mô tả,
+ * Trạng thái, Hướng xử lý (nếu có), Thời gian — plus the creator, the shift,
+ * who completed it and when, and the record's integrity. An older report's
+ * "Số phòng / Khác" is in the full record one click down.
+ */
 export function AdminServiceQualityTable({ rows, title, grouped, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'whitespace-nowrap font-medium text-slate-800',
+      className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.complaint?.guestName),
     },
-    {
-      key: 'location',
-      header: 'Số phòng / Khác',
-      className: 'whitespace-nowrap',
-      render: (r) => text(r.complaint?.location),
-    },
+    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.complaint?.ezCode) },
     {
       key: 'description',
       header: 'Mô tả',
       className: 'min-w-[14rem] max-w-[28rem]',
       render: (r) => clamped(r.complaint?.description),
     },
+    {
+      key: 'lifecycle',
+      header: 'Trạng thái',
+      render: (r) => (
+        <>
+          {lifecycleBadge(r.complaint)}
+          {r.complaint?.completed ? <span className="mt-0.5 block">{completionCell(r.complaint)}</span> : null}
+        </>
+      ),
+    },
+    {
+      key: 'resolution',
+      header: 'Hướng xử lý (nếu có)',
+      secondary: true,
+      className: 'min-w-[9rem] max-w-[18rem]',
+      render: (r) => handling(r.complaint?.resolution),
+    },
     staff('Người tạo'),
     shift(),
     when('createdAt', 'Thời gian', (r) => r.createdAt),
-    status(),
+    status('Bản ghi'),
   ];
 
   return (
@@ -335,10 +423,13 @@ export function AdminServiceQualityTable({ rows, title, grouped, ...state }: Adm
 /**
  * ONE TABLE PER SUBTYPE, and only for subtypes that actually have rows.
  *
- * The columns differ by subtype — a sale has a phone and a room class, an
- * upgrade has a from/to pair — and they come from `roomServiceFields`, the same
- * table reception's form and correction dialog read. Rendering five tables when
- * four are empty would reintroduce exactly the whitespace this redesign removes.
+ * The columns differ by subtype — a sale has Hạng phòng and Số đêm, an upgrade
+ * the from/to pair and Số đêm, the rest nothing more — and they come from
+ * `roomServiceFields`, the same table reception's form, tables and correction
+ * dialog read. Every table carries Mã EZ, and the Admin's staff, shift, time
+ * and record integrity. Legacy fields (SĐT, Số phòng, Loại hình) are in the
+ * full record one click down. Rendering five tables when four are empty would
+ * reintroduce exactly the whitespace this layout removes.
  */
 export function AdminRoomServiceTable({
   rows,
@@ -354,30 +445,33 @@ export function AdminRoomServiceTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'whitespace-nowrap font-medium text-slate-800',
+      className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.roomService?.guestName),
     },
-    ...(needs.phone
-      ? [{ key: 'phone', header: 'SĐT', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.phone) }]
-      : []),
+    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.roomService?.ezCode) },
     ...(needs.roomClass
-      ? [{ key: 'roomClass', header: 'Loại phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.roomClass) }]
+      ? [{ key: 'roomClass', header: 'Hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.roomClass) }]
       : []),
     ...(needs.upgrade
       ? [
-          { key: 'from', header: 'Từ hạng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.fromRoomClass) },
-          { key: 'to', header: 'Đến hạng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.toRoomClass) },
+          { key: 'from', header: 'Từ hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.fromRoomClass) },
+          { key: 'to', header: 'Tới hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.toRoomClass) },
         ]
       : []),
-    ...(needs.serviceName
-      ? [{ key: 'serviceName', header: 'Loại dịch vụ', render: (r: OperationalReport) => text(r.roomService?.serviceName) }]
-      : []),
-    ...(needs.roomNumber
-      ? [{ key: 'room', header: 'Phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.roomNumber) }]
+    ...(needs.nights
+      ? [
+          {
+            key: 'nights',
+            header: 'Số đêm',
+            align: 'right' as const,
+            className: 'whitespace-nowrap',
+            render: (r: OperationalReport) => (r.roomService?.nights ? String(r.roomService.nights) : text(null)),
+          },
+        ]
       : []),
     {
       key: 'price',
-      header: 'Giá',
+      header: 'Giá tiền',
       align: 'right',
       className: 'whitespace-nowrap font-medium text-slate-800',
       render: (r) => money(r.roomService?.price),

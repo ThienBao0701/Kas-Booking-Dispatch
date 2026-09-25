@@ -185,25 +185,50 @@ const PAYMENT_COLUMNS = checked<Numbered<SerializedReport>>('operational payment
 
 /* ------------------------ II. Vấn đề khách yêu cầu ------------------------ */
 
+/**
+ * A legacy field, printed where it belongs rather than in a column of its own.
+ *
+ * Older reports carry "Số phòng" on a request and "Phòng / Khác" on a
+ * complaint, which the current forms no longer ask for. A column that is empty
+ * on every current row would cost the page its width; dropping the value would
+ * lose what an older report said. So it rides along in brackets.
+ */
+function withLegacy(text: string, legacy: string | null | undefined): string {
+  const extra = legacy?.trim();
+  return extra ? `${text} (${extra})`.trim() : text;
+}
+
 const GUEST_REQUEST_COLUMNS = checked<Numbered<SerializedReport>>('operational guest requests', [
   { header: 'STT', width: 26, value: (r) => String(r.stt) },
-  { header: 'Ký gửi', width: 80, value: (r) => r.guestRequest?.itemType ?? '' },
-  { header: 'Tên khách', width: 110, value: (r) => r.guestRequest?.guestName ?? '' },
-  { header: 'Ghi chú', width: 106, value: (r) => withVoid(r, r.guestRequest?.note) },
-  { header: 'Người nhập', width: 90, value: (r) => r.createdByName },
-  { header: 'Ca nhập', width: 44, value: (r) => r.shiftName ?? '' },
+  { header: 'Tên khách', width: 80, value: (r) => r.guestRequest?.guestName ?? '' },
+  { header: 'Mã EZ', width: 50, value: (r) => r.guestRequest?.ezCode ?? '' },
+  {
+    header: 'Nội dung',
+    width: 150,
+    value: (r) =>
+      withVoid(
+        r,
+        withLegacy(
+          r.guestRequest?.content ?? '',
+          r.guestRequest?.roomNumber ? `P. ${r.guestRequest.roomNumber}` : null,
+        ),
+      ),
+  },
+  { header: 'Người nhập', width: 66, value: (r) => r.createdByName },
+  { header: 'Ca nhập', width: 40, value: (r) => r.shiftName ?? '' },
   { header: 'Giờ nhập', width: 72, value: (r) => hcmDateTime(new Date(r.createdAt)) },
   {
-    header: 'Người tiếp nhận',
-    width: 90,
-    value: (r) => r.guestRequest?.acceptedByName ?? 'Chưa tiếp nhận',
+    header: 'Người hoàn thành',
+    width: 66,
+    value: (r) => r.guestRequest?.completedByName ?? 'Chưa hoàn thành',
   },
-  { header: 'Ca tiếp nhận', width: 58, value: (r) => r.guestRequest?.acceptedShiftName ?? '' },
+  { header: 'Ca hoàn thành', width: 44, value: (r) => r.guestRequest?.completedShiftName ?? '' },
   {
-    header: 'Giờ tiếp nhận',
+    header: 'Giờ hoàn thành',
     width: 72,
-    value: (r) => (r.guestRequest?.acceptedAt ? hcmDateTime(new Date(r.guestRequest.acceptedAt)) : ''),
+    value: (r) => (r.guestRequest?.completedAt ? hcmDateTime(new Date(r.guestRequest.completedAt)) : ''),
   },
+  { header: 'Cách xử lý (nếu có)', width: 106, value: (r) => r.guestRequest?.resolution ?? '' },
 ]);
 
 /* ------------------- III. Sự cố cơ sở vật chất đang xử lý ------------------- */
@@ -244,14 +269,28 @@ const FACILITY_COLUMNS = checked<Numbered<SerializedReport>>('operational facili
   },
 ]);
 
-/* ------------------------- IV. Khách hàng complain ------------------------- */
+/* ----------------- IV. Vấn đề về chất lượng và dịch vụ ----------------- */
+
+/** "Đã tiếp nhận", or "Đã hoàn thành" with the server's completion time. */
+function complaintStatus(r: SerializedReport): string {
+  const c = r.complaint;
+  if (!c) return '';
+  if (!c.completed) return 'Đã tiếp nhận';
+  return c.completedAt ? `Đã hoàn thành ${hcmDateTime(new Date(c.completedAt))}` : 'Đã hoàn thành';
+}
 
 const COMPLAINT_COLUMNS = checked<Numbered<SerializedReport>>('operational complaints', [
   { header: 'STT', width: 26, value: (r) => String(r.stt) },
-  { header: 'Tên khách', width: 110, value: (r) => r.complaint?.guestName ?? '' },
-  { header: 'Phòng / Khác', width: 90, value: (r) => r.complaint?.location ?? '' },
-  { header: 'Mô tả', width: 248, value: (r) => withVoid(r, r.complaint?.description) },
-  { header: 'Nhân viên', width: 90, value: (r) => r.createdByName },
+  { header: 'Tên khách', width: 90, value: (r) => r.complaint?.guestName ?? '' },
+  { header: 'Mã EZ', width: 50, value: (r) => r.complaint?.ezCode ?? '' },
+  {
+    header: 'Mô tả',
+    width: 236,
+    value: (r) => withVoid(r, withLegacy(r.complaint?.description ?? '', r.complaint?.location)),
+  },
+  { header: 'Trạng thái', width: 72, value: complaintStatus },
+  { header: 'Hướng xử lý (nếu có)', width: 120, value: (r) => r.complaint?.resolution ?? '' },
+  { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
 ]);
@@ -276,18 +315,21 @@ function serviceDetail(r: SerializedReport): string {
   if (s.fromRoomClass || s.toRoomClass) {
     parts.push(`Từ ${s.fromRoomClass ?? '?'} lên ${s.toRoomClass ?? '?'}`);
   }
+  if (s.nights) parts.push(`${s.nights} đêm`);
+  // Legacy fields an older row may carry; never on a row recorded since.
   if (s.serviceName) parts.push(s.serviceName);
+  if (s.roomNumber) parts.push(`P. ${s.roomNumber}`);
+  if (s.phone) parts.push(`SĐT ${s.phone}`);
   if (s.note) parts.push(s.note);
   return withVoid(r, parts.join(' · '));
 }
 
 const ROOM_SERVICE_COLUMNS = checked<Numbered<SerializedReport>>('operational room services', [
   { header: 'STT', width: 26, value: (r) => String(r.stt) },
-  { header: 'Loại', width: 80, value: (r) => r.roomService?.serviceTypeLabel ?? '' },
-  { header: 'Tên khách', width: 96, value: (r) => r.roomService?.guestName ?? '' },
-  { header: 'SĐT', width: 66, value: (r) => r.roomService?.phone ?? '' },
-  { header: 'Phòng', width: 40, value: (r) => r.roomService?.roomNumber ?? '' },
-  { header: 'Chi tiết', width: 140, value: serviceDetail },
+  { header: 'Loại', width: 70, value: (r) => r.roomService?.serviceTypeLabel ?? '' },
+  { header: 'Tên khách', width: 110, value: (r) => r.roomService?.guestName ?? '' },
+  { header: 'Mã EZ', width: 50, value: (r) => r.roomService?.ezCode ?? '' },
+  { header: 'Chi tiết', width: 236, value: serviceDetail },
   { header: 'Giá tiền (₫)', width: MONEY_COLUMN_WIDTH, align: 'right', value: (r) => formatVndPlain(r.roomService?.price ?? null) },
   { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },

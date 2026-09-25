@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { RepairAttempt } from './issues';
+import type { Issue } from './issues';
 import type { ShiftType } from './shifts';
 
 export type ReportCategory =
@@ -25,7 +25,8 @@ export interface ReportOptions {
   categories: { code: ReportCategory; label: string }[];
   paymentMethods: { code: PaymentMethod; label: string }[];
   roomServiceTypes: { code: RoomServiceType; label: string }[];
-  guestRequestItems: string[];
+  /** "Nguồn" for a new payment — a closed list, the server's. */
+  paymentSources: string[];
 }
 
 export interface ReportAudit {
@@ -57,70 +58,76 @@ export interface PaymentDetail {
   card: number;
 }
 
+/**
+ * "Đã tiếp nhận" from the moment it is recorded (the report's `createdAt`),
+ * "Đã hoàn thành" once `completed` — with `resolution` saying how.
+ */
 export interface GuestRequestDetail {
-  itemType: string;
   guestName: string;
+  ezCode: string | null;
+  /** "Nội dung" as the server reads it — the note, or a legacy row's "Ký gửi" and note. */
+  content: string;
   note: string | null;
-  accepted: boolean;
-  acceptedBy: { id: number; fullName: string } | null;
-  acceptedByName: string | null;
-  acceptedAt: string | null;
-  acceptedShiftType: ShiftType | null;
-  acceptedShiftName: string | null;
+  /** Legacy "Ký gửi" and "Số phòng", no longer asked for. Null on current rows. */
+  itemType: string | null;
+  roomNumber: string | null;
+  completed: boolean;
+  completedBy: { id: number; fullName: string } | null;
+  completedByName: string | null;
+  completedAt: string | null;
+  completedShiftType: ShiftType | null;
+  completedShiftName: string | null;
+  /** "Cách xử lý (nếu có)". Optional, so null on many completed requests too. */
+  resolution: string | null;
 }
 
-/** The LIVE incident, read through the reference — never a copy of it. */
+/**
+ * The LIVE incident, read through the reference — never a copy of it.
+ *
+ * Typed as the full `Issue` because that is what arrives: the server runs the
+ * SAME `serializeIssue` here as it does for the technical queue, so the journal
+ * row carries the incident's status, attempts and times exactly as the incident
+ * screens show them. Note that `issue.updatedAt` is the INCIDENT's own stamp,
+ * which moves when a technician works it — unlike the report's `updatedAt`.
+ */
 export interface FacilityIssueDetail {
   issueId: string;
-  issue: {
-    id: string;
-    locationLabel: string;
-    category: string | null;
-    description: string;
-    status: 'NEW' | 'IN_PROGRESS' | 'COMPLETED';
-    needsRework: boolean;
-    technicianName: string | null;
-    technicianPhone: string | null;
-    acceptedAt: string | null;
-    completedAt: string | null;
-    durationLabel: string | null;
-    cannotRepairCount: number;
-    /**
-     * Oldest first, and fully populated — the server runs the SAME
-     * `serializeIssue` here as it does for the technical queue, so each attempt
-     * carries its outcome, reason and duration. This was typed `unknown[]`,
-     * which made the last attempt's result unreadable to anything that had only
-     * a report in hand, and left the Admin monitor unable to say how a repair
-     * ended without a second request.
-     */
-    attempts: RepairAttempt[];
-    /**
-     * The INCIDENT's own stamp, which moves when a technician works it — unlike
-     * the report's `updatedAt`, which only moves when reception edits the
-     * journal entry. "Cập nhật gần nhất" is this one.
-     */
-    updatedAt: string;
-  };
+  issue: Issue;
 }
 
+/** "Đã tiếp nhận" from creation, "Đã hoàn thành" once `completed`. */
 export interface ComplaintDetail {
   guestName: string;
-  location: string;
+  ezCode: string | null;
   description: string;
+  /** Legacy "Số phòng / Khác" — null on every report recorded since. */
+  location: string | null;
+  completed: boolean;
+  completedBy: { id: number; fullName: string } | null;
+  completedByName: string | null;
+  completedAt: string | null;
+  completedShiftType: ShiftType | null;
+  completedShiftName: string | null;
+  /** "Hướng xử lý (nếu có)". */
+  resolution: string | null;
 }
 
 export interface RoomServiceDetail {
   serviceType: RoomServiceType;
   serviceTypeLabel: string;
   guestName: string;
-  phone: string | null;
-  roomNumber: string | null;
+  ezCode: string | null;
   roomClass: string | null;
   fromRoomClass: string | null;
   toRoomClass: string | null;
-  serviceName: string | null;
+  /** Số đêm — "Bán phòng" and "Upgrade". */
+  nights: number | null;
   price: number;
   note: string | null;
+  /** Legacy fields, no longer asked for; null on current rows. */
+  phone: string | null;
+  roomNumber: string | null;
+  serviceName: string | null;
 }
 
 export interface OperationalReport {
@@ -188,35 +195,33 @@ export interface NewPaymentInput {
   ezCode?: string;
   source?: string;
   guestName?: string;
-  roomNumber?: string;
   method: PaymentMethod;
   amount: number;
   receivable?: number;
   expense?: number;
-  note?: string;
 }
 
+/** Tên khách, Mã EZ and Nội dung — the whole of the form. */
 export interface NewGuestRequestInput {
-  itemType: string;
   guestName: string;
-  note?: string;
+  ezCode?: string;
+  note: string;
 }
 
 export interface NewComplaintInput {
   guestName: string;
-  location: string;
+  ezCode?: string;
   description: string;
 }
 
 export interface NewRoomServiceInput {
   serviceType: RoomServiceType;
   guestName: string;
-  phone?: string;
-  roomNumber?: string;
+  ezCode?: string;
   roomClass?: string;
   fromRoomClass?: string;
   toRoomClass?: string;
-  serviceName?: string;
+  nights?: number;
   price: number;
   note?: string;
 }
@@ -273,8 +278,12 @@ export const reportsApi = {
   void: (id: string, reason: string) =>
     api.post<{ report: OperationalReport }>(`/reception/reports/${id}/void`, { reason }),
 
-  accept: (id: string) =>
-    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/accept`, {}),
+  /**
+   * "Hoàn thành" on a guest request or a service-quality report. The handling
+   * text is optional; the server stamps who, when and which shift.
+   */
+  complete: (id: string, resolution?: string) =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/complete`, { resolution }),
 
   cash: () => api.get<{ cash: CashSummary }>('/reception/shifts/cash'),
 

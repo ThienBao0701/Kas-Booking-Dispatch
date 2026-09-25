@@ -3,9 +3,10 @@
  *
  * LAYOUT, TOP TO BOTTOM
  *
- *   SUMMARY STRIP     tiền đầu ca (editable), số giao dịch, tổng theo từng
- *                     phương thức, công nợ, chi, và tiền cuối ca nổi bật
- *   DANH SÁCH GIAO DỊCH TRONG CA   every transaction this shift, immediately
+ *   SUMMARY STRIP     tiền đầu ca (editable), số giao dịch, thu tiền mặt, chi,
+ *                     và tiền cuối ca nổi bật — the drawer's figures only
+ *   DANH SÁCH GIAO DỊCH TRONG CA   every transaction this shift, immediately:
+ *                     Tên khách, Mã EZ, Nguồn, Tiền mặt, Cà thẻ, Công nợ, Chi
  *
  * The entry form is NOT on the page: "+ Thêm giao dịch" in the category header
  * opens it in a dialog, and it closes itself on save. A permanent form pushed
@@ -33,7 +34,7 @@
  * financial row that can be made to vanish makes the drawer unexplainable.
  */
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import {
   reportsApi,
@@ -49,8 +50,12 @@ import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { Modal } from './Modal';
 import { VoidDialog } from './RecordDialogs';
+import { DataTable, type DataColumn } from './DataTable';
+import type { SectionFrame } from './ReportSection';
 import { formatVnd, groupDigits, parseVnd, parseVndOrZero } from '../lib/money';
 import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
+import { PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
+import { useShiftCash } from '../hooks/useShiftCash';
 
 const METHODS: PaymentMethod[] = ['CASH', 'TRANSFER', 'CARD'];
 
@@ -89,7 +94,8 @@ export function PaymentLedger({
   onAdd,
 }: Props) {
   const queryClient = useQueryClient();
-  const cash = useQuery({ queryKey: CASH_KEY, queryFn: () => reportsApi.cash() });
+  const cash = useShiftCash();
+  const sources = options?.paymentSources ?? PAYMENT_SOURCE_FALLBACK;
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: REPORTS_KEY });
@@ -112,6 +118,7 @@ export function PaymentLedger({
             bare
             onCancel={onCloseAdd}
             methods={options?.paymentMethods}
+            sources={sources}
             onCreated={async () => {
               await refresh();
               onCloseAdd();
@@ -122,6 +129,7 @@ export function PaymentLedger({
       ) : null}
       <PaymentTable
         rows={rows}
+        sources={sources}
         isLoading={isLoading}
         isError={isError}
         error={error}
@@ -134,11 +142,103 @@ export function PaymentLedger({
   );
 }
 
+/* ------------------------------ Overview table ------------------------------ */
+
+/**
+ * The drawer in four figures, for the report overview.
+ *
+ * The same `/reception/shifts/cash` answer the ledger's strip shows, so the two
+ * cannot disagree about "Tiền mặt cuối ca" — which, like everything here, is the
+ * server's arithmetic and never recomputed in React. Entering "Tiền đầu ca"
+ * stays in the ledger; here an uncounted drawer simply reads "Chưa nhập".
+ */
+export function PaymentOverview({ title, section }: { title: string; section?: SectionFrame }) {
+  const cash = useShiftCash();
+  const summary = cash.data?.cash ?? null;
+  const pending = (text: string) => <span className="text-sm font-normal text-slate-400">{text}</span>;
+  // The amount never breaks; the header may, so four columns fit a phone.
+  const amount = (value: number, strong = false) => (
+    <span
+      className={`whitespace-nowrap ${
+        strong ? 'text-[15px] font-bold sm:text-base' : 'text-sm font-semibold text-slate-900 sm:text-[15px]'
+      }`}
+    >
+      {formatVnd(value)}
+    </span>
+  );
+  /*
+    FOUR MONEY COLUMNS ON A PHONE. Two seven-digit amounts leave the other two
+    columns so narrow that "Tiền mặt thu trong ca" broke over four lines; a
+    little less padding and a slightly smaller figure below `sm`, plus a floor
+    under that one column, keep every header to two balanced lines. `!` because
+    the table sets the desktop padding itself.
+  */
+  const cell = 'tabular-nums text-balance !px-2 sm:!px-3';
+
+  const columns: DataColumn<CashSummary>[] = [
+    {
+      key: 'opening',
+      header: 'Tiền đầu ca',
+      align: 'right',
+      className: cell,
+      render: (s) => (s.openingCash === null ? pending('Chưa nhập') : amount(s.openingCash)),
+    },
+    {
+      key: 'cashCollected',
+      header: 'Tiền mặt thu trong ca',
+      align: 'right',
+      className: `${cell} min-w-[6.25rem]`,
+      render: (s) => amount(s.cashCollected),
+    },
+    {
+      key: 'cashExpense',
+      header: 'Chi',
+      align: 'right',
+      className: cell,
+      render: (s) => amount(s.cashExpense),
+    },
+    /*
+      THE RESULT, set apart as a tinted column — header and figure together — so
+      the drawer's answer is found first without becoming a banner.
+    */
+    {
+      key: 'endingCash',
+      header: 'Tiền mặt cuối ca',
+      align: 'right',
+      className: `${cell} bg-brand-50 text-brand-800`,
+      render: (s) => (s.endingCash === null ? pending('Chưa xác định') : amount(s.endingCash, true)),
+    },
+  ];
+
+  return (
+    <DataTable
+      testId="payment-overview"
+      title={title}
+      columns={columns}
+      rows={summary ? [summary] : []}
+      rowKey={() => 'drawer'}
+      isLoading={cash.isLoading}
+      isError={cash.isError}
+      error={cash.error}
+      onRetry={() => void cash.refetch()}
+      compact
+      section={section}
+      emptyTitle="Chưa có số liệu tiền mặt của ca."
+      emptyMessage=""
+    />
+  );
+}
+
 /* ------------------------------ Summary strip ------------------------------ */
 
 /**
- * ONE ROW: [Tiền đầu ca] [Số giao dịch] [Thu tiền mặt] [Thu CK] [Cà thẻ]
- * [Công nợ] [Chi] [Tiền cuối ca].
+ * ONE ROW: [Tiền đầu ca] [Số giao dịch] [Thu tiền mặt] [Chi] [Tiền cuối ca].
+ *
+ * THE DRAWER'S FIGURES ONLY. Transfer, card and receivable totals are real, and
+ * the Admin's report shows them, but none of them moves the cash a receptionist
+ * counts at handover — so the desk's strip leaves them out rather than setting
+ * four numbers beside the one that must balance. The ending-cash arithmetic is
+ * the server's and does not change with what is displayed.
  *
  * Every figure but the first is read-only, from the server. "Tiền đầu ca" is
  * the one count a receptionist makes by hand, so it alone gets an edit
@@ -173,9 +273,6 @@ function PaymentSummaryStrip({
   const chips: { label: string; value: string; testId?: string }[] = [
     { label: 'Số giao dịch', value: String(summary.paymentCount) },
     { label: 'Thu tiền mặt', value: formatVnd(summary.cashCollected) },
-    { label: 'Thu CK', value: formatVnd(summary.transferCollected) },
-    { label: 'Cà thẻ', value: formatVnd(summary.cardCollected) },
-    { label: 'Công nợ', value: formatVnd(summary.receivable) },
     { label: 'Chi', value: formatVnd(summary.cashExpense) },
   ];
 
@@ -203,7 +300,7 @@ function PaymentSummaryStrip({
         </div>
       ) : null}
       <div data-testid="cash-summary-strip" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-4 xl:grid-cols-8">
+        <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
           <OpeningCashCell
             openingCash={summary.openingCash}
             editing={editingOpening}
@@ -221,7 +318,7 @@ function PaymentSummaryStrip({
             </div>
           ))}
           {/* TIỀN CUỐI CA — the headline figure, set apart by weight and colour. */}
-          <div className="bg-brand-50 px-3 py-2.5">
+          <div className="col-span-2 bg-brand-50 px-3 py-2.5 sm:col-span-1">
             <p className="text-[11px] uppercase tracking-wide text-brand-700">Tiền cuối ca</p>
             <p className="text-base font-bold tabular-nums text-brand-800" data-testid="ending-cash">
               {summary.endingCash === null ? 'Chưa xác định' : formatVnd(summary.endingCash)}
@@ -303,7 +400,7 @@ function OpeningCashEditor({
   });
 
   return (
-    <div className="col-span-2 space-y-1.5 bg-slate-50 px-3 py-2.5 sm:col-span-4 xl:col-span-2">
+    <div className="col-span-2 space-y-1.5 bg-slate-50 px-3 py-2.5">
       <div className="flex items-end gap-1.5">
         <div className="flex-1">
           <MoneyInput label="Tiền đầu ca" value={value} onChange={setValue} data-testid="opening-cash-input" />
@@ -331,21 +428,60 @@ const EMPTY_FORM = {
   ezCode: '',
   source: '',
   guestName: '',
-  roomNumber: '',
   method: 'CASH' as PaymentMethod,
   amount: '',
   receivable: '',
   expense: '',
-  note: '',
 };
+
+const selectClass =
+  'block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600';
+
+/**
+ * "NGUỒN" IS A SELECT, NOT A TEXT BOX — the five channels the server accepts
+ * (`/reception/reports/options`), or none for a walk-in. Free text is how one
+ * channel became three spellings in a report.
+ */
+function SourceSelect({
+  id,
+  value,
+  onChange,
+  sources,
+  className = selectClass,
+  testId,
+}: {
+  id?: string;
+  value: string;
+  onChange: (value: string) => void;
+  sources: string[];
+  className?: string;
+  testId: string;
+}) {
+  // An older row may carry a source typed before the list was closed. It is
+  // offered as-is so a correction does not silently rewrite it.
+  const legacy = value && !sources.includes(value) ? value : null;
+  return (
+    <select id={id} value={value} onChange={(e) => onChange(e.target.value)} data-testid={testId} className={className}>
+      <option value="">— Chọn nguồn —</option>
+      {sources.map((s) => (
+        <option key={s} value={s}>
+          {s}
+        </option>
+      ))}
+      {legacy ? <option value={legacy}>{legacy} (dữ liệu cũ)</option> : null}
+    </select>
+  );
+}
 
 function NewPaymentForm({
   methods,
+  sources,
   onCreated,
   onCancel,
   bare,
 }: {
   methods?: ReportOptions['paymentMethods'];
+  sources: string[];
   onCreated: () => void | Promise<void>;
   onCancel?: () => void;
   bare?: boolean;
@@ -361,15 +497,13 @@ function NewPaymentForm({
         category: 'PAYMENT',
         payment: {
           ezCode: form.ezCode.trim() || undefined,
-          source: form.source.trim() || undefined,
+          source: form.source || undefined,
           guestName: form.guestName.trim() || undefined,
-          roomNumber: form.roomNumber.trim() || undefined,
           method: form.method,
           // Parsed at the boundary: the grouped display never leaves the field.
           amount: parseVnd(form.amount) ?? 0,
           receivable: parseVndOrZero(form.receivable),
           expense: parseVndOrZero(form.expense),
-          note: form.note.trim() || undefined,
         },
       }),
     onSuccess: async () => {
@@ -394,9 +528,10 @@ function NewPaymentForm({
       {bare ? null : <p className="text-sm font-semibold text-slate-800">Thêm giao dịch</p>}
 
       {/*
-        THREE ROWS: who and where, then the money, then a note. Four equal columns
-        on a wide screen so every field lines up with the one above it; two on a
-        tablet; one on a phone.
+        TWO ROWS: the booking, then the money. Mã EZ, Nguồn and Tên khách; then
+        Phương thức, Số tiền, Công nợ and Chi tiền. No room and no note — the
+        booking reference finds the room, and a note is not something the desk
+        needs at the till.
 
         "NHÂN VIÊN" IS NOT A FIELD. It is whoever is on the open shift, decided by
         the server — so it is shown, not asked for.
@@ -405,11 +540,21 @@ function NewPaymentForm({
         rule the server applies (and the tests pin), not a sentence to re-read on
         every transaction — and the hints were what made the fields unequal.
       */}
-      <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4" data-testid="payment-row-who">
+      <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-who">
         <Input label="Mã EZ" value={form.ezCode} onChange={(e) => set('ezCode', e.target.value)} data-testid="payment-ez" />
-        <Input label="Nguồn" value={form.source} onChange={(e) => set('source', e.target.value)} data-testid="payment-source" />
+        <div className="space-y-1.5">
+          <label htmlFor="payment-source" className="block text-sm font-medium text-slate-700">
+            Nguồn
+          </label>
+          <SourceSelect
+            id="payment-source"
+            value={form.source}
+            onChange={(v) => set('source', v)}
+            sources={sources}
+            testId="payment-source"
+          />
+        </div>
         <Input label="Tên khách" value={form.guestName} onChange={(e) => set('guestName', e.target.value)} data-testid="payment-guest" />
-        <Input label="Số phòng" value={form.roomNumber} onChange={(e) => set('roomNumber', e.target.value)} data-testid="payment-room" />
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4" data-testid="payment-row-money">
@@ -422,7 +567,7 @@ function NewPaymentForm({
             value={form.method}
             onChange={(e) => set('method', e.target.value as PaymentMethod)}
             data-testid="payment-method"
-            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+            className={selectClass}
           >
             {(methods ?? METHODS.map((code) => ({ code, label: code }))).map((m) => (
               <option key={m.code} value={m.code}>
@@ -452,8 +597,6 @@ function NewPaymentForm({
         />
       </div>
 
-      <Input label="Ghi chú" value={form.note} onChange={(e) => set('note', e.target.value)} data-testid="payment-note" />
-
       {error ? <ErrorAlert>{error}</ErrorAlert> : null}
 
       <div className={`flex justify-end gap-2 ${bare ? 'border-t border-slate-100 pt-3' : ''}`}>
@@ -475,6 +618,7 @@ function NewPaymentForm({
 
 function PaymentTable({
   rows,
+  sources,
   isLoading,
   isError,
   error,
@@ -484,6 +628,7 @@ function PaymentTable({
   onAdd,
 }: {
   rows: OperationalReport[];
+  sources: string[];
   isLoading?: boolean;
   isError?: boolean;
   error?: unknown;
@@ -541,20 +686,22 @@ function PaymentTable({
         // glance, and a stack of cards loses exactly that.
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm" data-testid="payment-table">
+            {/*
+              EIGHT COLUMNS AND ONE COMPACT "THAO TÁC". Staff, room, transfer and
+              note are not the desk's questions at the till: the shift says who,
+              the booking says where, and a transfer never reaches the drawer.
+              The Admin's table keeps all of them.
+            */}
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">STT</th>
-                <th className="px-3 py-2 text-left font-medium">Nhân viên</th>
+                <th className="px-3 py-2 text-left font-medium">Tên khách</th>
                 <th className="px-3 py-2 text-left font-medium">Mã EZ</th>
                 <th className="px-3 py-2 text-left font-medium">Nguồn</th>
-                <th className="px-3 py-2 text-left font-medium">Tên khách</th>
-                <th className="px-3 py-2 text-left font-medium">Số phòng</th>
-                <th className="px-3 py-2 text-right font-medium">Thu tiền mặt</th>
-                <th className="px-3 py-2 text-right font-medium">Thu CK</th>
-                <th className="px-3 py-2 text-right font-medium">Thu cà thẻ</th>
+                <th className="px-3 py-2 text-right font-medium">Tiền mặt</th>
+                <th className="px-3 py-2 text-right font-medium">Cà thẻ</th>
                 <th className="px-3 py-2 text-right font-medium">Công nợ</th>
                 <th className="px-3 py-2 text-right font-medium">Chi</th>
-                <th className="px-3 py-2 text-left font-medium">Ghi chú</th>
                 <th className="w-[1%] whitespace-nowrap px-3 py-2 text-right font-medium">Thao tác</th>
               </tr>
             </thead>
@@ -565,6 +712,7 @@ function PaymentTable({
                     key={row.id}
                     row={row}
                     index={index}
+                    sources={sources}
                     onCancel={() => setEditingId(null)}
                     onSaved={async () => {
                       setEditingId(null);
@@ -620,18 +768,8 @@ function ReadRow({
       className={`transition-colors hover:bg-slate-50 ${row.voided ? 'bg-slate-50 text-slate-400 line-through' : ''}`}
     >
       <td className="px-3 py-2.5 align-top text-slate-400">{index + 1}</td>
-      <td className="px-3 py-2.5 align-top">{row.createdByName}</td>
-      <td className="px-3 py-2.5 align-top">{p.ezCode ?? '—'}</td>
-      <td className="px-3 py-2.5 align-top">{p.source ?? '—'}</td>
-      <td className="px-3 py-2.5 align-top">{p.guestName ?? '—'}</td>
-      <td className="px-3 py-2.5 align-top">{p.roomNumber ?? '—'}</td>
-      <td className="px-3 py-2.5 text-right align-top tabular-nums">{p.cash ? formatVnd(p.cash) : '—'}</td>
-      <td className="px-3 py-2.5 text-right align-top tabular-nums">{p.transfer ? formatVnd(p.transfer) : '—'}</td>
-      <td className="px-3 py-2.5 text-right align-top tabular-nums">{p.card ? formatVnd(p.card) : '—'}</td>
-      <td className="px-3 py-2.5 text-right align-top tabular-nums">{p.receivable ? formatVnd(p.receivable) : '—'}</td>
-      <td className="px-3 py-2.5 text-right align-top tabular-nums">{p.expense ? formatVnd(p.expense) : '—'}</td>
-      <td className="max-w-[14rem] px-3 py-2.5 align-top">
-        <span className="whitespace-pre-wrap">{p.note ?? '—'}</span>
+      <td className="min-w-[7rem] px-3 py-2.5 align-top">
+        {p.guestName ?? '—'}
         {row.voided ? (
           <span className="mt-0.5 block text-xs font-medium text-rose-600 no-underline">
             Đã hủy: {row.voidReason}
@@ -643,6 +781,12 @@ function ReadRow({
           </span>
         ) : null}
       </td>
+      <td className="whitespace-nowrap px-3 py-2.5 align-top">{p.ezCode ?? '—'}</td>
+      <td className="whitespace-nowrap px-3 py-2.5 align-top">{p.source ?? '—'}</td>
+      <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.cash ? formatVnd(p.cash) : '—'}</td>
+      <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.card ? formatVnd(p.card) : '—'}</td>
+      <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.receivable ? formatVnd(p.receivable) : '—'}</td>
+      <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.expense ? formatVnd(p.expense) : '—'}</td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right align-top">
         {row.voided ? (
           <span className="text-xs text-slate-300">—</span>
@@ -676,25 +820,27 @@ function ReadRow({
 function EditRow({
   row,
   index,
+  sources,
   onCancel,
   onSaved,
 }: {
   row: OperationalReport;
   index: number;
+  sources: string[];
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
   const p = row.payment!;
+  // Room and note are not correctable here any more: they are not asked for,
+  // and an older row keeps whatever it recorded — they are simply not sent.
   const [draft, setDraft] = useState({
     ezCode: p.ezCode ?? '',
     source: p.source ?? '',
     guestName: p.guestName ?? '',
-    roomNumber: p.roomNumber ?? '',
     method: p.method,
     amount: groupDigits(String(p.amount)),
     receivable: groupDigits(String(p.receivable)),
     expense: groupDigits(String(p.expense)),
-    note: p.note ?? '',
   });
   const [error, setError] = useState<string | null>(null);
 
@@ -703,14 +849,12 @@ function EditRow({
       reportsApi.update(row.id, {
         payment: {
           ezCode: draft.ezCode.trim(),
-          source: draft.source.trim(),
+          source: draft.source,
           guestName: draft.guestName.trim(),
-          roomNumber: draft.roomNumber.trim(),
           method: draft.method,
           amount: parseVnd(draft.amount) ?? 0,
           receivable: parseVndOrZero(draft.receivable),
           expense: parseVndOrZero(draft.expense),
-          note: draft.note.trim(),
         },
       }),
     onSuccess: async () => {
@@ -725,25 +869,28 @@ function EditRow({
   return (
     <tr data-testid={`payment-edit-row-${row.id}`} className="bg-amber-50/40">
       <td className="px-3 py-2 align-top text-slate-400">{index + 1}</td>
-      <td className="px-3 py-2 align-top text-xs text-slate-500">{row.createdByName}</td>
+      <td className="px-2 py-2 align-top">
+        <input className={cell} value={draft.guestName} onChange={(e) => setDraft({ ...draft, guestName: e.target.value })} />
+        {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
+      </td>
       <td className="px-2 py-2 align-top">
         <input className={cell} value={draft.ezCode} onChange={(e) => setDraft({ ...draft, ezCode: e.target.value })} />
       </td>
       <td className="px-2 py-2 align-top">
-        <input className={cell} value={draft.source} onChange={(e) => setDraft({ ...draft, source: e.target.value })} />
-      </td>
-      <td className="px-2 py-2 align-top">
-        <input className={cell} value={draft.guestName} onChange={(e) => setDraft({ ...draft, guestName: e.target.value })} />
-      </td>
-      <td className="px-2 py-2 align-top">
-        <input className={cell} value={draft.roomNumber} onChange={(e) => setDraft({ ...draft, roomNumber: e.target.value })} />
+        <SourceSelect
+          value={draft.source}
+          onChange={(v) => setDraft({ ...draft, source: v })}
+          sources={sources}
+          className={cell}
+          testId={`payment-edit-source-${row.id}`}
+        />
       </td>
       {/*
-        ONE AMOUNT AND ONE METHOD, not three amount boxes. The three columns are a
-        RENDERING of (method, amount); three editable boxes would let a row be
-        both cash and card at once, and the server would then have to pick one.
+        ONE AMOUNT AND ONE METHOD, across the two amount columns — not an amount
+        box per column. The columns are a RENDERING of (method, amount); a box
+        each would let a row be both cash and card at once.
       */}
-      <td className="px-2 py-2 align-top" colSpan={3}>
+      <td className="px-2 py-2 align-top" colSpan={2}>
         <div className="flex gap-1">
           <select
             className={cell}
@@ -780,10 +927,6 @@ function EditRow({
           data-testid={`payment-edit-expense-${row.id}`}
           onChange={(e) => setDraft({ ...draft, expense: groupDigits(e.target.value) })}
         />
-      </td>
-      <td className="px-2 py-2 align-top">
-        <input className={cell} value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} />
-        {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
       </td>
       <td className="whitespace-nowrap px-3 py-2 align-top text-right">
         <button

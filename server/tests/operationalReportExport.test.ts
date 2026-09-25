@@ -123,21 +123,28 @@ async function seedFullDay(agent: Agent, name: string, { end = true }: { end?: b
     category: 'PAYMENT',
     payment: {
       ezCode: 'EZ123',
-      source: 'Booking.com',
+      source: 'Booking',
       guestName: 'Nguyễn Khách',
-      roomNumber: '101',
       method: 'CASH',
       amount: 300000,
       receivable: 50000,
       expense: 100000,
-      note: 'Thanh toán đêm đầu',
     },
   });
   expect(payment.status).toBe(201);
+  /*
+    A ROW RECORDED BEFORE ROOM AND NOTE STOPPED BEING ASKED FOR. The form no
+    longer sends them, but older rows carry them, and the Admin and the exports
+    must still show them — so they are written the way history left them.
+  */
+  await testPrisma.receptionPayment.update({
+    where: { reportId: payment.body.report.id },
+    data: { roomNumber: '101', note: 'Thanh toán đêm đầu' },
+  });
 
   const request = await agent.post('/api/reception/reports').send({
     category: 'GUEST_REQUEST',
-    guestRequest: { itemType: 'Balo', guestName: 'Khách ký gửi', note: 'Balo đen' },
+    guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ777', note: 'Balo đen' },
   });
   expect(request.status).toBe(201);
 
@@ -154,7 +161,7 @@ async function seedFullDay(agent: Agent, name: string, { end = true }: { end?: b
 
   const complaint = await agent.post('/api/reception/reports').send({
     category: 'CUSTOMER_COMPLAINT',
-    complaint: { guestName: 'Trần Complain', location: '202', description: 'Phòng ồn suốt đêm' },
+    complaint: { guestName: 'Trần Complain', description: 'Phòng ồn suốt đêm' },
   });
   expect(complaint.status).toBe(201);
 
@@ -165,6 +172,7 @@ async function seedFullDay(agent: Agent, name: string, { end = true }: { end?: b
       guestName: 'Lê Upgrade',
       fromRoomClass: 'Standard',
       toRoomClass: 'Deluxe',
+      nights: 2,
       price: 300000,
       note: 'Khách đồng ý',
     },
@@ -189,7 +197,7 @@ describe('the drill-down returns records, not counts', () => {
     const row = res.body.reports[0];
     expect(row.payment).toMatchObject({
       ezCode: 'EZ123',
-      source: 'Booking.com',
+      source: 'Booking',
       guestName: 'Nguyễn Khách',
       roomNumber: '101',
       method: 'CASH',
@@ -221,17 +229,20 @@ describe('the drill-down returns records, not counts', () => {
     expect(res.body.reports).toHaveLength(5);
   });
 
-  it('shows both actors on a guest request', async () => {
+  it('shows both actors and the handling on a guest request', async () => {
     const { requestId } = await seedFullDay(letan, 'Nguyễn Văn A', { end: false });
     setClock({ now: () => hcm('2026-09-19', '13:00') });
-    const accepted = await letan.post(`/api/reception/reports/${requestId}/accept`).send({});
-    expect(accepted.status).toBe(200);
+    const completed = await letan
+      .post(`/api/reception/reports/${requestId}/complete`)
+      .send({ resolution: 'Đã trả hành lý' });
+    expect(completed.status).toBe(200);
 
     const res = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&category=GUEST_REQUEST`);
     const row = res.body.reports[0];
     expect(row.createdByName).toBe('Nguyễn Văn A');
-    expect(row.guestRequest.acceptedByName).toBe('Nguyễn Văn A');
-    expect(row.guestRequest.acceptedAt).toBe(hcm('2026-09-19', '13:00').toISOString());
+    expect(row.guestRequest.completedByName).toBe('Nguyễn Văn A');
+    expect(row.guestRequest.completedAt).toBe(hcm('2026-09-19', '13:00').toISOString());
+    expect(row.guestRequest.resolution).toBe('Đã trả hành lý');
   });
 
   it('shows the full complaint text and the full service detail', async () => {
@@ -240,6 +251,11 @@ describe('the drill-down returns records, not counts', () => {
 
     const complaint = res.body.reports.find((r: { category: string }) => r.category === 'CUSTOMER_COMPLAINT');
     expect(complaint.complaint.description).toBe('Phòng ồn suốt đêm');
+    // The lifecycle travels to the Admin too: recorded, not yet completed.
+    expect(complaint.complaint).toMatchObject({ completed: false, completedAt: null, resolution: null });
+
+    const request = res.body.reports.find((r: { category: string }) => r.category === 'GUEST_REQUEST');
+    expect(request.guestRequest).toMatchObject({ ezCode: 'EZ777', content: 'Balo đen', itemType: null });
 
     const service = res.body.reports.find((r: { category: string }) => r.category === 'ROOM_SERVICE');
     expect(service.roomService).toMatchObject({
@@ -248,6 +264,7 @@ describe('the drill-down returns records, not counts', () => {
       guestName: 'Lê Upgrade',
       fromRoomClass: 'Standard',
       toRoomClass: 'Deluxe',
+      nights: 2,
       price: 300000,
     });
   });
@@ -627,7 +644,7 @@ describe('the exports', () => {
       'Theo dõi thanh toán',
       'Vấn đề khách yêu cầu',
       'Sự cố vật chất đang xử lý',
-      'Vấn đề về chất lượng dịch vụ',
+      'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]);
 
@@ -650,10 +667,21 @@ describe('the exports', () => {
     // 7.570.000 + 300.000 − 100.000
     expect(branchRow.getCell(columnByHeader(summary, 'Tiền cuối ca')).value).toBe(7770000);
 
-    const complaints = wb.getWorksheet('Vấn đề về chất lượng dịch vụ')!;
+    const complaints = wb.getWorksheet('Vấn đề về chất lượng và dịch vụ')!;
     expect(complaints.getRow(2).getCell(columnByHeader(complaints, 'Mô tả')).value).toBe(
       'Phòng ồn suốt đêm',
     );
+    expect(complaints.getRow(2).getCell(columnByHeader(complaints, 'Trạng thái')).value).toBe('Đã tiếp nhận');
+
+    // The canonical fields lead each sheet; the legacy ones are kept, labelled, after.
+    const requests = wb.getWorksheet('Vấn đề khách yêu cầu')!;
+    expect(requests.getRow(2).getCell(columnByHeader(requests, 'Mã EZ')).value).toBe('EZ777');
+    expect(requests.getRow(2).getCell(columnByHeader(requests, 'Nội dung')).value).toBe('Balo đen');
+    expect(requests.getRow(2).getCell(columnByHeader(requests, 'Ký gửi (dữ liệu cũ)')).value).toBe('');
+
+    const services = wb.getWorksheet('Dịch vụ phòng, KPI')!;
+    // A real number, like the price.
+    expect(services.getRow(2).getCell(columnByHeader(services, 'Số đêm')).value).toBe(2);
 
     const facilities = wb.getWorksheet('Sự cố vật chất đang xử lý')!;
     expect(facilities.getRow(2).getCell(columnByHeader(facilities, 'Mô tả')).value).toBe('Sofa rách');
@@ -698,7 +726,7 @@ async function seedComplaintOn21st(agent: Agent) {
   await checkIn(agent, 'A', 'Người Ngày 21');
   const res = await agent.post('/api/reception/reports').send({
     category: 'CUSTOMER_COMPLAINT',
-    complaint: { guestName: 'Khách Ngày 21', location: '305', description: 'Nước nóng yếu' },
+    complaint: { guestName: 'Khách Ngày 21', description: 'Nước nóng yếu' },
   });
   expect(res.status).toBe(201);
   await endShift(agent);
@@ -767,14 +795,14 @@ describe('every record carries its shift’s own day', () => {
 
     const before = await letan.post('/api/reception/reports').send({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'Trước nửa đêm', location: '201', description: 'Ồn' },
+      complaint: { guestName: 'Trước nửa đêm', description: 'Ồn' },
     });
     expect(before.status).toBe(201);
 
     setClock({ now: () => hcm('2026-09-20', '02:15') });
     const after = await letan.post('/api/reception/reports').send({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'Sau nửa đêm', location: '202', description: 'Ồn' },
+      complaint: { guestName: 'Sau nửa đêm', description: 'Ồn' },
     });
     expect(after.status).toBe(201);
 
@@ -792,7 +820,7 @@ describe('every record carries its shift’s own day', () => {
       'Theo dõi thanh toán',
       'Vấn đề khách yêu cầu',
       'Sự cố vật chất đang xử lý',
-      'Vấn đề về chất lượng dịch vụ',
+      'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]) {
       const sheet = wb.getWorksheet(name)!;
@@ -811,7 +839,7 @@ describe('the export is scoped exactly like the screen', () => {
     for (const name of [
       'Vấn đề khách yêu cầu',
       'Sự cố vật chất đang xử lý',
-      'Vấn đề về chất lượng dịch vụ',
+      'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]) {
       expect(wb.getWorksheet(name)!.rowCount).toBe(1);
@@ -829,7 +857,7 @@ describe('the export is scoped exactly like the screen', () => {
     const wb = await xlsx(`from=2026-09-21&to=2026-09-21&branchId=${cn1}`);
     // The 19th's payment is outside the period.
     expect(wb.getWorksheet('Theo dõi thanh toán')!.rowCount).toBe(1);
-    const complaints = wb.getWorksheet('Vấn đề về chất lượng dịch vụ')!;
+    const complaints = wb.getWorksheet('Vấn đề về chất lượng và dịch vụ')!;
     expect(complaints.rowCount).toBe(2);
     expect(complaints.getRow(2).getCell(columnByHeader(complaints, 'Tên khách')).value).toBe('Khách Ngày 21');
   });
@@ -887,7 +915,7 @@ async function note(agent: Agent, at: Date, guestName: string) {
   setClock({ now: () => at });
   const res = await agent.post('/api/reception/reports').send({
     category: 'CUSTOMER_COMPLAINT',
-    complaint: { guestName, location: '101', description: 'Ghi nhận' },
+    complaint: { guestName, description: 'Ghi nhận' },
   });
   expect(res.status).toBe(201);
 }
@@ -895,7 +923,7 @@ async function note(agent: Agent, at: Date, guestName: string) {
 /** The guest names in the official export's complaint sheet for one business date. */
 async function exportedFor(day: string): Promise<string[]> {
   const wb = await xlsx(`from=${day}&to=${day}&branchId=${cn1}`);
-  const sheet = wb.getWorksheet('Vấn đề về chất lượng dịch vụ')!;
+  const sheet = wb.getWorksheet('Vấn đề về chất lượng và dịch vụ')!;
   const col = columnByHeader(sheet, 'Tên khách');
   const names: string[] = [];
   sheet.eachRow((row, i) => {

@@ -56,18 +56,25 @@ describe('role-based shell and routing', () => {
     expect(within(nav).queryByRole('link', { name: 'Bàn giao ca' })).not.toBeInTheDocument();
   });
 
-  it('shows only the five receptionist items', async () => {
+  it('shows only the four receptionist items', async () => {
     mockShell(RECEPTIONIST_USER);
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
-    expect(labels).toEqual(['Đơn mới', 'Chờ Admin kiểm tra', 'Báo cáo vấn đề', 'Chat box', 'Nhắc nhở']);
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Chat box', 'Nhắc nhở']);
     /*
       Removed from the MENU only. Their routes, records and APIs are untouched;
       "Báo cáo sự cố" is a category inside "Báo cáo vấn đề".
     */
-    for (const gone of ['Cần tạo lại', 'Đã xác nhận đúng', 'Lịch sử', 'Bàn giao ca', 'Báo cáo sự cố']) {
+    for (const gone of [
+      'Chờ Admin kiểm tra',
+      'Cần tạo lại',
+      'Đã xác nhận đúng',
+      'Lịch sử',
+      'Bàn giao ca',
+      'Báo cáo sự cố',
+    ]) {
       expect(within(nav).queryByRole('link', { name: gone })).not.toBeInTheDocument();
     }
     expect(within(nav).queryByRole('link', { name: 'Quản lý tài khoản' })).not.toBeInTheDocument();

@@ -38,6 +38,7 @@ import { describeLocation } from '../issue/issueArea';
 import {
   CATEGORY_LABELS,
   PAYMENT_METHOD_LABELS,
+  PAYMENT_SOURCES,
   ROOM_SERVICE_LABELS,
   formatVnd,
 } from './reportTypes';
@@ -54,14 +55,14 @@ export const REPORT_INCLUDE = {
   voidedBy: { select: { id: true, fullName: true } },
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true, startedAt: true, closedAt: true } },
   payment: true,
-  guestRequest: { include: { acceptedBy: { select: { id: true, fullName: true } } } },
+  guestRequest: { include: { completedBy: { select: { id: true, fullName: true } } } },
   /*
     The LIVE incident, read through the reference — never a copy of it. The
     journal shows the status Bộ phận kỹ thuật has it in right now, which is the
     only status worth showing.
   */
   facility: { include: { issue: { include: ISSUE_INCLUDE } } },
-  complaint: true,
+  complaint: { include: { completedBy: { select: { id: true, fullName: true } } } },
   roomService: true,
   /// Oldest first: a correction history reads forwards.
   audits: { orderBy: { createdAt: 'asc' } },
@@ -73,6 +74,21 @@ export type ReportDetail = Prisma.ReceptionOperationalReportGetPayload<{
 
 function person(u: { id: number; fullName: string } | null) {
   return u ? { id: u.id, fullName: u.fullName } : null;
+}
+
+/**
+ * "Nội dung" of a guest request — what the guest asked for.
+ *
+ * A request recorded under the current form carries it in `note`. An older one
+ * said it with "Ký gửi" (and perhaps a note beside it), so both are read, in
+ * that order, rather than the older rows showing an empty content cell. Nothing
+ * is rewritten: this is how a row is READ, not what it stores.
+ */
+export function requestContent(row: { itemType: string | null; note: string | null }): string {
+  return [row.itemType, row.note]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join(' — ');
 }
 
 /**
@@ -88,8 +104,11 @@ export function reportSummary(row: ReportDetail): string {
     return `${who} · ${PAYMENT_METHOD_LABELS[row.payment.method]} ${formatVnd(row.payment.amount)}`;
   }
   if (row.guestRequest) {
-    const state = row.guestRequest.acceptedAt ? 'đã tiếp nhận' : 'chờ tiếp nhận';
-    return `${row.guestRequest.itemType} · ${row.guestRequest.guestName} · ${state}`;
+    const state = row.guestRequest.completedAt ? 'đã hoàn thành' : 'đã tiếp nhận';
+    // A legacy row leads with its short "Ký gửi", as it always did; a current
+    // one with the content itself.
+    const what = row.guestRequest.itemType?.trim() || row.guestRequest.note?.trim() || 'Yêu cầu';
+    return `${what} · ${row.guestRequest.guestName} · ${state}`;
   }
   if (row.facility) {
     const issue = row.facility.issue;
@@ -98,7 +117,10 @@ export function reportSummary(row: ReportDetail): string {
     return `${describeLocation(issue)} · ${issue.description}`;
   }
   if (row.complaint) {
-    return `${row.complaint.guestName} · ${row.complaint.location} · ${row.complaint.description}`;
+    // `location` is legacy and null on every report recorded since.
+    return [row.complaint.guestName, row.complaint.location, row.complaint.description]
+      .filter((part) => Boolean(part?.trim()))
+      .join(' · ');
   }
   if (row.roomService) {
     return `${ROOM_SERVICE_LABELS[row.roomService.serviceType]} · ${row.roomService.guestName} · ${formatVnd(row.roomService.price)}`;
@@ -184,19 +206,25 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
 
     guestRequest: row.guestRequest
       ? {
-          itemType: row.guestRequest.itemType,
           guestName: row.guestRequest.guestName,
+          ezCode: row.guestRequest.ezCode,
+          /** "Nội dung" as read — the note, or a legacy row's "Ký gửi" and note. */
+          content: requestContent(row.guestRequest),
           note: row.guestRequest.note,
-          accepted: row.guestRequest.acceptedAt !== null,
-          acceptedBy: person(row.guestRequest.acceptedBy),
-          acceptedByName: row.guestRequest.acceptedByNameSnapshot,
-          acceptedAt: row.guestRequest.acceptedAt
-            ? row.guestRequest.acceptedAt.toISOString()
+          /** Legacy: asked for until the form became name, Mã EZ and content. */
+          itemType: row.guestRequest.itemType,
+          roomNumber: row.guestRequest.roomNumber,
+          completed: row.guestRequest.completedAt !== null,
+          completedBy: person(row.guestRequest.completedBy),
+          completedByName: row.guestRequest.completedByNameSnapshot,
+          completedAt: row.guestRequest.completedAt
+            ? row.guestRequest.completedAt.toISOString()
             : null,
-          acceptedShiftType: row.guestRequest.acceptedShiftType,
-          acceptedShiftName: row.guestRequest.acceptedShiftType
-            ? shiftDefinition(row.guestRequest.acceptedShiftType).name
+          completedShiftType: row.guestRequest.completedShiftType,
+          completedShiftName: row.guestRequest.completedShiftType
+            ? shiftDefinition(row.guestRequest.completedShiftType).name
             : null,
+          resolution: row.guestRequest.resolution,
         }
       : null,
 
@@ -207,8 +235,20 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
     complaint: row.complaint
       ? {
           guestName: row.complaint.guestName,
-          location: row.complaint.location,
+          ezCode: row.complaint.ezCode,
           description: row.complaint.description,
+          /** Legacy "Số phòng / Khác" — null on every report recorded since. */
+          location: row.complaint.location,
+          completed: row.complaint.completedAt !== null,
+          completedBy: person(row.complaint.completedBy),
+          completedByName: row.complaint.completedByNameSnapshot,
+          completedAt: row.complaint.completedAt ? row.complaint.completedAt.toISOString() : null,
+          completedShiftType: row.complaint.completedShiftType,
+          completedShiftName: row.complaint.completedShiftType
+            ? shiftDefinition(row.complaint.completedShiftType).name
+            : null,
+          /** "Hướng xử lý (nếu có)". */
+          resolution: row.complaint.resolution,
         }
       : null,
 
@@ -217,14 +257,17 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
           serviceType: row.roomService.serviceType,
           serviceTypeLabel: ROOM_SERVICE_LABELS[row.roomService.serviceType],
           guestName: row.roomService.guestName,
-          phone: row.roomService.phone,
-          roomNumber: row.roomService.roomNumber,
+          ezCode: row.roomService.ezCode,
           roomClass: row.roomService.roomClass,
           fromRoomClass: row.roomService.fromRoomClass,
           toRoomClass: row.roomService.toRoomClass,
-          serviceName: row.roomService.serviceName,
+          nights: row.roomService.nights,
           price: row.roomService.price,
           note: row.roomService.note,
+          /** Legacy fields, no longer asked for; kept readable on older rows. */
+          phone: row.roomService.phone,
+          roomNumber: row.roomService.roomNumber,
+          serviceName: row.roomService.serviceName,
         }
       : null,
 
@@ -328,43 +371,70 @@ function optional(value: string | undefined | null): string | null {
  * Creating
  * ------------------------------------------------------------------ */
 
+/**
+ * "Nguồn", as a new entry must carry it: one of `PAYMENT_SOURCES`, or nothing.
+ *
+ * Nothing is allowed — a walk-in paying at the desk came through no channel —
+ * but anything outside the list is refused rather than stored. See the list's
+ * own comment for why it is closed.
+ */
+function assertSource(value: string | undefined | null): string | null {
+  const source = optional(value);
+  if (source === null) return null;
+  if (!(PAYMENT_SOURCES as readonly string[]).includes(source)) {
+    throw ApiError.validation(`Nguồn không hợp lệ. Chọn một trong: ${PAYMENT_SOURCES.join(', ')}.`);
+  }
+  return source;
+}
+
+/** The longest stay one "Bán phòng" or "Upgrade" row may record. */
+export const MAX_NIGHTS = 365;
+
+/** "Số đêm": a whole number of nights, at least one. */
+function assertNights(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw ApiError.validation('Số đêm phải là số nguyên từ 1 trở lên.');
+  }
+  if (value > MAX_NIGHTS) throw ApiError.validation(`Số đêm không được vượt quá ${MAX_NIGHTS}.`);
+  return value;
+}
+
 export interface PaymentInput {
   ezCode?: string;
   source?: string;
   guestName?: string;
-  roomNumber?: string;
   method: 'CASH' | 'TRANSFER' | 'CARD';
   amount: number;
   receivable?: number;
   expense?: number;
-  note?: string;
 }
 
+/** Tên khách, Mã EZ and "Nội dung" (`note`) — the whole of the current form. */
 export interface GuestRequestInput {
-  itemType: string;
   guestName: string;
-  note?: string;
+  ezCode?: string;
+  note: string;
 }
 
 export interface FacilityInput {
   issueId: string;
 }
 
+/** Tên khách, Mã EZ and Mô tả. */
 export interface ComplaintInput {
   guestName: string;
-  location: string;
+  ezCode?: string;
   description: string;
 }
 
 export interface RoomServiceInput {
   serviceType: 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER';
   guestName: string;
-  phone?: string;
-  roomNumber?: string;
+  ezCode?: string;
   roomClass?: string;
   fromRoomClass?: string;
   toRoomClass?: string;
-  serviceName?: string;
+  nights?: number;
   price: number;
   note?: string;
 }
@@ -372,70 +442,51 @@ export interface RoomServiceInput {
 /**
  * WHICH FIELDS EACH ROOM-SERVICE SUBTYPE MUST CARRY.
  *
- * The same split as `issue/issueArea.ts`: this table is the authority and the
- * React form READS it to decide what to render. A form that both renders and
- * validates is a form `curl` can skip, and these rows end up in a financial
- * report.
+ * Every subtype: Tên khách, Mã EZ, Giá tiền, Ghi chú. On top of that, "Bán
+ * phòng" requires Hạng phòng and Số đêm, "Upgrade" requires Từ / Tới hạng
+ * phòng and Số đêm, and the other three ask for nothing more.
+ *
+ * A FIELD THE SUBTYPE DOES NOT ASK FOR IS NEVER STORED, whatever the request
+ * carried — a "Giặt ủi" row cannot acquire a room class because a client sent
+ * one. The legacy columns (SĐT, Số phòng, Loại hình) are left null on new rows.
+ *
+ * The same split as `issue/issueArea.ts`: this is the authority, the React form
+ * only mirrors it. A form that validates itself is a form `curl` can skip, and
+ * these rows end up in a financial report.
  */
 export function normaliseRoomService(input: RoomServiceInput) {
-  const guestName = required(input.guestName, 'tên khách');
-  const price = assertMoney(input.price, 'Giá tiền');
-  const note = optional(input.note);
+  const common = {
+    serviceType: input.serviceType,
+    guestName: required(input.guestName, 'tên khách'),
+    ezCode: optional(input.ezCode),
+    price: assertMoney(input.price, 'Giá tiền'),
+    note: optional(input.note),
+    phone: null,
+    roomNumber: null,
+    serviceName: null,
+  };
+  const none = { roomClass: null, fromRoomClass: null, toRoomClass: null, nights: null };
 
   switch (input.serviceType) {
     case 'ROOM_SALE':
       return {
-        serviceType: input.serviceType,
-        guestName,
-        phone: optional(input.phone),
+        ...common,
+        ...none,
         roomClass: required(input.roomClass, 'hạng phòng'),
-        roomNumber: null,
-        fromRoomClass: null,
-        toRoomClass: null,
-        serviceName: null,
-        price,
-        note,
+        nights: assertNights(input.nights),
       };
     case 'UPGRADE':
       return {
-        serviceType: input.serviceType,
-        guestName,
-        phone: null,
-        roomClass: null,
-        roomNumber: optional(input.roomNumber),
-        fromRoomClass: required(input.fromRoomClass, 'hạng phòng hiện tại'),
-        toRoomClass: required(input.toRoomClass, 'hạng phòng nâng lên'),
-        serviceName: null,
-        price,
-        note,
+        ...common,
+        ...none,
+        fromRoomClass: required(input.fromRoomClass, 'từ hạng phòng'),
+        toRoomClass: required(input.toRoomClass, 'tới hạng phòng'),
+        nights: assertNights(input.nights),
       };
     case 'SMOKING':
     case 'LAUNDRY':
-      return {
-        serviceType: input.serviceType,
-        guestName,
-        phone: null,
-        roomClass: null,
-        roomNumber: required(input.roomNumber, 'số phòng'),
-        fromRoomClass: null,
-        toRoomClass: null,
-        serviceName: null,
-        price,
-        note,
-      };
     case 'OTHER':
-      return {
-        serviceType: input.serviceType,
-        guestName,
-        phone: null,
-        roomClass: null,
-        roomNumber: required(input.roomNumber, 'số phòng'),
-        fromRoomClass: null,
-        toRoomClass: null,
-        serviceName: required(input.serviceName, 'loại hình dịch vụ'),
-        price,
-        note,
-      };
+      return { ...common, ...none };
   }
 }
 
@@ -521,16 +572,15 @@ async function buildCreateData(
       return {
         ...scalars,
         payment: {
+          // Số phòng and Ghi chú are no longer asked for; new rows leave them null.
           create: {
             ezCode: optional(p.ezCode),
-            source: optional(p.source),
+            source: assertSource(p.source),
             guestName: optional(p.guestName),
-            roomNumber: optional(p.roomNumber),
             method: p.method,
             amount: assertMoney(p.amount, 'Số tiền'),
             receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
             expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
-            note: optional(p.note),
           },
         },
       };
@@ -539,10 +589,12 @@ async function buildCreateData(
       return {
         ...scalars,
         guestRequest: {
+          // Recorded as "Đã tiếp nhận": the completion columns stay null until
+          // `completeReport` writes them. Ký gửi and Số phòng are not asked for.
           create: {
-            itemType: required(input.guestRequest.itemType, 'loại ký gửi'),
             guestName: required(input.guestRequest.guestName, 'tên khách'),
-            note: optional(input.guestRequest.note),
+            ezCode: optional(input.guestRequest.ezCode),
+            note: required(input.guestRequest.note, 'nội dung'),
           },
         },
       };
@@ -570,9 +622,10 @@ async function buildCreateData(
       return {
         ...scalars,
         complaint: {
+          // "Đã tiếp nhận" until completed; Số phòng / Khác is not asked for.
           create: {
             guestName: required(input.complaint.guestName, 'tên khách'),
-            location: required(input.complaint.location, 'số phòng hoặc vị trí'),
+            ezCode: optional(input.complaint.ezCode),
             description: required(input.complaint.description, 'mô tả'),
           },
         },
@@ -700,17 +753,24 @@ async function loadOwn(
 }
 
 /** The fields each category allows a correction to touch. */
+/**
+ * The fields each category allows a correction to touch — the fields its
+ * current form asks for. Legacy columns (a payment's room and note, a request's
+ * "Ký gửi", a complaint's place, a room service's phone) are not correctable any
+ * more, so an older row keeps them exactly as recorded.
+ */
 const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
-  PAYMENT: ['ezCode', 'source', 'guestName', 'roomNumber', 'method', 'amount', 'receivable', 'expense', 'note'],
-  GUEST_REQUEST: ['itemType', 'guestName', 'note'],
+  PAYMENT: ['ezCode', 'source', 'guestName', 'method', 'amount', 'receivable', 'expense'],
+  // `resolution` is absent on purpose: it is written only by `completeReport`.
+  GUEST_REQUEST: ['guestName', 'ezCode', 'note'],
   /*
     A facility entry has NOTHING TO CORRECT. Its only field is the incident it
     points at, and pointing it somewhere else would not be a correction — it
     would be a different report. The wrong one is voided and a new one written.
   */
   FACILITY_ISSUE: [],
-  CUSTOMER_COMPLAINT: ['guestName', 'location', 'description'],
-  ROOM_SERVICE: ['guestName', 'phone', 'roomNumber', 'roomClass', 'fromRoomClass', 'toRoomClass', 'serviceName', 'price', 'note'],
+  CUSTOMER_COMPLAINT: ['guestName', 'ezCode', 'description'],
+  ROOM_SERVICE: ['guestName', 'ezCode', 'roomClass', 'fromRoomClass', 'toRoomClass', 'nights', 'price', 'note'],
 };
 
 const MONEY_FIELDS = new Set(['amount', 'receivable', 'expense', 'price']);
@@ -827,13 +887,21 @@ export async function updateReport(
     for (const field of allowed) {
       if (!(field in supplied)) continue;
       const raw = supplied[field];
+      const before = detail[field] ?? null;
       const next = MONEY_FIELDS.has(field)
         ? assertMoney(raw, moneyLabel(field))
         : field === 'method'
           ? assertMethod(raw)
-          : normaliseText(field, raw, current.category);
-      const before = detail[field] ?? null;
+          : field === 'nights'
+            ? correctedNights(raw, (detail as { serviceType?: string }).serviceType)
+            : normaliseText(field, raw, current.category);
       if (auditValue(before) === auditValue(next)) continue;
+      /*
+        A SOURCE IS CHECKED ONLY WHEN IT CHANGES. An older row typed "agoda.com"
+        before the list was closed; correcting its amount must not force a
+        change of source, and re-saving it untouched is skipped just above.
+      */
+      if (field === 'source') assertSource(next as string | null);
       data[field] = next;
       guard[field] = before;
       changes.push({ field, oldValue: auditValue(before), newValue: auditValue(next) });
@@ -909,16 +977,22 @@ function assertMethod(raw: unknown): 'CASH' | 'TRANSFER' | 'CARD' {
   throw ApiError.validation('Phương thức thanh toán không hợp lệ.');
 }
 
+/**
+ * "Số đêm" on a correction: required on "Bán phòng" and "Upgrade", and never
+ * settable on a subtype that does not have it.
+ */
+function correctedNights(raw: unknown, serviceType: string | undefined): number | null {
+  if (serviceType === 'ROOM_SALE' || serviceType === 'UPGRADE') return assertNights(raw);
+  throw ApiError.validation('Loại dịch vụ này không có số đêm.');
+}
+
 /** Which text fields may become empty, and which may not. */
 const TEXT_REQUIRED: Record<string, string> = {
-  itemType: 'loại ký gửi',
   guestName: 'tên khách',
-  location: 'số phòng hoặc vị trí',
   description: 'mô tả',
-  serviceName: 'loại hình dịch vụ',
   roomClass: 'hạng phòng',
-  fromRoomClass: 'hạng phòng hiện tại',
-  toRoomClass: 'hạng phòng nâng lên',
+  fromRoomClass: 'từ hạng phòng',
+  toRoomClass: 'tới hạng phòng',
 };
 
 function normaliseText(
@@ -933,6 +1007,8 @@ function normaliseText(
     cash may genuinely have no name recorded — so the rule follows the category
     rather than the column name alone.
   */
+  // A request's "Nội dung" is what the request IS; it cannot be emptied.
+  if (category === 'GUEST_REQUEST' && field === 'note') return required(value, 'nội dung');
   const label = TEXT_REQUIRED[field];
   const mandatory =
     label !== undefined &&
@@ -950,7 +1026,7 @@ function normaliseText(
  * `normaliseRoomService` is what guarantees the right ones are present for the
  * subtype in the first place.
  */
-const ROOM_SERVICE_OPTIONAL = new Set(['roomClass', 'fromRoomClass', 'toRoomClass', 'serviceName']);
+const ROOM_SERVICE_OPTIONAL = new Set(['roomClass', 'fromRoomClass', 'toRoomClass']);
 
 /**
  * VOID — withdraw a record from the totals, keep it on file.
@@ -1017,44 +1093,61 @@ export async function voidReport(
 }
 
 /**
- * "NGƯỜI TIẾP NHẬN" — a second, separate actor on a guest request.
+ * "HOÀN THÀNH" — a second, separate actor on a guest request or a
+ * service-quality report, and how they handled it.
  *
- * It writes only the acceptance columns and never touches the creation ones. A
- * bag taken on Ca A and returned on Ca B has two names on it afterwards, and the
- * first one is still the answer to "who took it?".
+ * Both are "Đã tiếp nhận" from the moment they are recorded; this is the event
+ * that makes them "Đã hoàn thành". It writes only the completion columns and
+ * never touches the creation ones. A bag taken on Ca A and returned on Ca B has
+ * two names on it afterwards, and the first one is still the answer to "who
+ * took it?".
  *
- * Guarded by `acceptedAt: null` in the update itself, so two receptionists
- * accepting at once produce one acceptance rather than the later overwriting the
- * earlier.
+ * THE HANDLING TEXT IS OPTIONAL ("Cách xử lý / Hướng xử lý (nếu có)"). Plenty
+ * of completions need no explanation — the bag was collected — so an empty or
+ * blank one is stored as null, never as a placeholder sentence. The time, the
+ * person and the shift are the server's; nothing in the request sets them.
+ *
+ * Guarded by `completedAt: null` and a live report in the update itself, so two
+ * receptionists completing at once produce one completion, and a void racing a
+ * completion cannot complete a withdrawn record.
  */
-export async function acceptGuestRequest(
+export async function completeReport(
   id: string,
+  resolution: string | null | undefined,
   actor: ReportActor,
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ReportDetail> {
+  const handled = optional(resolution);
   const now = clock.now();
   const current = await loadOwn(id, actor, client);
-  if (current.category !== 'GUEST_REQUEST' || !current.guestRequest) {
-    throw ApiError.validation('Chỉ yêu cầu của khách mới cần tiếp nhận.');
+  const detail =
+    current.category === 'GUEST_REQUEST'
+      ? current.guestRequest
+      : current.category === 'CUSTOMER_COMPLAINT'
+        ? current.complaint
+        : null;
+  if (!detail) {
+    throw ApiError.validation('Chỉ yêu cầu của khách và vấn đề chất lượng mới cần hoàn thành.');
   }
   if (current.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy.');
-  if (current.guestRequest.acceptedAt) {
-    throw ApiError.conflict('Yêu cầu này đã được tiếp nhận.');
-  }
+  if (detail.completedAt) throw ApiError.conflict('Bản ghi này đã được hoàn thành.');
   const session = await requireOpenSession(actor, client);
 
-  const { count } = await client.guestRequestReport.updateMany({
-    where: { reportId: id, acceptedAt: null },
-    data: {
-      acceptedByUserId: actor.id,
-      acceptedByNameSnapshot: session.receptionistName,
-      acceptedAt: now,
-      acceptedShiftSessionId: session.id,
-      acceptedShiftType: session.shiftType,
-    },
-  });
-  if (count === 0) throw ApiError.conflict('Yêu cầu này đã được tiếp nhận.');
+  const where = { reportId: id, completedAt: null, report: { is: { voidedAt: null } } };
+  const data = {
+    completedByUserId: actor.id,
+    completedByNameSnapshot: session.receptionistName,
+    completedAt: now,
+    completedShiftSessionId: session.id,
+    completedShiftType: session.shiftType,
+    resolution: handled,
+  };
+  const { count } =
+    current.category === 'GUEST_REQUEST'
+      ? await client.guestRequestReport.updateMany({ where, data })
+      : await client.customerComplaintReport.updateMany({ where, data });
+  if (count === 0) throw ApiError.conflict('Bản ghi này đã được hoàn thành hoặc đã bị hủy.');
 
   return client.receptionOperationalReport.findUniqueOrThrow({
     where: { id },

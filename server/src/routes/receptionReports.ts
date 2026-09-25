@@ -20,7 +20,7 @@ import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/
 import { hcmRange } from '../booking/recreationReport';
 import type { UserWithBranch } from '../auth/serialize';
 import {
-  acceptGuestRequest,
+  completeReport,
   countByCategory,
   createReport,
   listReports,
@@ -34,7 +34,7 @@ import { requireOpenSession } from '../shift/shiftService';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
-  GUEST_REQUEST_ITEM_SUGGESTIONS,
+  PAYMENT_SOURCES,
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   ROOM_SERVICE_LABELS,
@@ -72,41 +72,54 @@ const money = z.number().int().min(0).max(MAX_VND);
 
 const text = (max: number) => z.string().trim().max(max);
 
+/*
+  THE CURRENT FORMS, FIELD FOR FIELD. The legacy columns (a payment's room and
+  note, a request's "Ký gửi" and room, a complaint's place, a room service's
+  phone, room and service name) are no longer accepted: zod strips unknown keys,
+  so a client that still sends them changes nothing, and older rows keep them.
+
+  "Nguồn" is only length-checked here; WHICH values are allowed is the service's
+  rule (`PAYMENT_SOURCES`), because a correction must be allowed to leave an
+  older row's free-text source alone.
+*/
 const paymentSchema = z.object({
   ezCode: text(100).optional(),
   source: text(100).optional(),
   guestName: text(200).optional(),
-  roomNumber: text(50).optional(),
   method: METHOD,
   amount: money,
   receivable: money.optional(),
   expense: money.optional(),
-  note: text(2000).optional(),
 });
 
 const guestRequestSchema = z.object({
-  itemType: text(100).min(1, 'Vui lòng nhập loại ký gửi.'),
   guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
-  note: text(2000).optional(),
+  ezCode: text(100).optional(),
+  note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
+});
+
+/** "Cách xử lý / Hướng xử lý (nếu có)" — optional; blank is stored as nothing. */
+const completeSchema = z.object({
+  resolution: text(2000).optional(),
 });
 
 const facilitySchema = z.object({ issueId: z.string().min(1) });
 
 const complaintSchema = z.object({
   guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
-  location: text(200).min(1, 'Vui lòng nhập số phòng hoặc vị trí.'),
+  ezCode: text(100).optional(),
   description: text(4000).min(1, 'Vui lòng nhập mô tả.'),
 });
 
 const roomServiceSchema = z.object({
   serviceType: SERVICE,
   guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
-  phone: text(50).optional(),
-  roomNumber: text(50).optional(),
+  ezCode: text(100).optional(),
   roomClass: text(200).optional(),
   fromRoomClass: text(200).optional(),
   toRoomClass: text(200).optional(),
-  serviceName: text(200).optional(),
+  // Which subtypes need it, and its range, are the service's rule.
+  nights: z.number().int().optional(),
   price: money,
   note: text(2000).optional(),
 });
@@ -182,7 +195,7 @@ export function createReceptionReportsRouter(): Router {
         categories: CATEGORIES.map((c) => ({ code: c, label: CATEGORY_LABELS[c] })),
         paymentMethods: PAYMENT_METHODS.map((m) => ({ code: m, label: PAYMENT_METHOD_LABELS[m] })),
         roomServiceTypes: ROOM_SERVICE_TYPES.map((t) => ({ code: t, label: ROOM_SERVICE_LABELS[t] })),
-        guestRequestItems: GUEST_REQUEST_ITEM_SUGGESTIONS,
+        paymentSources: PAYMENT_SOURCES,
       });
     },
   );
@@ -252,13 +265,20 @@ export function createReceptionReportsRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/reception/reports/:id/accept — "Người tiếp nhận" on a guest request.
-  router.post('/reception/reports/:id/accept', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  /*
+    POST /api/reception/reports/:id/complete — "Hoàn thành" on a guest request
+    or a service-quality report.
+
+    The body carries only the optional handling text; who, when and on which
+    shift come from the session and the server clock.
+  */
+  router.post('/reception/reports/:id/complete', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
+      const { resolution } = completeSchema.parse(req.body ?? {});
       const clock = getClock();
-      const accepted = await acceptGuestRequest(req.params.id!, actor(user), clock);
-      res.json({ report: serializeReport(accepted, clock.now()) });
+      const completed = await completeReport(req.params.id!, resolution, actor(user), clock);
+      res.json({ report: serializeReport(completed, clock.now()) });
     })().catch(next);
   });
 

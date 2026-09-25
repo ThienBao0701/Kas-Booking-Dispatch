@@ -58,7 +58,7 @@ const OPTIONS = {
     { code: 'PAYMENT', label: 'Theo dõi thanh toán' },
     { code: 'GUEST_REQUEST', label: 'Vấn đề khách yêu cầu' },
     { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
-    { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng dịch vụ' },
+    { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
   ],
   paymentMethods: [{ code: 'CASH', label: 'Thu tiền mặt' }],
@@ -69,7 +69,7 @@ const OPTIONS = {
     { code: 'LAUNDRY', label: 'Giặt ủi' },
     { code: 'OTHER', label: 'Dịch vụ khác' },
   ],
-  guestRequestItems: [],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
 };
 
 const BASE = {
@@ -171,17 +171,21 @@ const REQUEST = {
   id: 'g1',
   category: 'GUEST_REQUEST',
   categoryLabel: 'Vấn đề khách yêu cầu',
-  summary: 'Balo · Khách ký gửi · đã tiếp nhận',
+  summary: 'Balo · Khách ký gửi · đã hoàn thành',
   guestRequest: {
-    itemType: 'Balo',
     guestName: 'Khách ký gửi',
+    ezCode: 'EZ305',
+    content: 'Balo — Balo đen',
     note: 'Balo đen',
-    accepted: true,
-    acceptedBy: { id: 3, fullName: 'Lễ tân Hai' },
-    acceptedByName: 'Nguyễn Văn B',
-    acceptedAt: '2026-09-19T07:02:00.000Z',
-    acceptedShiftType: 'B',
-    acceptedShiftName: 'Ca B',
+    itemType: 'Balo',
+    roomNumber: '305',
+    completed: true,
+    completedBy: { id: 3, fullName: 'Lễ tân Hai' },
+    completedByName: 'Nguyễn Văn B',
+    completedAt: '2026-09-19T07:02:00.000Z',
+    completedShiftType: 'B',
+    completedShiftName: 'Ca B',
+    resolution: 'Đã trả balo cho khách',
   },
 };
 
@@ -234,9 +238,21 @@ const COMPLAINT = {
   ...BASE,
   id: 'c1',
   category: 'CUSTOMER_COMPLAINT',
-  categoryLabel: 'Vấn đề về chất lượng dịch vụ',
-  summary: 'Trần Complain · 202 · Phòng ồn suốt đêm',
-  complaint: { guestName: 'Trần Complain', location: '202', description: 'Phòng ồn suốt đêm' },
+  categoryLabel: 'Vấn đề về chất lượng và dịch vụ',
+  summary: 'Trần Complain · Phòng ồn suốt đêm',
+  complaint: {
+    guestName: 'Trần Complain',
+    ezCode: 'EZ202',
+    description: 'Phòng ồn suốt đêm',
+    location: null,
+    completed: false,
+    completedBy: null,
+    completedByName: null,
+    completedAt: null,
+    completedShiftType: null,
+    completedShiftName: null,
+    resolution: null,
+  },
 };
 
 const SERVICE = {
@@ -249,11 +265,13 @@ const SERVICE = {
     serviceType: 'UPGRADE',
     serviceTypeLabel: 'Upgrade',
     guestName: 'Lê Upgrade',
+    ezCode: 'EZ900',
     phone: null,
     roomNumber: null,
     roomClass: null,
     fromRoomClass: 'Standard',
     toRoomClass: 'Deluxe',
+    nights: 2,
     serviceName: null,
     price: 300000,
     note: 'Khách đồng ý',
@@ -270,11 +288,13 @@ const LAUNDRY = {
     serviceType: 'LAUNDRY',
     serviceTypeLabel: 'Giặt ủi',
     guestName: 'Phạm Giặt',
+    ezCode: null,
     phone: null,
     roomNumber: '305',
     roomClass: null,
     fromRoomClass: null,
     toRoomClass: null,
+    nights: null,
     serviceName: null,
     price: 120000,
     note: null,
@@ -484,7 +504,7 @@ describe('choosing a branch', () => {
       // No count: this tab lists the incidents themselves, not journal entries,
       // so a journal count on it would describe something else.
       'Sự cố vật chất đang xử lý',
-      'Vấn đề về chất lượng dịch vụ1',
+      'Vấn đề về chất lượng và dịch vụ1',
       'Dịch vụ phòng, KPI2',
     ]);
   });
@@ -522,18 +542,19 @@ describe('each category is a table', () => {
     // rather than every row repeating them.
     expect(headers.slice(1)).toEqual([
       'STT',
+      'Tên khách',
       'Mã EZ',
       'Nguồn',
-      'Tên khách',
-      'Phòng',
       'Phương thức',
       // The headline figure, kept primary so a phone still shows an amount.
       'Số tiền',
-      'Thu tiền mặt',
+      'Tiền mặt',
       'Thu CK',
       'Cà thẻ',
       'Công nợ',
       'Chi',
+      // Reception no longer asks for a room; the Admin still shows an older one.
+      'Phòng',
       'Thời gian',
       'Trạng thái',
     ]);
@@ -557,15 +578,34 @@ describe('each category is a table', () => {
     expect(screen.getByTestId('admin-category-GUEST_REQUEST')).toHaveTextContent('Vấn đề khách yêu cầu');
     expect(within(table).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.slice(1)).toEqual([
+      'STT',
+      'Tên khách',
+      'Mã EZ',
+      'Nội dung',
+      'Thời gian tiếp nhận',
+      'Thời gian hoàn thành',
+      'Cách xử lý (nếu có)',
+      'Trạng thái',
+      'Bản ghi',
+    ]);
+    // "Ký gửi" and "Số phòng" are not columns any more…
+    expect(headers).not.toContain('Ký gửi');
+    expect(headers).not.toContain('Số phòng');
+
     const row = within(table).getByTestId('row-g1');
-    expect(within(row).getByText('Balo')).toBeInTheDocument();
+    // …but an older request's "Ký gửi" still reads, as part of its content.
+    expect(within(row).getByText('Balo — Balo đen')).toBeInTheDocument();
     expect(within(row).getByText('Khách ký gửi')).toBeInTheDocument();
-    // Who took it, and who received it — two facts, never one overwriting the
+    expect(within(row).getByText('EZ305')).toBeInTheDocument();
+    expect(within(row).getByText('Đã hoàn thành')).toBeInTheDocument();
+    expect(within(row).getByText('Đã trả balo cho khách')).toBeInTheDocument();
+    // Who took it, and who completed it — two facts, never one overwriting the
     // other. The taker is the shift's person, named once in the heading; the
-    // receiver, on another shift, is in the row.
+    // completer, on another shift, is in the row.
     expect(within(table).getByRole('heading')).toHaveTextContent('Nguyễn Văn A');
-    expect(within(row).getByText('Nguyễn Văn B')).toBeInTheDocument();
-    expect(within(row).getByText('Ca B')).toBeInTheDocument();
+    expect(within(row).getByText('Nguyễn Văn B · Ca B')).toBeInTheDocument();
   });
 
   /**
@@ -671,14 +711,28 @@ describe('each category is a table', () => {
 
     const table = await screen.findByTestId('admin-table-CUSTOMER_COMPLAINT');
     expect(screen.getByTestId('admin-category-CUSTOMER_COMPLAINT')).toHaveTextContent(
-      'Vấn đề về chất lượng dịch vụ',
+      'Vấn đề về chất lượng và dịch vụ',
     );
     expect(within(table).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.slice(1)).toEqual([
+      'STT',
+      'Tên khách',
+      'Mã EZ',
+      'Mô tả',
+      'Trạng thái',
+      'Hướng xử lý (nếu có)',
+      'Thời gian',
+      'Bản ghi',
+    ]);
+    expect(headers).not.toContain('Số phòng / Khác');
+
     const row = within(table).getByTestId('row-c1');
     expect(within(row).getByText('Trần Complain')).toBeInTheDocument();
-    expect(within(row).getByText('202')).toBeInTheDocument();
+    expect(within(row).getByText('EZ202')).toBeInTheDocument();
     expect(within(row).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
+    expect(within(row).getByText('Đã tiếp nhận')).toBeInTheDocument();
   });
 
   it('gives each room-service subtype its own table and its own columns', async () => {
@@ -690,17 +744,29 @@ describe('each category is a table', () => {
     const upgrade = await screen.findByTestId('admin-table-ROOM_SERVICE-UPGRADE');
     expect(within(upgrade).getByRole('heading')).toHaveTextContent('Upgrade');
     const upgradeHeaders = within(upgrade).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(upgradeHeaders).toContain('Từ hạng');
-    expect(upgradeHeaders).toContain('Đến hạng');
-    expect(upgradeHeaders).not.toContain('Phòng');
+    expect(upgradeHeaders.slice(1)).toEqual([
+      'STT',
+      'Tên khách',
+      'Mã EZ',
+      'Từ hạng phòng',
+      'Tới hạng phòng',
+      'Số đêm',
+      'Giá tiền',
+      'Thời gian',
+      'Ghi chú',
+      'Trạng thái',
+    ]);
     expect(within(upgrade).getByText('Standard')).toBeInTheDocument();
     expect(within(upgrade).getByText('Deluxe')).toBeInTheDocument();
+    expect(within(upgrade).getByText('EZ900')).toBeInTheDocument();
 
     const laundry = screen.getByTestId('admin-table-ROOM_SERVICE-LAUNDRY');
     const laundryHeaders = within(laundry).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(laundryHeaders).toContain('Phòng');
-    expect(laundryHeaders).not.toContain('Từ hạng');
+    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái']);
     expect(within(laundry).getByText('Phạm Giặt')).toBeInTheDocument();
+    // The room an older laundry row recorded is not a column; it is in the full record.
+    await userEvent.click(within(laundry).getByTestId('row-toggle-v2'));
+    expect(await within(laundry).findByText('Số phòng (dữ liệu cũ)')).toBeInTheDocument();
 
     // A subtype with no records gets no empty table of its own — that whitespace
     // is what this redesign removed.
@@ -736,7 +802,7 @@ describe('each category is a table', () => {
     }
     // A mixed table is unreadable unless each row says what it is.
     expect(within(table).getByTestId('row-p1')).toHaveTextContent('Theo dõi thanh toán');
-    expect(within(table).getByTestId('row-c1')).toHaveTextContent('Vấn đề về chất lượng dịch vụ');
+    expect(within(table).getByTestId('row-c1')).toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
     // And the one figure a record carries, where it carries one.
     expect(within(table).getByTestId('row-p1')).toHaveTextContent('300.000 ₫');
     expect(within(table).getByTestId('row-v1')).toHaveTextContent('300.000 ₫');
@@ -1210,7 +1276,7 @@ function onShift(
     branchId: (over.branch ?? BRANCHES[0]!).id,
     branch: over.branch ?? BRANCHES[0],
     summary: `${over.employee} · ${id}`,
-    complaint: { guestName: `Khách ${id}`, location: '101', description: `Mô tả ${id}` },
+    complaint: { ...COMPLAINT.complaint, guestName: `Khách ${id}`, description: `Mô tả ${id}` },
   };
 }
 
@@ -1380,7 +1446,7 @@ describe('DATE → SHIFT → EMPLOYEE', () => {
     await chooseBranch();
 
     expect(await screen.findByTestId('shift-counts-11|2026-09-19|s1')).toHaveTextContent(
-      'Theo dõi thanh toán: 2 · Vấn đề về chất lượng dịch vụ: 1',
+      'Theo dõi thanh toán: 2 · Vấn đề về chất lượng và dịch vụ: 1',
     );
     // A closed shift carries no "not finished" flag.
     expect(screen.queryByTestId('shift-open-11|2026-09-19|s1')).not.toBeInTheDocument();

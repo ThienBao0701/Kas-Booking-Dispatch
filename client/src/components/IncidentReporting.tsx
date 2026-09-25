@@ -31,6 +31,7 @@ import { Modal } from './Modal';
 import { ErrorAlert } from './ErrorAlert';
 import { DateRangeField, type DateRangeValue } from './DateRangeField';
 import { DataTable, type DataColumn } from './DataTable';
+import type { SectionFrame } from './ReportSection';
 import { IssueStatusBadge, IssueTimeline } from './IssueViews';
 import { reportsApi } from '../api/reports';
 import { formatDateTime, hcmToday } from '../lib/format';
@@ -52,7 +53,13 @@ const MAX_BYTES = 10 * 1024 * 1024;
  * authority: it re-checks every rule, and refuses a request that skipped the
  * form entirely.
  */
-export function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function NewIssueModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (issue: Issue) => void;
+}) {
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [areaCategory, setAreaCategory] = useState<IssueAreaCategory>('ROOM');
@@ -81,11 +88,11 @@ export function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onC
         locationDetail: locationDetail || undefined,
         photo: file ?? undefined,
       }),
-    onSuccess: () => {
+    onSuccess: ({ issue }) => {
       void queryClient.invalidateQueries({ queryKey: ['issues'] });
       clearFile();
       onClose();
-      onCreated();
+      onCreated(issue);
     },
   });
 
@@ -338,10 +345,10 @@ export function IncidentRangeSummary({
 
   return (
     <div className="mb-4" data-testid="incident-range-summary">
-      <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {cells.map((c) => (
-          <div key={c.label} className="rounded-xl border border-slate-200 bg-white p-3">
-            <p className="text-[11px] uppercase tracking-wide text-slate-400">{c.label}</p>
+          <div key={c.label} className="rounded-xl border border-slate-300 bg-white p-3 shadow-sm">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{c.label}</p>
             <p className={`text-lg font-semibold ${c.tone ?? 'text-slate-900'}`}>{c.value}</p>
           </div>
         ))}
@@ -453,6 +460,9 @@ export function IncidentTable({
   testId,
   showBranch = false,
   readingMode = false,
+  receptionView = false,
+  compact,
+  section,
   actions,
   emptyTitle,
   emptyMessage,
@@ -471,6 +481,14 @@ export function IncidentTable({
    * at once. Reception keeps the phone-only expander of its other tables.
    */
   readingMode?: boolean;
+  /**
+   * Reception's progress view: where the repair stands, nothing to operate. No
+   * reporter (it is their own branch's report) and no last-update stamp; the
+   * completion time and the status are what the desk is asked about.
+   */
+  receptionView?: boolean;
+  compact?: boolean;
+  section?: SectionFrame;
   actions?: (issue: Issue) => ReactNode;
   emptyTitle: string;
   emptyMessage: string;
@@ -479,85 +497,123 @@ export function IncidentTable({
   error?: unknown;
   onRetry?: () => void;
 }) {
-  const columns: DataColumn<Issue>[] = [
-    {
-      key: 'issue',
-      header: 'Sự cố',
-      className: 'min-w-[12rem] max-w-[22rem]',
-      render: (i) => (
+  const issue: DataColumn<Issue> = {
+    key: 'issue',
+    header: 'Sự cố',
+    className: 'min-w-[12rem] max-w-[22rem]',
+    render: (i) => (
+      <>
+        <span className="line-clamp-2 whitespace-pre-wrap text-slate-800">{i.description}</span>
+        {i.category ? <span className="block text-xs text-slate-500">{issueCategoryLabel(i)}</span> : null}
+      </>
+    ),
+  };
+  const location: DataColumn<Issue> = {
+    key: 'location',
+    header: 'Khu vực',
+    className: 'min-w-[8rem] font-medium text-slate-800',
+    render: (i) => i.locationLabel,
+  };
+  const status: DataColumn<Issue> = {
+    key: 'status',
+    header: 'Trạng thái',
+    className: 'whitespace-nowrap',
+    render: (i) => <IssueStatusBadge status={i.status} needsRework={i.needsRework} />,
+  };
+  const technician: DataColumn<Issue> = {
+    key: 'technician',
+    header: 'Kỹ thuật',
+    secondary: true,
+    className: 'whitespace-nowrap',
+    render: (i) =>
+      i.technicianName ? (
         <>
-          <span className="line-clamp-2 whitespace-pre-wrap text-slate-800">{i.description}</span>
-          {i.category ? <span className="block text-xs text-slate-500">{issueCategoryLabel(i)}</span> : null}
+          {i.technicianName}
+          {i.technicianPhone ? <span className="block text-xs text-slate-400">{i.technicianPhone}</span> : null}
         </>
+      ) : (
+        muted('Chưa tiếp nhận')
       ),
-    },
-    {
-      key: 'location',
-      header: 'Khu vực',
-      className: 'min-w-[8rem] font-medium text-slate-800',
-      render: (i) => i.locationLabel,
-    },
-    {
-      key: 'status',
-      header: 'Trạng thái',
-      className: 'whitespace-nowrap',
-      render: (i) => <IssueStatusBadge status={i.status} needsRework={i.needsRework} />,
-    },
-    {
-      key: 'reporter',
-      header: 'Người báo',
-      secondary: true,
-      className: 'whitespace-nowrap',
-      render: (i) => i.reportedByName ?? muted('—'),
-    },
-    ...(showBranch
-      ? [
-          {
-            key: 'branch',
-            header: 'Chi nhánh',
-            secondary: true,
-            className: 'min-w-[6rem] text-slate-500',
-            render: (i: Issue) => i.branch?.address ?? muted('—'),
-          },
-        ]
-      : []),
-    {
-      key: 'createdAt',
-      header: 'Thời gian',
-      className: 'min-w-[5.5rem] text-slate-500',
-      render: (i) => formatDateTime(i.createdAt),
-    },
-    {
-      key: 'technician',
-      header: 'Kỹ thuật',
-      secondary: true,
-      className: 'whitespace-nowrap',
-      render: (i) =>
-        i.technicianName ? (
-          <>
-            {i.technicianName}
-            {i.technicianPhone ? <span className="block text-xs text-slate-400">{i.technicianPhone}</span> : null}
-          </>
-        ) : (
-          muted('Chưa tiếp nhận')
-        ),
-    },
-    { key: 'result', header: 'Kết quả gần nhất', secondary: true, className: 'min-w-[7rem]', render: latestResult },
-    {
-      key: 'attempts',
-      header: 'Lần sửa',
-      align: 'right',
-      secondary: true,
-      className: 'w-[1%] whitespace-nowrap',
-      render: (i) => String(i.attempts?.length ?? 0),
-    },
-    {
-      key: 'updatedAt',
-      header: 'Cập nhật',
-      className: 'min-w-[5.5rem] text-slate-500',
-      render: (i) => formatDateTime(i.updatedAt),
-    },
-  ];
+  };
+  const attempts: DataColumn<Issue> = {
+    key: 'attempts',
+    header: 'Lần sửa',
+    align: 'right',
+    secondary: true,
+    className: 'w-[1%] whitespace-nowrap',
+    render: (i) => String(i.attempts?.length ?? 0),
+  };
+
+  /*
+    Eight columns at desk width: the free-text column is a little narrower than
+    the Admin's and the technician and "Lần sửa" headers may wrap, so "Trạng thái"
+    — the answer the desk is asked for — stays on screen instead of scrolled off.
+  */
+  const columns: DataColumn<Issue>[] = receptionView
+    ? [
+        {
+          key: 'stt',
+          header: 'STT',
+          className: 'w-[1%] whitespace-nowrap text-slate-400',
+          render: (_i, index) => index + 1,
+        },
+        { ...issue, className: 'min-w-[10rem] max-w-[20rem]' },
+        { ...location, className: 'min-w-[7rem] font-medium text-slate-800' },
+        {
+          key: 'createdAt',
+          header: 'Thời gian báo cáo',
+          className: 'min-w-[5.5rem] text-slate-500',
+          render: (i) => formatDateTime(i.createdAt),
+        },
+        { ...technician, className: 'min-w-[6rem]' },
+        {
+          key: 'completedAt',
+          header: 'Thời gian hoàn thành',
+          secondary: true,
+          className: 'min-w-[5.5rem] text-slate-500',
+          render: (i) => formatDateTime(i.completedAt),
+        },
+        { ...attempts, className: 'w-[1%]' },
+        status,
+      ]
+    : [
+        issue,
+        location,
+        status,
+        {
+          key: 'reporter',
+          header: 'Người báo',
+          secondary: true,
+          className: 'whitespace-nowrap',
+          render: (i) => i.reportedByName ?? muted('—'),
+        },
+        ...(showBranch
+          ? [
+              {
+                key: 'branch',
+                header: 'Chi nhánh',
+                secondary: true,
+                className: 'min-w-[6rem] text-slate-500',
+                render: (i: Issue) => i.branch?.address ?? muted('—'),
+              },
+            ]
+          : []),
+        {
+          key: 'createdAt',
+          header: 'Thời gian',
+          className: 'min-w-[5.5rem] text-slate-500',
+          render: (i) => formatDateTime(i.createdAt),
+        },
+        technician,
+        { key: 'result', header: 'Kết quả gần nhất', secondary: true, className: 'min-w-[7rem]', render: latestResult },
+        attempts,
+        {
+          key: 'updatedAt',
+          header: 'Cập nhật',
+          className: 'min-w-[5.5rem] text-slate-500',
+          render: (i) => formatDateTime(i.updatedAt),
+        },
+      ];
 
   return (
     <DataTable
@@ -571,6 +627,8 @@ export function IncidentTable({
       isError={isError}
       error={error}
       onRetry={onRetry}
+      compact={compact}
+      section={section}
       emptyTitle={emptyTitle}
       emptyMessage={emptyMessage}
       actions={actions}

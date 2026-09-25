@@ -63,17 +63,16 @@ export const BOOKING_DEPARTMENT_NAV: NavItem[] = [
 /**
  * Receptionist creates externally, uploads proof, then tracks the verdict.
  *
- * FIVE ENTRIES CAME OUT, AND NO SCREEN OR RECORD WENT WITH THEM.
+ * SIX ENTRIES CAME OUT, AND NO SCREEN OR RECORD WENT WITH THEM.
  *
- * "Cần tạo lại", "Đã xác nhận đúng" and "Lịch sử" are no longer on reception's
- * menu; their routes still exist, so a notification or booking link that
- * points there still opens. "Báo cáo sự cố" is a category of "Báo cáo vấn đề"
- * now (same form, same incident system), and "Bàn giao ca" has no screen — its
- * history and API are untouched.
+ * "Chờ Admin kiểm tra", "Cần tạo lại", "Đã xác nhận đúng" and "Lịch sử" are no
+ * longer on reception's menu; their routes still exist, so a notification or
+ * booking link that points there still opens. "Báo cáo sự cố" is a category of
+ * "Báo cáo vấn đề" now (same form, same incident system), and "Bàn giao ca" has
+ * no screen — its history and API are untouched.
  */
 export const RECEPTIONIST_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
-  { to: '/app/pending-review', label: 'Chờ Admin kiểm tra', icon: ScanSearch },
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
   { to: '/app/chat', label: 'Chat box', icon: MessagesSquare },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },

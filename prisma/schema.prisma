@@ -542,7 +542,8 @@ model User {
   repairAttempts           TechnicalRepairAttempt[]      @relation("AttemptTechnician")
   operationalReports       ReceptionOperationalReport[]  @relation("OperationalReportCreatedBy")
   operationalReportsVoided ReceptionOperationalReport[]  @relation("OperationalReportVoidedBy")
-  guestRequestsAccepted    GuestRequestReport[]          @relation("GuestRequestAcceptedBy")
+  guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
+  complaintsCompleted      CustomerComplaintReport[]     @relation("ComplaintCompletedBy")
   operationalReportAudits  ReceptionReportAudit[]        @relation("ReportAuditActor")
 
   @@index([branchId])
@@ -2073,9 +2074,11 @@ model ReceptionShiftSession {
   handoverNotes         ShiftHandoverNote[]          @relation("HandoverNoteSession")
   /// "Báo cáo vấn đề" — everything the desk recorded during this shift.
   operationalReports    ReceptionOperationalReport[] @relation("OperationalReportSession")
-  /// Guest requests ACCEPTED during this session, which is usually a different
+  /// Guest requests COMPLETED during this session, which is usually a different
   /// shift from the one that created them.
-  guestRequestsAccepted GuestRequestReport[]         @relation("GuestRequestAcceptedSession")
+  guestRequestsCompleted GuestRequestReport[]        @relation("GuestRequestCompletedSession")
+  /// Service-quality reports COMPLETED during this session — same reasoning.
+  complaintsCompleted   CustomerComplaintReport[]    @relation("ComplaintCompletedSession")
   reportAudits          ReceptionReportAudit[]       @relation("ReportAuditSession")
 
   /// "Is this person checked in?" — the query every protected request makes.
@@ -2439,9 +2442,11 @@ model ReceptionPayment {
   /// Mã EZ — the PMS reference, as typed. Free text: it is a foreign system's
   /// identifier and this application must not pretend to validate it.
   ezCode     String?
-  /// Nguồn — where the booking came from, as typed.
+  /// Nguồn — where the booking came from. New entries are one of the service's
+  /// `PAYMENT_SOURCES`; older rows keep whatever was typed, unrewritten.
   source     String?
   guestName  String?
+  /// Số phòng — no longer asked for by reception; kept for the Admin.
   roomNumber String?
 
   method     ReceptionPaymentMethod
@@ -2460,8 +2465,11 @@ model ReceptionPayment {
   @@index([method])
 }
 
-/// "VẤN ĐỀ KHÁCH YÊU CẦU" — something left with the desk, and who later dealt
-/// with it.
+/// "VẤN ĐỀ KHÁCH YÊU CẦU THỰC HIỆN" — something left with the desk, and who
+/// later dealt with it, and how.
+///
+/// A request is "Đã tiếp nhận" from the moment it is recorded (the report's own
+/// creation stamp) and "Đã hoàn thành" once the completion event below is set.
 ///
 /// TWO ACTORS, TWO SETS OF COLUMNS, NEVER ONE. The person who takes a bag at
 /// 10:05 on Ca A and the person who hands it back at 14:02 on Ca B are two
@@ -2473,30 +2481,42 @@ model GuestRequestReport {
   id       String @id @default(cuid())
   reportId String @unique
 
-  /// Ký gửi — what was left: "Balo", "Hành lý", "Vật dụng khác"… Free text
-  /// rather than an enum: the three named in the specification are examples, and
-  /// a closed list would force a real item into "khác" and lose what it was.
-  itemType  String
-  guestName String
-  note      String?
+  /// Ký gửi — LEGACY. What was left ("Balo", "Hành lý"…), asked for until the
+  /// entry form was reduced to name, Mã EZ and content. Null on every request
+  /// recorded since; kept, never rewritten, on the ones recorded before.
+  itemType   String?
+  guestName  String
+  /// Mã EZ — the PMS reference, as typed, like the payment's.
+  ezCode     String?
+  /// Số phòng — LEGACY, like `itemType`: no longer asked for.
+  roomNumber String?
+  /// Nội dung — what the guest asked for. Required on every request recorded
+  /// under the current form; optional on older ones, where `itemType` said it.
+  note       String?
 
-  /// The acceptance event. All null until somebody accepts it, and all written
-  /// together in one update — an accepted request always says who, when and on
-  /// which shift.
-  acceptedByUserId       Int?
-  acceptedByNameSnapshot String?
-  acceptedAt             DateTime?
-  acceptedShiftSessionId String?
-  acceptedShiftType      ShiftType?
+  /// The completion event. All null until somebody completes it, and all written
+  /// together in one update — a completed request always says who, when, on
+  /// which shift and how it was handled.
+  ///
+  /// THE COLUMNS KEEP THEIR V3 NAMES (`accepted…`). In V3 the second actor was
+  /// called "tiếp nhận"; V4 uses that word for the moment a request is recorded,
+  /// so the fields were renamed here without rewriting the table.
+  completedByUserId       Int?       @map("acceptedByUserId")
+  completedByNameSnapshot String?    @map("acceptedByNameSnapshot")
+  completedAt             DateTime?  @map("acceptedAt")
+  completedShiftSessionId String?    @map("acceptedShiftSessionId")
+  completedShiftType      ShiftType? @map("acceptedShiftType")
+  /// Cách xử lý (nếu có) — optional, and never set without the completion event.
+  resolution              String?
 
-  report          ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  acceptedBy      User?                      @relation("GuestRequestAcceptedBy", fields: [acceptedByUserId], references: [id])
-  acceptedSession ReceptionShiftSession?     @relation("GuestRequestAcceptedSession", fields: [acceptedShiftSessionId], references: [id], onDelete: SetNull)
+  report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  completedBy      User?                      @relation("GuestRequestCompletedBy", fields: [completedByUserId], references: [id])
+  completedSession ReceptionShiftSession?     @relation("GuestRequestCompletedSession", fields: [completedShiftSessionId], references: [id], onDelete: SetNull)
 
   /// "What is still outstanding?" — the open-requests query.
-  @@index([acceptedAt])
-  @@index([acceptedByUserId])
-  @@index([acceptedShiftSessionId])
+  @@index([completedAt])
+  @@index([completedByUserId])
+  @@index([completedShiftSessionId])
 }
 
 /// "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ" — a POINTER, and nothing else.
@@ -2525,24 +2545,43 @@ model FacilityIssueReport {
   @@index([issueId])
 }
 
-/// "KHÁCH HÀNG COMPLAIN" — three fields, and no lifecycle.
+/// "VẤN ĐỀ VỀ CHẤT LƯỢNG VÀ DỊCH VỤ" — what the guest raised, and how the desk
+/// dealt with it.
 ///
-/// NO PRIORITY, NO SEVERITY, NO STATUS. Those were considered and explicitly
-/// excluded: this is an operational record for the Admin and for whatever
-/// follow-up happens outside this system, not a ticket queue. Adding a status
-/// would create a workflow with no worker and a "chưa xử lý" count nobody owns.
+/// THE SAME TWO-STATE LIFECYCLE AS A GUEST REQUEST, and nothing more: "Đã tiếp
+/// nhận" from the moment it is recorded, "Đã hoàn thành" once the completion
+/// event below is set. No priority, no severity, no assignee — the desk closes
+/// what the desk opened, and the completion keeps its own actor, shift and time
+/// beside the creator's, never over them.
 model CustomerComplaintReport {
   id       String @id @default(cuid())
   reportId String @unique
 
   guestName   String
-  /// Số phòng / Khác — a room number, or wherever it happened, as typed.
-  location    String
+  /// Mã EZ — the PMS reference, as typed.
+  ezCode      String?
+  /// Số phòng / Khác — LEGACY. No longer asked for; kept on older reports.
+  location    String?
   /// Mô tả — the complaint in the guest's terms. Required: a complaint with no
   /// description records only that somebody was unhappy.
   description String
 
-  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  /// The completion event, written together in one update by the server.
+  completedByUserId       Int?
+  completedByNameSnapshot String?
+  completedAt             DateTime?
+  completedShiftSessionId String?
+  completedShiftType      ShiftType?
+  /// Hướng xử lý (nếu có) — optional, set only with the completion event.
+  resolution              String?
+
+  report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  completedBy      User?                      @relation("ComplaintCompletedBy", fields: [completedByUserId], references: [id])
+  completedSession ReceptionShiftSession?     @relation("ComplaintCompletedSession", fields: [completedShiftSessionId], references: [id], onDelete: SetNull)
+
+  @@index([completedAt])
+  @@index([completedByUserId])
+  @@index([completedShiftSessionId])
 }
 
 /// "DỊCH VỤ PHÒNG" — five subtypes in one table.
@@ -2560,15 +2599,21 @@ model RoomServiceReport {
 
   serviceType   RoomServiceType
   guestName     String
-  /// SĐT — optional, and only asked for on "Bán phòng".
+  /// Mã EZ — the PMS reference, as typed. Asked for on every subtype.
+  ezCode        String?
+  /// SĐT — LEGACY ("Bán phòng" asked for it once). Kept on older rows.
   phone         String?
+  /// Số phòng — LEGACY, no longer asked for. Kept on older rows.
   roomNumber    String?
   /// Hạng phòng — "Bán phòng".
   roomClass     String?
-  /// "Upgrade": từ hạng phòng → lên hạng phòng.
+  /// "Upgrade": từ hạng phòng → tới hạng phòng.
   fromRoomClass String?
   toRoomClass   String?
-  /// Loại hình dịch vụ — "Dịch vụ khác" only.
+  /// Số đêm — "Bán phòng" and "Upgrade", a whole number of nights, at least 1.
+  /// Null on the other subtypes and on rows recorded before it was asked for.
+  nights        Int?
+  /// Loại hình dịch vụ — LEGACY ("Dịch vụ khác" asked for it once).
   serviceName   String?
   /// Giá tiền, whole đồng, non-negative.
   price         Int

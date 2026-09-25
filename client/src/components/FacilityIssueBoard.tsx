@@ -12,28 +12,26 @@
  * reported — exactly "tồn đọng hiện tại", the existing semantics for "still
  * needs doing", not a rule invented for this screen.
  *
+ * PLUS THIS SHIFT'S OWN INCIDENTS, EVEN ONCE FIXED. An incident this shift
+ * recorded stays on the board after the technician completes it, read live
+ * through the journal row, so "Thời gian hoàn thành" is something the desk can
+ * actually see rather than a column that is empty by definition.
+ *
  * NO SECOND INCIDENT SYSTEM. This renders `HotelIssue` rows through the same
  * `IssueStatusBadge` / `IssueTimeline` the rest of the app uses; nothing here
  * stores a status, an area or a technician of its own.
  *
- * REPORTING A NEW FAULT HAPPENS HERE NOW, through the SAME dialog the old
- * standalone "Báo cáo sự cố" screen used — `NewIssueModal`, in
- * IncidentReporting. Reception used to have two sidebar entries for one job:
- * report a fault in one place, watch it in another. There is one entry now, and
- * exactly one issue form, one issue API and one issue model behind it.
- *
- * THE JOURNAL ACTION IS SECONDARY, ON PURPOSE. Recording that an EXISTING
- * incident is part of this shift's journal — for the official report — is one
- * quiet button per row, not the page's primary interaction, and it
- * never asks the receptionist to identify the incident: they are looking at it.
+ * REPORTING A NEW FAULT HAPPENS HERE, through the SAME dialog the old standalone
+ * "Báo cáo sự cố" screen used — `NewIssueModal`, in IncidentReporting — and the
+ * incident is then recorded in this shift's journal in the same step. Reception
+ * sees progress here and operates nothing: there is no per-row action.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { ClipboardCheck, Wrench } from 'lucide-react';
-import { issuesApi } from '../api/issues';
+import { issuesApi, type Issue } from '../api/issues';
 import { reportsApi, type OperationalReport } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
-import { RowAction } from './DataTable';
 import { IncidentTable, NewIssueModal } from './IncidentReporting';
+import type { SectionFrame } from './ReportSection';
 
 export function FacilityIssueBoard({
   currentShiftFacilityReports,
@@ -41,14 +39,20 @@ export function FacilityIssueBoard({
   onToast,
   reportOpen,
   onCloseReport,
+  title = 'Sự cố đang xử lý',
+  compact,
+  section,
 }: {
-  /** This shift's own FACILITY_ISSUE journal rows — decides "Đã thêm" per row. */
+  /** This shift's own FACILITY_ISSUE journal rows. */
   currentShiftFacilityReports: OperationalReport[];
   onLogged: () => void | Promise<void>;
   onToast: (message: string) => void;
   /** "+ Báo cáo sự cố", owned by the category header above this board. */
   reportOpen: boolean;
   onCloseReport: () => void;
+  title?: string;
+  compact?: boolean;
+  section?: SectionFrame;
 }) {
   const issues = useQuery({
     queryKey: ['reception', 'facility-board', 'outstanding'],
@@ -59,63 +63,56 @@ export function FacilityIssueBoard({
     refetchInterval: 30_000,
   });
 
-  const loggedIssueIds = new Set(
-    currentShiftFacilityReports.filter((r) => !r.voided).map((r) => r.facility?.issueId),
-  );
-
   const logToJournal = useMutation({
     mutationFn: (issueId: string) =>
       reportsApi.create({ category: 'FACILITY_ISSUE', facility: { issueId } }),
     onSuccess: async () => {
       await onLogged();
-      onToast('Đã thêm vào nhật ký ca.');
+      onToast('Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.');
     },
-    onError: (e) => onToast(toUserMessage(e)),
+    // The incident itself exists either way; only the journal entry is missing.
+    onError: (e) =>
+      onToast(`Đã gửi báo cáo sự cố, nhưng chưa ghi được vào nhật ký ca: ${toUserMessage(e)}`),
   });
 
-  const rows = issues.data?.issues ?? [];
+  const outstanding = issues.data?.issues ?? [];
+  const seen = new Set(outstanding.map((i) => i.id));
+  const loggedThisShift: Issue[] = [];
+  for (const r of currentShiftFacilityReports) {
+    const issue = r.facility?.issue;
+    if (r.voided || !issue || seen.has(issue.id)) continue;
+    seen.add(issue.id);
+    loggedThisShift.push(issue);
+  }
+  const rows = [...outstanding, ...loggedThisShift];
 
   return (
     <>
       {reportOpen ? (
         <NewIssueModal
           onClose={onCloseReport}
-          onCreated={() => {
+          onCreated={(issue) => {
             // The board reads its own query, which `NewIssueModal` does not know
             // about — it invalidates `['issues']`. Refetch so the incident the
             // receptionist just reported is on screen before they look for it.
             void issues.refetch();
-            onToast('Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.');
+            logToJournal.mutate(issue.id);
           }}
         />
       ) : null}
       <IncidentTable
         testId="facility-board"
-        title="Sự cố đang xử lý"
+        title={title}
         rows={rows}
+        receptionView
+        compact={compact}
+        section={section}
         isLoading={issues.isLoading}
         isError={issues.isError}
         error={issues.error}
         onRetry={() => void issues.refetch()}
         emptyTitle="Không có sự cố nào đang chờ xử lý"
         emptyMessage="Mọi sự cố cơ sở vật chất của chi nhánh đã được xử lý xong."
-        actions={(issue) =>
-          loggedIssueIds.has(issue.id) ? (
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
-              <ClipboardCheck className="h-3.5 w-3.5" aria-hidden="true" />
-              Đã thêm
-            </span>
-          ) : (
-            <RowAction
-              onClick={() => logToJournal.mutate(issue.id)}
-              disabled={logToJournal.isPending}
-              testId={`facility-log-${issue.id}`}
-            >
-              <Wrench className="h-3 w-3" aria-hidden="true" />
-              Thêm vào nhật ký ca
-            </RowAction>
-          )
-        }
       />
     </>
   );

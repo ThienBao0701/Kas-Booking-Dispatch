@@ -149,7 +149,7 @@ describe('the end-of-shift preview', () => {
     await checkIn(letan, 'A', 'Nguyễn Văn A');
     await letan.post('/api/reception/reports').send({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'K', location: '101', description: 'ồn' },
+      complaint: { guestName: 'K', description: 'ồn' },
     });
 
     setClock({ now: () => hcm('2026-09-19', '13:50') });
@@ -277,7 +277,7 @@ describe('đổi ca still keeps the incoming shift’s planned end', () => {
     const first = await checkIn(letan, 'A', 'Nguyễn Văn A');
     const before = await letan.post('/api/reception/reports').send({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'K1', location: '101', description: 'trước' },
+      complaint: { guestName: 'K1', description: 'trước' },
     });
     expect(before.status).toBe(201);
 
@@ -291,7 +291,7 @@ describe('đổi ca still keeps the incoming shift’s planned end', () => {
 
     const after = await letan.post('/api/reception/reports').send({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'K2', location: '102', description: 'sau' },
+      complaint: { guestName: 'K2', description: 'sau' },
     });
     expect(after.status).toBe(201);
 

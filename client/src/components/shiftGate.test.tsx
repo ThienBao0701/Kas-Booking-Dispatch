@@ -170,7 +170,7 @@ describe('the shift panel appears only when the server says so', () => {
     renderApp('/app/reports');
 
     // The page itself renders, and no dialog interrupts it.
-    expect(await screen.findByTestId('report-landing')).toBeInTheDocument();
+    expect(await screen.findByTestId('report-overview')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
@@ -303,7 +303,7 @@ describe('the check-in prompt is required at the start and deferrable at handove
     expect(banner).toHaveTextContent('Ca làm việc đã kết thúc');
 
     // And the page underneath is usable again.
-    expect(screen.getByTestId('report-landing')).toBeInTheDocument();
+    expect(screen.getByTestId('report-overview')).toBeInTheDocument();
 
     // The banner reopens it on demand.
     await user.click(screen.getByTestId('shift-reopen'));

@@ -38,6 +38,46 @@ function ShiftContext({ row }: { row: OperationalReport }) {
   );
 }
 
+/**
+ * A field the current form no longer asks for, shown ONLY on a row that has it.
+ *
+ * Older records carry a room number, a "Ký gửi", a phone… and the Admin reading
+ * one must still see exactly what was recorded. A current row has none of
+ * these, and an empty "Số phòng: —" on every one of them would suggest a field
+ * that is still expected.
+ */
+function Legacy({ label, value }: { label: string; value: string | null | undefined }) {
+  if (!value?.trim()) return null;
+  return <Field label={`${label} (dữ liệu cũ)`}>{value}</Field>;
+}
+
+/** The completion event of a request or a service-quality report. */
+function Completion({
+  detail,
+  handlingLabel,
+}: {
+  detail: {
+    completed: boolean;
+    completedByName: string | null;
+    completedShiftName: string | null;
+    completedAt: string | null;
+    resolution: string | null;
+  };
+  handlingLabel: string;
+}) {
+  return (
+    <>
+      <Field label="Trạng thái">{detail.completed ? 'Đã hoàn thành' : 'Đã tiếp nhận'}</Field>
+      <Field label="Người hoàn thành">{detail.completedByName ?? 'Chưa hoàn thành'}</Field>
+      <Field label="Ca hoàn thành">{detail.completedShiftName}</Field>
+      <Field label="Thời gian hoàn thành">{detail.completedAt ? formatDateTime(detail.completedAt) : '—'}</Field>
+      <div className="sm:col-span-2 lg:col-span-4">
+        <Field label={handlingLabel}>{detail.resolution}</Field>
+      </div>
+    </>
+  );
+}
+
 const ISSUE_STATUS_LABEL: Record<string, string> = {
   NEW: 'Chờ tiếp nhận',
   IN_PROGRESS: 'Đang sửa',
@@ -73,35 +113,34 @@ export function OperationalRecordDetail({
 
         {row.payment ? (
           <>
+            <Field label="Tên khách">{row.payment.guestName}</Field>
             <Field label="Mã EZ">{row.payment.ezCode}</Field>
             <Field label="Nguồn">{row.payment.source}</Field>
-            <Field label="Tên khách">{row.payment.guestName}</Field>
-            <Field label="Số phòng">{row.payment.roomNumber}</Field>
             <Field label="Phương thức">{row.payment.methodLabel}</Field>
             <Field label="Số tiền">{formatVnd(row.payment.amount)}</Field>
             <Field label="Công nợ">{formatVnd(row.payment.receivable)}</Field>
             <Field label="Chi tiền">{formatVnd(row.payment.expense)}</Field>
-            <Field label="Ghi chú">{row.payment.note}</Field>
+            {/* Recorded before the form stopped asking for them; kept, not shown empty. */}
+            <Legacy label="Số phòng" value={row.payment.roomNumber} />
+            <Legacy label="Ghi chú" value={row.payment.note} />
           </>
         ) : null}
 
         {row.guestRequest ? (
           <>
-            <Field label="Ký gửi">{row.guestRequest.itemType}</Field>
             <Field label="Tên khách">{row.guestRequest.guestName}</Field>
-            <Field label="Ghi chú">{row.guestRequest.note}</Field>
+            <Field label="Mã EZ">{row.guestRequest.ezCode}</Field>
+            <div className="sm:col-span-2">
+              <Field label="Nội dung">{row.guestRequest.note ?? row.guestRequest.content}</Field>
+            </div>
+            <Legacy label="Ký gửi" value={row.guestRequest.itemType} />
+            <Legacy label="Số phòng" value={row.guestRequest.roomNumber} />
             {/*
-              THE ACCEPTANCE IS ITS OWN SET OF FIELDS. The creator's row above is
+              THE COMPLETION IS ITS OWN SET OF FIELDS. The creator's row above is
               never overwritten by it — a bag taken on Ca A and returned on Ca B
               has two names on it, and the first is the answer to "who took it?".
             */}
-            <Field label="Người tiếp nhận">
-              {row.guestRequest.acceptedByName ?? 'Chưa tiếp nhận'}
-            </Field>
-            <Field label="Ca tiếp nhận">{row.guestRequest.acceptedShiftName}</Field>
-            <Field label="Thời gian tiếp nhận">
-              {row.guestRequest.acceptedAt ? formatDateTime(row.guestRequest.acceptedAt) : '—'}
-            </Field>
+            <Completion detail={row.guestRequest} handlingLabel="Cách xử lý (nếu có)" />
           </>
         ) : null}
 
@@ -127,10 +166,12 @@ export function OperationalRecordDetail({
         {row.complaint ? (
           <>
             <Field label="Tên khách">{row.complaint.guestName}</Field>
-            <Field label="Phòng / Khác">{row.complaint.location}</Field>
+            <Field label="Mã EZ">{row.complaint.ezCode}</Field>
+            <Legacy label="Phòng / Khác" value={row.complaint.location} />
             <div className="sm:col-span-2 lg:col-span-4">
               <Field label="Mô tả">{row.complaint.description}</Field>
             </div>
+            <Completion detail={row.complaint} handlingLabel="Hướng xử lý (nếu có)" />
           </>
         ) : null}
 
@@ -138,14 +179,24 @@ export function OperationalRecordDetail({
           <>
             <Field label="Loại dịch vụ">{row.roomService.serviceTypeLabel}</Field>
             <Field label="Tên khách">{row.roomService.guestName}</Field>
-            <Field label="SĐT">{row.roomService.phone}</Field>
-            <Field label="Phòng">{row.roomService.roomNumber}</Field>
-            <Field label="Hạng phòng">{row.roomService.roomClass}</Field>
-            <Field label="Từ hạng phòng">{row.roomService.fromRoomClass}</Field>
-            <Field label="Lên hạng phòng">{row.roomService.toRoomClass}</Field>
-            <Field label="Loại hình dịch vụ">{row.roomService.serviceName}</Field>
+            <Field label="Mã EZ">{row.roomService.ezCode}</Field>
+            {row.roomService.serviceType === 'ROOM_SALE' || row.roomService.roomClass ? (
+              <Field label="Hạng phòng">{row.roomService.roomClass}</Field>
+            ) : null}
+            {row.roomService.serviceType === 'UPGRADE' || row.roomService.fromRoomClass ? (
+              <>
+                <Field label="Từ hạng phòng">{row.roomService.fromRoomClass}</Field>
+                <Field label="Tới hạng phòng">{row.roomService.toRoomClass}</Field>
+              </>
+            ) : null}
+            {row.roomService.serviceType === 'ROOM_SALE' || row.roomService.serviceType === 'UPGRADE' ? (
+              <Field label="Số đêm">{row.roomService.nights ? String(row.roomService.nights) : null}</Field>
+            ) : null}
             <Field label="Giá tiền">{formatVnd(row.roomService.price)}</Field>
             <Field label="Ghi chú">{row.roomService.note}</Field>
+            <Legacy label="SĐT" value={row.roomService.phone} />
+            <Legacy label="Số phòng" value={row.roomService.roomNumber} />
+            <Legacy label="Loại hình dịch vụ" value={row.roomService.serviceName} />
           </>
         ) : null}
       </dl>

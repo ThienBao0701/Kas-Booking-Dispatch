@@ -3,58 +3,48 @@
  *
  * WHAT THIS SCREEN IS
  *
- * A clean LANDING with one action, "+ Báo cáo vấn đề", which offers the five
- * categories; then one category at a time. Each category leads with the records
- * it has produced THIS SHIFT and offers exactly one way to add to them — a
- * "+ Thêm …" dialog — with the shift-wide journal further down as a secondary,
- * collapsed-by-default cross-category view.
+ * An OVERVIEW first: the shift's five categories as five compact sections, in
+ * the order the categories are always listed. ONE HEADER on every screen — the
+ * title, "Làm mới", and "Tổng ▾" with the open category's one primary action
+ * beside it — so switching category never goes back through the overview. Each
+ * category's own screen leads with the records it has produced THIS SHIFT, with
+ * the shift-wide journal further down as a collapsed secondary view.
  *
- * LIST FIRST, FORM SECOND. The screen used to open on a payment form, so it
- * answered "what would you like to add?" before anyone had asked. What a
- * receptionist arrives wanting to know is what is already recorded; adding is
- * the second thing, and it now closes itself when it is done.
+ * THE OVERVIEW RE-USES EACH CATEGORY'S OWN TABLE. Nothing on it is a second
+ * implementation: the payment figures are the server's drawer, the Request,
+ * incident and service-quality tables are the category tables in their compact
+ * form, and "Dịch vụ phòng, KPI" is reduced to its two summary figures.
  *
  * "Sự cố vật chất đang xử lý" is a live read of the existing Technical
  * workflow. Its "+ Báo cáo sự cố" opens the SAME dialog the standalone "Báo cáo
  * sự cố" menu entry used to open — one issue form, one issue API, one issue
- * model. That menu entry is gone; this category replaced it.
+ * model.
  *
- * WHY THE PRIMARY TABLE AND NOT JUST THE JOURNAL
- *
- * The journal answers "what happened this shift, across every category?". It
- * does not answer "did the row I just typed look right?" — which is the
- * question somebody has while they are still at the keyboard. Making them
- * scroll a mixed chronological list to check the payment they just entered is
- * the difference between a ledger and a scratchpad.
- *
- * THE CONTEXT IS SHOWN, NEVER ASKED FOR. The banner says which branch, which
- * shift and which receptionist every record is about to be stamped with — those
- * come from the open session on the server, and there is no field anywhere on
- * this page that could change them.
+ * THE CONTEXT IS NEVER ASKED FOR. Branch, shift and receptionist are stamped on
+ * every record by the server from the open session; no field on this page can
+ * change them, and the page no longer repeats them in a banner.
  *
  * ONE ROUTE, TWO AUDIENCES. An Admin lands on the branch drill-down instead; see
  * `AdminOperationalReportsPage`. They are different screens for different
  * questions — "what am I recording now?" versus "what did that branch record?" —
  * but they share one menu entry because operators call both "Báo cáo vấn đề".
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Plus, RefreshCw } from 'lucide-react';
 import {
   reportsApi,
   type OperationalReport,
   type ReportCategory,
-  type ReportOptions,
   type RoomServiceType,
 } from '../api/receptionReports';
-import { useAuth } from '../auth/AuthProvider';
 import { useIsReception, useShiftSession } from '../hooks/useShiftSession';
-import { PageHeader, QueryState } from '../components/PageState';
+import { QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
-import { PaymentLedger } from '../components/PaymentLedger';
+import { PaymentLedger, PaymentOverview } from '../components/PaymentLedger';
 import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import {
   GuestRequestForm,
@@ -64,15 +54,20 @@ import {
 import { FacilityIssueBoard } from '../components/FacilityIssueBoard';
 import {
   GuestRequestTable,
+  RoomServiceOverview,
   RoomServiceTable,
-  RoomServiceTotals,
   ServiceQualityTable,
 } from '../components/OperationalTables';
 import { OperationalRecordDetail } from '../components/OperationalRecord';
 import { AdminOperationalReportsPage } from './AdminOperationalReportsPage';
 import { formatDateTime } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
-import { CATEGORY_FALLBACK_LABELS, CATEGORY_ORDER } from '../lib/reportCategories';
+import {
+  CATEGORY_FALLBACK_LABELS,
+  CATEGORY_MARKERS,
+  CATEGORY_ORDER,
+  RECEPTION_CATEGORY_TITLES,
+} from '../lib/reportCategories';
 
 export function OperationalReportsPage() {
   const isReception = useIsReception();
@@ -83,14 +78,11 @@ export function OperationalReportsPage() {
 
 function ReceptionJournal() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const { data: shift } = useShiftSession();
   /*
-    NULL IS THE LANDING, and it is where the screen opens: one action, "+ Báo
-    cáo vấn đề", which offers the five categories. The screen used to land on a
-    payment form, then on five cards — both answered a question nobody had
-    asked yet. Every category then leads with WHAT IS ALREADY RECORDED rather
-    than with an empty form.
+    NULL IS THE OVERVIEW, and it is where the screen opens. A category is
+    chosen from the "Tổng" menu; its screen leads with WHAT IS ALREADY RECORDED
+    rather than with an empty form.
   */
   const [searchParams] = useSearchParams();
   const [category, setCategory] = useState<ReportCategory | null>(() => {
@@ -98,9 +90,6 @@ function ReceptionJournal() {
     const wanted = searchParams.get('category');
     return CATEGORY_ORDER.find((c) => c === wanted) ?? null;
   });
-  /** The category picker, opened by "+ Báo cáo vấn đề" on the landing. */
-  const [picking, setPicking] = useState(false);
-  const [roomServiceType, setRoomServiceType] = useState<RoomServiceType>('ROOM_SALE');
   /** Which category's "+ Thêm" dialog is open. One at a time, by construction. */
   const [adding, setAdding] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -137,6 +126,9 @@ function ReceptionJournal() {
 
   const label = (c: ReportCategory) =>
     options.data?.categories.find((x) => x.code === c)?.label ?? CATEGORY_FALLBACK_LABELS[c];
+  const title = (c: ReportCategory) => RECEPTION_CATEGORY_TITLES[c] ?? label(c);
+  const roomServiceLabel = (t: RoomServiceType) =>
+    options.data?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
 
   const all = list.data?.reports ?? [];
   const byCategory = (c: ReportCategory) => all.filter((r) => r.category === c);
@@ -148,83 +140,88 @@ function ReceptionJournal() {
     canEdit: true,
   };
 
+  /** Straight to a category, from anywhere — never through the overview. */
+  const openCategory = (c: ReportCategory) => {
+    setCategory(c);
+    setAdding(false);
+  };
+  const openOverview = () => {
+    setCategory(null);
+    setAdding(false);
+  };
+
   return (
     <div>
-      <PageHeader
-        title="Báo cáo vấn đề"
-        description="Ghi lại các việc phát sinh trong ca. Mỗi bản ghi tự động gắn chi nhánh, ca và tên lễ tân."
-        actions={
-          <button
-            type="button"
-            onClick={() => void list.refetch()}
-            aria-label="Làm mới"
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-          >
-            <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
-            Làm mới
-          </button>
-        }
+      <ReportHeader
+        category={category}
+        labelOf={title}
+        onPick={openCategory}
+        onOverview={openOverview}
+        refreshing={list.isFetching}
+        onRefresh={() => void list.refetch()}
+        action={category ? { label: ADD_LABELS[category], onClick: () => setAdding(true) } : null}
       />
 
-      {/*
-        WHAT EVERY RECORD IS ABOUT TO BE STAMPED WITH — read-only, from the
-        server. Compact: one line, small type, because this is context to glance
-        at, not the first thing worth the eye's attention on a work screen.
-      */}
-      <div
-        data-testid="journal-context"
-        className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600"
-      >
-        <span className="font-medium text-slate-500">Chi nhánh</span>
-        <span className="font-semibold text-slate-800">{user?.branch?.address ?? '—'}</span>
-        <span className="text-slate-300">|</span>
-        <span className="font-medium text-slate-500">Ca</span>
-        <span className="font-semibold text-slate-800">
-          {shift?.session ? `${shift.session.shiftName} · ${shift.session.shiftWindow}` : '—'}
-        </span>
-        <span className="text-slate-300">|</span>
-        <span className="font-medium text-slate-500">Nhân viên</span>
-        <span className="font-semibold text-slate-800">{shift?.session?.receptionistName ?? '—'}</span>
-      </div>
-
       {category === null ? (
-        <>
-          <ReportLanding onStart={() => setPicking(true)} />
-          {picking ? (
-            <CategoryPicker
-              label={label}
-              countOf={(c) => byCategory(c).length}
-              onClose={() => setPicking(false)}
-              onPick={(c) => {
-                setPicking(false);
-                setCategory(c);
-                setAdding(false);
-              }}
-            />
-          ) : null}
-        </>
+        <section data-testid="report-overview" aria-labelledby="report-overview-heading" className="space-y-4">
+          <div className="flex items-center gap-3">
+            <h2 id="report-overview-heading" className="text-xs font-bold tracking-[0.12em] text-slate-700">
+              TỔNG QUAN
+            </h2>
+            <span aria-hidden="true" className="h-px flex-1 bg-slate-300" />
+          </div>
+          <PaymentOverview title={title('PAYMENT')} section={{ marker: CATEGORY_MARKERS.PAYMENT }} />
+          <GuestRequestTable
+            rows={byCategory('GUEST_REQUEST')}
+            title={title('GUEST_REQUEST')}
+            onChanged={refresh}
+            onToast={setToast}
+            {...tableState}
+            canEdit={false}
+            compact
+            section={{ marker: CATEGORY_MARKERS.GUEST_REQUEST }}
+          />
+          <FacilityIssueBoard
+            currentShiftFacilityReports={byCategory('FACILITY_ISSUE')}
+            title={title('FACILITY_ISSUE')}
+            onLogged={refresh}
+            onToast={setToast}
+            reportOpen={false}
+            onCloseReport={() => undefined}
+            compact
+            section={{ marker: CATEGORY_MARKERS.FACILITY_ISSUE }}
+          />
+          <ServiceQualityTable
+            rows={byCategory('CUSTOMER_COMPLAINT')}
+            title={title('CUSTOMER_COMPLAINT')}
+            onChanged={refresh}
+            onToast={setToast}
+            {...tableState}
+            canEdit={false}
+            compact
+            section={{ marker: CATEGORY_MARKERS.CUSTOMER_COMPLAINT }}
+          />
+          {/* Two figures and nothing else — the detail lives on the category's own screen. */}
+          <RoomServiceOverview
+            rows={byCategory('ROOM_SERVICE')}
+            title={title('ROOM_SERVICE')}
+            marker={CATEGORY_MARKERS.ROOM_SERVICE}
+            isLoading={tableState.isLoading}
+            isError={tableState.isError}
+          />
+        </section>
       ) : (
-        <CategoryShell
-          title={label(category)}
-          description={CATEGORY_HINTS[category]}
-          addLabel={ADD_LABELS[category]}
-          onAdd={() => setAdding(true)}
-          onBack={() => {
-            setCategory(null);
-            setAdding(false);
-          }}
-        >
+        <CategoryShell title={title(category)} description={CATEGORY_HINTS[category]}>
+          {/*
+            THE FORM AND ITS TABLE ARE OUTSIDE THE QUERY STATE for the form's sake.
 
-      {/*
-        THE FORM AND ITS TABLE ARE OUTSIDE THE QUERY STATE for the form's sake.
-
-        Wrapping the whole block made the page unmount whatever was being typed
-        the moment the journal query started — it does, a beat after load,
-        because it is keyed on the shift session id which arrives from its own
-        request. A receptionist who began typing immediately watched the form
-        vanish and come back empty, with a guest in front of them. The list can
-        show a spinner; the box someone is typing into may not.
-      */}
+            Wrapping the whole block made the page unmount whatever was being typed
+            the moment the journal query started — it does, a beat after load,
+            because it is keyed on the shift session id which arrives from its own
+            request. A receptionist who began typing immediately watched the form
+            vanish and come back empty, with a guest in front of them. The list can
+            show a spinner; the box someone is typing into may not.
+          */}
           {category === 'PAYMENT' ? (
             <PaymentLedger
               rows={byCategory('PAYMENT')}
@@ -244,7 +241,6 @@ function ReceptionJournal() {
                   <GuestRequestForm
                     bare
                     onCancel={() => setAdding(false)}
-                    options={options.data}
                     onCreated={async () => {
                       await refresh();
                       setAdding(false);
@@ -270,14 +266,14 @@ function ReceptionJournal() {
           {category === 'CUSTOMER_COMPLAINT' ? (
             <>
               {adding ? (
-                <Modal open title="Báo cáo vấn đề về chất lượng dịch vụ" onClose={() => setAdding(false)}>
+                <Modal open title="Báo cáo vấn đề về chất lượng và dịch vụ" onClose={() => setAdding(false)}>
                   <ServiceQualityForm
                     bare
                     onCancel={() => setAdding(false)}
                     onCreated={async () => {
                       await refresh();
                       setAdding(false);
-                      setToast('Đã ghi nhận vấn đề về chất lượng dịch vụ.');
+                      setToast('Đã ghi nhận vấn đề về chất lượng và dịch vụ.');
                     }}
                   />
                 </Modal>
@@ -289,18 +285,11 @@ function ReceptionJournal() {
           {category === 'ROOM_SERVICE' ? (
             <>
               {adding ? (
-                <Modal
-                  open
-                  title={`Thêm ${(
-                    options.data?.roomServiceTypes.find((t) => t.code === roomServiceType)?.label ??
-                    ROOM_SERVICE_FALLBACK_LABELS[roomServiceType]
-                  ).toLowerCase()}`}
-                  onClose={() => setAdding(false)}
-                >
+                <Modal open title="Thêm dịch vụ" onClose={() => setAdding(false)}>
                   <RoomServiceForm
                     bare
+                    options={options.data}
                     onCancel={() => setAdding(false)}
-                    serviceType={roomServiceType}
                     onCreated={async () => {
                       await refresh();
                       setAdding(false);
@@ -310,36 +299,24 @@ function ReceptionJournal() {
                 </Modal>
               ) : null}
               {/*
-                THE SUBTYPE PICKER STAYS ON THE PAGE, not in the dialog: it
-                chooses which records are being LOOKED at, and only then which
-                one the dialog will add.
+                FIVE SECTIONS, ONE PER SERVICE, stacked — not five tabs. Each holds
+                only its own service's rows; the columns follow the service.
               */}
-              <RoomServiceSubtypes
-                options={options.data}
-                value={roomServiceType}
-                onChange={setRoomServiceType}
-              />
-              <RoomServiceTable
-                rows={byCategory('ROOM_SERVICE').filter((r) => r.roomService?.serviceType === roomServiceType)}
-                serviceType={roomServiceType}
-                serviceLabel={
-                  options.data?.roomServiceTypes.find((t) => t.code === roomServiceType)?.label ??
-                  roomServiceType
-                }
-                onChanged={refresh}
-                onToast={setToast}
-                {...tableState}
-              />
-              {/*
-                THE "KPI" HALF OF "Dịch vụ phòng, KPI" — arithmetic on the rows
-                already on screen (count and revenue per subtype), never a fetched
-                metric. This project has no KPI data source, so none is invented.
-              */}
-              <RoomServiceTotals
-                rows={byCategory('ROOM_SERVICE')}
-                order={ROOM_SERVICE_ORDER}
-                labelOf={(t) => options.data?.roomServiceTypes.find((x) => x.code === t)?.label ?? t}
-              />
+              <div className="space-y-4" data-testid="room-service-groups">
+                {ROOM_SERVICE_ORDER.map((type) => (
+                  <RoomServiceTable
+                    key={type}
+                    rows={byCategory('ROOM_SERVICE').filter((r) => r.roomService?.serviceType === type)}
+                    serviceType={type}
+                    serviceLabel={roomServiceLabel(type)}
+                    onChanged={refresh}
+                    onToast={setToast}
+                    {...tableState}
+                    compact
+                    section={{}}
+                  />
+                ))}
+              </div>
             </>
           ) : null}
 
@@ -367,41 +344,213 @@ function ReceptionJournal() {
 }
 
 /**
- * WHICH SUBTYPE IS BEING LOOKED AT.
+ * THE REPORT HEADER — one component for the overview and all five categories,
+ * so they cannot drift into five slightly different headers.
  *
- * This used to live inside the entry form, which meant choosing what to READ
- * required opening something to WRITE. It is a view control, so it sits with
- * the view; the dialog inherits whatever is selected here.
+ *   Theo dõi tình hình các vấn đề, thanh toán trong ca làm việc
+ *                                                     [ Làm mới ]
+ *   [ Tổng ▾ ]                                 [ + context action ]
+ *
+ * "Tổng" stays on every screen, so switching categories never goes back through
+ * the overview. Only three things vary: which category is open, and the label
+ * and handler of its one primary action (none on the overview).
  */
-function RoomServiceSubtypes({
-  options,
-  value,
-  onChange,
+function ReportHeader({
+  category,
+  labelOf,
+  onPick,
+  onOverview,
+  refreshing,
+  onRefresh,
+  action,
 }: {
-  options?: ReportOptions;
-  value: RoomServiceType;
-  onChange: (t: RoomServiceType) => void;
+  category: ReportCategory | null;
+  labelOf: (c: ReportCategory) => string;
+  onPick: (c: ReportCategory) => void;
+  onOverview: () => void;
+  refreshing: boolean;
+  onRefresh: () => void;
+  action: { label: string; onClick: () => void } | null;
 }) {
-  const labelOf = (t: RoomServiceType) =>
-    options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
   return (
-    <div className="flex flex-wrap gap-1.5" data-testid="room-service-types">
-      {ROOM_SERVICE_ORDER.map((t) => (
-        <button
-          key={t}
-          type="button"
-          onClick={() => onChange(t)}
-          aria-pressed={value === t}
-          data-testid={`room-service-type-${t}`}
-          className={`rounded-lg border px-2.5 py-1.5 text-sm transition-colors ${
-            value === t
-              ? 'border-brand-600 bg-brand-50 font-medium text-brand-700'
-              : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-          }`}
-        >
-          {labelOf(t)}
+    <div className="mb-5" data-testid="report-header">
+      <h1 className="text-xl font-bold leading-snug tracking-tight text-slate-900">
+        Theo dõi tình hình các vấn đề, thanh toán trong ca làm việc
+      </h1>
+      <div className="mt-3 flex justify-end" data-testid="report-header-refresh-row">
+        <Button variant="secondary" onClick={onRefresh} aria-label="Làm mới" className="shadow-sm">
+          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+          Làm mới
+        </Button>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2" data-testid="report-header-nav-row">
+        <TotalMenu current={category} labelOf={labelOf} onPick={onPick} onOverview={onOverview} />
+        {action ? (
+          <Button onClick={action.onClick} data-testid="category-add" className="shadow-sm">
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            {action.label}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "TỔNG ▾" — the category switcher, on every screen.
+ *
+ * A menu button in the WAI-ARIA sense: the arrow keys move between the five
+ * items, Escape closes it and returns focus to the button, and a click outside
+ * closes it. The five items are the five categories, in their fixed order, and
+ * nothing else; the open one is marked.
+ *
+ * ON A CATEGORY'S SCREEN IT IS A SPLIT BUTTON: "Tổng" goes back to the
+ * overview — the only way back, now that there is no "Tất cả danh mục" link —
+ * and the caret opens the menu. On the overview there is nowhere to go back
+ * to, so the whole control opens the menu.
+ */
+function TotalMenu({
+  current,
+  labelOf,
+  onPick,
+  onOverview,
+}: {
+  current: ReportCategory | null;
+  labelOf: (c: ReportCategory) => string;
+  onPick: (c: ReportCategory) => void;
+  onOverview: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    // Focus the open category, or the first one.
+    const index = current ? CATEGORY_ORDER.indexOf(current) : 0;
+    itemRefs.current[index >= 0 ? index : 0]?.focus();
+  }, [open, current]);
+
+  const close = () => {
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const onMenuKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const items = itemRefs.current.filter((el): el is HTMLButtonElement => el !== null);
+    const index = items.findIndex((el) => el === document.activeElement);
+    const focusAt = (i: number) => items[(i + items.length) % items.length]?.focus();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      focusAt(index + 1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      focusAt(index - 1);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      focusAt(0);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      focusAt(items.length - 1);
+    } else if (e.key === 'Tab') {
+      setOpen(false);
+    }
+  };
+
+  const segment =
+    'flex h-10 items-center bg-brand-600 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2';
+  const caret = (
+    <ChevronDown className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`} strokeWidth={2.5} aria-hidden="true" />
+  );
+  const menuButtonProps = {
+    ref: buttonRef,
+    type: 'button' as const,
+    'aria-haspopup': 'menu' as const,
+    'aria-expanded': open,
+    'aria-controls': open ? 'report-total-menu' : undefined,
+    onClick: () => setOpen((o) => !o),
+    onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) => {
+      if (e.key === 'ArrowDown' && !open) {
+        e.preventDefault();
+        setOpen(true);
+      }
+    },
+    'data-testid': 'report-total',
+  };
+
+  return (
+    <div className="relative">
+      {current === null ? (
+        <button {...menuButtonProps} className={`${segment} gap-0 rounded-xl shadow-sm`}>
+          <span className="px-4">Tổng</span>
+          <span className="flex h-full items-center border-l border-white/30 px-2.5">{caret}</span>
         </button>
-      ))}
+      ) : (
+        <div className="inline-flex rounded-xl shadow-sm">
+          <button
+            type="button"
+            onClick={onOverview}
+            aria-label="Tổng — về tổng quan"
+            data-testid="report-total-overview"
+            className={`${segment} rounded-l-xl px-4`}
+          >
+            Tổng
+          </button>
+          <button
+            {...menuButtonProps}
+            aria-label="Chọn danh mục"
+            className={`${segment} rounded-r-xl border-l border-white/30 px-2.5`}
+          >
+            {caret}
+          </button>
+        </div>
+      )}
+
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div
+            id="report-total-menu"
+            role="menu"
+            aria-label="Danh mục báo cáo"
+            data-testid="category-menu"
+            onKeyDown={onMenuKeyDown}
+            className="absolute left-0 z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-300 bg-white p-1 shadow-lg"
+          >
+            <p role="presentation" className="px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Xem chi tiết danh mục
+            </p>
+            {CATEGORY_ORDER.map((c, i) => {
+              const active = current === c;
+              return (
+                <button
+                  key={c}
+                  ref={(el) => {
+                    itemRefs.current[i] = el;
+                  }}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={active}
+                  onClick={() => {
+                    setOpen(false);
+                    onPick(c);
+                  }}
+                  data-testid={`category-${c}`}
+                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-brand-50 hover:text-brand-800 focus:bg-brand-50 focus:text-brand-800 focus:outline-none ${
+                    active ? 'bg-brand-50 font-semibold text-brand-800' : 'font-medium text-slate-700'
+                  }`}
+                >
+                  <span>{labelOf(c)}</span>
+                  {active ? <Check className="h-4 w-4 shrink-0 text-brand-700" aria-hidden="true" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -409,12 +558,13 @@ function RoomServiceSubtypes({
 /** What each category is for, in one line, on its own screen. */
 const CATEGORY_HINTS: Record<ReportCategory, string> = {
   PAYMENT: 'Tiền đầu ca, các giao dịch trong ca và tiền cuối ca.',
-  GUEST_REQUEST: 'Đồ khách ký gửi và các yêu cầu cần bàn giao cho ca sau.',
+  GUEST_REQUEST: 'Yêu cầu của khách cần thực hiện hoặc bàn giao cho ca sau.',
   FACILITY_ISSUE: 'Sự cố cơ sở vật chất đang chờ hoặc đang được kỹ thuật xử lý.',
-  CUSTOMER_COMPLAINT: 'Phản ánh của khách về chất lượng phục vụ.',
+  CUSTOMER_COMPLAINT: 'Phản ánh của khách về chất lượng và dịch vụ.',
   ROOM_SERVICE: 'Bán phòng, upgrade, hút thuốc, giặt ủi và các dịch vụ khác.',
 };
 
+/** The one primary action of each category, in the header's lower-right. */
 const ADD_LABELS: Record<ReportCategory, string> = {
   PAYMENT: 'Thêm giao dịch',
   GUEST_REQUEST: 'Thêm vấn đề',
@@ -425,121 +575,23 @@ const ADD_LABELS: Record<ReportCategory, string> = {
 };
 
 /**
- * THE LANDING — one action, nothing else asked.
- *
- * Opening "Báo cáo vấn đề" used to present five category cards straight away,
- * which is a choice nobody arriving at the screen has made yet. The landing
- * says what the screen is for and offers the one thing to do; the five
- * categories appear when that is pressed.
- */
-function ReportLanding({ onStart }: { onStart: () => void }) {
-  return (
-    <div
-      data-testid="report-landing"
-      className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center"
-    >
-      <p className="text-sm text-slate-600">Ghi nhận các việc phát sinh trong ca của bạn.</p>
-      <Button onClick={onStart} data-testid="report-start">
-        <Plus className="h-4 w-4" aria-hidden="true" />
-        Báo cáo vấn đề
-      </Button>
-    </div>
-  );
-}
-
-/**
- * THE CATEGORY PICKER. Five peers, in a dialog, and nothing else.
- *
- * The count is this shift's own, so a receptionist can see at a glance where
- * they have already recorded something — it is a fact about the rows, never a
- * metric.
- */
-function CategoryPicker({
-  label,
-  countOf,
-  onPick,
-  onClose,
-}: {
-  label: (c: ReportCategory) => string;
-  countOf: (c: ReportCategory) => number;
-  onPick: (c: ReportCategory) => void;
-  onClose: () => void;
-}) {
-  return (
-    <Modal open title="Chọn loại báo cáo" onClose={onClose}>
-    <div className="grid gap-2" data-testid="category-menu">
-      {CATEGORY_ORDER.map((c) => (
-        <button
-          key={c}
-          type="button"
-          onClick={() => onPick(c)}
-          data-testid={`category-${c}`}
-          className="group flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left transition-colors hover:border-brand-600 hover:bg-brand-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-        >
-          <span className="min-w-0">
-            <span data-testid={`category-label-${c}`} className="block text-sm font-semibold text-slate-800">
-              {label(c)}
-            </span>
-            <span className="mt-0.5 block text-xs text-slate-500">{CATEGORY_HINTS[c]}</span>
-          </span>
-          <span className="flex shrink-0 items-center gap-2">
-            <span
-              data-testid={`category-count-${c}`}
-              className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600"
-            >
-              {countOf(c)}
-            </span>
-            <ChevronRight className="h-4 w-4 text-slate-400 group-hover:text-brand-600" aria-hidden="true" />
-          </span>
-        </button>
-      ))}
-    </div>
-    </Modal>
-  );
-}
-
-/**
- * One category's screen: what is already recorded, and one way to add to it.
- *
- * The primary action lives HERE rather than inside each category's component,
- * so all five open a dialog the same way and none of them can quietly grow a
- * second entry affordance of its own.
+ * One category's screen: its name, one line on what it is for, and what is
+ * already recorded. The way in and the way to add both live in the header.
  */
 function CategoryShell({
   title,
   description,
-  addLabel,
-  onAdd,
-  onBack,
   children,
 }: {
   title: string;
   description: string;
-  addLabel: string;
-  onAdd: () => void;
-  onBack: () => void;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-3" data-testid="category-view">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <button
-            type="button"
-            onClick={onBack}
-            data-testid="category-back"
-            className="mb-1 inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-brand-700"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
-            Tất cả danh mục
-          </button>
-          <h2 className="text-base font-semibold text-slate-900">{title}</h2>
-          <p className="text-xs text-slate-500">{description}</p>
-        </div>
-        <Button onClick={onAdd} data-testid="category-add">
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          {addLabel}
-        </Button>
+      <div className="min-w-0">
+        <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+        <p className="text-xs text-slate-500">{description}</p>
       </div>
       {children}
     </div>

@@ -33,7 +33,8 @@ export const CATEGORY_LABELS: Record<OperationalReportCategory, string> = {
   PAYMENT: 'Theo dõi thanh toán',
   GUEST_REQUEST: 'Vấn đề khách yêu cầu',
   FACILITY_ISSUE: 'Sự cố vật chất đang xử lý',
-  CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng dịch vụ',
+  // 31 characters: exactly Excel's sheet-name limit, which this label also is.
+  CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
 };
 
@@ -80,18 +81,17 @@ export const ROOM_SERVICE_TYPES: readonly RoomServiceType[] = [
 ];
 
 /**
- * Suggestions for "Ký gửi", NOT a closed list.
+ * "Nguồn" on a payment — A CLOSED LIST, for new entries.
  *
- * The specification names them as examples, and a guest leaving a wedding dress
- * or a bicycle must be recorded as that rather than forced into "Vật dụng khác",
- * which would lose the one fact the record exists to preserve. The form offers
- * these three as quick picks and still accepts anything typed.
+ * The booking channels the desk actually takes money for. The form offers only
+ * these, and the service refuses anything else on create and on a correction
+ * that changes the value — a free-text source is how "Agoda", "agoda" and
+ * "AGD" became three channels in one report.
+ *
+ * OLDER ROWS ARE NOT REWRITTEN. They were typed freely and keep what was typed;
+ * a correction that leaves the source untouched does not have to "fix" it.
  */
-export const GUEST_REQUEST_ITEM_SUGGESTIONS: readonly string[] = [
-  'Balo',
-  'Hành lý',
-  'Vật dụng khác',
-];
+export const PAYMENT_SOURCES = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'] as const;
 
 /**
  * "7.570.000 ₫".

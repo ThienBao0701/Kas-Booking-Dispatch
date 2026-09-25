@@ -27,10 +27,10 @@
  * A TABLE, NOT A STACK OF CARDS. The full record, correction history and all,
  * is one click down inside the row.
  */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Building2, Download, FileSpreadsheet } from 'lucide-react';
+import { AlertTriangle, Building2, Download, FileSpreadsheet } from 'lucide-react';
 import {
   adminReportsApi,
   operationalPdfUrl,
@@ -46,7 +46,7 @@ import { adminBranchesApi } from '../api/adminBranches';
 import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
 import { Modal } from '../components/Modal';
-import { PageHeader, QueryState } from '../components/PageState';
+import { QueryState } from '../components/PageState';
 import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
 import {
   AdminAllCategoriesTable,
@@ -133,21 +133,24 @@ export function AdminOperationalReportsPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Báo cáo vấn đề"
-        description="Chọn khoảng thời gian, chi nhánh và danh mục. Bản ghi được xếp theo ngày, ca và nhân viên."
-        actions={
-          <Button
-            variant="secondary"
-            onClick={() => setExportOpen(true)}
-            disabled={branch === null || !rangeValid}
-            data-testid="operational-export-open"
-          >
-            <Download className="h-4 w-4" aria-hidden="true" />
-            Xuất báo cáo
-          </Button>
-        }
-      />
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0 max-w-[40rem]">
+          <h1 className="text-xl font-bold leading-snug tracking-tight text-slate-900">Báo cáo vấn đề</h1>
+          <p className="mt-0.5 text-sm text-slate-500">
+            Chọn khoảng thời gian, chi nhánh và danh mục. Bản ghi được xếp theo ngày, ca và nhân viên.
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => setExportOpen(true)}
+          disabled={branch === null || !rangeValid}
+          data-testid="operational-export-open"
+          className="ml-auto shadow-sm"
+        >
+          <Download className="h-4 w-4" aria-hidden="true" />
+          Xuất báo cáo
+        </Button>
+      </div>
 
       <QueryState
         isLoading={branches.isLoading}
@@ -155,73 +158,93 @@ export function AdminOperationalReportsPage() {
         error={branches.error}
         onRetry={() => void branches.refetch()}
       >
-        {/* THE THREE FILTERS, on one band. Each is one decision, made once. */}
-        <div
+        {/*
+          THE THREE FILTERS, as one block. Each is one decision, made once; every
+          control is the same 44px tall so the row reads as one line of choices.
+        */}
+        <section
           data-testid="admin-filters"
-          className="mb-3 flex flex-wrap items-end gap-x-4 gap-y-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5"
+          aria-label="Bộ lọc báo cáo"
+          className="mb-4 overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm"
         >
-          <div className="min-w-[17rem]">
-            <DateRangeField
-              legend="Khoảng thời gian"
-              value={range}
-              onChange={setRange}
-              max={today}
-              testId="admin-range"
-            />
+          <p className="border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+            Bộ lọc báo cáo
+          </p>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3 px-4 py-3">
+            <div className="min-w-[17rem]">
+              <DateRangeField
+                legend="Khoảng thời gian"
+                value={range}
+                onChange={setRange}
+                max={today}
+                testId="admin-range"
+              />
+            </div>
+            <div>
+              <p aria-hidden="true" className="mb-1 text-xs font-medium text-slate-500">
+                Chọn nhanh
+              </p>
+              <div
+                className="inline-flex overflow-hidden rounded-xl border border-slate-300 bg-white"
+                role="group"
+                aria-label="Chọn nhanh khoảng thời gian"
+              >
+                {(
+                  [
+                    ['Hôm nay', 0],
+                    ['7 ngày', 6],
+                    ['30 ngày', 29],
+                  ] as const
+                ).map(([text, back], i) => {
+                  const from = daysBefore(today, back);
+                  const active = range.from === from && range.to === today;
+                  return (
+                    <button
+                      key={text}
+                      type="button"
+                      onClick={() => setRange({ from, to: today })}
+                      aria-pressed={active}
+                      data-testid={`admin-range-${back}`}
+                      className={`min-h-[2.75rem] whitespace-nowrap px-3.5 text-sm transition-colors focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
+                        i > 0 ? 'border-l border-slate-300' : ''
+                      } ${
+                        active
+                          ? 'bg-brand-50 font-semibold text-brand-700'
+                          : 'font-medium text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {text}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="min-w-[16rem] flex-1">
+              <label htmlFor="admin-branch" className="mb-1 block text-xs font-medium text-slate-500">
+                Chi nhánh
+              </label>
+              <select
+                id="admin-branch"
+                data-testid="branch-select"
+                value={branch === null ? '' : String(branch)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setBranch(v === '' ? null : v === 'ALL' ? 'ALL' : Number(v));
+                  setCategory(null);
+                }}
+                className="min-h-[2.75rem] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
+              >
+                <option value="">— Chọn chi nhánh —</option>
+                <option value="ALL">Tất cả chi nhánh</option>
+                {(branches.data?.branches ?? []).map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.address} · Chi nhánh {b.branchNumber}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div className="flex gap-1 pb-1" role="group" aria-label="Chọn nhanh khoảng thời gian">
-            {(
-              [
-                ['Hôm nay', 0],
-                ['7 ngày', 6],
-                ['30 ngày', 29],
-              ] as const
-            ).map(([text, back]) => {
-              const from = daysBefore(today, back);
-              const active = range.from === from && range.to === today;
-              return (
-                <button
-                  key={text}
-                  type="button"
-                  onClick={() => setRange({ from, to: today })}
-                  aria-pressed={active}
-                  data-testid={`admin-range-${back}`}
-                  className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                    active
-                      ? 'border-brand-600 bg-brand-50 text-brand-700'
-                      : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-                  }`}
-                >
-                  {text}
-                </button>
-              );
-            })}
-          </div>
-          <div className="min-w-[16rem] flex-1">
-            <label htmlFor="admin-branch" className="mb-1 block text-xs font-medium text-slate-500">
-              Chi nhánh
-            </label>
-            <select
-              id="admin-branch"
-              data-testid="branch-select"
-              value={branch === null ? '' : String(branch)}
-              onChange={(e) => {
-                const v = e.target.value;
-                setBranch(v === '' ? null : v === 'ALL' ? 'ALL' : Number(v));
-                setCategory(null);
-              }}
-              className="min-h-[2.75rem] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
-            >
-              <option value="">— Chọn chi nhánh —</option>
-              <option value="ALL">Tất cả chi nhánh</option>
-              {(branches.data?.branches ?? []).map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.address} · Chi nhánh {b.branchNumber}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
+        </section>
       </QueryState>
 
       {branch === null ? (
@@ -231,28 +254,35 @@ export function AdminOperationalReportsPage() {
           message="Sau khi chọn chi nhánh, bạn sẽ thấy năm danh mục và toàn bộ bản ghi, xếp theo ngày và ca."
         />
       ) : !rangeValid ? (
-        <p data-testid="admin-range-invalid" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        <p data-testid="admin-range-invalid" className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900">
           Hãy chọn đủ ngày bắt đầu và ngày kết thúc.
         </p>
       ) : (
-        <div className="space-y-3">
-          <nav className="flex flex-wrap gap-1.5" data-testid="admin-category-menu">
-            <CategoryTab testId="admin-category-ALL" active={category === null} onClick={() => setCategory(null)}>
-              Tất cả
-            </CategoryTab>
-            {CATEGORY_ORDER.map((c) => (
-              <CategoryTab
-                key={c}
-                testId={`admin-category-${c}`}
-                active={category === c}
-                onClick={() => setCategory(c)}
-                // The incident tab lists HotelIssue rows, not journal entries, so a
-                // journal count on it would describe something else.
-                count={c === 'FACILITY_ISSUE' ? undefined : (data.data?.counts[c] ?? 0)}
-              >
-                {label(c)}
+        <div className="space-y-4">
+          {/*
+            ONE SEGMENTED STRIP. On a phone it scrolls sideways inside itself
+            rather than stacking six buttons into a wall; wider, it wraps within
+            the same track so no category is ever hidden off the edge.
+          */}
+          <nav aria-label="Danh mục báo cáo" className="overflow-x-auto" data-testid="admin-category-menu">
+            <div className="flex w-max gap-1 rounded-xl border border-slate-300 bg-slate-100 p-1 sm:w-auto sm:flex-wrap">
+              <CategoryTab testId="admin-category-ALL" active={category === null} onClick={() => setCategory(null)}>
+                Tất cả
               </CategoryTab>
-            ))}
+              {CATEGORY_ORDER.map((c) => (
+                <CategoryTab
+                  key={c}
+                  testId={`admin-category-${c}`}
+                  active={category === c}
+                  onClick={() => setCategory(c)}
+                  // The incident tab lists HotelIssue rows, not journal entries, so a
+                  // journal count on it would describe something else.
+                  count={c === 'FACILITY_ISSUE' ? undefined : (data.data?.counts[c] ?? 0)}
+                >
+                  {label(c)}
+                </CategoryTab>
+              ))}
+            </div>
           </nav>
 
           {/*
@@ -276,7 +306,7 @@ export function AdminOperationalReportsPage() {
           {data.data?.truncated ? (
             <p
               data-testid="operational-truncated"
-              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+              className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900"
             >
               Chỉ hiển thị {rows.length} bản ghi mới nhất trong tổng số {data.data.total}. Hãy chọn
               khoảng thời gian hoặc danh mục hẹp hơn, hoặc xuất báo cáo để xem đầy đủ.
@@ -337,24 +367,41 @@ function CategoryTab({
   onClick: () => void;
   testId: string;
 }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  /*
+    On a phone the strip scrolls sideways, so a category opened from a link
+    (the old "Sự cố khách sạn" address) could be chosen yet out of sight. The
+    strip — never the page — scrolls just far enough to show it.
+  */
+  useEffect(() => {
+    const tab = ref.current;
+    const strip = tab?.closest('nav');
+    if (!active || !tab || !strip) return;
+    const s = strip.getBoundingClientRect();
+    const t = tab.getBoundingClientRect();
+    if (t.left < s.left) strip.scrollLeft -= s.left - t.left + 8;
+    else if (t.right > s.right) strip.scrollLeft += t.right - s.right + 8;
+  }, [active]);
+
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onClick}
       aria-pressed={active}
       data-testid={testId}
-      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm transition-colors ${
+      className={`inline-flex min-h-[2.5rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 sm:flex-auto ${
         active
-          ? 'border-brand-600 bg-brand-50 font-medium text-brand-700'
-          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+          ? 'bg-white font-semibold text-brand-700 shadow-sm ring-1 ring-slate-300'
+          : 'font-medium text-slate-600 hover:bg-white/70 hover:text-slate-900'
       }`}
     >
       {children}
       {/* A convenience for choosing; never a substitute for the rows. */}
       {count !== undefined ? (
         <span
-          className={`rounded px-1.5 py-0.5 text-xs tabular-nums ${
-            active ? 'bg-brand-100 text-brand-700' : 'bg-slate-100 text-slate-600'
+          className={`inline-flex min-w-[1.5rem] justify-center rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums ${
+            active ? 'bg-brand-600 text-white' : 'bg-slate-200 text-slate-600'
           }`}
         >
           {count}
@@ -376,6 +423,7 @@ function CategoryTable({
   title,
   headerAction,
   grouped,
+  marker,
   label,
   serviceLabel,
   tableState,
@@ -386,11 +434,15 @@ function CategoryTable({
   headerAction?: ReactNode;
   /** Under a shift heading: leave out the columns it already states. */
   grouped?: boolean;
+  /** The shift's code ("A", "C4") beside the title, when there is a shift. */
+  marker?: string;
   label: (c: ReportCategory) => string;
   serviceLabel: (t: RoomServiceType) => string;
   tableState: TableState;
 }) {
-  const props = { rows, title, headerAction, grouped, ...tableState };
+  // Every table is a report section: the same bounded frame as reception's
+  // overview, so a day of shifts reads as a stack of distinct blocks.
+  const props = { rows, title, headerAction, grouped, section: { marker }, ...tableState };
   if (category === 'PAYMENT') return <AdminPaymentTable {...props} />;
   if (category === 'GUEST_REQUEST') return <AdminGuestRequestTable {...props} />;
   if (category === 'CUSTOMER_COMPLAINT') return <AdminServiceQualityTable {...props} />;
@@ -405,7 +457,7 @@ function CategoryTable({
       return <AdminRoomServiceTable {...props} serviceType="ROOM_SALE" title={label('ROOM_SERVICE')} rows={[]} />;
     }
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
         {present.map((type) => (
           <AdminRoomServiceTable
             key={type}
@@ -471,22 +523,28 @@ function CategoryView({
   }
 
   return (
-    <div className="space-y-4" data-testid="admin-shift-groups">
+    <div className={showBranch ? 'space-y-6' : 'space-y-5'} data-testid="admin-shift-groups">
       {totals}
       {groupByBranch(rows).map((branch) => (
-        <section key={branch.branchId} data-testid={`branch-group-${branch.branchId}`} className="space-y-3">
+        <section key={branch.branchId} data-testid={`branch-group-${branch.branchId}`} className="space-y-4">
           {showBranch ? (
-            <h2 className="text-sm font-semibold text-slate-900">
-              {branch.branchNumber !== null ? `Chi nhánh ${branch.branchNumber} · ` : ''}
-              {branch.branchAddress ?? '—'}
+            <h2 className="flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-900">
+              <Building2 className="h-4 w-4 shrink-0 text-slate-500" aria-hidden="true" />
+              <span className="min-w-0">
+                {branch.branchNumber !== null ? `Chi nhánh ${branch.branchNumber} · ` : ''}
+                {branch.branchAddress ?? '—'}
+              </span>
             </h2>
           ) : null}
           {branch.days.map((day) => (
-            <section key={day.date} data-testid={`date-group-${day.date}`} className="space-y-2">
-              <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                {formatViWeekdayDate(day.date)}
-                <span className="h-px flex-1 bg-slate-200" aria-hidden="true" />
-                <span className="font-normal normal-case tracking-normal text-slate-400">
+            <section key={day.date} data-testid={`date-group-${day.date}`} className="space-y-3">
+              {/* The day is the landmark of the list: a solid chip, a rule, its count. */}
+              <h3 className="flex items-center gap-2.5">
+                <span className="inline-flex shrink-0 items-center rounded-md bg-slate-800 px-2.5 py-1 text-xs font-semibold tracking-wide text-white">
+                  {formatViWeekdayDate(day.date)}
+                </span>
+                <span className="h-px flex-1 bg-slate-300" aria-hidden="true" />
+                <span className="shrink-0 text-xs font-medium tabular-nums text-slate-600">
                   {day.shifts.reduce((n, s) => n + s.rows.length, 0)} bản ghi
                 </span>
               </h3>
@@ -497,6 +555,7 @@ function CategoryView({
                     rows={group.rows}
                     title={shiftTitle(group)}
                     headerAction={<ShiftSummary group={group} label={label} />}
+                    marker={shiftCode(group)}
                     grouped
                     label={label}
                     serviceLabel={serviceLabel}
@@ -518,6 +577,12 @@ function shiftTitle(group: ShiftGroup): string {
   return group.employee ? `${shift} · ${group.employee}` : shift;
 }
 
+/** "Ca A" → "A": the shift's code, for the section marker. Nothing for a shiftless group. */
+function shiftCode(group: ShiftGroup): string | undefined {
+  const code = group.shiftName?.replace(/^Ca\s+/i, '').trim();
+  return code && code.length <= 3 ? code : undefined;
+}
+
 /**
  * What the person on this shift recorded, by category — and whether the shift
  * has ended. An open shift is on screen but not yet in the official report.
@@ -527,12 +592,12 @@ function ShiftSummary({ group, label }: { group: ShiftGroup; label: (c: ReportCa
     (c) => `${label(c)}: ${group.counts[c]}`,
   );
   return (
-    <span className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs text-slate-500">
+    <span className="flex flex-wrap items-center justify-start gap-x-2 gap-y-1 text-xs text-slate-600 sm:justify-end">
       <span data-testid={`shift-counts-${group.key}`}>{parts.join(' · ')}</span>
       {group.closed ? null : (
         <span
           data-testid={`shift-open-${group.key}`}
-          className="rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800"
+          className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-800 ring-1 ring-inset ring-amber-300"
         >
           Chưa kết thúc
         </span>
@@ -552,16 +617,19 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
     <div
       role="status"
       data-testid="open-shift-warning"
-      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+      className="flex gap-2.5 rounded-xl border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900"
     >
-      <p className="font-semibold">{warning}</p>
-      <ul className="mt-1 space-y-0.5">
-        {notices.map((n) => (
-          <li key={n.sessionId}>
-            {formatDate(n.businessDate)} · {n.shiftName} ({n.shiftWindow}) · {n.receptionistName} · {n.branchAddress}
-          </li>
-        ))}
-      </ul>
+      <AlertTriangle className="mt-px h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="text-[13px] font-semibold leading-5">{warning}</p>
+        <ul className="mt-1 space-y-0.5 leading-5 text-amber-800">
+          {notices.map((n) => (
+            <li key={n.sessionId} className="tabular-nums">
+              {formatDate(n.businessDate)} · {n.shiftName} ({n.shiftWindow}) · {n.receptionistName} · {n.branchAddress}
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }
@@ -606,12 +674,19 @@ function AdminIncidentView({
     <div className="space-y-3" data-testid="admin-incident-view">
       {branchId === undefined ? <BranchIncidentCounts onPick={onPickBranch} /> : null}
       {outstanding ? null : <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />}
-      <label className="flex items-center gap-2 text-sm text-slate-600">
+      <label
+        className={`inline-flex min-h-[2.75rem] cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm transition-colors ${
+          outstanding
+            ? 'border-brand-600 bg-brand-50 font-medium text-brand-700'
+            : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+        }`}
+      >
         <input
           type="checkbox"
           checked={outstanding}
           data-testid="admin-incident-outstanding"
           onChange={(e) => setOutstanding(e.target.checked)}
+          className="h-4 w-4 accent-brand-600"
         />
         Chỉ xem sự cố còn tồn đọng (mọi ngày báo)
       </label>
@@ -620,6 +695,7 @@ function AdminIncidentView({
         title={outstanding ? 'Sự cố còn tồn đọng' : 'Sự cố báo trong kỳ'}
         rows={issues}
         showBranch={branchId === undefined}
+        section={{}}
         readingMode
         isLoading={list.isLoading}
         isError={list.isError}
@@ -703,8 +779,12 @@ function CashStrip({
   cash: CashSummary;
   period: { from: string; to: string } | null;
 }) {
-  const chips: { label: string; value: string }[] = [
-    { label: 'Tiền đầu ca', value: cash.openingCash === null ? 'Chưa kiểm đếm' : formatVnd(cash.openingCash) },
+  const chips: { label: string; value: string; pending?: boolean }[] = [
+    {
+      label: 'Tiền đầu ca',
+      value: cash.openingCash === null ? 'Chưa kiểm đếm' : formatVnd(cash.openingCash),
+      pending: cash.openingCash === null,
+    },
     { label: 'Thu tiền mặt', value: formatVnd(cash.cashCollected) },
     { label: 'Chuyển khoản', value: formatVnd(cash.transferCollected) },
     { label: 'Cà thẻ', value: formatVnd(cash.cardCollected) },
@@ -713,23 +793,37 @@ function CashStrip({
   ];
 
   return (
-    <div data-testid="admin-cash-panel" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-4 xl:grid-cols-7">
+    <div data-testid="admin-cash-panel" className="overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm">
+      {/* Figures right-aligned, as on a ledger, so the digits line up down each column. */}
+      <div className="grid grid-cols-2 gap-px bg-slate-200 sm:grid-cols-4 xl:grid-cols-7">
         {chips.map((c) => (
-          <div key={c.label} className="bg-white px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-slate-400">{c.label}</p>
-            <p className="text-sm font-semibold tabular-nums text-slate-800">{c.value}</p>
+          <div key={c.label} className="bg-white px-3 py-2.5 text-right">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{c.label}</p>
+            <p
+              className={`mt-0.5 tabular-nums ${
+                c.pending ? 'text-sm font-medium text-slate-500' : 'text-[15px] font-semibold text-slate-900'
+              }`}
+            >
+              {c.value}
+            </p>
           </div>
         ))}
         {/* Two cells wide until one row holds all seven, so no row has a gap. */}
-        <div className="col-span-2 bg-brand-50 px-3 py-2 xl:col-span-1">
-          <p className="text-[11px] uppercase tracking-wide text-brand-700">Tiền cuối ca</p>
-          <p className="text-sm font-bold tabular-nums text-brand-800">
+        <div className="col-span-2 border-l-[3px] border-l-brand-600 bg-brand-50 px-3 py-2.5 text-right xl:col-span-1">
+          <p className="text-[11px] font-bold uppercase tracking-wide text-brand-700">Tiền cuối ca</p>
+          <p
+            className={`mt-0.5 tabular-nums ${
+              cash.endingCash === null ? 'text-sm font-medium text-brand-700' : 'text-lg font-bold leading-6 text-brand-800'
+            }`}
+          >
             {cash.endingCash === null ? 'Chưa xác định' : formatVnd(cash.endingCash)}
           </p>
         </div>
       </div>
-      <p className="border-t border-slate-100 px-3 py-1.5 text-[11px] text-slate-400" data-testid="admin-cash-period">
+      <p
+        className="border-t border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500"
+        data-testid="admin-cash-period"
+      >
         Tiền mặt{' '}
         {period
           ? period.from === period.to
@@ -737,7 +831,7 @@ function CashStrip({
             : `kỳ ${formatDate(period.from)} – ${formatDate(period.to)}`
           : ''}
         {cash.voidedCount > 0 ? (
-          <span className="ml-1 text-rose-500">· {cash.voidedCount} bản ghi đã hủy, không tính vào tổng.</span>
+          <span className="ml-1 text-rose-600">· {cash.voidedCount} bản ghi đã hủy, không tính vào tổng.</span>
         ) : null}
       </p>
     </div>

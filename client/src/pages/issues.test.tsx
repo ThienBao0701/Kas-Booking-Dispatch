@@ -108,12 +108,18 @@ function adminRoutes(issues: unknown[]) {
 describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"', () => {
   it('creates a new issue report via the existing modal form', async () => {
     let created = false;
+    const journal: unknown[] = [];
     const fetchMock = installApiMock(
       receptionRoutes({
         'GET /api/issues?pageSize=100&outstanding=true': () => listBody(created ? [issue()] : []),
         'POST /api/issues': () => {
           created = true;
           return { status: 201, body: { issue: issue() } };
+        },
+        // The shift journal records the new incident by reference, in the same step.
+        'POST /api/reception/reports': (init) => {
+          journal.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: { id: 'f1' } } };
         },
       }),
     );
@@ -139,10 +145,11 @@ describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"
       ([url, init]) => String(url) === '/api/issues' && (init as RequestInit).method === 'POST',
     );
     expect(called).toBe(true);
+    expect(journal).toEqual([{ category: 'FACILITY_ISSUE', facility: { issueId: 'i1' } }]);
     expect(await within(screen.getByTestId('facility-board')).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
   });
 
-  it('shows the reported incident with its location and status', async () => {
+  it('shows the reported incident with its location and status, not who reported it', async () => {
     installApiMock(
       receptionRoutes({ 'GET /api/issues?pageSize=100&outstanding=true': () => listBody([issue()]) }),
     );
@@ -154,7 +161,8 @@ describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"
     expect(within(row).getByText('Phòng · Phòng 301')).toBeInTheDocument();
     expect(within(row).getByText('Máy lạnh không lạnh')).toBeInTheDocument();
     expect(within(row).getByText('Sự cố khách sạn')).toBeInTheDocument();
-    expect(within(row).getByText('Lễ tân Một')).toBeInTheDocument();
+    // "Người báo" is not a reception column any more.
+    expect(within(row).queryByText('Lễ tân Một')).not.toBeInTheDocument();
   });
 });
 
