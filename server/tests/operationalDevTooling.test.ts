@@ -121,7 +121,7 @@ describe('clearDemoData', () => {
     await journalEntryOnIncident(true);
     const payment = await letan
       .post('/api/reception/reports')
-      .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 300000 } });
+      .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 300000 } });
     expect(payment.status).toBe(201);
 
     await clearDemoData(testPrisma);
@@ -135,7 +135,7 @@ describe('prepareForProduction', () => {
     await letan.put('/api/reception/shifts/cash').send({ openingCash: 7570000 });
     const payment = await letan
       .post('/api/reception/reports')
-      .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 300000 } });
+      .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 300000 } });
     expect(payment.status).toBe(201);
     await ensureTestReceptionist(testPrisma);
 

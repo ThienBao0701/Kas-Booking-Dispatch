@@ -359,7 +359,7 @@ function ShiftHandoverDialog({
             maxLength={1000}
             placeholder="Ví dụ: Có việc cá nhân"
             data-testid="handover-reason"
-            className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           />
         </label>
 
@@ -412,7 +412,7 @@ function ShiftHandoverDialog({
             maxLength={5000}
             placeholder="Việc còn tồn cần ca sau theo dõi…"
             data-testid="handover-note"
-            className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           />
         </label>
 

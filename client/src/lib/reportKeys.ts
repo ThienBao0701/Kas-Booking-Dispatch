@@ -13,3 +13,13 @@
  */
 export const REPORTS_KEY = ['reception', 'reports'];
 export const CASH_KEY = ['reception', 'reports', 'cash'];
+
+/**
+ * II and IV across shifts, and "Hoàn thành vấn đề" — both UNDER `REPORTS_KEY`,
+ * so every write that refreshes the journal refreshes them with it.
+ */
+export const ACTIVE_REPORTS_KEY = ['reception', 'reports', 'active'];
+export const ARCHIVED_REPORTS_KEY = ['reception', 'reports', 'archive'];
+
+/** The facility board's and the archive's own reads of the incidents (III). */
+export const FACILITY_BOARD_KEY = ['reception', 'facility-board'];

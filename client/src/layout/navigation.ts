@@ -2,6 +2,7 @@ import {
   BellRing,
   Building2,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardPaste,
   NotebookPen,
   FileText,
@@ -35,7 +36,7 @@ export const ADMIN_NAV: NavItem[] = [
   { to: '/app/completed', label: 'Đã xác nhận đúng', icon: CheckCircle2 },
   { to: '/app/history', label: 'Lịch sử', icon: History },
   // "Sự cố khách sạn" and "Bàn giao ca" are gone: incidents live under
-  // "Báo cáo vấn đề" -> "Sự cố vật chất đang xử lý"; handover has no screen.
+  // "Báo cáo vấn đề" -> "Sự cố cơ sở vật chất đang xử lý"; handover has no screen.
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
   { to: '/app/charge-documents', label: 'Chứng từ', icon: FileText },
@@ -74,28 +75,42 @@ export const BOOKING_DEPARTMENT_NAV: NavItem[] = [
 export const RECEPTIONIST_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
+  // Requests, facility incidents and service-quality reports completed 12 hours
+  // or more after they were received — the same records, by query.
+  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
   { to: '/app/chat', label: 'Chat box', icon: MessagesSquare },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
 ];
 
 /**
- * Bộ phận kỹ thuật works three queues and nothing else.
+ * Bộ phận kỹ thuật works the incident queues and nothing else.
  *
- * The three items are WORKFLOW STATES, not saved filters: an incident is in
- * exactly one of them, and it moves between them only by a technician acting on
- * it. No booking screen appears here — this role has no branch and no part in
- * dispatch.
+ * The items are WORKFLOW STATES, not saved filters: an incident is in exactly
+ * one of them, and it moves between them only by somebody acting on it. No
+ * booking screen appears here — this role has no branch and no part in dispatch.
  */
 export const TECHNICAL_NAV: NavItem[] = [
   { to: '/app/technical/new', label: 'Sự cố khách sạn', icon: Wrench },
+  { to: '/app/technical/rework', label: 'Cần sửa lại', icon: RotateCcw },
   { to: '/app/technical/in-progress', label: 'Đang sửa', icon: Hammer },
   { to: '/app/technical/completed', label: 'Đã hoàn thành', icon: CheckCircle2 },
+];
+
+/**
+ * Quản lý kỹ thuật's one entry: inspection. While inspection is DORMANT (the
+ * server's TECHNICAL_INSPECTION_ENABLED, off by default) the screen says the
+ * feature is not yet active and offers nothing to act on — the operational
+ * workflow is the technician's alone.
+ */
+export const TECHNICAL_MANAGER_NAV: NavItem[] = [
+  { to: '/app/technical/awaiting-inspection', label: 'Nghiệm thu', icon: ClipboardCheck },
 ];
 
 export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'ADMIN') return ADMIN_NAV;
   if (role === 'BOOKING_DEPARTMENT') return BOOKING_DEPARTMENT_NAV;
   if (role === 'TECHNICAL') return TECHNICAL_NAV;
+  if (role === 'TECHNICAL_MANAGER') return TECHNICAL_MANAGER_NAV;
   // Receptionist, and anything unrecognised: never the Chứng từ menu.
   return RECEPTIONIST_NAV;
 }
@@ -107,7 +122,7 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith('/app/chat/')) return 'Chat box';
   if (pathname.startsWith('/app/reminders')) return 'Nhắc nhở';
   if (pathname.startsWith('/app/resend-orders')) return 'Gửi lại đơn';
-  const all = [...ADMIN_NAV, ...RECEPTIONIST_NAV, ...BOOKING_DEPARTMENT_NAV, ...TECHNICAL_NAV];
+  const all = [...ADMIN_NAV, ...RECEPTIONIST_NAV, ...BOOKING_DEPARTMENT_NAV, ...TECHNICAL_NAV, ...TECHNICAL_MANAGER_NAV];
   const match = all
     .slice()
     .sort((a, b) => b.to.length - a.to.length)

@@ -9,11 +9,15 @@
  * the ONLY role that may move an incident through its workflow — an Admin sees
  * everything and changes nothing.
  *
+ * TECHNICAL_MANAGER ("Quản lý kỹ thuật") is global like TECHNICAL, and judges
+ * that team's finished repairs — "Nghiệm thu". It inspects and nothing else: it
+ * cannot accept or complete a repair, and it is not an admin.
+ *
  * NOTE: this union is hand-written and is NOT generated from the Prisma enum, so
  * adding a role to the schema does not update it. `ROLE_LABEL` below is the one
  * place that fails to compile when the two drift — keep it exhaustive.
  */
-export type UserRole = 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL';
+export type UserRole = 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL' | 'TECHNICAL_MANAGER';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -21,6 +25,7 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   RECEPTIONIST: 'Lễ tân',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   TECHNICAL: 'Bộ phận kỹ thuật',
+  TECHNICAL_MANAGER: 'Quản lý kỹ thuật',
 };
 
 export interface Branch {

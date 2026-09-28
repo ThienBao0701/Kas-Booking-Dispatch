@@ -17,12 +17,13 @@
  *      just visually.
  *   7. The drawer names the period it covers, and says so when it was never
  *      counted.
- *   8. The export asks for a period and offers PDF and Excel.
+ *   8. The export asks for a period and offers a PDF (no Excel action).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
@@ -57,7 +58,7 @@ const OPTIONS = {
   categories: [
     { code: 'PAYMENT', label: 'Theo dõi thanh toán' },
     { code: 'GUEST_REQUEST', label: 'Vấn đề khách yêu cầu' },
-    { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
+    { code: 'FACILITY_ISSUE', label: 'Sự cố cơ sở vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
   ],
@@ -68,8 +69,9 @@ const OPTIONS = {
     { code: 'SMOKING', label: 'Hút thuốc' },
     { code: 'LAUNDRY', label: 'Giặt ủi' },
     { code: 'OTHER', label: 'Dịch vụ khác' },
+    { code: 'REVIEW', label: 'Review' },
   ],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking'],
 };
 
 const BASE = {
@@ -197,11 +199,12 @@ const FACILITY = {
   ...BASE,
   id: 'f1',
   category: 'FACILITY_ISSUE',
-  categoryLabel: 'Sự cố vật chất đang xử lý',
+  categoryLabel: 'Sự cố cơ sở vật chất đang xử lý',
   summary: 'Khu Vực Sảnh · Sofa rách',
   facility: {
     issueId: 'cm0000000000000000000issue',
-    issue: {
+    // Everything the server sends for an incident, the lifecycle fields included.
+    issue: withLifecycle({
       id: 'cm0000000000000000000issue',
       locationLabel: 'Khu Vực Sảnh · Sofa',
       category: 'FURNITURE',
@@ -230,7 +233,7 @@ const FACILITY = {
           durationLabel: '30 phút',
         },
       ],
-    },
+    }),
   },
 };
 
@@ -298,6 +301,33 @@ const LAUNDRY = {
     serviceName: null,
     price: 120000,
     note: null,
+  },
+};
+
+/** A review the desk counted: two numbers, no price — never revenue. */
+const REVIEW = {
+  ...BASE,
+  id: 'v3',
+  category: 'ROOM_SERVICE',
+  categoryLabel: 'Dịch vụ phòng, KPI',
+  summary: 'Review · Guest A · Tripadvisor 3 · Google 2',
+  roomService: {
+    serviceType: 'REVIEW',
+    serviceTypeLabel: 'Review',
+    guestName: 'Guest A',
+    ezCode: 'QA-REVIEW-01',
+    phone: null,
+    roomNumber: null,
+    roomClass: null,
+    fromRoomClass: null,
+    toRoomClass: null,
+    nights: null,
+    serviceName: null,
+    price: 0,
+    note: null,
+    tripadvisorCount: 3,
+    googleCount: 2,
+    countsAsRevenue: false,
   },
 };
 
@@ -389,14 +419,15 @@ function shellRoutes(
  * chất đang xử lý" tab now lists. The same HotelIssue the journal entry above
  * references, with who reported it and where.
  */
-const ISSUE = {
+const ISSUE = withLifecycle({
   ...FACILITY.facility.issue,
   branchId: 11,
   branch: BRANCHES[0],
   areaCategory: 'LOBBY',
   reportedByName: 'Nguyễn Văn A',
+  reporterName: 'Nguyễn Văn A',
   createdAt: '2026-09-19T01:00:00.000Z',
-};
+});
 
 const ISSUES_TODAY = `GET /api/issues?branchId=11&from=${TODAY}&to=${TODAY}&pageSize=100`;
 
@@ -431,6 +462,13 @@ async function chooseBranch(id = '11') {
 
 async function openCategory(code: string) {
   await userEvent.click(await screen.findByTestId(`admin-category-${code}`));
+}
+
+/** The heading of the shift frame a table sits in — "Ca A · 06:00 – 14:00 · …". */
+function shiftTitleOf(el: HTMLElement): HTMLElement {
+  const frame = el.closest<HTMLElement>('[data-testid^="shift-group-"]');
+  if (!frame) throw new Error('not inside a shift frame');
+  return within(frame).getByTestId(/^shift-title-/);
 }
 
 afterEach(() => {
@@ -503,7 +541,7 @@ describe('choosing a branch', () => {
       'Vấn đề khách yêu cầu1',
       // No count: this tab lists the incidents themselves, not journal entries,
       // so a journal count on it would describe something else.
-      'Sự cố vật chất đang xử lý',
+      'Sự cố cơ sở vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ1',
       'Dịch vụ phòng, KPI2',
     ]);
@@ -530,10 +568,11 @@ describe('each category is a table', () => {
 
     const table = await screen.findByTestId('admin-table-PAYMENT');
     // Titled with the SERVER's word for the category.
-    // The category is the chosen tab, in the server's word; the table's own
-    // heading is the SHIFT and the PERSON — DATE → SHIFT → EMPLOYEE.
+    // The category is the chosen tab, in the server's word, and heads the table;
+    // the SHIFT and the PERSON head the frame it sits in — DATE → SHIFT → EMPLOYEE.
     expect(screen.getByTestId('admin-category-PAYMENT')).toHaveTextContent('Theo dõi thanh toán');
-    expect(within(table).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expect(within(table).getByRole('heading')).toHaveTextContent('Theo dõi thanh toán');
+    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     // The first is the expander's own column, which carries no label.
@@ -576,7 +615,7 @@ describe('each category is a table', () => {
 
     const table = await screen.findByTestId('admin-table-GUEST_REQUEST');
     expect(screen.getByTestId('admin-category-GUEST_REQUEST')).toHaveTextContent('Vấn đề khách yêu cầu');
-    expect(within(table).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers.slice(1)).toEqual([
@@ -604,7 +643,7 @@ describe('each category is a table', () => {
     // Who took it, and who completed it — two facts, never one overwriting the
     // other. The taker is the shift's person, named once in the heading; the
     // completer, on another shift, is in the row.
-    expect(within(table).getByRole('heading')).toHaveTextContent('Nguyễn Văn A');
+    expect(shiftTitleOf(table)).toHaveTextContent('Nguyễn Văn A');
     expect(within(row).getByText('Nguyễn Văn B · Ca B')).toBeInTheDocument();
   });
 
@@ -612,14 +651,14 @@ describe('each category is a table', () => {
    * THE OLD "SỰ CỐ KHÁCH SẠN" SCREEN LIVES HERE NOW: the HotelIssue rows
    * themselves, from the same `/api/issues` the technical department works.
    */
-  it('monitors the incidents — status, technician and how the last attempt ended', async () => {
+  it('monitors the incidents — stage, technician and the attempt history, with inspection dormant', async () => {
     const fetchMock = installApiMock(shellRoutes(incidentRoutes()));
     renderApp('/app/reports');
     await chooseBranch();
     await openCategory('FACILITY_ISSUE');
 
     const view = await screen.findByTestId('admin-incident-view');
-    expect(screen.getByTestId('admin-category-FACILITY_ISSUE')).toHaveTextContent('Sự cố vật chất đang xử lý');
+    expect(screen.getByTestId('admin-category-FACILITY_ISSUE')).toHaveTextContent('Sự cố cơ sở vật chất đang xử lý');
     // The period's counts, as the old screen had them.
     expect(await within(view).findByTestId('incident-range-summary')).toHaveTextContent('Tổng sự cố phát sinh');
 
@@ -628,18 +667,30 @@ describe('each category is a table', () => {
     expect(within(row).getByText('Khu Vực Sảnh · Sofa')).toBeInTheDocument();
     expect(within(row).getByText('Sofa rách')).toBeInTheDocument();
     expect(within(row).getByText('Đang sửa')).toBeInTheDocument();
-    expect(within(row).getByText('Bảo')).toBeInTheDocument();
+    // Inspection is dormant: no verdict badge on the row.
+    expect(within(row).queryByTestId('issue-inspection')).not.toBeInTheDocument();
+    // "Người sửa" is the latest attempt's technician — read from the attempt.
+    expect(within(row).getByText('Minh')).toBeInTheDocument();
     expect(within(row).getByText('Nguyễn Văn A')).toBeInTheDocument();
-    // The last attempt's own outcome, in the technical workflow's own words.
-    expect(within(row).getByText(/Không sửa được/)).toBeInTheDocument();
-    expect(within(row).getByText(/30 phút/)).toBeInTheDocument();
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
-    for (const h of ['Sự cố', 'Khu vực', 'Người báo', 'Thời gian', 'Trạng thái', 'Kỹ thuật', 'Kết quả gần nhất', 'Lần sửa', 'Cập nhật']) {
+    for (const h of [
+      'Sự cố',
+      'Khu vực',
+      'Nguyên nhân',
+      'Trạng thái',
+      'Người báo',
+      'Thời gian báo cáo',
+      'Người sửa',
+      'Hoàn thành',
+      'Lần sửa',
+      'Cập nhật',
+    ]) {
       expect(headers).toContain(h);
     }
-    // One branch on screen: no branch column.
+    // One branch on screen: no branch column. Inspection dormant: no "Nghiệm thu" column.
     expect(headers).not.toContain('Chi nhánh');
+    expect(headers).not.toContain('Nghiệm thu');
 
     // Scoped by the SERVER to the page's branch and period.
     expect(fetchMock.mock.calls.some(([url]) => `GET ${String(url)}` === ISSUES_TODAY)).toBe(true);
@@ -659,8 +710,12 @@ describe('each category is a table', () => {
     const toggle = await screen.findByTestId(`row-toggle-${ISSUE.id}`);
     expect(toggle.closest('td')!.className).not.toMatch(/\bmd:hidden\b/);
     await userEvent.click(toggle);
-    expect(await screen.findByText('Lịch sử xử lý')).toBeInTheDocument();
-    expect(screen.getByText(/Thiếu phụ tùng/)).toBeInTheDocument();
+    // The full record: report, repair and inspection, then every attempt.
+    const lifecycle = await screen.findByTestId('issue-lifecycle');
+    expect(within(lifecycle).getByText('Báo cáo')).toBeInTheDocument();
+    expect(within(lifecycle).getByText('Sửa chữa')).toBeInTheDocument();
+    expect(within(lifecycle).getByText('Lịch sử xử lý')).toBeInTheDocument();
+    expect(within(lifecycle).getByText(/Thiếu phụ tùng/)).toBeInTheDocument();
   });
 
   it('switches to every incident still open, whatever day it was reported', async () => {
@@ -713,7 +768,7 @@ describe('each category is a table', () => {
     expect(screen.getByTestId('admin-category-CUSTOMER_COMPLAINT')).toHaveTextContent(
       'Vấn đề về chất lượng và dịch vụ',
     );
-    expect(within(table).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers.slice(1)).toEqual([
@@ -791,21 +846,77 @@ describe('each category is a table', () => {
     expect(screen.getByTestId('service-grand-total')).toHaveTextContent('420.000');
   });
 
-  it('puts every category in one chronological table under "Tất cả"', async () => {
+  it('tells a Review from revenue: its two counts in its own table, footed in reviews, never in money', async () => {
+    installApiMock(
+      shellRoutes({
+        [`GET /api/admin/reports/operational?branchId=11&category=ROOM_SERVICE&${PERIOD}`]: () => ({
+          status: 200,
+          body: body([SERVICE, LAUNDRY, REVIEW]),
+        }),
+        [`GET /api/admin/reports/operational?branchId=11&${PERIOD}`]: () => ({ status: 200, body: body([...ALL, REVIEW]) }),
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+
+    // "Tất cả": inside the shift's frame, the Review sits in V's own Review table,
+    // as two counts — never as money.
+    const inShift = await screen.findByTestId('admin-table-ROOM_SERVICE-REVIEW');
+    expect(within(inShift).getByTestId('row-v3')).not.toHaveTextContent('₫');
+    expect(within(inShift).getByTestId('admin-table-ROOM_SERVICE-REVIEW-total')).toHaveTextContent('5 review');
+
+    await openCategory('ROOM_SERVICE');
+    const table = await screen.findByTestId('admin-table-ROOM_SERVICE-REVIEW');
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Thời gian', 'Trạng thái']);
+    const row = within(table).getByTestId('row-v3');
+    expect(within(row).getByText('Guest A')).toBeInTheDocument();
+    expect(within(row).getByText('QA-REVIEW-01')).toBeInTheDocument();
+    expect(within(row).getByText('3')).toBeInTheDocument();
+    expect(within(row).getByText('2')).toBeInTheDocument();
+    expect(screen.getByTestId('admin-table-ROOM_SERVICE-REVIEW-total')).toHaveTextContent('5 review');
+
+    // The totals keep the two apart: the review is counted, the money is unchanged.
+    const summary = screen.getByTestId('room-service-summary');
+    expect(within(summary).getByTestId('service-total-REVIEW')).toHaveTextContent('5 review');
+    expect(screen.getByTestId('service-grand-total')).toHaveTextContent('420.000');
+  });
+
+  /**
+   * "TẤT CẢ" IS ONE FRAME PER SHIFT, the five categories inside it as five
+   * tables, I to V, each holding only its own records.
+   */
+  it('frames each shift and lays its records out as tables I–V under "Tất cả"', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
 
-    const table = await screen.findByTestId('admin-table-ALL');
-    for (const id of ['p1', 'g1', 'f1', 'c1', 'v1']) {
-      expect(within(table).getByTestId(`row-${id}`)).toBeInTheDocument();
+    const payments = await screen.findByTestId('admin-table-PAYMENT');
+    const frame = payments.closest<HTMLElement>('[data-testid^="shift-group-"]')!;
+    expect(within(frame).getByTestId(/^shift-title-/)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+
+    const sections = [
+      ['admin-table-PAYMENT', 'p1', 'Theo dõi thanh toán'],
+      ['admin-table-GUEST_REQUEST', 'g1', 'Vấn đề khách yêu cầu'],
+      ['admin-table-FACILITY_ISSUE', 'f1', 'Sự cố cơ sở vật chất đang xử lý'],
+      ['admin-table-CUSTOMER_COMPLAINT', 'c1', 'Vấn đề về chất lượng và dịch vụ'],
+      ['admin-table-ROOM_SERVICE-UPGRADE', 'v1', 'Dịch vụ phòng, KPI'],
+    ] as const;
+    const tables = sections.map(([id, row, heading]) => {
+      const table = within(frame).getByTestId(id);
+      expect(within(table).getAllByRole('heading')[0]).toHaveTextContent(heading);
+      expect(within(table).getByTestId(`row-${row}`)).toBeInTheDocument();
+      return table;
+    });
+    // In the order I → V.
+    for (let i = 1; i < tables.length; i += 1) {
+      expect(tables[i - 1]!.compareDocumentPosition(tables[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
-    // A mixed table is unreadable unless each row says what it is.
-    expect(within(table).getByTestId('row-p1')).toHaveTextContent('Theo dõi thanh toán');
-    expect(within(table).getByTestId('row-c1')).toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
-    // And the one figure a record carries, where it carries one.
-    expect(within(table).getByTestId('row-p1')).toHaveTextContent('300.000 ₫');
-    expect(within(table).getByTestId('row-v1')).toHaveTextContent('300.000 ₫');
+    // Each table holds only its own category.
+    expect(within(tables[0]!).queryByTestId('row-c1')).not.toBeInTheDocument();
+    expect(within(tables[3]!).queryByTestId('row-p1')).not.toBeInTheDocument();
+    // The facility entry shows the incident it reports, and the entry's own status.
+    expect(within(tables[2]!).getByTestId('admin-status-f1')).toBeInTheDocument();
   });
 
   it('says so, in the table, when a category has nothing', async () => {
@@ -1033,7 +1144,7 @@ describe('a cash outflow', () => {
    * alone printed "—" against a real two-million-đồng outflow — a term of the
    * cash formula, shown on the branch's primary table carrying no figure.
    */
-  it('shows its figure, signed, in the "Tất cả" table', async () => {
+  it('shows its figure in the shift’s payment table, under "Chi"', async () => {
     const EXPENSE = {
       ...PAYMENT,
       id: 'p3',
@@ -1049,8 +1160,11 @@ describe('a cash outflow', () => {
     renderApp('/app/reports');
     await chooseBranch();
 
-    const row = await screen.findByTestId('row-p3');
-    expect(within(row).getByText('−2.000.000 ₫')).toBeInTheDocument();
+    const table = await screen.findByTestId('admin-table-PAYMENT');
+    const row = within(table).getByTestId('row-p3');
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent ?? '');
+    const cells = within(row).getAllByRole('cell').map((c) => c.textContent ?? '');
+    expect(cells[headers.indexOf('Chi')]).toBe('2.000.000 ₫');
   });
 });
 
@@ -1326,8 +1440,8 @@ describe('DATE → SHIFT → EMPLOYEE', () => {
     // Two shifts on the 19th, in the order they began, each its own table.
     const shifts = within(day19).getAllByTestId(/^shift-group-/);
     expect(shifts).toHaveLength(2);
-    expect(within(shifts[0]!).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
-    expect(within(shifts[1]!).getByRole('heading')).toHaveTextContent('Ca B · 14:00 – 22:00 · Trần Thị B');
+    expect(within(shifts[0]!).getByTestId(/^shift-title-/)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expect(within(shifts[1]!).getByTestId(/^shift-title-/)).toHaveTextContent('Ca B · 14:00 – 22:00 · Trần Thị B');
     // Each shift holds only its own records.
     expect(within(shifts[0]!).getByTestId('row-x1')).toBeInTheDocument();
     expect(within(shifts[0]!).queryByTestId('row-x2')).not.toBeInTheDocument();
@@ -1389,7 +1503,7 @@ describe('DATE → SHIFT → EMPLOYEE', () => {
     const branch = await screen.findByTestId('branch-group-12');
     expect(within(branch).getByRole('heading', { level: 2 })).toHaveTextContent('Chi nhánh 2 · 260 Lý Tự Trọng');
     const group = within(branch).getByTestId('shift-group-12|2026-09-19|s9');
-    expect(within(group).getByRole('heading')).toHaveTextContent('Ca A · 06:00 – 14:00 · Người CN2');
+    expect(within(group).getByTestId(/^shift-title-/)).toHaveTextContent('Ca A · 06:00 – 14:00 · Người CN2');
     // Eight drawers added together describe no drawer at all.
     expect(screen.queryByTestId('admin-cash-panel')).not.toBeInTheDocument();
   });
@@ -1578,7 +1692,7 @@ describe('the period', () => {
 });
 
 describe('the export is what is on screen', () => {
-  it('exports the screen’s branch and period, in both formats', async () => {
+  it('exports the screen’s branch and period as a PDF — and offers no Excel', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
@@ -1588,10 +1702,8 @@ describe('the export is what is on screen', () => {
       'href',
       `/api/admin/reports/operational.pdf?branchId=11&${PERIOD}`,
     );
-    expect(screen.getByTestId('operational-export-xlsx')).toHaveAttribute(
-      'href',
-      `/api/admin/reports/operational.xlsx?branchId=11&${PERIOD}`,
-    );
+    expect(screen.queryByTestId('operational-export-xlsx')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Xuất Excel/)).not.toBeInTheDocument();
   });
 
   it('carries the chosen category into the file', async () => {
@@ -1626,9 +1738,9 @@ describe('the export is what is on screen', () => {
     await screen.findByTestId('row-p1');
     await userEvent.click(screen.getByTestId('operational-export-open'));
 
-    expect(await screen.findByTestId('operational-export-xlsx')).toHaveAttribute(
+    expect(await screen.findByTestId('operational-export-pdf')).toHaveAttribute(
       'href',
-      `/api/admin/reports/operational.xlsx?branchId=11&from=${from}&to=${TODAY}`,
+      `/api/admin/reports/operational.pdf?branchId=11&from=${from}&to=${TODAY}`,
     );
   });
 

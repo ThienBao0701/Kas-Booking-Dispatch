@@ -23,6 +23,8 @@ import {
   completeReport,
   countByCategory,
   createReport,
+  listActiveJournal,
+  listArchivedJournal,
   listReports,
   serializeReport,
   updateReport,
@@ -30,7 +32,8 @@ import {
 } from '../reception/reportService';
 import { setOpeningCash, shiftCashSummary, sumPayments, withEndingCash } from '../reception/cashService';
 import { MAX_VND } from '../reception/reportService';
-import { requireOpenSession } from '../shift/shiftService';
+import { captureShiftContext, requireOpenSession } from '../shift/shiftService';
+import { COMPLETION_ARCHIVE_HOURS } from '../reception/completionArchive';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
@@ -49,7 +52,7 @@ const CATEGORY = z.enum([
   'ROOM_SERVICE',
 ]);
 const METHOD = z.enum(['CASH', 'TRANSFER', 'CARD']);
-const SERVICE = z.enum(['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER']);
+const SERVICE = z.enum(['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW']);
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 /**
@@ -120,8 +123,12 @@ const roomServiceSchema = z.object({
   toRoomClass: text(200).optional(),
   // Which subtypes need it, and its range, are the service's rule.
   nights: z.number().int().optional(),
-  price: money,
+  // Every service but "Review" requires it — the service's rule, like nights.
+  price: money.optional(),
   note: text(2000).optional(),
+  // "Review" only: whole numbers; the range is the service's rule.
+  tripadvisorCount: z.number().int().optional(),
+  googleCount: z.number().int().optional(),
 });
 
 /**
@@ -158,6 +165,22 @@ const listSchema = z
     from: isoDay.optional(),
     to: isoDay.optional(),
   })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
+    path: ['to'],
+  })
+  .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+    message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
+    path: ['from'],
+  });
+
+/**
+ * "Hoàn thành vấn đề" by the days the records were RECEIVED on. Optional — the
+ * whole archive without it — and refused as a pair or in the wrong order, like
+ * every other period in KAS.
+ */
+const archiveSchema = z
+  .object({ from: isoDay.optional(), to: isoDay.optional() })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
     path: ['to'],
@@ -223,6 +246,52 @@ export function createReceptionReportsRouter(): Router {
         countByCategory(actor(user), filter),
       ]);
       res.json({ reports: reports.map((r) => serializeReport(r, now)), counts });
+    })().catch(next);
+  });
+
+  /*
+    GET /api/reception/reports/active — II and IV as the desk must see them:
+    the branch's unfinished records at any age, and its completions received in
+    the last 12 hours, across shifts. The server clock decides; the open shift
+    is read from the session, never from the request.
+  */
+  router.get('/reception/reports/active', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const now = getClock().now();
+      const shift = await captureShiftContext(actor(user));
+      const { reports, totals } = await listActiveJournal(actor(user), now, shift.shiftSessionId);
+      res.json({
+        reports: reports.map((r) => serializeReport(r, now)),
+        // Each category's full count: the list is a page, and the screen says so.
+        totals,
+        archiveAfterHours: COMPLETION_ARCHIVE_HOURS,
+      });
+    })().catch(next);
+  });
+
+  /*
+    GET /api/reception/reports/archive — "Hoàn thành vấn đề": II and IV that are
+    completed AND were received at least 12 hours ago. A query over the same
+    rows, not a copy of them.
+
+    `from`/`to` (YYYY-MM-DD, inclusive Vietnamese calendar days) narrow it to
+    the records RECEIVED on those days — the original reception time, the same
+    instant the 12-hour rule is measured from; never the completion.
+  */
+  router.get('/reception/reports/archive', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const q = archiveSchema.parse(req.query);
+      const received = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      const now = getClock().now();
+      const { reports, totals } = await listArchivedJournal(actor(user), now, received);
+      res.json({
+        reports: reports.map((r) => serializeReport(r, now)),
+        totals,
+        range: q.from && q.to ? { from: q.from, to: q.to } : null,
+        archiveAfterHours: COMPLETION_ARCHIVE_HOURS,
+      });
     })().catch(next);
   });
 

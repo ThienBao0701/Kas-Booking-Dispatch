@@ -48,7 +48,7 @@ export function ReportSection({
   children: ReactNode;
 }) {
   return (
-    <section data-testid={testId} className="overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm">
+    <section data-testid={testId} className="overflow-hidden rounded-xl border-section border-line bg-white shadow-sm">
       {/*
         The marker stays beside the title and the count flows right after the
         title's last word, so a long title on a phone wraps as text instead of
@@ -58,7 +58,7 @@ export function ReportSection({
         fit on one line it is the aside that moves down, never the title that is
         squeezed into a column one word wide.
       */}
-      <header className="flex flex-wrap items-start gap-x-4 gap-y-1.5 border-b border-slate-300 bg-slate-50 px-4 py-2.5">
+      <header className="flex flex-wrap items-start gap-x-4 gap-y-1.5 border-b-rule border-line bg-slate-50 px-4 py-2.5">
         <div className="flex min-w-0 flex-auto items-start gap-2.5">
           {marker ? (
             <span

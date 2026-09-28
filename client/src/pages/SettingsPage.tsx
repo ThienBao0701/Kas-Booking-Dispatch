@@ -96,7 +96,7 @@ export function SettingsPage() {
  * The departments, in the order an Admin manages them. These are the system's
  * own roles — nothing here invents a department that has no accounts behind it.
  */
-const DEPARTMENTS: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'BOOKING_DEPARTMENT', 'ADMIN'];
+const DEPARTMENTS: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'TECHNICAL_MANAGER', 'BOOKING_DEPARTMENT', 'ADMIN'];
 
 /** Sections shown even when empty — the departments every property has. */
 const ALWAYS_SHOWN: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'ADMIN'];
@@ -104,6 +104,7 @@ const ALWAYS_SHOWN: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'ADMIN'];
 const DEPARTMENT_TITLE: Record<UserRole, string> = {
   RECEPTIONIST: 'Lễ tân',
   TECHNICAL: 'Kỹ thuật',
+  TECHNICAL_MANAGER: 'Quản lý kỹ thuật',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   ADMIN: 'Admin / Quản trị',
 };
@@ -258,6 +259,7 @@ function CreateUserModal({
             <option value="RECEPTIONIST">Lễ tân</option>
             <option value="BOOKING_DEPARTMENT">Bộ phận đặt phòng</option>
             <option value="TECHNICAL">Bộ phận kỹ thuật</option>
+            <option value="TECHNICAL_MANAGER">Quản lý kỹ thuật</option>
           </select>
         </label>
         {/*

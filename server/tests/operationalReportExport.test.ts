@@ -152,6 +152,7 @@ async function seedFullDay(agent: Agent, name: string, { end = true }: { end?: b
     areaCategory: 'LOBBY',
     areaSubtype: 'SOFA',
     description: 'Sofa rách',
+    cause: 'Khách kéo vali',
   });
   expect(issue.status).toBe(201);
   const facility = await agent
@@ -375,7 +376,7 @@ describe('branch drill-down', () => {
       (
         await letan
           .post('/api/reception/reports')
-          .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 500000 } })
+          .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 500000 } })
       ).status,
     ).toBe(201);
     setClock({ now: () => hcm('2026-09-18', '14:05') });
@@ -420,7 +421,7 @@ describe('branch drill-down', () => {
     expect(
       (await letan.post('/api/reception/reports').send({
         category: 'PAYMENT',
-        payment: { method: 'CASH', amount: 4400000, expense: 100000 },
+        payment: { source: 'Walking', method: 'CASH', amount: 4400000, expense: 100000 },
       })).status,
     ).toBe(201);
 
@@ -431,7 +432,7 @@ describe('branch drill-down', () => {
     expect(
       (await letan
         .post('/api/reception/reports')
-        .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 500000 } })).status,
+        .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 500000 } })).status,
     ).toBe(201);
 
     const res = await admin.get(
@@ -461,7 +462,7 @@ describe('branch drill-down', () => {
     expect(
       (await letan
         .post('/api/reception/reports')
-        .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 950000 } })).status,
+        .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 950000 } })).status,
     ).toBe(201);
 
     const the19th = await admin.get(
@@ -540,7 +541,8 @@ describe('the exports', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toBe('application/pdf');
-    expect(res.headers['content-disposition']).toContain('KAS-bao-cao-van-de-le-tan');
+    // Every branch, one business day: named for both, never for the build time.
+    expect(res.headers['content-disposition']).toContain('filename="Tat ca chi nhanh_19-09-2026.pdf"');
     const body = res.body as Buffer;
     expect(body.subarray(0, 5).toString()).toBe('%PDF-');
     // Two branch sections plus five tables each — comfortably more than an
@@ -562,7 +564,7 @@ describe('the exports', () => {
     */
     const max = await letan.post('/api/reception/reports').send({
       category: 'PAYMENT',
-      payment: { method: 'CASH', amount: 2_147_483_647, expense: 2_147_483_647, guestName: 'Khách VIP' },
+      payment: { source: 'Walking', method: 'CASH', amount: 2_147_483_647, expense: 2_147_483_647, guestName: 'Khách VIP' },
     });
     expect(max.status).toBe(201);
     expect(max.body.report.payment.amount).toBe(2_147_483_647);
@@ -570,7 +572,7 @@ describe('the exports', () => {
     for (const amount of [2_147_483_648, 9_999_999_999, 10_000_000_000]) {
       const over = await letan
         .post('/api/reception/reports')
-        .send({ category: 'PAYMENT', payment: { method: 'CASH', amount } });
+        .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount } });
       // 422, never 500 — the field is named and nothing reaches the driver.
       expect(over.status, String(amount)).toBe(422);
     }
@@ -643,7 +645,7 @@ describe('the exports', () => {
       'Tổng hợp chi nhánh',
       'Theo dõi thanh toán',
       'Vấn đề khách yêu cầu',
-      'Sự cố vật chất đang xử lý',
+      'Sự cố cơ sở vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]);
@@ -683,8 +685,15 @@ describe('the exports', () => {
     // A real number, like the price.
     expect(services.getRow(2).getCell(columnByHeader(services, 'Số đêm')).value).toBe(2);
 
-    const facilities = wb.getWorksheet('Sự cố vật chất đang xử lý')!;
+    const facilities = wb.getWorksheet('Sự cố cơ sở vật chất đang xử lý')!;
     expect(facilities.getRow(2).getCell(columnByHeader(facilities, 'Mô tả')).value).toBe('Sofa rách');
+    // The ONE canonical cause, and the lifecycle in the screens' own words —
+    // not the raw enum. Nobody has inspected it, and nothing says otherwise.
+    expect(facilities.getRow(2).getCell(columnByHeader(facilities, 'Nguyên nhân')).value).toBe('Khách kéo vali');
+    expect(facilities.getRow(2).getCell(columnByHeader(facilities, 'Trạng thái kỹ thuật')).value).toBe('Chờ kỹ thuật');
+    // Inspection is dormant: the file carries no "Nghiệm thu" columns at all.
+    expect(() => columnByHeader(facilities, 'Nghiệm thu')).toThrow();
+    expect(() => columnByHeader(facilities, 'Người nghiệm thu')).toThrow();
     // A cuid, which is the reference into the existing technical system.
     expect(String(facilities.getRow(2).getCell(columnByHeader(facilities, 'Mã sự cố')).value)).toMatch(
       /^c[a-z0-9]{24}$/,
@@ -819,7 +828,7 @@ describe('every record carries its shift’s own day', () => {
     for (const name of [
       'Theo dõi thanh toán',
       'Vấn đề khách yêu cầu',
-      'Sự cố vật chất đang xử lý',
+      'Sự cố cơ sở vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]) {
@@ -838,7 +847,7 @@ describe('the export is scoped exactly like the screen', () => {
     // Every other category's sheet holds its header and nothing else.
     for (const name of [
       'Vấn đề khách yêu cầu',
-      'Sự cố vật chất đang xử lý',
+      'Sự cố cơ sở vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
     ]) {
@@ -1055,7 +1064,7 @@ describe('only CLOSED shifts are in the official report', () => {
     expect((await letan.put('/api/reception/shifts/cash').send({ openingCash: 1_000_000 })).status).toBe(200);
     setClock({ now: () => hcm('2026-09-24', '02:00') });
     expect(
-      (await letan.post('/api/reception/reports').send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 200_000 } }))
+      (await letan.post('/api/reception/reports').send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 200_000 } }))
         .status,
     ).toBe(201);
     setClock({ now: () => hcm('2026-09-24', '05:50') });

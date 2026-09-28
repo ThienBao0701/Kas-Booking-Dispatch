@@ -87,7 +87,7 @@ export function VoidDialog({
             rows={2}
             maxLength={1000}
             data-testid="void-reason"
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            className="mt-1 w-full rounded-lg border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           />
         </label>
         {error ? <ErrorAlert>{error}</ErrorAlert> : null}
@@ -159,7 +159,7 @@ export function CompleteRecordDialog({
             rows={3}
             maxLength={2000}
             data-testid="complete-resolution"
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            className="mt-1 w-full rounded-lg border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           />
         </label>
         <p className="text-xs text-slate-500">Thời gian hoàn thành do hệ thống ghi nhận.</p>
@@ -177,10 +177,20 @@ export interface EditField {
   /** The server's own field name — it is what the audit row will record. */
   name: string;
   label: string;
-  /** `integer`: a whole number, such as "Số đêm". */
-  kind?: 'text' | 'textarea' | 'money' | 'integer';
+  /**
+   * `integer`: a whole number of at least 1, such as "Số đêm".
+   * `count`: a whole number of at least 0, such as a review count.
+   */
+  kind?: 'text' | 'textarea' | 'money' | 'integer' | 'count';
   required?: boolean;
   placeholder?: string;
+}
+
+/** A whole number from 0 up as typed, or null — never a silent zero for blank. */
+function parseCount(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  return Number(trimmed);
 }
 
 /** A positive whole number as typed, or null — never a silent zero. */
@@ -235,7 +245,9 @@ export function RecordEditDialog({
             ? (parseVnd(value) ?? 0)
             : f.kind === 'integer'
               ? parseWhole(value)
-              : value.trim();
+              : f.kind === 'count'
+                ? parseCount(value)
+                : value.trim();
       }
       const patch = { [block]: payload, reason: reason.trim() || undefined } as UpdateReportInput;
       return reportsApi.update(report.id, patch);
@@ -247,13 +259,19 @@ export function RecordEditDialog({
     onError: (e) => setError(toUserMessage(e)),
   });
 
-  const ready = fields.every((f) => {
+  const everyFieldReady = fields.every((f) => {
     const value = (draft[f.name] ?? '').trim();
     if (!f.required) return true;
     if (f.kind === 'money') return parseVnd(value) !== null;
     if (f.kind === 'integer') return parseWhole(value) !== null;
+    if (f.kind === 'count') return parseCount(value) !== null;
     return value.length > 0;
   });
+  // The counts of a Review are judged together: at least one review, as on creation.
+  const countFields = fields.filter((f) => f.kind === 'count');
+  const countsReady =
+    countFields.length === 0 || countFields.reduce((sum, f) => sum + (parseCount(draft[f.name] ?? '') ?? 0), 0) > 0;
+  const ready = everyFieldReady && countsReady;
 
   return (
     <Modal
@@ -296,7 +314,7 @@ export function RecordEditDialog({
                 onChange={(v) => setDraft((d) => ({ ...d, [f.name]: v }))}
                 data-testid={`record-edit-${f.name}`}
               />
-            ) : f.kind === 'integer' ? (
+            ) : f.kind === 'integer' || f.kind === 'count' ? (
               <Input
                 key={f.name}
                 label={f.label}
@@ -314,7 +332,7 @@ export function RecordEditDialog({
                   rows={3}
                   maxLength={4000}
                   data-testid={`record-edit-${f.name}`}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+                  className="mt-1 w-full rounded-lg border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
                 />
               </label>
             ) : (

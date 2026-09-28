@@ -10,7 +10,7 @@
  * for a day contains only shifts that have pressed "Kết thúc ca"; until then the
  * screen says "Ca chưa kết thúc chưa được đưa vào báo cáo chính thức."
  *
- * "Sự cố vật chất đang xử lý" here is the incident monitor that used to be the
+ * "Sự cố cơ sở vật chất đang xử lý" here is the incident monitor that used to be the
  * separate "Sự cố khách sạn" screen: the HotelIssue rows themselves.
  *
  * THREE FILTERS, NO MORE: a period, a branch, a category. All three are applied
@@ -30,11 +30,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Building2, Download, FileSpreadsheet } from 'lucide-react';
+import { AlertTriangle, Building2, Download } from 'lucide-react';
 import {
   adminReportsApi,
   operationalPdfUrl,
-  operationalXlsxUrl,
   reportsApi,
   type CashSummary,
   type OpenShiftNotice,
@@ -50,6 +49,7 @@ import { QueryState } from '../components/PageState';
 import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
 import {
   AdminAllCategoriesTable,
+  AdminFacilityJournalTable,
   AdminGuestRequestTable,
   AdminPaymentTable,
   AdminRoomServiceTable,
@@ -59,8 +59,9 @@ import { RoomServiceTotals } from '../components/OperationalTables';
 import { formatVnd } from '../lib/money';
 import { formatDate, formatViWeekdayDate, hcmToday } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
-import { CATEGORY_FALLBACK_LABELS, CATEGORY_ORDER } from '../lib/reportCategories';
-import { daysBefore, groupByBranch, type ShiftGroup } from '../lib/shiftGroups';
+import { CATEGORY_FALLBACK_LABELS, CATEGORY_MARKERS, CATEGORY_ORDER } from '../lib/reportCategories';
+import { groupByBranch, type ShiftGroup } from '../lib/shiftGroups';
+import { PeriodQuickPicks } from '../components/PeriodQuickPicks';
 import { issuesApi } from '../api/issues';
 import { IncidentExportModal, IncidentRangeSummary, IncidentTable } from '../components/IncidentReporting';
 import { useIssueSummary } from '../hooks/useIssueSummary';
@@ -165,9 +166,9 @@ export function AdminOperationalReportsPage() {
         <section
           data-testid="admin-filters"
           aria-label="Bộ lọc báo cáo"
-          className="mb-4 overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm"
+          className="mb-4 overflow-hidden rounded-xl border-section border-line bg-white shadow-sm"
         >
-          <p className="border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+          <p className="border-b-rule border-line bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
             Bộ lọc báo cáo
           </p>
           <div className="flex flex-wrap items-end gap-x-4 gap-y-3 px-4 py-3">
@@ -180,45 +181,7 @@ export function AdminOperationalReportsPage() {
                 testId="admin-range"
               />
             </div>
-            <div>
-              <p aria-hidden="true" className="mb-1 text-xs font-medium text-slate-500">
-                Chọn nhanh
-              </p>
-              <div
-                className="inline-flex overflow-hidden rounded-xl border border-slate-300 bg-white"
-                role="group"
-                aria-label="Chọn nhanh khoảng thời gian"
-              >
-                {(
-                  [
-                    ['Hôm nay', 0],
-                    ['7 ngày', 6],
-                    ['30 ngày', 29],
-                  ] as const
-                ).map(([text, back], i) => {
-                  const from = daysBefore(today, back);
-                  const active = range.from === from && range.to === today;
-                  return (
-                    <button
-                      key={text}
-                      type="button"
-                      onClick={() => setRange({ from, to: today })}
-                      aria-pressed={active}
-                      data-testid={`admin-range-${back}`}
-                      className={`min-h-[2.75rem] whitespace-nowrap px-3.5 text-sm transition-colors focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
-                        i > 0 ? 'border-l border-slate-300' : ''
-                      } ${
-                        active
-                          ? 'bg-brand-50 font-semibold text-brand-700'
-                          : 'font-medium text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      {text}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            <PeriodQuickPicks value={range} onChange={setRange} today={today} testId="admin-range" />
             <div className="min-w-[16rem] flex-1">
               <label htmlFor="admin-branch" className="mb-1 block text-xs font-medium text-slate-500">
                 Chi nhánh
@@ -232,7 +195,7 @@ export function AdminOperationalReportsPage() {
                   setBranch(v === '' ? null : v === 'ALL' ? 'ALL' : Number(v));
                   setCategory(null);
                 }}
-                className="min-h-[2.75rem] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
+                className="min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-800 hover:border-slate-600 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
               >
                 <option value="">— Chọn chi nhánh —</option>
                 <option value="ALL">Tất cả chi nhánh</option>
@@ -243,6 +206,17 @@ export function AdminOperationalReportsPage() {
                 ))}
               </select>
             </div>
+          </div>
+          {/*
+            WHICH BRANCH HAS HOW MANY — always in view, beside the branch it
+            selects. The same count as the "Báo cáo vấn đề" badge in the menu
+            (`/api/issues/summary`), split by branch; choosing one selects it.
+          */}
+          <div className="border-t-rule border-line-subtle px-4 py-3">
+            <BranchIncidentCounts
+              selected={typeof branch === 'number' ? branch : null}
+              onPick={(id) => setBranch(id)}
+            />
           </div>
         </section>
       </QueryState>
@@ -314,7 +288,7 @@ export function AdminOperationalReportsPage() {
           ) : null}
 
           {category === 'FACILITY_ISSUE' ? (
-            <AdminIncidentView branchId={filters.branchId} range={range} onPickBranch={setBranch} />
+            <AdminIncidentView branchId={filters.branchId} range={range} />
           ) : (
             <CategoryView
               category={category}
@@ -390,7 +364,7 @@ function CategoryTab({
       onClick={onClick}
       aria-pressed={active}
       data-testid={testId}
-      className={`inline-flex min-h-[2.5rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 sm:flex-auto ${
+      className={`inline-flex min-h-[2.5rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 sm:flex-auto ${
         active
           ? 'bg-white font-semibold text-brand-700 shadow-sm ring-1 ring-slate-300'
           : 'font-medium text-slate-600 hover:bg-white/70 hover:text-slate-900'
@@ -424,6 +398,7 @@ function CategoryTable({
   headerAction,
   grouped,
   marker,
+  compact,
   label,
   serviceLabel,
   tableState,
@@ -434,17 +409,20 @@ function CategoryTable({
   headerAction?: ReactNode;
   /** Under a shift heading: leave out the columns it already states. */
   grouped?: boolean;
-  /** The shift's code ("A", "C4") beside the title, when there is a shift. */
+  /** The category's numeral ("I"–"V") beside the title, inside a shift's frame. */
   marker?: string;
+  /** A one-line empty state — a category the shift recorded nothing in. */
+  compact?: boolean;
   label: (c: ReportCategory) => string;
   serviceLabel: (t: RoomServiceType) => string;
   tableState: TableState;
 }) {
   // Every table is a report section: the same bounded frame as reception's
-  // overview, so a day of shifts reads as a stack of distinct blocks.
-  const props = { rows, title, headerAction, grouped, section: { marker }, ...tableState };
+  // overview, so a shift reads as a stack of distinct blocks.
+  const props = { rows, title, headerAction, grouped, compact, section: { marker }, ...tableState };
   if (category === 'PAYMENT') return <AdminPaymentTable {...props} />;
   if (category === 'GUEST_REQUEST') return <AdminGuestRequestTable {...props} />;
+  if (category === 'FACILITY_ISSUE') return <AdminFacilityJournalTable {...props} />;
   if (category === 'CUSTOMER_COMPLAINT') return <AdminServiceQualityTable {...props} />;
   if (category === 'ROOM_SERVICE') {
     const present = ROOM_SERVICE_ORDER.filter((t) => rows.some((r) => r.roomService?.serviceType === t));
@@ -475,10 +453,11 @@ function CategoryTable({
 /**
  * CHI NHÁNH → NGÀY NGHIỆP VỤ → CA → NHÂN VIÊN → the records.
  *
- * Each shift is its own compact table, and the table's heading IS the shift and
- * the person — "Ca A · 06:00 – 14:00 · Nguyễn Văn A" — with what they recorded,
- * counted by category, on the right. The day sits above its shifts as one line,
- * and the branch above its days when several branches are on screen.
+ * Each shift is its own bordered frame (`ShiftBlock`), headed once by the shift
+ * and the person — "Ca A · 06:00 – 14:00 · Nguyễn Văn A" — with what they
+ * recorded, counted by category, on the right, and the categories inside it as
+ * separate tables I–V. The day sits above its shifts as one line, and the
+ * branch above its days when several branches are on screen.
  */
 function CategoryView({
   category,
@@ -549,25 +528,101 @@ function CategoryView({
                 </span>
               </h3>
               {day.shifts.map((group) => (
-                <div key={group.key} data-testid={`shift-group-${group.key}`}>
-                  <CategoryTable
-                    category={category}
-                    rows={group.rows}
-                    title={shiftTitle(group)}
-                    headerAction={<ShiftSummary group={group} label={label} />}
-                    marker={shiftCode(group)}
-                    grouped
-                    label={label}
-                    serviceLabel={serviceLabel}
-                    tableState={tableState}
-                  />
-                </div>
+                <ShiftBlock
+                  key={group.key}
+                  group={group}
+                  category={category}
+                  label={label}
+                  serviceLabel={serviceLabel}
+                  tableState={tableState}
+                />
               ))}
             </section>
           ))}
         </section>
       ))}
     </div>
+  );
+}
+
+/**
+ * ONE SHIFT, ONE FRAME.
+ *
+ *   ┏━ [A] Ca A · 06:00 – 14:00 · Trần Thiên Bảo ─────── counts · Chưa kết thúc ━┓
+ *   ┃  I.  Theo dõi thanh toán                [table]                            ┃
+ *   ┃  II. Vấn đề khách yêu cầu thực hiện     [table]                            ┃
+ *   ┃  …   down to V. Dịch vụ phòng, KPI                                         ┃
+ *   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ *
+ * The shift and its person head the frame once; inside, each category keeps
+ * its own table under its own numeral — all five on "Tất cả" (an empty one in
+ * a single line, so "nothing recorded" is said rather than missing), the one
+ * chosen otherwise. Presentation only: the rows are the server's, grouped by
+ * the session that wrote them, exactly as before.
+ */
+function ShiftBlock({
+  group,
+  category,
+  label,
+  serviceLabel,
+  tableState,
+}: {
+  group: ShiftGroup;
+  category: ReportCategory | null;
+  label: (c: ReportCategory) => string;
+  serviceLabel: (t: RoomServiceType) => string;
+  tableState: TableState;
+}) {
+  const categories = category ? [category] : CATEGORY_ORDER;
+  const code = shiftCode(group);
+  return (
+    <section
+      data-testid={`shift-group-${group.key}`}
+      aria-labelledby={`shift-title-${group.key}`}
+      className="overflow-hidden rounded-2xl border-section border-line-strong bg-white shadow-sm"
+    >
+      <header className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b-rule border-line bg-slate-100 px-4 py-3">
+        <div className="flex min-w-0 flex-auto items-center gap-2.5">
+          {code ? (
+            <span
+              aria-hidden="true"
+              className="inline-flex h-7 min-w-[1.75rem] shrink-0 items-center justify-center rounded-md bg-slate-800 px-1.5 text-xs font-bold text-white"
+            >
+              {code}
+            </span>
+          ) : null}
+          <h3
+            id={`shift-title-${group.key}`}
+            data-testid={`shift-title-${group.key}`}
+            className="min-w-0 text-base font-semibold text-slate-900"
+          >
+            {shiftTitle(group)}
+          </h3>
+        </div>
+        <div className="basis-full sm:ml-auto sm:basis-auto">
+          <ShiftSummary group={group} label={label} />
+        </div>
+      </header>
+      <div className="space-y-3 bg-slate-50/60 p-3">
+        {categories.map((c) => {
+          const rows = group.rows.filter((r) => r.category === c);
+          return (
+            <CategoryTable
+              key={c}
+              category={c}
+              rows={rows}
+              title={label(c)}
+              marker={CATEGORY_MARKERS[c]}
+              compact={rows.length === 0}
+              grouped
+              label={label}
+              serviceLabel={serviceLabel}
+              tableState={tableState}
+            />
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -635,7 +690,7 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
 }
 
 /**
- * "SỰ CỐ VẬT CHẤT ĐANG XỬ LÝ", for the Admin: the incidents themselves.
+ * "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ", for the Admin: the incidents themselves.
  *
  * This is where the old "Sự cố khách sạn" screen went. It reads the SAME
  * `HotelIssue` rows through the SAME `/api/issues` the technical department
@@ -643,16 +698,7 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
  * report date — plus the period's counts and, when asked, every incident still
  * open whatever day it was reported. Nothing here is a second incident system.
  */
-function AdminIncidentView({
-  branchId,
-  range,
-  onPickBranch,
-}: {
-  branchId?: number;
-  range: DateRangeValue;
-  /** A branch's count is also the way into that branch. */
-  onPickBranch: (branchId: number) => void;
-}) {
+function AdminIncidentView({ branchId, range }: { branchId?: number; range: DateRangeValue }) {
   const [outstanding, setOutstanding] = useState(false);
   const list = useQuery({
     queryKey: ['issues', { admin: true, branchId, range, outstanding }],
@@ -672,7 +718,6 @@ function AdminIncidentView({
 
   return (
     <div className="space-y-3" data-testid="admin-incident-view">
-      {branchId === undefined ? <BranchIncidentCounts onPick={onPickBranch} /> : null}
       {outstanding ? null : <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />}
       <label
         className={`inline-flex min-h-[2.75rem] cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm transition-colors ${
@@ -720,8 +765,20 @@ function AdminIncidentView({
  * server (`/api/issues/summary`), whatever the period: an unresolved incident
  * matters whichever day it was reported. Choosing one narrows the page to that
  * branch through the page's own branch filter — there is only one.
+ *
+ * THE SAME NUMBER AS THE MENU BADGE. "Báo cáo vấn đề [n]" in the sidebar is
+ * this query's `totalUnresolved`; these are its `byBranch` parts, so the badge
+ * and the branches always add up and refresh together. Shown in the filter
+ * block, so it is in view on every category and before a branch is chosen.
  */
-function BranchIncidentCounts({ onPick }: { onPick: (branchId: number) => void }) {
+function BranchIncidentCounts({
+  onPick,
+  selected,
+}: {
+  onPick: (branchId: number) => void;
+  /** The branch the page is filtered to, marked as chosen. */
+  selected: number | null;
+}) {
   const summary = useIssueSummary();
   const branches = summary.data?.summary.byBranch ?? [];
   if (branches.length === 0) return null;
@@ -733,14 +790,21 @@ function BranchIncidentCounts({ onPick }: { onPick: (branchId: number) => void }
       <div className="flex flex-wrap gap-1.5">
         {branches.map((b) => {
           const open = b.totalUnresolved > 0;
+          const chosen = selected === b.branchId;
           return (
             <button
               key={b.branchId}
               type="button"
               onClick={() => onPick(b.branchId)}
+              aria-pressed={chosen}
+              data-testid={`branch-count-${b.branchId}`}
               aria-label={`${b.totalUnresolved} sự cố chưa xử lý tại ${b.address}`}
-              className={`inline-flex items-center gap-2 rounded-lg border bg-white px-2.5 py-1.5 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
-                open ? 'border-red-200 hover:border-red-300' : 'border-slate-200 hover:border-slate-300'
+              className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
+                chosen
+                  ? 'border-brand-600 bg-brand-50 ring-1 ring-brand-600'
+                  : open
+                    ? 'border-red-300 bg-white hover:border-red-400'
+                    : 'border-line bg-white hover:border-line-strong'
               }`}
             >
               <span className="font-medium text-slate-800">{b.address}</span>
@@ -753,6 +817,7 @@ function BranchIncidentCounts({ onPick }: { onPick: (branchId: number) => void }
               </span>
               <span className="text-slate-500">
                 Mới: {b.newCount} · Đang sửa: {b.inProgressCount}
+                {b.awaitingInspectionCount > 0 ? ` · Chờ nghiệm thu: ${b.awaitingInspectionCount}` : ''}
               </span>
             </button>
           );
@@ -877,14 +942,7 @@ function ExportDialog({
           <Button variant="secondary" onClick={onClose}>
             Đóng
           </Button>
-          <a
-            href={operationalXlsxUrl(filters)}
-            data-testid="operational-export-xlsx"
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-          >
-            <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
-            Xuất Excel
-          </a>
+          {/* PDF only: the report is read and filed, not re-worked in a spreadsheet. */}
           <a
             href={operationalPdfUrl(filters)}
             data-testid="operational-export-pdf"

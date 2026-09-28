@@ -16,20 +16,28 @@
  *   4. Request and "Vấn đề về chất lượng và dịch vụ" ask for three fields each,
  *      start as "Đã tiếp nhận", and complete with an OPTIONAL handling text.
  *   5. "Dịch vụ phòng, KPI" is one form that asks only what the chosen service
- *      needs, five grouped tables on its screen, and two figures on the
- *      overview — with no invented review score.
- *   6. "Sự cố vật chất đang xử lý" is a MONITOR: no "chọn sự cố" dropdown, no
+ *      needs, six grouped tables on its screen, and two figures on the
+ *      overview — revenue, and the reviews the desk itself counted
+ *      (Tripadvisor + Google), which never add to revenue.
+ *   6. "Sự cố cơ sở vật chất đang xử lý" is a MONITOR: no "chọn sự cố" dropdown, no
  *      entry form — it shows the branch's live incidents and their status.
  *   7. Editing and voiding live in the category table, are audited and never
  *      delete a record.
- *   8. "Nhật ký ca hiện tại" still exists, collapsed by default — secondary,
- *      not the primary presentation.
+ *   8. There is no "Nhật ký ca hiện tại" on any Reception reporting screen any
+ *      more — each category's table is the record; the data itself is untouched.
+ *   9. OVERVIEW = COMPACT, DETAIL = COMPLETE. II, III and IV are read across
+ *      shifts; the overview shows their summary columns only.
+ *  10. "Hoàn thành vấn đề" lists II, III and IV completed 12 hours or more
+ *      after receipt — compact, read-only, for Reception only, and filtered on
+ *      the SERVER by the days the records were received (default: last 7 days).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
-import { formatDateTime } from '../lib/format';
+import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
+import { formatDateTime, hcmToday } from '../lib/format';
+import { daysBefore } from '../lib/shiftGroups';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,7 +68,7 @@ const OPTIONS = {
   categories: [
     { code: 'PAYMENT', label: 'Theo dõi thanh toán' },
     { code: 'GUEST_REQUEST', label: 'Vấn đề khách yêu cầu' },
-    { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
+    { code: 'FACILITY_ISSUE', label: 'Sự cố cơ sở vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
   ],
@@ -75,8 +83,9 @@ const OPTIONS = {
     { code: 'SMOKING', label: 'Hút thuốc' },
     { code: 'LAUNDRY', label: 'Giặt ủi' },
     { code: 'OTHER', label: 'Dịch vụ khác' },
+    { code: 'REVIEW', label: 'Review' },
   ],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking'],
 };
 
 const EMPTY_COUNTS = {
@@ -148,10 +157,30 @@ function report(over: Record<string, unknown> = {}) {
   };
 }
 
-function shellRoutes(
-  user: unknown,
-  extra: Record<string, (init: RequestInit) => { status: number; body?: unknown }> = {},
-) {
+type Handler = (init: RequestInit) => { status: number; body?: unknown };
+
+/**
+ * II AND IV ARE READ ACROSS SHIFTS, from `/reception/reports/active`. Unless a
+ * test sets that route itself, it answers with the II and IV rows the shift
+ * journal holds — on the server those rows are part of the active set too, so
+ * the two stay consistent without every test restating its rows twice.
+ */
+function shellRoutes(user: unknown, extra: Record<string, Handler> = {}) {
+  const routes = baseRoutes(user, extra);
+  const journal = routes['GET /api/reception/reports?shiftSessionId=s1'];
+  if (!extra['GET /api/reception/reports/active'] && journal) {
+    routes['GET /api/reception/reports/active'] = (init) => {
+      const res = journal(init);
+      const rows = ((res.body as { reports?: { category: string }[] } | undefined)?.reports ?? []).filter(
+        (r) => r.category === 'GUEST_REQUEST' || r.category === 'CUSTOMER_COMPLAINT',
+      );
+      return { status: res.status, body: { reports: rows, archiveAfterHours: 12 } };
+    };
+  }
+  return routes;
+}
+
+function baseRoutes(user: unknown, extra: Record<string, Handler>): Record<string, Handler> {
   return {
     'GET /api/auth/me': () => ({ status: 200, body: { user } }),
     'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
@@ -170,7 +199,7 @@ function shellRoutes(
     'GET /api/reception/shifts/cash': () => ({ status: 200, body: { cash: EMPTY_CASH } }),
     // The exact URL `issuesApi.list` builds: `query()` keeps insertion order,
     // and `outstanding` is appended after the rest.
-    'GET /api/issues?pageSize=100&outstanding=true': () => ({
+    'GET /api/issues?scope=active&pageSize=100': () => ({
       status: 200,
       body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 0 } },
     }),
@@ -181,7 +210,7 @@ function shellRoutes(
 const FIVE_TITLES = [
   'Theo dõi thanh toán',
   'Vấn đề khách yêu cầu thực hiện (Request)',
-  'Sự cố vật chất đang xử lý',
+  'Sự cố cơ sở vật chất đang xử lý',
   'Vấn đề về chất lượng và dịch vụ',
   'Dịch vụ phòng, KPI',
 ];
@@ -351,14 +380,18 @@ describe('the overview', () => {
     expect(within(payment).getByText('Chưa xác định')).toBeInTheDocument();
   });
 
-  it('lists this shift’s real records, with each summary table’s exact columns', async () => {
+  it('lists the real records in each section’s compact summary columns', async () => {
+    const doneRequest = requestRow(
+      { id: 'g2' },
+      { guestName: 'Khách Xong', completed: true, completedAt: '2026-09-19T02:00:00.000Z', resolution: 'Đã trả balo' },
+    );
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
           status: 200,
           body: {
-            reports: [requestRow(), report()],
-            counts: { ...EMPTY_COUNTS, GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 1 },
+            reports: [requestRow(), doneRequest, report()],
+            counts: { ...EMPTY_COUNTS, GUEST_REQUEST: 2, CUSTOMER_COMPLAINT: 1 },
           },
         }),
       }),
@@ -368,36 +401,155 @@ describe('the overview', () => {
     const overview = await screen.findByTestId('report-overview');
     const requests = within(overview).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách ký gửi')).toBeInTheDocument();
-    expect(headersOf(requests)).toEqual([
-      'STT',
-      'Tên khách',
-      'Mã EZ',
-      'Nội dung',
-      'Thời gian tiếp nhận',
-      'Thời gian hoàn thành',
-      'Cách xử lý (nếu có)',
-    ]);
-    expect(within(requests).getByText('EZ305')).toBeInTheDocument();
-    expect(within(requests).getByText('Gửi balo đen, 14h lấy')).toBeInTheDocument();
+    // OVERVIEW = COMPACT: no times, no handling, no controls.
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(within(within(requests).getByTestId('row-g1')).getByText('EZ305')).toBeInTheDocument();
+    expect(within(within(requests).getByTestId('row-g1')).getByText('Gửi balo đen, 14h lấy')).toBeInTheDocument();
+    // The status is the words and nothing beneath them.
+    expect(within(within(requests).getByTestId('row-g1')).getByText('Đã tiếp nhận')).toBeInTheDocument();
+    const done = within(requests).getByTestId('row-g2');
+    expect(within(done).getByText('Đã hoàn thành')).toBeInTheDocument();
+    expect(within(done).queryByText('Đã trả balo')).not.toBeInTheDocument();
+    expect(within(done).queryByText(formatDateTime('2026-09-19T02:00:00.000Z'))).not.toBeInTheDocument();
 
     const quality = within(overview).getByTestId('service-quality-table');
     expect(within(quality).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
-    expect(headersOf(quality)).toEqual([
-      'STT',
-      'Tên khách',
-      'Mã EZ',
-      'Mô tả',
-      'Trạng thái',
-      'Hướng xử lý (nếu có)',
-      'Thời gian',
-    ]);
+    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Trạng thái']);
     expect(within(quality).getByText('Đã tiếp nhận')).toBeInTheDocument();
-    // The overview reads; it does not edit or void.
+    // The overview reads: no "Hoàn thành", no "Sửa", no "Hủy".
+    expect(within(quality).queryByTestId('complete-r1')).not.toBeInTheDocument();
     expect(within(quality).queryByTestId('edit-r1')).not.toBeInTheDocument();
+    expect(within(requests).queryByTestId('complete-g1')).not.toBeInTheDocument();
     expect(within(requests).queryByTestId('edit-g1')).not.toBeInTheDocument();
   });
 
+  /**
+   * II AND IV ARE THE BRANCH'S, NOT THE SHIFT'S: an unfinished request from the
+   * last shift is on this shift's overview, read from the active set — and a
+   * withdrawn row is not on the overview at all.
+   */
+  it('shows requests and service-quality reports across shifts, without withdrawn rows', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({
+          status: 200,
+          body: {
+            reports: [
+              requestRow({ id: 'g-prev', shiftSessionId: 's0', shiftName: 'Ca C' }, { guestName: 'Khách ca trước' }),
+              requestRow({ id: 'g-void', voided: true, voidReason: 'nhầm' }, { guestName: 'Khách đã hủy' }),
+              report({ id: 'q-prev', shiftSessionId: 's0', shiftName: 'Ca C' }),
+            ],
+            archiveAfterHours: 12,
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    const overview = await screen.findByTestId('report-overview');
+    const requests = within(overview).getByTestId('guest-request-table');
+    expect(await within(requests).findByText('Khách ca trước')).toBeInTheDocument();
+    expect(within(requests).queryByText('Khách đã hủy')).not.toBeInTheDocument();
+    expect(within(within(overview).getByTestId('service-quality-table')).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
+  });
+
+  /**
+   * THE CATEGORY SCREENS READ THE SAME ACTIVE SET: a request the last shift
+   * left unfinished is on this shift's "Vấn đề khách yêu cầu thực hiện" screen
+   * to be completed — and a row this shift withdrew stays there, struck through.
+   */
+  it('lists the last shift’s unfinished records on the category screens, where they can be completed', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({
+          status: 200,
+          body: {
+            reports: [
+              requestRow({ id: 'g-prev', shiftSessionId: 's0', shiftName: 'Ca C' }, { guestName: 'Khách ca trước' }),
+              requestRow({ id: 'g-void', voided: true, voidReason: 'Trùng' }, { guestName: 'Khách đã hủy' }),
+              report({ id: 'q-prev', shiftSessionId: 's0', shiftName: 'Ca C' }),
+            ],
+            totals: { GUEST_REQUEST: 2, CUSTOMER_COMPLAINT: 1 },
+            archiveAfterHours: 12,
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports?category=GUEST_REQUEST');
+
+    const requests = await screen.findByTestId('guest-request-table');
+    expect(await within(requests).findByText('Khách ca trước')).toBeInTheDocument();
+    expect(within(within(requests).getByTestId('row-g-prev')).getByTestId('complete-g-prev')).toBeInTheDocument();
+    // Withdrawn by this shift: still on its screen, struck through, with nothing left to press.
+    const withdrawn = within(requests).getByTestId('row-g-void');
+    expect(withdrawn).toHaveTextContent('Khách đã hủy');
+    expect(within(withdrawn).queryByTestId('complete-g-void')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('list-more')).not.toBeInTheDocument();
+
+    await openCategory('CUSTOMER_COMPLAINT');
+    const quality = await screen.findByTestId('service-quality-table');
+    expect(within(quality).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
+    expect(within(quality).getByTestId('complete-q-prev')).toBeInTheDocument();
+  });
+
+  it('says so when the server returned only the newest page of the active records', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({
+          status: 200,
+          body: { reports: [requestRow()], totals: { GUEST_REQUEST: 612, CUSTOMER_COMPLAINT: 0 }, archiveAfterHours: 12 },
+        }),
+        'GET /api/issues?scope=active&pageSize=100': () => ({
+          status: 200,
+          body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 0 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    const overview = await screen.findByTestId('report-overview');
+    await within(overview).findByText('Khách ký gửi');
+    const notes = within(overview).getAllByTestId('list-more');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toHaveTextContent('Đang hiển thị 1 bản ghi gần nhất trên tổng số 612.');
+
+    await openCategory('GUEST_REQUEST');
+    expect(await screen.findByTestId('list-more')).toHaveTextContent('tổng số 612');
+  });
+
   it('reduces "Dịch vụ phòng, KPI" to its two figures, from the real rows', async () => {
+    const review = report({
+      id: 'rv1',
+      category: 'ROOM_SERVICE',
+      complaint: null,
+      roomService: roomService({
+        serviceType: 'REVIEW',
+        serviceTypeLabel: 'Review',
+        roomClass: null,
+        nights: null,
+        price: 0,
+        tripadvisorCount: 3,
+        googleCount: 2,
+        countsAsRevenue: false,
+      }),
+    });
+    const withdrawnReview = report({
+      id: 'rv2',
+      category: 'ROOM_SERVICE',
+      complaint: null,
+      voided: true,
+      voidReason: 'nhầm',
+      roomService: roomService({
+        serviceType: 'REVIEW',
+        serviceTypeLabel: 'Review',
+        roomClass: null,
+        nights: null,
+        price: 0,
+        tripadvisorCount: 7,
+        googleCount: 7,
+        countsAsRevenue: false,
+      }),
+    });
     const sale = report({
       id: 'rs1',
       category: 'ROOM_SERVICE',
@@ -422,19 +574,19 @@ describe('the overview', () => {
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
           status: 200,
-          body: { reports: [sale, laundry, voided], counts: { ...EMPTY_COUNTS, ROOM_SERVICE: 3 } },
+          body: { reports: [sale, laundry, voided, review, withdrawnReview], counts: { ...EMPTY_COUNTS, ROOM_SERVICE: 5 } },
         }),
       }),
     );
     renderApp('/app/reports');
 
     const section = await screen.findByTestId('room-service-overview');
-    // Real rows, voided excluded: 800.000 + 150.000.
+    // Real rows, voided excluded: 800.000 + 150.000 — a review is never money.
     expect(await within(section).findByText('950.000 ₫')).toBeInTheDocument();
     expect(within(section).getByText('Tổng doanh thu')).toBeInTheDocument();
     expect(within(section).getByText('Tổng đánh giá (review)')).toBeInTheDocument();
-    // No review source exists in KAS, and the line says so instead of inventing one.
-    expect(within(section).getByTestId('room-service-review')).toHaveTextContent('Chưa có dữ liệu');
+    // The desk's own counts: Tripadvisor 3 + Google 2; the withdrawn review counts for nothing.
+    expect(within(section).getByTestId('room-service-review')).toHaveTextContent('5');
     // Nothing else: no subtype buttons, no tables, no per-subtype totals.
     expect(within(section).queryAllByRole('button')).toHaveLength(0);
     expect(within(section).queryByRole('table')).not.toBeInTheDocument();
@@ -783,7 +935,7 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     expect(screen.getByTestId('service-quality-form-add')).toBeEnabled();
   });
 
-  it('lays the table out in exactly the seven columns, with no action column', async () => {
+  it('lays the table out in exactly the seven columns, with "Sửa" beside the handling and no "Hủy"', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
@@ -806,8 +958,10 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
       'Hướng xử lý (nếu có)',
       'Thời gian',
     ]);
+    // No action column: "Sửa" sits with the handling, as in the request table.
     expect(within(table).queryByText('Thao tác')).not.toBeInTheDocument();
-    expect(within(table).queryByTestId('edit-r1')).not.toBeInTheDocument();
+    const handling = within(within(table).getByTestId('row-r1')).getAllByRole('cell')[headersOf(table).indexOf('Hướng xử lý (nếu có)') + 1]!;
+    expect(within(handling).getByTestId('edit-r1')).toHaveTextContent('Sửa');
     expect(within(table).queryByTestId('void-r1')).not.toBeInTheDocument();
   });
 
@@ -867,6 +1021,63 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     await openCategory('CUSTOMER_COMPLAINT');
     expect(await screen.findByTestId('service-quality-table-empty')).toBeInTheDocument();
   });
+
+  /**
+   * "SỬA" CORRECTS WHAT THE DESK TYPED — Tên khách, Mã EZ and Mô tả — and
+   * nothing else: the times, the completion and its handling stay exactly as
+   * recorded. It is offered after completion too.
+   */
+  it('edits Tên khách, Mã EZ and Mô tả only — even after completion — and sends nothing else', async () => {
+    let updated = false;
+    const posted: unknown[] = [];
+    const completedAt = '2026-09-19T03:00:00.000Z';
+    const done = complaint({ completed: true, completedAt, completedByName: 'Nguyễn Văn A', resolution: 'Đổi phòng' });
+    const before = report({ complaint: done });
+    const after = report({ complaint: { ...done, guestName: 'Trần Thị Bích', description: 'Phòng ồn cả đêm' } });
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: { reports: [updated ? after : before], counts: { ...EMPTY_COUNTS, CUSTOMER_COMPLAINT: 1 } },
+        }),
+        'PATCH /api/reception/reports/r1': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          updated = true;
+          return { status: 200, body: { report: after } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+
+    await openCategory('CUSTOMER_COMPLAINT');
+    const table = await screen.findByTestId('service-quality-table');
+    await userEvent.click(await within(table).findByTestId('edit-r1'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('record-edit-guestName')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('record-edit-ezCode')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('record-edit-description')).toBeInTheDocument();
+    // Nothing that belongs to the server or to the completion.
+    expect(within(dialog).queryByTestId('record-edit-resolution')).not.toBeInTheDocument();
+    expect(within(dialog).queryByTestId('record-edit-completedAt')).not.toBeInTheDocument();
+    expect(within(dialog).queryByTestId('record-edit-createdAt')).not.toBeInTheDocument();
+
+    await userEvent.clear(within(dialog).getByTestId('record-edit-guestName'));
+    await userEvent.type(within(dialog).getByTestId('record-edit-guestName'), 'Trần Thị Bích');
+    await userEvent.clear(within(dialog).getByTestId('record-edit-description'));
+    await userEvent.type(within(dialog).getByTestId('record-edit-description'), 'Phòng ồn cả đêm');
+    await userEvent.click(within(dialog).getByTestId('record-edit-save'));
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      complaint: { guestName: 'Trần Thị Bích', ezCode: 'EZ202', description: 'Phòng ồn cả đêm' },
+    });
+    expect(await within(table).findByText('Phòng ồn cả đêm')).toBeInTheDocument();
+    // The completion is still the one the server recorded.
+    expect(within(table).getByText('Đã hoàn thành')).toBeInTheDocument();
+    expect(within(table).getByText(formatDateTime(completedAt))).toBeInTheDocument();
+    expect(within(table).getByText('Đổi phòng')).toBeInTheDocument();
+  });
 });
 
 describe('dịch vụ phòng, KPI', () => {
@@ -877,14 +1088,14 @@ describe('dịch vụ phòng, KPI', () => {
     return screen.findByTestId('room-service-form');
   }
 
-  it('offers the five services in one "Chọn dịch vụ" select — not five buttons', async () => {
+  it('offers the six services in one "Chọn dịch vụ" select — not six buttons', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
 
     await openCategory('ROOM_SERVICE');
     await screen.findByTestId('category-view');
     expect(screen.queryByTestId('room-service-types')).not.toBeInTheDocument();
-    for (const t of ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER']) {
+    for (const t of ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW']) {
       expect(screen.queryByTestId(`room-service-type-${t}`)).not.toBeInTheDocument();
     }
 
@@ -894,7 +1105,7 @@ describe('dịch vụ phòng, KPI', () => {
       .getAllByRole('option')
       .map((o) => o.textContent)
       .filter((t) => !t?.startsWith('—'));
-    expect(options).toEqual(['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác']);
+    expect(options).toEqual(['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác', 'Review']);
   });
 
   it('shows exactly the fields each service asks for', async () => {
@@ -943,6 +1154,28 @@ describe('dịch vụ phòng, KPI', () => {
     for (const gone of ['room-service-phone', 'room-service-room', 'room-service-name']) {
       expect(within(form).queryByTestId(gone)).not.toBeInTheDocument();
     }
+  });
+
+  it('gives Bán phòng two equal columns and Upgrade three, and takes Số đêm as a whole number', async () => {
+    installApiMock(shellRoutes(RECEPTIONIST_USER));
+    renderApp('/app/reports');
+    const form = await openAddService();
+    const select = within(form).getByTestId('room-service-type');
+
+    await userEvent.selectOptions(select, 'ROOM_SALE');
+    const saleRow = within(form).getByTestId('room-service-conditional');
+    expect(saleRow.className).toMatch(/\bsm:grid-cols-2\b/);
+    expect(saleRow.className).not.toMatch(/\bsm:grid-cols-3\b/);
+    const nights = within(form).getByTestId('room-service-nights');
+    expect(nights).toHaveAttribute('type', 'number');
+    expect(nights).toHaveAttribute('inputmode', 'numeric');
+    expect(nights).toHaveAttribute('min', '1');
+    await userEvent.type(nights, '12');
+    expect(nights).toHaveValue(12);
+
+    await userEvent.selectOptions(select, 'UPGRADE');
+    expect(within(form).getByTestId('room-service-conditional').className).toMatch(/\bsm:grid-cols-3\b/);
+    expect(within(form).getByTestId('room-service-nights')).toHaveAttribute('type', 'number');
   });
 
   it('requires the chosen service’s own fields before it can be saved', async () => {
@@ -1040,7 +1273,7 @@ describe('dịch vụ phòng, KPI', () => {
     expect(price).toHaveValue('3.150.000');
   });
 
-  it('lays out five tables, one per service, each with only its own rows and columns', async () => {
+  it('lays out six tables, one per service, each with only its own rows and columns', async () => {
     const sale = report({
       id: 'rs-sale',
       category: 'ROOM_SERVICE',
@@ -1089,13 +1322,13 @@ describe('dịch vụ phòng, KPI', () => {
 
     await openCategory('ROOM_SERVICE');
     const groups = await screen.findByTestId('room-service-groups');
-    const tables = ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER'].map((t) =>
+    const tables = ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW'].map((t) =>
       within(groups).getByTestId(`room-service-table-${t}`),
     );
     // In the fixed order, each under its own heading.
     tables.forEach((table, i) => {
       expect(within(table).getAllByRole('heading')[0]).toHaveTextContent(
-        ['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác'][i]!,
+        ['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác', 'Review'][i]!,
       );
     });
     const [saleTable, upgradeTable, smokingTable, laundryTable] = tables as [HTMLElement, HTMLElement, HTMLElement, HTMLElement];
@@ -1137,6 +1370,196 @@ describe('dịch vụ phòng, KPI', () => {
     expect(within(smokingTable).getByTestId('room-service-table-SMOKING-empty')).toBeInTheDocument();
     // The old per-subtype summary block is gone from the reception screen.
     expect(screen.queryByTestId('room-service-summary')).not.toBeInTheDocument();
+  });
+
+  /** A review is a COUNT the desk records — not a sale, and never a price. */
+  function reviewRow(over: Record<string, unknown> = {}, counts: Record<string, unknown> = {}) {
+    return report({
+      id: 'rv1',
+      category: 'ROOM_SERVICE',
+      complaint: null,
+      createdAt: '2026-09-19T03:15:00.000Z',
+      roomService: roomService({
+        serviceType: 'REVIEW',
+        serviceTypeLabel: 'Review',
+        guestName: 'Guest A',
+        ezCode: 'QA-REVIEW-01',
+        roomClass: null,
+        nights: null,
+        price: 0,
+        note: null,
+        tripadvisorCount: 3,
+        googleCount: 2,
+        countsAsRevenue: false,
+        ...counts,
+      }),
+      ...over,
+    });
+  }
+
+  it('records a Review as its two counts — no price and no note — and needs at least one review', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: reviewRow() } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    const form = await openAddService();
+
+    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'REVIEW');
+    expect(within(form).getByTestId('room-service-review-counts')).toBeInTheDocument();
+    expect(within(form).queryByTestId('room-service-price')).not.toBeInTheDocument();
+    expect(within(form).queryByTestId('room-service-note')).not.toBeInTheDocument();
+    expect(within(form).queryByTestId('room-service-class')).not.toBeInTheDocument();
+
+    const add = within(form).getByTestId('room-service-form-add');
+    await userEvent.type(within(form).getByTestId('room-service-guest'), 'Guest A');
+    await userEvent.type(within(form).getByTestId('room-service-ez'), 'QA-REVIEW-01');
+    // No review counted yet: nothing to record.
+    expect(add).toBeDisabled();
+    await userEvent.type(within(form).getByTestId('room-service-tripadvisor'), '3');
+    await userEvent.type(within(form).getByTestId('room-service-google'), '2');
+    expect(add).toBeEnabled();
+    await userEvent.click(add);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      category: 'ROOM_SERVICE',
+      roomService: {
+        serviceType: 'REVIEW',
+        guestName: 'Guest A',
+        ezCode: 'QA-REVIEW-01',
+        tripadvisorCount: 3,
+        googleCount: 2,
+      },
+    });
+  });
+
+  it('keeps each count to whole, non-negative digits — a minus sign never reaches it', async () => {
+    installApiMock(shellRoutes(RECEPTIONIST_USER));
+    renderApp('/app/reports');
+    const form = await openAddService();
+
+    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'REVIEW');
+    const tripadvisor = within(form).getByTestId('room-service-tripadvisor');
+    await userEvent.type(tripadvisor, '-3');
+    expect(tripadvisor).toHaveValue(3);
+    // Zero and zero is no review at all.
+    await userEvent.clear(tripadvisor);
+    await userEvent.type(tripadvisor, '0');
+    await userEvent.type(within(form).getByTestId('room-service-google'), '0');
+    await userEvent.type(within(form).getByTestId('room-service-guest'), 'Guest A');
+    expect(within(form).getByTestId('room-service-form-add')).toBeDisabled();
+  });
+
+  it('gives Review its own table — Tripadvisor and Google where the others have a price — footed in reviews', async () => {
+    const sale = report({
+      id: 'rs-sale',
+      category: 'ROOM_SERVICE',
+      complaint: null,
+      roomService: roomService({ guestName: 'Khách Bán Phòng', price: 850000 }),
+    });
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: {
+            reports: [
+              sale,
+              reviewRow(),
+              reviewRow({ id: 'rv2' }, { guestName: 'Guest B', ezCode: 'QA-REVIEW-02', tripadvisorCount: 1, googleCount: 0 }),
+              reviewRow({ id: 'rv3', voided: true, voidReason: 'nhầm' }, { guestName: 'Guest C', tripadvisorCount: 9, googleCount: 9 }),
+            ],
+            counts: { ...EMPTY_COUNTS, ROOM_SERVICE: 4 },
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    await openCategory('ROOM_SERVICE');
+    const table = await screen.findByTestId('room-service-table-REVIEW');
+    expect(await within(table).findByText('Guest A')).toBeInTheDocument();
+    expect(headersOf(table)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Thời gian', 'Thao tác']);
+    const row = within(table).getByTestId('row-rv1');
+    expect(within(row).getByText('QA-REVIEW-01')).toBeInTheDocument();
+    expect(within(row).getByText('3')).toBeInTheDocument();
+    expect(within(row).getByText('2')).toBeInTheDocument();
+    expect(within(row).getByText(formatDateTime('2026-09-19T03:15:00.000Z'))).toBeInTheDocument();
+    expect(within(row).queryByText(/₫/)).not.toBeInTheDocument();
+    // 3 + 2 + 1 + 0; the withdrawn review counts for nothing.
+    expect(within(table).getByTestId('room-service-total-REVIEW')).toHaveTextContent('6 review');
+    // The sale's total is untouched by any review.
+    expect(within(screen.getByTestId('room-service-table-ROOM_SALE')).getByTestId('room-service-total-ROOM_SALE')).toHaveTextContent('850.000 ₫');
+  });
+
+  it('will not save a correction that leaves a Review with no review at all', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: { reports: [reviewRow()], counts: { ...EMPTY_COUNTS, ROOM_SERVICE: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    await openCategory('ROOM_SERVICE');
+    const table = await screen.findByTestId('room-service-table-REVIEW');
+    await userEvent.click(await within(table).findByTestId('edit-rv1'));
+    const dialog = await screen.findByRole('dialog');
+    const save = within(dialog).getByTestId('record-edit-save');
+    const tripadvisor = within(dialog).getByTestId('record-edit-tripadvisorCount');
+    const google = within(dialog).getByTestId('record-edit-googleCount');
+
+    await userEvent.clear(tripadvisor);
+    await userEvent.type(tripadvisor, '0');
+    // Google still holds 2 reviews: a valid correction.
+    expect(save).toBeEnabled();
+    await userEvent.clear(google);
+    await userEvent.type(google, '0');
+    expect(save).toBeDisabled();
+    await userEvent.type(google, '1');
+    expect(save).toBeEnabled();
+  });
+
+  it('keeps the overview’s revenue and review total apart as reviews are added, sold and withdrawn', async () => {
+    let rows: Record<string, unknown>[] = [reviewRow()];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: { reports: rows, counts: { ...EMPTY_COUNTS, ROOM_SERVICE: rows.length } },
+        }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp('/app/reports');
+
+    const section = await screen.findByTestId('room-service-overview');
+    const review = within(section).getByTestId('room-service-review');
+    await waitFor(() => expect(review).toHaveTextContent('5'));
+    expect(within(section).getByText('0 ₫')).toBeInTheDocument();
+
+    // Another review, and a paid service: the revenue moves, the review total moves separately.
+    rows = [
+      ...rows,
+      reviewRow({ id: 'rv2' }, { guestName: 'Guest B', tripadvisorCount: 1, googleCount: 1 }),
+      report({ id: 'rs-paid', category: 'ROOM_SERVICE', complaint: null, roomService: roomService({ serviceType: 'LAUNDRY', serviceTypeLabel: 'Giặt ủi', roomClass: null, nights: null, price: 150000 }) }),
+    ];
+    await user.click(screen.getByRole('button', { name: 'Làm mới' }));
+    await waitFor(() => expect(review).toHaveTextContent('7'));
+    expect(await within(section).findByText('150.000 ₫')).toBeInTheDocument();
+
+    // The first review withdrawn: the review total falls; the revenue does not.
+    rows = rows.map((r) => (r.id === 'rv1' ? { ...r, voided: true, voidReason: 'nhầm' } : r));
+    await user.click(screen.getByRole('button', { name: 'Làm mới' }));
+    await waitFor(() => expect(review).toHaveTextContent('2'));
+    expect(within(section).getByText('150.000 ₫')).toBeInTheDocument();
   });
 });
 
@@ -1343,7 +1766,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
   });
 });
 
-describe('sự cố vật chất đang xử lý', () => {
+describe('sự cố cơ sở vật chất đang xử lý', () => {
   it('has no "chọn sự cố" dropdown and no entry form at all', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
@@ -1361,7 +1784,7 @@ describe('sự cố vật chất đang xử lý', () => {
   it('shows the branch’s live incidents and their current status, immediately', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
           body: {
             issues: [
@@ -1403,7 +1826,7 @@ describe('sự cố vật chất đang xử lý', () => {
                   },
                 ],
               },
-            ],
+            ].map(withLifecycle),
             pagination: { page: 1, pageSize: 100, total: 2, totalPages: 1 },
           },
         }),
@@ -1420,14 +1843,14 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(within(board).getByText('Bảo')).toBeInTheDocument();
 
     expect(within(board).getByText('Khu Vực Sảnh · Sofa')).toBeInTheDocument();
-    // NEW + already attempted reads as "Cần xử lý lại", not plain "NEW".
-    expect(within(board).getByText('Cần xử lý lại')).toBeInTheDocument();
+    // NEW + already attempted reads as "Cần sửa lại", not plain "NEW".
+    expect(within(board).getByText('Cần sửa lại')).toBeInTheDocument();
   });
 
   it('offers no action on a row: no "Thao tác" column and no per-row button', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
           body: {
             issues: [
@@ -1445,7 +1868,7 @@ describe('sự cố vật chất đang xử lý', () => {
                 updatedAt: '2026-09-19T02:00:00.000Z',
                 attempts: [],
               },
-            ],
+            ].map(withLifecycle),
             pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 },
           },
         }),
@@ -1463,8 +1886,12 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(within(board).queryAllByRole('button').filter((b) => b.dataset.testid !== 'row-toggle-i1')).toHaveLength(0);
   });
 
-  it('keeps an incident this shift recorded on the board after it is fixed, with its completion time', async () => {
-    const completedIssue = {
+  /**
+   * FINISHED WITHIN 12 HOURS OF ITS REPORT, IT STAYS ON THE BOARD — because the
+   * server's active set includes it, not because the page merges anything in.
+   */
+  it('keeps an incident on the board after it is fixed, with its completion time', async () => {
+    const completedIssue = withLifecycle({
       id: 'i-done',
       locationLabel: 'Phòng · Phòng 202',
       description: 'Vòi sen rò nước',
@@ -1491,23 +1918,12 @@ describe('sự cố vật chất đang xử lý', () => {
           durationLabel: '1 giờ 30 phút',
         },
       ],
-    };
+    });
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
-          body: {
-            reports: [
-              report({
-                id: 'f1',
-                category: 'FACILITY_ISSUE',
-                categoryLabel: 'Sự cố vật chất đang xử lý',
-                complaint: null,
-                facility: { issueId: 'i-done', issue: completedIssue },
-              }),
-            ],
-            counts: { ...EMPTY_COUNTS, FACILITY_ISSUE: 1 },
-          },
+          body: { issues: [completedIssue], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
         }),
       }),
     );
@@ -1517,6 +1933,8 @@ describe('sự cố vật chất đang xử lý', () => {
     const board = await screen.findByTestId('facility-board');
     expect(await within(board).findByText('Vòi sen rò nước')).toBeInTheDocument();
     expect(within(board).getByText('Đã hoàn thành')).toBeInTheDocument();
+    // Inspection is dormant: no verdict is shown, and none is invented.
+    expect(within(board).queryByTestId('issue-inspection')).not.toBeInTheDocument();
     // Read by column: "Lần sửa" is the attempts that exist, not a fabricated count.
     const headers = within(board).getAllByRole('columnheader').map((h) => h.textContent ?? '');
     const row = within(board).getByText('Vòi sen rò nước').closest('tr')!;
@@ -1524,13 +1942,14 @@ describe('sự cố vật chất đang xử lý', () => {
     const cellAt = (header: string) => cells[headers.indexOf(header)];
     expect(cellAt('Lần sửa')).toBe('1');
     expect(cellAt('Thời gian hoàn thành')).toBe(formatDateTime('2026-09-19T04:30:00.000Z'));
-    expect(cellAt('Kỹ thuật')).toContain('Bảo');
+    // "Người sửa" comes from the attempt, not from who reported it.
+    expect(cellAt('Người sửa')).toContain('Bảo');
   });
 
   it('keeps its row expander mobile-only', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
           body: {
             issues: [
@@ -1546,7 +1965,7 @@ describe('sự cố vật chất đang xử lý', () => {
                 updatedAt: '2026-09-19T02:00:00.000Z',
                 attempts: [],
               },
-            ],
+            ].map(withLifecycle),
             pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 },
           },
         }),
@@ -1572,7 +1991,7 @@ describe('sự cố vật chất đang xử lý', () => {
   it('reports a new fault through the existing issue form and API, and records it in the shift journal', async () => {
     let created = false;
     const journal: Record<string, unknown>[] = [];
-    const NEW_ISSUE = {
+    const NEW_ISSUE = withLifecycle({
       id: 'i-new',
       locationLabel: 'Phòng · Phòng 301',
       description: 'Máy lạnh không lạnh',
@@ -1584,10 +2003,10 @@ describe('sự cố vật chất đang xử lý', () => {
       createdAt: '2026-09-19T03:00:00.000Z',
       updatedAt: '2026-09-19T03:00:00.000Z',
       attempts: [],
-    };
+    });
     const fetchMock = installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
           body: {
             issues: created ? [NEW_ISSUE] : [],
@@ -1606,7 +2025,7 @@ describe('sự cố vật chất đang xử lý', () => {
               report: report({
                 id: 'f-new',
                 category: 'FACILITY_ISSUE',
-                categoryLabel: 'Sự cố vật chất đang xử lý',
+                categoryLabel: 'Sự cố cơ sở vật chất đang xử lý',
                 complaint: null,
                 facility: { issueId: 'i-new', issue: NEW_ISSUE },
               }),
@@ -1624,9 +2043,9 @@ describe('sự cố vật chất đang xử lý', () => {
     // The EXISTING dialog — its own title, its area-first field order.
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('Báo cáo sự cố mới');
-    expect(within(dialog).getByLabelText('Sự cố')).toHaveValue('ROOM');
+    expect(within(dialog).getByLabelText('Khu vực')).toHaveValue('ROOM');
     await userEvent.type(within(dialog).getByText('Số phòng').querySelector('input')!, '301');
-    await userEvent.type(within(dialog).getByLabelText('Mô tả sự cố'), 'Máy lạnh không lạnh');
+    await userEvent.type(within(dialog).getByLabelText('Sự cố'), 'Máy lạnh không lạnh');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Gửi báo cáo' }));
 
     // Posted to the ONE issue API, not a reception-specific one…
@@ -1647,10 +2066,10 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(await within(board).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
   });
 
-  it('lays the incidents out in exactly the eight specified columns, in order', async () => {
+  it('lays the incidents out in exactly the nine specified columns, in order', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?scope=active&pageSize=100': () => ({
           status: 200,
           body: {
             issues: [
@@ -1668,7 +2087,7 @@ describe('sự cố vật chất đang xử lý', () => {
                 updatedAt: '2026-09-19T02:00:00.000Z',
                 attempts: [],
               },
-            ],
+            ].map(withLifecycle),
             pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 },
           },
         }),
@@ -1680,16 +2099,176 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(await within(board).findByText('Máy lạnh không mát')).toBeInTheDocument();
     expect(headersOf(board)).toEqual([
       'STT',
-      'Sự cố',
       'Khu vực',
+      'Sự cố',
+      'Nguyên nhân',
       'Thời gian báo cáo',
-      'Kỹ thuật',
+      'Người sửa',
       'Thời gian hoàn thành',
-      'Lần sửa',
       'Trạng thái',
+      'Lần sửa',
     ]);
     // The reporter is no longer shown to reception.
     expect(within(board).queryByText('Nguyễn Văn A')).not.toBeInTheDocument();
+  });
+
+  /** Two finished attempts: Lần 1 failed inspection, Lần 2 passed. */
+  function twiceRepaired(over: Record<string, unknown> = {}) {
+    const attempt = {
+      id: 'a1',
+      attemptNumber: 1,
+      technicianName: 'Bảo',
+      technicianPhone: '0369852177',
+      acceptedByName: 'Bảo',
+      acceptedAt: '2026-09-19T03:30:00.000Z',
+      outcome: 'COMPLETED',
+      outcomeAt: '2026-09-19T04:10:00.000Z',
+      reason: null,
+      cause: 'Thiếu gas',
+      result: 'Đã nạp gas',
+      inspection: { result: 'FAILED', resultLabel: 'Không đạt', inspectedByName: 'Hùng', inspectedAt: '2026-09-19T04:40:00.000Z', note: 'Vẫn chưa lạnh' },
+      durationSeconds: 2400,
+      durationLabel: '40 phút',
+    };
+    return withLifecycle({
+      id: 'i-pass',
+      locationLabel: 'Phòng · Phòng 305',
+      description: 'Máy lạnh không lạnh',
+      category: null,
+      status: 'COMPLETED',
+      needsRework: false,
+      reportedCause: null,
+      technicianName: 'Minh',
+      technicianPhone: '0911222333',
+      completedAt: '2026-09-19T06:00:00.000Z',
+      createdAt: '2026-09-19T02:00:00.000Z',
+      updatedAt: '2026-09-19T06:20:00.000Z',
+      attempts: [
+        attempt,
+        {
+          ...attempt,
+          id: 'a2',
+          attemptNumber: 2,
+          technicianName: 'Minh',
+          technicianPhone: '0911222333',
+          acceptedByName: 'Minh',
+          acceptedAt: '2026-09-19T05:20:00.000Z',
+          outcomeAt: '2026-09-19T06:00:00.000Z',
+          cause: 'Rò rỉ ống đồng',
+          result: 'Đã hàn ống',
+          inspection: { result: 'PASSED', resultLabel: 'Đạt', inspectedByName: 'Hùng', inspectedAt: '2026-09-19T06:20:00.000Z', note: null },
+        },
+      ],
+      ...over,
+    });
+  }
+
+  async function facilityRowCells(issue: unknown) {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/issues?scope=active&pageSize=100': () => ({
+          status: 200,
+          body: { issues: [issue], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports?category=FACILITY_ISSUE');
+
+    const board = await screen.findByTestId('facility-board');
+    const row = (await within(board).findByText('Máy lạnh không lạnh')).closest('tr')!;
+    const headers = within(board).getAllByRole('columnheader').map((h) => h.textContent ?? '');
+    const cells = within(row).getAllByRole('cell').map((c) => c.textContent ?? '');
+    return (header: string) => cells[headers.indexOf(header)];
+  }
+
+  /**
+   * WHILE INSPECTION IS DORMANT the status is the operational one — the
+   * technician's "Hoàn thành" — and "Người sửa" and "Nguyên nhân" come from the
+   * repair itself. A verdict recorded earlier is kept, not shown.
+   */
+  it('shows the status, the repairer and the cause — and no inspection while it is dormant', async () => {
+    const cellAt = await facilityRowCells(twiceRepaired());
+    expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
+    expect(cellAt('Trạng thái')).not.toContain('Nghiệm thu');
+    expect(cellAt('Người sửa')).toContain('Minh');
+    expect(cellAt('Nguyên nhân')).toBe('Rò rỉ ống đồng');
+    expect(cellAt('Lần sửa')).toBe('2');
+    expect(cellAt('Thời gian hoàn thành')).toBe(formatDateTime('2026-09-19T06:00:00.000Z'));
+  });
+
+  /**
+   * With inspection switched on, "the technician finished" and "the repair
+   * passed" are two events, and the desk has to be able to tell them apart —
+   * so the inspection sits beneath the status.
+   */
+  it('with inspection switched on, shows the inspection beneath the status', async () => {
+    const cellAt = await facilityRowCells(twiceRepaired({ inspectionEnabled: true }));
+    expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
+    expect(cellAt('Trạng thái')).toContain('Nghiệm thu: Đạt');
+    expect(cellAt('Người sửa')).toContain('Minh');
+  });
+
+  /** OVERVIEW = COMPACT: the five facts, and nothing to open. */
+  it('reduces the overview’s incident section to STT, Khu vực, Sự cố, Nguyên nhân and Trạng thái', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/issues?scope=active&pageSize=100': () => ({
+          status: 200,
+          body: { issues: [twiceRepaired()], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    const overview = await screen.findByTestId('report-overview');
+    const board = within(overview).getByTestId('facility-board');
+    expect(await within(board).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
+    expect(headersOf(board)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
+    for (const detailOnly of ['Lần sửa', 'Người sửa', 'Thời gian báo cáo', 'Thời gian hoàn thành']) {
+      expect(within(board).queryByRole('columnheader', { name: detailOnly })).not.toBeInTheDocument();
+    }
+    expect(within(board).getByText('Rò rỉ ống đồng')).toBeInTheDocument();
+    expect(within(board).getByText('Đã hoàn thành')).toBeInTheDocument();
+    // No repairer, no times, no attempts — and nothing to open into them.
+    expect(within(board).queryByText('Minh')).not.toBeInTheDocument();
+    // On a phone only, "Nguyên nhân" folds into the row's expander — which holds
+    // that column and nothing else.
+    const toggle = within(board).getByTestId('row-toggle-i-pass');
+    expect(toggle.closest('td')!.className).toMatch(/\bmd:hidden\b/);
+    await userEvent.click(toggle);
+    expect(within(board).queryByTestId('issue-timeline')).not.toBeInTheDocument();
+    expect(within(board).queryByTestId('issue-lifecycle')).not.toBeInTheDocument();
+  });
+
+  it('says so when the board shows only the newest 100 incidents', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/issues?scope=active&pageSize=100': () => ({
+          status: 200,
+          body: {
+            issues: [
+              withLifecycle({
+                id: 'i1',
+                locationLabel: 'Phòng · Phòng 101',
+                description: 'Máy lạnh không mát',
+                status: 'NEW',
+                needsRework: false,
+                technicianName: null,
+                technicianPhone: null,
+                createdAt: '2026-09-19T02:00:00.000Z',
+                updatedAt: '2026-09-19T02:00:00.000Z',
+                attempts: [],
+              }),
+            ],
+            pagination: { page: 1, pageSize: 100, total: 140, totalPages: 2 },
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports?category=FACILITY_ISSUE');
+
+    await screen.findByText('Máy lạnh không mát');
+    expect(screen.getByTestId('list-more')).toHaveTextContent('Đang hiển thị 1 bản ghi gần nhất trên tổng số 140.');
   });
 
   it('shows an empty state when nothing is outstanding', async () => {
@@ -1807,84 +2386,230 @@ describe('sửa và hủy bản ghi trong bảng chính', () => {
   });
 });
 
-describe('nhật ký ca hiện tại — thứ yếu, không phải bảng chính', () => {
-  it('is collapsed by default, and does not duplicate the primary table as the main view', async () => {
+describe('no "Nhật ký ca hiện tại" on Reception', () => {
+  const noJournal = () => {
+    expect(screen.queryByText(/Nhật ký ca hiện tại/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('journal-section')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('journal-toggle')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('journal-list')).not.toBeInTheDocument();
+  };
+
+  it('is on neither the overview nor any category screen, and each category keeps its own table', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
           status: 200,
-          body: { reports: [report()], counts: { ...EMPTY_COUNTS, CUSTOMER_COMPLAINT: 1 } },
+          body: { reports: [requestRow(), report()], counts: { ...EMPTY_COUNTS, GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 1 } },
         }),
       }),
     );
     renderApp('/app/reports');
 
-    await openCategory('CUSTOMER_COMPLAINT');
-    // The primary table is open immediately.
-    const table = await screen.findByTestId('service-quality-table');
-    expect(within(table).getByText('Trần Thị B')).toBeInTheDocument();
-
-    // The journal exists but starts closed — a native <details>, so a browser
-    // hides its rows by default even though jsdom (no layout engine) keeps
-    // them in the tree; the attribute is what the component controls.
-    const section = screen.getByTestId('journal-section');
-    expect(section).not.toHaveAttribute('open');
-  });
-
-  it('opens on request and shows the same record, across categories', async () => {
-    installApiMock(
-      shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/reception/reports?shiftSessionId=s1': () => ({
-          status: 200,
-          body: { reports: [report()], counts: { ...EMPTY_COUNTS, CUSTOMER_COMPLAINT: 1 } },
-        }),
-      }),
-    );
-    renderApp('/app/reports');
-
-    await openCategory('CUSTOMER_COMPLAINT');
-    await userEvent.click(await screen.findByTestId('journal-toggle'));
-    expect(await screen.findByTestId('journal-row-r1')).toBeInTheDocument();
+    await screen.findByTestId('report-overview');
+    noJournal();
+    for (const [code, table] of [
+      ['PAYMENT', 'payment-table-section'],
+      ['GUEST_REQUEST', 'guest-request-table'],
+      ['FACILITY_ISSUE', 'facility-board'],
+      ['CUSTOMER_COMPLAINT', 'service-quality-table'],
+      ['ROOM_SERVICE', 'room-service-groups'],
+    ] as const) {
+      await openCategory(code);
+      expect(await screen.findByTestId(table)).toBeInTheDocument();
+      noJournal();
+    }
   });
 });
 
-describe('the correction history is visible to the person who made it', () => {
-  it('shows old → new, who and when', async () => {
-    installApiMock(
-      shellRoutes(RECEPTIONIST_USER, {
-        'GET /api/reception/reports?shiftSessionId=s1': () => ({
-          status: 200,
-          body: {
-            reports: [
-              report({
-                audits: [
-                  {
-                    id: 'a1',
-                    action: 'EDIT',
-                    field: 'description',
-                    oldValue: 'Phòng ồn',
-                    newValue: 'Phòng ồn suốt đêm',
-                    reason: 'Bổ sung chi tiết',
-                    actor: { id: 2, name: 'Nguyễn Văn A' },
-                    shiftType: 'A',
-                    createdAt: '2026-09-19T01:30:00.000Z',
-                  },
-                ],
-              }),
-            ],
-            counts: { ...EMPTY_COUNTS, CUSTOMER_COMPLAINT: 1 },
-          },
-        }),
-      }),
+describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
+  /** The page's own default: the last 7 days, ending today (HCM). */
+  const TODAY = hcmToday();
+  const WEEK_FROM = daysBefore(TODAY, 6);
+  const archiveUrl = (from: string, to: string) => `GET /api/reception/reports/archive?from=${from}&to=${to}`;
+  const issuesUrl = (from: string, to: string) => `GET /api/issues?scope=archive&from=${from}&to=${to}&pageSize=100`;
+
+  const doneRequest = () =>
+    requestRow(
+      { id: 'g-old', createdAt: '2026-09-18T01:00:00.000Z' },
+      { guestName: 'Khách Cũ', completed: true, completedAt: '2026-09-18T02:00:00.000Z', resolution: 'Đã trả balo' },
     );
+  const doneComplaint = () =>
+    report({
+      id: 'q-old',
+      createdAt: '2026-09-18T01:30:00.000Z',
+      complaint: complaint({ guestName: 'Khách Phàn Nàn', completed: true, completedAt: '2026-09-18T03:00:00.000Z', resolution: 'Đổi phòng' }),
+    });
+  const doneIssue = () =>
+    withLifecycle({
+      id: 'i-old',
+      locationLabel: 'Phòng · Phòng 404',
+      description: 'Bóng đèn cháy',
+      category: null,
+      status: 'COMPLETED',
+      needsRework: false,
+      reportedCause: 'Hết tuổi thọ',
+      technicianName: 'Bảo',
+      technicianPhone: '0909000111',
+      completedAt: '2026-09-18T04:00:00.000Z',
+      createdAt: '2026-09-18T01:00:00.000Z',
+      updatedAt: '2026-09-18T04:00:00.000Z',
+      attempts: [],
+    });
+
+  function archiveRoutes(
+    totals = { GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 1 },
+    user: unknown = RECEPTIONIST_USER,
+    from = WEEK_FROM,
+    to = TODAY,
+  ) {
+    return shellRoutes(user, {
+      [archiveUrl(from, to)]: () => ({
+        status: 200,
+        body: { reports: [doneRequest(), doneComplaint()], totals, range: { from, to }, archiveAfterHours: 12 },
+      }),
+      [issuesUrl(from, to)]: () => ({
+        status: 200,
+        body: { issues: [doneIssue()], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
+      }),
+    });
+  }
+
+  const emptyArchive = (from: string, to: string) => ({
+    [archiveUrl(from, to)]: () => ({
+      status: 200,
+      body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, range: { from, to }, archiveAfterHours: 12 },
+    }),
+    [issuesUrl(from, to)]: () => ({
+      status: 200,
+      body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } },
+    }),
+  });
+
+  const requested = (fetchMock: ReturnType<typeof installApiMock>, key: string) =>
+    fetchMock.mock.calls.some(([url, init]) => `${((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()} ${String(url)}` === key);
+
+  it('is on the reception menu, beside "Báo cáo vấn đề"', async () => {
+    installApiMock(archiveRoutes());
     renderApp('/app/reports');
 
-    await openCategory('CUSTOMER_COMPLAINT');
-    await userEvent.click(await screen.findByTestId('journal-toggle'));
-    await userEvent.click(await screen.findByTestId('journal-row-r1'));
-    const audits = await screen.findByTestId('record-audits-r1');
-    expect(audits).toHaveTextContent('Phòng ồn → Phòng ồn suốt đêm');
-    expect(audits).toHaveTextContent('Nguyễn Văn A');
-    expect(audits).toHaveTextContent('Bổ sung chi tiết');
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    await userEvent.click(within(nav).getByRole('link', { name: 'Hoàn thành vấn đề' }));
+    expect(await screen.findByTestId('completed-issues')).toBeInTheDocument();
+    expect(screen.getByText('Vấn đề đã hoàn thành, từ 12 giờ trở lên kể từ lúc lễ tân tiếp nhận.')).toBeInTheDocument();
+  });
+
+  it('lists II, III and IV in their compact columns, each as "Đã hoàn thành" — and nothing to press', async () => {
+    installApiMock(archiveRoutes());
+    renderApp('/app/completed-issues');
+
+    const page = await screen.findByTestId('completed-issues');
+    const requests = within(page).getByTestId('guest-request-table');
+    expect(await within(requests).findByText('Khách Cũ')).toBeInTheDocument();
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(within(requests).getByText('Đã hoàn thành')).toBeInTheDocument();
+
+    const facility = within(page).getByTestId('completed-facility');
+    expect(await within(facility).findByText('Bóng đèn cháy')).toBeInTheDocument();
+    expect(headersOf(facility)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
+    expect(within(facility).getByText('Đã hoàn thành')).toBeInTheDocument();
+
+    const quality = within(page).getByTestId('service-quality-table');
+    expect(within(quality).getByText('Khách Phàn Nàn')).toBeInTheDocument();
+    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Trạng thái']);
+    expect(within(quality).getByText('Đã hoàn thành')).toBeInTheDocument();
+
+    // A read-only list: nothing to press — the filter and "Làm mới" sit above it —
+    // but, on a phone only, each row's expander for the column folded into it.
+    for (const button of within(page).queryAllByRole('button')) {
+      expect(button.dataset.testid).toMatch(/^row-toggle-/);
+      expect(button.closest('td')!.className).toMatch(/\bmd:hidden\b/);
+    }
+    expect(within(page).queryByTestId('complete-g-old')).not.toBeInTheDocument();
+    expect(within(page).queryByTestId('edit-q-old')).not.toBeInTheDocument();
+    // Payments and room services are never part of it.
+    expect(screen.queryByTestId('payment-overview')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('room-service-overview')).not.toBeInTheDocument();
+    expect(screen.queryByText('Đã trả balo')).not.toBeInTheDocument();
+  });
+
+  it('says so when a section shows only the newest of more', async () => {
+    installApiMock(archiveRoutes({ GUEST_REQUEST: 250, CUSTOMER_COMPLAINT: 1 }));
+    renderApp('/app/completed-issues');
+
+    const page = await screen.findByTestId('completed-issues');
+    await within(page).findByText('Khách Cũ');
+    const notes = within(page).getAllByTestId('list-more');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toHaveTextContent('Đang hiển thị 1 bản ghi gần nhất trên tổng số 250.');
+  });
+
+  it('asks the SERVER for the last 7 days by default, by the day received — and shows no journal', async () => {
+    const fetchMock = installApiMock(archiveRoutes());
+    renderApp('/app/completed-issues');
+
+    await within(await screen.findByTestId('completed-issues')).findByText('Khách Cũ');
+    expect(requested(fetchMock, archiveUrl(WEEK_FROM, TODAY))).toBe(true);
+    expect(requested(fetchMock, issuesUrl(WEEK_FROM, TODAY))).toBe(true);
+    // The range is the page's own, visible, and labelled as the day RECEIVED.
+    const filters = screen.getByTestId('completed-filters');
+    expect(within(filters).getByText('Ngày tiếp nhận')).toBeInTheDocument();
+    expect(within(filters).getByTestId('completed-range-from')).toHaveValue(WEEK_FROM);
+    expect(within(filters).getByTestId('completed-range-to')).toHaveValue(TODAY);
+    expect(within(filters).getByTestId('completed-range-6')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByText(/Nhật ký ca hiện tại/)).not.toBeInTheDocument();
+  });
+
+  it('re-asks the server when a quick period or a typed range is chosen', async () => {
+    const MONTH_FROM = daysBefore(TODAY, 29);
+    const fetchMock = installApiMock({
+      ...archiveRoutes(),
+      ...emptyArchive(TODAY, TODAY),
+      ...archiveRoutes(undefined, RECEPTIONIST_USER, MONTH_FROM, TODAY),
+      ...emptyArchive('2026-09-01', '2026-09-02'),
+    });
+    renderApp('/app/completed-issues');
+    await within(await screen.findByTestId('completed-issues')).findByText('Khách Cũ');
+
+    await userEvent.click(screen.getByTestId('completed-range-0'));
+    await waitFor(() => expect(requested(fetchMock, archiveUrl(TODAY, TODAY))).toBe(true));
+    expect(requested(fetchMock, issuesUrl(TODAY, TODAY))).toBe(true);
+    // A same-day range with nothing in it says so — about the range, not the system.
+    expect(
+      await within(screen.getByTestId('completed-issues')).findAllByText('Không có vấn đề hoàn thành trong khoảng thời gian này.'),
+    ).toHaveLength(3);
+
+    await userEvent.click(screen.getByTestId('completed-range-29'));
+    await waitFor(() => expect(requested(fetchMock, archiveUrl(MONTH_FROM, TODAY))).toBe(true));
+    expect(await within(screen.getByTestId('completed-issues')).findByText('Khách Cũ')).toBeInTheDocument();
+
+    // A typed range: the start first (it carries the end along), then the end.
+    const from = screen.getByTestId('completed-range-from');
+    const to = screen.getByTestId('completed-range-to');
+    fireEvent.change(from, { target: { value: '2026-09-01' } });
+    fireEvent.change(to, { target: { value: '2026-09-02' } });
+    await waitFor(() => expect(requested(fetchMock, archiveUrl('2026-09-01', '2026-09-02'))).toBe(true));
+    expect(requested(fetchMock, issuesUrl('2026-09-01', '2026-09-02'))).toBe(true);
+  });
+
+  it('sends nothing for half a range, and says what is missing', async () => {
+    const fetchMock = installApiMock(archiveRoutes());
+    renderApp('/app/completed-issues');
+    await within(await screen.findByTestId('completed-issues')).findByText('Khách Cũ');
+    const before = fetchMock.mock.calls.length;
+
+    fireEvent.change(screen.getByTestId('completed-range-from'), { target: { value: '' } });
+    expect(await screen.findByTestId('completed-range-invalid')).toHaveTextContent('Hãy chọn đủ ngày bắt đầu và ngày kết thúc.');
+    expect(screen.queryByTestId('completed-issues')).not.toBeInTheDocument();
+    const after = fetchMock.mock.calls.slice(before).map(([url]) => String(url));
+    expect(after.some((u) => u.includes('/reception/reports/archive') || u.includes('scope=archive'))).toBe(false);
+  });
+
+  it('is Reception’s alone: an Admin is refused, and nothing is read', async () => {
+    const fetchMock = installApiMock(archiveRoutes(undefined, ADMIN_USER));
+    renderApp('/app/completed-issues');
+
+    expect(await screen.findByText('Không có quyền truy cập')).toBeInTheDocument();
+    expect(screen.queryByTestId('completed-issues')).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/reception/reports/archive'))).toBe(false);
   });
 });

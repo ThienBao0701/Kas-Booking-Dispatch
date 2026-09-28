@@ -1,7 +1,7 @@
 /**
- * The Admin's incident date-range monitoring — now the "Sự cố vật chất đang xử
- * lý" category of "Báo cáo vấn đề", where the old "Sự cố khách sạn" address
- * lands.
+ * The Admin's incident date-range monitoring — now the "Sự cố cơ sở vật chất
+ * đang xử lý" category of "Báo cáo vấn đề", where the old "Sự cố khách sạn"
+ * address lands.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
  *   1. The period is the PAGE's period — today by default, like every other
@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
@@ -30,18 +31,25 @@ afterEach(() => {
 
 const BRANCH = { id: 1, code: 'TRUONG_DINH_05', hotelName: 'KAS Passion', address: '05 Trương Định' };
 
+/** The period summary as the server sends it while inspection is DORMANT (the default). */
 const SUMMARY = {
   total: 7,
   newCount: 2,
   inProgressCount: 1,
+  awaitingInspectionCount: 0,
   completedCount: 4,
   cannotRepairAttempts: 4,
+  failedInspections: 2,
   needsReworkIssues: 1,
   outstandingTotal: 9,
+  inspectionEnabled: false,
 };
 
+/** …and with inspection switched on. */
+const INSPECTION_SUMMARY = { ...SUMMARY, awaitingInspectionCount: 3, completedCount: 1, inspectionEnabled: true };
+
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: BRANCH,
@@ -75,7 +83,7 @@ function issue(over: Record<string, unknown> = {}) {
     createdAt: '2026-09-17T02:00:00.000Z',
     updatedAt: '2026-09-17T02:00:00.000Z',
     ...over,
-  };
+  });
 }
 
 /**
@@ -86,7 +94,7 @@ function issue(over: Record<string, unknown> = {}) {
  * would have to restate today's date. What each test actually cares about is
  * which URLs were requested, which `seen` records.
  */
-function installMocks(onRequest?: (url: string) => void, issues: unknown[] = [issue()]) {
+function installMocks(onRequest?: (url: string) => void, issues: unknown[] = [issue()], summary: unknown = SUMMARY) {
   const fetchMock = vi.fn(async (url: string | URL) => {
     const u = String(url);
     onRequest?.(u);
@@ -112,7 +120,7 @@ function installMocks(onRequest?: (url: string) => void, issues: unknown[] = [is
     if (u === '/api/nav-badges')
       return json({ counts: { new: 0, pendingReview: 0, rejected: 0, resendOrders: 0, chat: 0, reminders: 0 } });
     if (u.startsWith('/api/admin/reports/incidents/summary'))
-      return json({ range: { from: '', to: '' }, summary: SUMMARY });
+      return json({ range: { from: '', to: '' }, summary });
     if (u.startsWith('/api/issues'))
       return json({
         issues,
@@ -198,7 +206,22 @@ describe('the period summary', () => {
       within(summary).getByText(label).parentElement!.textContent ?? '';
     expect(cell('Tổng sự cố phát sinh')).toContain('7');
     expect(cell('Lượt không sửa được')).toContain('4');
-    expect(cell('Cần xử lý lại')).toContain('1');
+    expect(cell('Cần sửa lại')).toContain('1');
+    // Inspection is dormant: neither of its figures is part of the summary.
+    expect(within(summary).queryByText('Nghiệm thu không đạt')).not.toBeInTheDocument();
+    expect(within(summary).queryByText('Chờ nghiệm thu')).not.toBeInTheDocument();
+  });
+
+  it('with inspection switched on, counts failed inspections and those awaiting one', async () => {
+    installMocks(undefined, [issue({ inspectionEnabled: true })], INSPECTION_SUMMARY);
+    await openIncidents();
+
+    const summary = await screen.findByTestId('incident-range-summary');
+    const cell = (label: string) =>
+      within(summary).getByText(label).parentElement!.textContent ?? '';
+    // A failed inspection is counted as the event it is, beside the others.
+    expect(cell('Nghiệm thu không đạt')).toContain('2');
+    expect(cell('Chờ nghiệm thu')).toContain('3');
   });
 
   /** The period hides nothing silently: what is still open elsewhere is counted. */
@@ -232,6 +255,58 @@ describe('the period summary', () => {
   });
 });
 
+/** Lần 1 repaired and failed inspection; Lần 2 under way. */
+const FAILED_ATTEMPT = {
+  id: 'a1',
+  attemptNumber: 1,
+  technicianName: 'Bảo',
+  technicianPhone: '0369852177',
+  acceptedByName: 'Bảo',
+  acceptedAt: '2026-09-17T03:30:00.000Z',
+  outcome: 'COMPLETED',
+  outcomeAt: '2026-09-17T04:10:00.000Z',
+  reason: null,
+  cause: 'Thiếu gas',
+  result: 'Đã nạp gas',
+  inspection: {
+    result: 'FAILED',
+    resultLabel: 'Không đạt',
+    inspectedByName: 'Quản lý Hùng',
+    inspectedAt: '2026-09-17T04:40:00.000Z',
+    note: 'Vẫn chưa lạnh',
+  },
+  durationSeconds: 2400,
+  durationLabel: '40 phút',
+};
+
+function reworked(over: Record<string, unknown> = {}) {
+  return issue({
+    status: 'IN_PROGRESS',
+    reportedCause: 'Máy kêu to',
+    technicianName: 'Minh',
+    technicianPhone: '0911222333',
+    acceptedAt: '2026-09-17T05:20:00.000Z',
+    attempts: [
+      FAILED_ATTEMPT,
+      {
+        ...FAILED_ATTEMPT,
+        id: 'a2',
+        attemptNumber: 2,
+        technicianName: 'Minh',
+        technicianPhone: '0911222333',
+        acceptedAt: '2026-09-17T05:20:00.000Z',
+        outcome: null,
+        outcomeAt: null,
+        cause: null,
+        result: null,
+        inspection: null,
+        durationLabel: '10 phút',
+      },
+    ],
+    ...over,
+  });
+}
+
 describe('the incident table', () => {
   it('keeps the branch and export controls, and every branch’s unresolved count', async () => {
     installMocks();
@@ -242,33 +317,65 @@ describe('the incident table', () => {
     expect(await screen.findByText('Sự cố chưa xử lý theo chi nhánh')).toBeInTheDocument();
   });
 
-  it('shows how the latest repair attempt ended, and how long it took', async () => {
-    installMocks(undefined, [
-      issue({
-        status: 'NEW',
-        needsRework: true,
-        attempts: [
-          {
-            id: 'a1',
-            attemptNumber: 1,
-            technicianName: 'Minh',
-            technicianPhone: '0909000222',
-            acceptedByName: 'Minh',
-            acceptedAt: '2026-09-17T02:10:00.000Z',
-            outcome: 'CANNOT_REPAIR',
-            outcomeAt: '2026-09-17T02:40:00.000Z',
-            reason: 'Thiếu phụ tùng',
-            durationSeconds: 1800,
-            durationLabel: '30 phút',
-          },
-        ],
-      }),
-    ]);
+  /**
+   * THE WHOLE LIFECYCLE, VISIBLY. Lần 1 was repaired and failed inspection, Lần 2
+   * is under way. The row says where it stands and who judged it; the opened
+   * record lays out report, repair and inspection — the rejection reason in
+   * plain text, not in a tooltip — and every attempt.
+   */
+  it('shows the stage, who judged the last repair, and the full lifecycle when opened', async () => {
+    installMocks(undefined, [reworked({ inspectionEnabled: true })], INSPECTION_SUMMARY);
+    const user = userEvent.setup();
     const table = await openIncidents();
 
     const row = await within(table).findByTestId('row-i1');
-    expect(within(row).getByText(/Không sửa được/)).toHaveTextContent('Không sửa được · 30 phút');
-    expect(within(table).getByRole('columnheader', { name: 'Kết quả gần nhất' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: 'Nghiệm thu' })).toBeInTheDocument();
+    expect(within(row).getByTestId('issue-stage')).toHaveTextContent('Đang sửa');
+    expect(within(row).getByTestId('issue-inspection')).toHaveTextContent('Nghiệm thu: Không đạt');
+    expect(within(row).getByText('Quản lý Hùng')).toBeInTheDocument();
+    expect(within(row).getByText('Minh')).toBeInTheDocument();
+
+    await user.click(within(table).getByTestId('row-toggle-i1'));
+    const lifecycle = await within(table).findByTestId('issue-lifecycle');
+    // Report: the reporter as a person, and the cause Reception gave.
+    expect(within(lifecycle).getAllByText('Nguyễn Văn A').length).toBeGreaterThan(0);
+    expect(within(lifecycle).getByText('Máy kêu to')).toBeInTheDocument();
+    // Inspection: the verdict, who, and why — visible, not hovered for.
+    expect(within(lifecycle).getAllByText('Lý do không đạt: Vẫn chưa lạnh').length).toBeGreaterThan(0);
+    expect(within(lifecycle).getAllByText(/Quản lý Hùng/).length).toBeGreaterThan(0);
+    // Both attempts, the first with its cause and result intact.
+    const timeline = within(lifecycle).getByTestId('issue-timeline');
+    expect(within(timeline).getByText(/Lần 1/)).toBeInTheDocument();
+    expect(within(timeline).getByText(/Lần 2/)).toBeInTheDocument();
+    expect(within(timeline).getByText('Đã nạp gas')).toBeInTheDocument();
+  });
+
+  /**
+   * DORMANT, THE SAME RECORD WITHOUT THE INSPECTION: the stage, the repairer
+   * and every attempt with its cause and result — and no "Nghiệm thu" column,
+   * badge, panel or verdict. The recorded verdict is still stored; it is simply
+   * not part of the workflow being shown.
+   */
+  it('shows the full history without any inspection while inspection is dormant', async () => {
+    installMocks(undefined, [reworked()]);
+    const user = userEvent.setup();
+    const table = await openIncidents();
+
+    const row = await within(table).findByTestId('row-i1');
+    expect(within(table).queryByRole('columnheader', { name: 'Nghiệm thu' })).not.toBeInTheDocument();
+    expect(within(row).getByTestId('issue-stage')).toHaveTextContent('Đang sửa');
+    expect(within(row).queryByTestId('issue-inspection')).not.toBeInTheDocument();
+    expect(within(row).getByText('Minh')).toBeInTheDocument();
+
+    await user.click(within(table).getByTestId('row-toggle-i1'));
+    const lifecycle = await within(table).findByTestId('issue-lifecycle');
+    expect(within(lifecycle).getByText('Máy kêu to')).toBeInTheDocument();
+    expect(within(lifecycle).queryByText(/Lý do không đạt/)).not.toBeInTheDocument();
+    expect(within(lifecycle).queryByText(/Quản lý Hùng/)).not.toBeInTheDocument();
+    const timeline = within(lifecycle).getByTestId('issue-timeline');
+    expect(within(timeline).getByText(/Lần 1/)).toBeInTheDocument();
+    expect(within(timeline).getByText(/Lần 2/)).toBeInTheDocument();
+    expect(within(timeline).getByText('Đã nạp gas')).toBeInTheDocument();
   });
 
   it('offers no way to transition anything', async () => {
@@ -314,5 +421,28 @@ describe('the export', () => {
     expect(url).toContain('/api/admin/reports/incidents.pdf');
     expect(url).toContain(`from=${TODAY}`);
     expect(url).toContain(`to=${TODAY}`);
+  });
+
+  /** The dialog describes the file the server will build — no inspection while it is dormant. */
+  it('promises no inspection results while inspection is dormant', async () => {
+    installMocks();
+    const user = userEvent.setup();
+    await openIncidents();
+    await screen.findByTestId('incident-range-summary');
+
+    await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
+    const contents = await screen.findByTestId('incident-export-contents');
+    expect(contents).toHaveTextContent('kể cả những lần không sửa được.');
+    expect(contents).not.toHaveTextContent(/nghiệm thu/i);
+  });
+
+  it('with inspection switched on, says the file carries the inspection results', async () => {
+    installMocks(undefined, [issue({ inspectionEnabled: true })], INSPECTION_SUMMARY);
+    const user = userEvent.setup();
+    await openIncidents();
+    await screen.findByTestId('incident-range-summary');
+
+    await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
+    expect(await screen.findByTestId('incident-export-contents')).toHaveTextContent('và kết quả nghiệm thu.');
   });
 });

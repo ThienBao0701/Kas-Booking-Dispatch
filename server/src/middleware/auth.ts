@@ -117,7 +117,8 @@ export const requirePasswordChanged: RequestHandler = (req, _res, next) => {
  * WHO IS NOT BOUND TO ONE BRANCH.
  *
  * ADMIN is the dispatch centre and monitors all eight; TECHNICAL is one
- * maintenance team that works all eight. Both carry `branchId = null`.
+ * maintenance team that works all eight, and TECHNICAL_MANAGER inspects that
+ * team's work at all eight. All three carry `branchId = null`.
  *
  * This exists as a named predicate, rather than as `role === 'ADMIN'` repeated
  * at each site, because a branchless role that falls through a branch check does
@@ -129,7 +130,7 @@ export const requirePasswordChanged: RequestHandler = (req, _res, next) => {
  * widening its access would grant something nothing asked for.
  */
 export function seesAllBranches(role: UserRole): boolean {
-  return role === 'ADMIN' || role === 'TECHNICAL';
+  return role === 'ADMIN' || role === 'TECHNICAL' || role === 'TECHNICAL_MANAGER';
 }
 
 export function assertBranchAccess(

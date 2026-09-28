@@ -13,7 +13,7 @@ import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware
  * The roles this endpoint may create. ADMIN is deliberately absent: an
  * administrator is bootstrapped, never minted through the user-management API.
  */
-const MANAGEABLE_ROLES = ['RECEPTIONIST', 'BOOKING_DEPARTMENT', 'TECHNICAL'] as const;
+const MANAGEABLE_ROLES = ['RECEPTIONIST', 'BOOKING_DEPARTMENT', 'TECHNICAL', 'TECHNICAL_MANAGER'] as const;
 
 /**
  * The roles that are GLOBAL — branchless by definition. Listing them once, and
@@ -21,13 +21,14 @@ const MANAGEABLE_ROLES = ['RECEPTIONIST', 'BOOKING_DEPARTMENT', 'TECHNICAL'] as 
  * from being classified by a `!== 'BOOKING_DEPARTMENT'` test that happens to
  * mean "is a receptionist" today and something else tomorrow.
  */
-const GLOBAL_ROLES: readonly string[] = ['BOOKING_DEPARTMENT', 'TECHNICAL'];
+const GLOBAL_ROLES: readonly string[] = ['BOOKING_DEPARTMENT', 'TECHNICAL', 'TECHNICAL_MANAGER'];
 
 /** Vietnamese department names, for the messages this endpoint returns. */
 const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   RECEPTIONIST: 'lễ tân',
   BOOKING_DEPARTMENT: 'bộ phận đặt phòng',
   TECHNICAL: 'bộ phận kỹ thuật',
+  TECHNICAL_MANAGER: 'quản lý kỹ thuật',
 };
 
 const createUserSchema = z

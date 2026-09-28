@@ -33,10 +33,11 @@ import type {
 } from '../api/receptionReports';
 import { DataTable, type DataColumn } from './DataTable';
 import { OperationalRecordDetail } from './OperationalRecord';
+import { IssueStageBadge } from './IssueViews';
 import type { SectionFrame } from './ReportSection';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
-import { roomServiceFields } from '../lib/roomServiceFields';
+import { reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
 
 export interface AdminTableProps {
   rows: OperationalReport[];
@@ -61,6 +62,8 @@ export interface AdminTableProps {
   onRetry?: () => void;
   /** Framed as a report section — the same shell as reception's overview. */
   section?: SectionFrame;
+  /** A one-line empty state, for a category with nothing in it inside a shift. */
+  compact?: boolean;
 }
 
 /** A voided row stays on screen, greyed — never removed, never hidden. */
@@ -418,6 +421,68 @@ export function AdminServiceQualityTable({ rows, title, grouped, ...state }: Adm
   );
 }
 
+/* ------------------ Sự cố cơ sở vật chất đang xử lý ------------------ */
+
+/**
+ * WHAT THE SHIFT REPORTED, inside the shift's own frame: one row per facility
+ * journal entry, showing the incident it references as it stands NOW (area,
+ * fault, cause, stage, repairer) beside the ENTRY's own integrity — a withdrawn
+ * entry says so without touching the incident. The incident's full history is
+ * one click down, and in the category's own view.
+ */
+export function AdminFacilityJournalTable({ rows, title, grouped, ...state }: AdminTableProps) {
+  const columns: DataColumn<OperationalReport>[] = [
+    stt(),
+    {
+      key: 'location',
+      header: 'Khu vực',
+      className: 'min-w-[8rem] font-medium text-slate-800',
+      render: (r) => text(r.facility?.issue.locationLabel),
+    },
+    {
+      key: 'issue',
+      header: 'Sự cố',
+      className: 'min-w-[12rem] max-w-[24rem]',
+      render: (r) => clamped(r.facility?.issue.description),
+    },
+    {
+      key: 'cause',
+      header: 'Nguyên nhân',
+      className: 'min-w-[8rem] max-w-[16rem]',
+      render: (r) => clamped(r.facility?.issue.cause),
+    },
+    {
+      key: 'stage',
+      header: 'Trạng thái',
+      render: (r) => (r.facility ? <IssueStageBadge issue={r.facility.issue} /> : text(null)),
+    },
+    {
+      key: 'repairer',
+      header: 'Người sửa',
+      className: 'whitespace-nowrap',
+      render: (r) => text(r.facility?.issue.repairerName),
+    },
+    staff('Người báo'),
+    shift(),
+    when('createdAt', 'Thời gian báo cáo', (r) => r.createdAt),
+    status('Bản ghi'),
+  ];
+
+  return (
+    <DataTable
+      {...SHARED}
+      {...state}
+      testId="admin-table-FACILITY_ISSUE"
+      title={title}
+      badge={rows.length}
+      columns={inContext(columns, grouped)}
+      rows={rows}
+      emptyTitle="Không có sự cố được báo"
+      emptyMessage="Ca này không báo sự cố cơ sở vật chất nào."
+    />
+  );
+}
+
 /* ------------------------- Dịch vụ phòng, KPI ------------------------- */
 
 /**
@@ -428,8 +493,12 @@ export function AdminServiceQualityTable({ rows, title, grouped, ...state }: Adm
  * `roomServiceFields`, the same table reception's form, tables and correction
  * dialog read. Every table carries Mã EZ, and the Admin's staff, shift, time
  * and record integrity. Legacy fields (SĐT, Số phòng, Loại hình) are in the
- * full record one click down. Rendering five tables when four are empty would
+ * full record one click down. Rendering six tables when five are empty would
  * reintroduce exactly the whitespace this layout removes.
+ *
+ * "REVIEW" IS NOT A SALE. Its table shows Tripadvisor and Google where the
+ * others show a price and a note, and it foots to a number of reviews, never
+ * to money — so the Admin cannot read a review as revenue.
  */
 export function AdminRoomServiceTable({
   rows,
@@ -469,22 +538,52 @@ export function AdminRoomServiceTable({
           },
         ]
       : []),
-    {
-      key: 'price',
-      header: 'Giá tiền',
-      align: 'right',
-      className: 'whitespace-nowrap font-medium text-slate-800',
-      render: (r) => money(r.roomService?.price),
-    },
+    ...(needs.review
+      ? [
+          {
+            key: 'tripadvisor',
+            header: 'Tripadvisor',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium tabular-nums text-slate-800',
+            render: (r: OperationalReport) => String(r.roomService?.tripadvisorCount ?? 0),
+          },
+          {
+            key: 'google',
+            header: 'Google',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium tabular-nums text-slate-800',
+            render: (r: OperationalReport) => String(r.roomService?.googleCount ?? 0),
+          },
+        ]
+      : [
+          {
+            key: 'price',
+            header: 'Giá tiền',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium text-slate-800',
+            render: (r: OperationalReport) => money(r.roomService?.price),
+          },
+        ]),
     staff(),
     shift(),
     when('createdAt', 'Thời gian', (r) => r.createdAt),
-    { key: 'note', header: 'Ghi chú', secondary: true, className: 'max-w-[18rem]', render: (r) => clamped(r.roomService?.note) },
+    ...(needs.review
+      ? []
+      : [
+          {
+            key: 'note',
+            header: 'Ghi chú',
+            secondary: true,
+            className: 'max-w-[18rem]',
+            render: (r: OperationalReport) => clamped(r.roomService?.note),
+          },
+        ]),
     status(),
   ];
 
   const live = rows.filter((r) => !r.voided);
-  const revenue = live.reduce((sum, r) => sum + (r.roomService?.price ?? 0), 0);
+  const revenue = serviceRevenue(rows);
+  const reviews = reviewTotal(rows);
 
   return (
     <DataTable
@@ -504,7 +603,9 @@ export function AdminRoomServiceTable({
               {live.length} bản ghi tính vào tổng
               {rows.length !== live.length ? ` · ${rows.length - live.length} đã hủy` : ''}
             </span>
-            <span className="font-semibold tabular-nums text-slate-800">{formatVnd(revenue)}</span>
+            <span className="font-semibold tabular-nums text-slate-800">
+              {needs.review ? `${reviews} review` : formatVnd(revenue)}
+            </span>
           </p>
         ) : null
       }
@@ -531,6 +632,11 @@ function recordValue(r: OperationalReport): ReactNode {
     }
     if (r.payment.receivable) return money(r.payment.receivable);
     return money(null);
+  }
+  // A review is a count, not money — say how many, never "0 ₫".
+  if (r.roomService?.serviceType === 'REVIEW') {
+    const count = (r.roomService.tripadvisorCount ?? 0) + (r.roomService.googleCount ?? 0);
+    return <span className="whitespace-nowrap text-slate-700">{count} review</span>;
   }
   if (r.roomService) return money(r.roomService.price);
   return money(null);

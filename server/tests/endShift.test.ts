@@ -126,7 +126,7 @@ describe('ending a shift', () => {
     await letan.put('/api/reception/shifts/cash').send({ openingCash: 1000000 });
     await letan
       .post('/api/reception/reports')
-      .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 500000, expense: 100000 } });
+      .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 500000, expense: 100000 } });
 
     const res = await letan.post('/api/reception/shifts/close').send({});
     expect(res.body.cash.openingCash).toBe(1000000);

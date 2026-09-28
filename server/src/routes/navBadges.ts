@@ -61,7 +61,11 @@ export function createNavBadgesRouter(): Router {
         widens to EVERY branch — handing a role that cannot open a single one of
         those screens a count of every order on all eight.
       */
-      if (user.role === 'BOOKING_DEPARTMENT' || user.role === 'TECHNICAL') {
+      if (
+        user.role === 'BOOKING_DEPARTMENT' ||
+        user.role === 'TECHNICAL' ||
+        user.role === 'TECHNICAL_MANAGER'
+      ) {
         res.json({ counts: EMPTY, serverNow: now.toISOString() });
         return;
       }

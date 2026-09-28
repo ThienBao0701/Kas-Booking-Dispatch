@@ -29,7 +29,7 @@ import {
 } from './RecordDialogs';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
-import { roomServiceFields } from '../lib/roomServiceFields';
+import { reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
 
 interface TableProps {
   rows: OperationalReport[];
@@ -47,6 +47,20 @@ interface TableProps {
   compact?: boolean;
   /** Drawn as one section of the reception overview. */
   section?: SectionFrame;
+  /**
+   * 'summary' — the OVERVIEW's and the archive's compact form: STT, Tên khách,
+   * Mã EZ, the content, and a status that is only "Đã tiếp nhận" or "Đã hoàn
+   * thành". No times, no handling text, no controls. 'detail' (the default) is
+   * the category's own complete table.
+   */
+  variant?: 'detail' | 'summary';
+  /** The empty state's line, where the default ("nothing recorded yet") does not fit. */
+  emptyTitle?: string;
+}
+
+/** The one status a summary row states — the words, nothing beneath them. */
+function summaryStatus(completed: boolean | undefined) {
+  return completed ? statusBadge('emerald', 'Đã hoàn thành') : statusBadge('amber', 'Đã tiếp nhận');
 }
 
 /** A voided row stays on screen, greyed and struck through — never removed. */
@@ -202,6 +216,9 @@ function RequestHandling({
  * server has stamped a completion time — and the way to change it sits in
  * "Cách xử lý", which is where its result is written. "Sửa" and "Hủy" sit there
  * too when the table may edit.
+ *
+ * THE SUMMARY (overview, "Hoàn thành vấn đề") keeps five: STT, Tên khách, Mã
+ * EZ, Nội dung and a status that is only "Đã tiếp nhận" or "Đã hoàn thành".
  */
 export function GuestRequestTable({
   rows,
@@ -215,11 +232,42 @@ export function GuestRequestTable({
   title = 'Danh sách vấn đề khách yêu cầu',
   compact,
   section,
+  variant = 'detail',
+  emptyTitle = 'Chưa có yêu cầu nào',
 }: TableProps) {
   const { editing, setEditing, setVoiding, voidNode } = useRowActions(onChanged, onToast);
   const [completing, setCompleting] = useState<string | null>(null);
 
-  const columns: DataColumn<OperationalReport>[] = [
+  /*
+    ON A PHONE the glance is the guest, the content and the status: STT and Mã
+    EZ fold into the row's expander (below `md` only). The content may break
+    anywhere, so one long unbroken word cannot push the status off screen; the
+    name keeps a readable width and breaks only between words.
+  */
+  const summaryColumns: DataColumn<OperationalReport>[] = [
+    { ...stt<OperationalReport>(), secondary: true },
+    {
+      key: 'guest',
+      header: 'Tên khách',
+      className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
+      render: (r) => r.guestRequest?.guestName ?? '—',
+    },
+    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
+    {
+      key: 'content',
+      header: 'Nội dung',
+      className: 'sm:min-w-[10rem] max-w-md',
+      render: (r) => <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{r.guestRequest?.content || '—'}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Trạng thái',
+      className: 'whitespace-nowrap',
+      render: (r) => summaryStatus(r.guestRequest?.completed),
+    },
+  ];
+
+  const detailColumns: DataColumn<OperationalReport>[] = [
     stt(),
     {
       key: 'guest',
@@ -278,6 +326,7 @@ export function GuestRequestTable({
       ),
     },
   ];
+  const columns = variant === 'summary' ? summaryColumns : detailColumns;
 
   return (
     <>
@@ -295,7 +344,7 @@ export function GuestRequestTable({
         onRetry={onRetry}
         compact={compact}
         section={section}
-        emptyTitle="Chưa có yêu cầu nào"
+        emptyTitle={emptyTitle}
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm."
       />
       {voidNode}
@@ -331,6 +380,12 @@ export function GuestRequestTable({
 
 /* ------------------- Vấn đề về chất lượng và dịch vụ ------------------- */
 
+const SERVICE_QUALITY_EDIT: EditField[] = [
+  { name: 'guestName', label: 'Tên khách', required: true },
+  { name: 'ezCode', label: 'Mã EZ' },
+  { name: 'description', label: 'Mô tả', kind: 'textarea', required: true },
+];
+
 /**
  * "Đã tiếp nhận", or "Đã hoàn thành" with the server's completion time — and,
  * until then, the way to complete it.
@@ -364,12 +419,13 @@ function ComplaintStatus({ row, onComplete }: { row: OperationalReport; onComple
 }
 
 /**
- * SEVEN COLUMNS: STT, Tên khách, Mã EZ, Mô tả, Trạng thái, Hướng xử lý (nếu
- * có), Thời gian. No room, no staff and no action column — the shift says who,
- * and completing a report is done in its status cell.
+ * THE CATEGORY'S OWN SCREEN — SEVEN COLUMNS: STT, Tên khách, Mã EZ, Mô tả, Trạng
+ * thái, Hướng xử lý (nếu có), Thời gian. No room, no staff and no action column:
+ * the shift says who, completing a report is done in its status cell, and "Sửa"
+ * sits with the handling.
  *
- * The same table on the overview and on the category's own screen, so the two
- * cannot show different columns.
+ * THE SUMMARY (overview, "Hoàn thành vấn đề"): STT, Tên khách, Mã EZ, Mô tả,
+ * Trạng thái — and nothing to press.
  */
 export function ServiceQualityTable({
   rows,
@@ -382,10 +438,38 @@ export function ServiceQualityTable({
   title = 'Danh sách vấn đề về chất lượng và dịch vụ',
   compact,
   section,
+  canEdit,
+  variant = 'detail',
+  emptyTitle = 'Chưa có ghi nhận nào',
 }: TableProps) {
   const [completing, setCompleting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<OperationalReport | null>(null);
 
-  const columns: DataColumn<OperationalReport>[] = [
+  // As the request summary: on a phone STT and Mã EZ fold away so the status stays in view.
+  const summaryColumns: DataColumn<OperationalReport>[] = [
+    { ...stt<OperationalReport>(), secondary: true },
+    {
+      key: 'guest',
+      header: 'Tên khách',
+      className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
+      render: (r) => r.complaint?.guestName ?? '—',
+    },
+    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.complaint?.ezCode || '—' },
+    {
+      key: 'description',
+      header: 'Mô tả',
+      className: 'sm:min-w-[12rem] max-w-xl',
+      render: (r) => <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{r.complaint?.description ?? '—'}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Trạng thái',
+      className: 'whitespace-nowrap',
+      render: (r) => summaryStatus(r.complaint?.completed),
+    },
+  ];
+
+  const detailColumns: DataColumn<OperationalReport>[] = [
     stt(),
     {
       key: 'guest',
@@ -417,19 +501,36 @@ export function ServiceQualityTable({
       className: 'min-w-[7.5rem]',
       render: (r) => <ComplaintStatus row={r} onComplete={() => setCompleting(r.id)} />,
     },
+    /*
+      "SỬA" SITS WITH THE HANDLING, as it does in the request table — no action
+      column of its own. It corrects Tên khách, Mã EZ and Mô tả only: the times
+      and the completion stay as the server recorded them, and the old values
+      go to the correction history. Offered before and after completion.
+    */
     {
       key: 'resolution',
       header: 'Hướng xử lý (nếu có)',
       className: 'min-w-[8rem] max-w-xs',
-      render: (r) =>
-        r.complaint?.completed && r.complaint.resolution ? (
-          <span className="whitespace-pre-wrap break-words text-slate-700">{r.complaint.resolution}</span>
-        ) : (
-          <span className="text-slate-300">—</span>
-        ),
+      render: (r) => (
+        <div className="space-y-1.5">
+          {r.complaint?.completed && r.complaint.resolution ? (
+            <p className="whitespace-pre-wrap break-words text-slate-700">{r.complaint.resolution}</p>
+          ) : (
+            <p className="text-slate-300">—</p>
+          )}
+          {canEdit && !r.voided ? (
+            <RowAction onClick={() => setEditing(r)} testId={`edit-${r.id}`}>
+              <Pencil className="h-3 w-3" aria-hidden="true" />
+              Sửa
+            </RowAction>
+          ) : null}
+        </div>
+      ),
     },
     when('createdAt', 'Thời gian', (r) => r.createdAt),
   ];
+  const summary = variant === 'summary';
+  const columns = summary ? summaryColumns : detailColumns;
 
   return (
     <>
@@ -447,9 +548,22 @@ export function ServiceQualityTable({
         onRetry={onRetry}
         compact={compact}
         section={section}
-        emptyTitle="Chưa có ghi nhận nào"
+        emptyTitle={emptyTitle}
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm."
       />
+      {editing ? (
+        <RecordEditDialog
+          report={editing}
+          block="complaint"
+          fields={SERVICE_QUALITY_EDIT}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            await onChanged();
+            onToast('Đã lưu chỉnh sửa.');
+          }}
+        />
+      ) : null}
       {completing ? (
         <CompleteRecordDialog
           id={completing}
@@ -472,6 +586,15 @@ export function ServiceQualityTable({
 /** The correction fields for one service — the same rules the entry form renders. */
 function roomServiceEditFields(type: RoomServiceType): EditField[] {
   const needs = roomServiceFields(type);
+  // "Review" corrects its guest and its two counts — it has no price or note.
+  if (needs.review) {
+    return [
+      { name: 'guestName', label: 'Tên khách', required: true },
+      { name: 'ezCode', label: 'Mã EZ' },
+      { name: 'tripadvisorCount', label: 'Tripadvisor', kind: 'count', required: true },
+      { name: 'googleCount', label: 'Google', kind: 'count', required: true },
+    ];
+  }
   return [
     { name: 'guestName', label: 'Tên khách', required: true },
     { name: 'ezCode', label: 'Mã EZ' },
@@ -560,20 +683,42 @@ export function RoomServiceTable({
           },
         ]
       : []),
-    {
-      key: 'price',
-      header: 'Giá tiền',
-      align: 'right',
-      className: 'whitespace-nowrap font-medium text-slate-800',
-      render: (r) => formatVnd(r.roomService?.price ?? null),
-    },
-    {
-      key: 'note',
-      header: 'Ghi chú',
-      secondary: true,
-      className: 'min-w-[8rem] max-w-xs',
-      render: (r) => <span className="whitespace-pre-wrap break-words">{text(r.roomService?.note)}</span>,
-    },
+    // "Review": the two counts, and no price or note — it is not a sale.
+    ...(needs.review
+      ? [
+          {
+            key: 'tripadvisor',
+            header: 'Tripadvisor',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium tabular-nums text-slate-800',
+            render: (r: OperationalReport) => String(r.roomService?.tripadvisorCount ?? 0),
+          },
+          {
+            key: 'google',
+            header: 'Google',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium tabular-nums text-slate-800',
+            render: (r: OperationalReport) => String(r.roomService?.googleCount ?? 0),
+          },
+        ]
+      : [
+          {
+            key: 'price',
+            header: 'Giá tiền',
+            align: 'right' as const,
+            className: 'whitespace-nowrap font-medium text-slate-800',
+            render: (r: OperationalReport) => formatVnd(r.roomService?.price ?? null),
+          },
+          {
+            key: 'note',
+            header: 'Ghi chú',
+            secondary: true,
+            className: 'min-w-[8rem] max-w-xs',
+            render: (r: OperationalReport) => (
+              <span className="whitespace-pre-wrap break-words">{text(r.roomService?.note)}</span>
+            ),
+          },
+        ]),
     {
       key: 'createdAt',
       header: 'Thời gian',
@@ -584,7 +729,8 @@ export function RoomServiceTable({
 
   // Derived from the rows on screen — arithmetic on real records, not a metric.
   const live = rows.filter((r) => !r.voided);
-  const revenue = live.reduce((sum, r) => sum + (r.roomService?.price ?? 0), 0);
+  const revenue = serviceRevenue(rows);
+  const reviews = reviewTotal(rows);
 
   return (
     <>
@@ -604,7 +750,7 @@ export function RoomServiceTable({
         section={section}
         emptyTitle={`Chưa có ${serviceLabel.toLowerCase()} nào`}
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm dịch vụ."
-        actions={(row) => (
+        actions={(row: OperationalReport) => (
           <Actions
             row={row}
             canEdit={canEdit}
@@ -619,7 +765,9 @@ export function RoomServiceTable({
                 {live.length} bản ghi tính vào tổng
                 {rows.length !== live.length ? ` · ${rows.length - live.length} đã hủy` : ''}
               </span>
-              <span className="font-semibold tabular-nums text-slate-800">{formatVnd(revenue)}</span>
+              <span className="font-semibold tabular-nums text-slate-800">
+                {needs.review ? `${reviews} review` : formatVnd(revenue)}
+              </span>
             </p>
           ) : null
         }
@@ -646,13 +794,12 @@ export function RoomServiceTable({
  * "DỊCH VỤ PHÒNG, KPI" ON THE OVERVIEW — two figures, and nothing else.
  *
  * TỔNG DOANH THU is arithmetic on this shift's own service rows (voided ones
- * excluded), the same sum the category's tables foot to.
+ * excluded), the same sum the category's tables foot to — never a "Review".
  *
- * TỔNG ĐÁNH GIÁ (REVIEW) HAS NO SOURCE IN THIS SYSTEM, and it says so. Nothing
- * in KAS records a guest's review or rating — every "review" in the schema is
- * an Admin reviewing a booking — so the line reads "Chưa có dữ liệu" rather than
- * a number. A fabricated score would be worse than none: an operator cannot tell
- * an invented figure from a real one.
+ * TỔNG ĐÁNH GIÁ (REVIEW) is the reviews the desk itself recorded this shift:
+ * SUM(Tripadvisor) + SUM(Google) over the live "Review" rows. A count the
+ * receptionist entered, not a rating fetched from anywhere — and no breakdown
+ * here; the category's own "Review" table has that.
  */
 export function RoomServiceOverview({
   rows,
@@ -667,13 +814,13 @@ export function RoomServiceOverview({
   isLoading?: boolean;
   isError?: boolean;
 }) {
-  const live = rows.filter((r) => !r.voided);
-  const revenue = live.reduce((sum, r) => sum + (r.roomService?.price ?? 0), 0);
+  const revenue = serviceRevenue(rows);
+  const reviews = reviewTotal(rows);
   const pending = isLoading || isError;
 
   return (
     <ReportSection testId="room-service-overview" marker={marker} title={title} count={rows.length}>
-      <dl className="divide-y divide-slate-200 text-sm">
+      <dl className="divide-y-rule divide-line-subtle text-sm">
         <div className="flex items-center justify-between gap-3 px-4 py-2.5">
           <dt className="font-medium text-slate-600">Tổng doanh thu</dt>
           <dd
@@ -686,11 +833,10 @@ export function RoomServiceOverview({
         <div className="flex items-center justify-between gap-3 px-4 py-2.5">
           <dt className="font-medium text-slate-600">Tổng đánh giá (review)</dt>
           <dd
-            className="shrink-0 text-right text-sm text-slate-500"
+            className="shrink-0 whitespace-nowrap text-base font-semibold tabular-nums text-slate-900"
             data-testid="room-service-review"
-            title="Hệ thống chưa có nguồn dữ liệu đánh giá của khách."
           >
-            Chưa có dữ liệu
+            {pending ? '—' : reviews}
           </dd>
         </div>
       </dl>
@@ -729,26 +875,31 @@ export function RoomServiceTotals({
       type,
       label: labelOf(type),
       count: mine.length,
-      revenue: mine.reduce((sum, r) => sum + (r.roomService?.price ?? 0), 0),
+      review: type === 'REVIEW',
+      revenue: serviceRevenue(mine),
+      reviews: reviewTotal(mine),
     };
   });
-  const grand = totals.reduce((sum, t) => sum + t.revenue, 0);
+  // Revenue only — a review is a count, and never adds to money.
+  const grand = serviceRevenue(rows);
 
   return (
-    <section data-testid="room-service-summary" className="rounded-xl border border-slate-200 bg-white">
-      <header className="border-b border-slate-200 bg-slate-50/70 px-4 py-2.5">
+    <section data-testid="room-service-summary" className="rounded-xl border-section border-line bg-white">
+      <header className="border-b-rule border-line bg-slate-50/70 px-4 py-2.5">
         <h3 className="text-sm font-semibold text-slate-800">Tổng hợp dịch vụ {scope}</h3>
       </header>
-      <div className="grid gap-px bg-slate-200 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid gap-0.5 bg-line-subtle sm:grid-cols-3 lg:grid-cols-6">
         {totals.map((t) => (
           <div key={t.type} className="bg-white px-4 py-3" data-testid={`service-total-${t.type}`}>
-            <p className="text-xs uppercase tracking-wide text-slate-400">{t.label}</p>
-            <p className="text-sm font-semibold tabular-nums text-slate-800">{formatVnd(t.revenue)}</p>
+            <p className="text-xs uppercase tracking-wide text-slate-500">{t.label}</p>
+            <p className="text-sm font-semibold tabular-nums text-slate-800">
+              {t.review ? `${t.reviews} review` : formatVnd(t.revenue)}
+            </p>
             <p className="text-xs text-slate-500">{t.count} bản ghi</p>
           </div>
         ))}
       </div>
-      <div className="flex items-center justify-between border-t border-slate-200 px-4 py-2.5">
+      <div className="flex items-center justify-between border-t-rule border-line px-4 py-2.5">
         <span className="text-sm font-medium text-slate-600">Tổng doanh thu dịch vụ {scope}</span>
         {/* A sum of money never breaks between its digits and its "₫". */}
         <span

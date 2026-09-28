@@ -1,4 +1,5 @@
 import type {
+  InspectionResult,
   IssueAreaCategory,
   IssueCategory,
   IssueStatus,
@@ -17,6 +18,15 @@ import {
   sniffImageMime,
 } from './issueStorage';
 import { AREA_FIELDS, describeLocation, normaliseArea, type AreaInput } from './issueArea';
+import { activeIssueWhere, archivedIssueWhere } from '../reception/completionArchive';
+import {
+  INSPECTION_RESULT_LABELS,
+  inspectionEnabled,
+  issueLifecycle,
+  outstandingStatuses,
+  stageWhere,
+  type IssueStage,
+} from './issueLifecycle';
 
 /** The partial unique index that makes "one open attempt per incident" a fact. */
 const ONE_OPEN_ATTEMPT = 'TechnicalRepairAttempt_one_open_per_issue';
@@ -59,7 +69,7 @@ export const ISSUE_INCLUDE = {
   acceptedBy: true,
   completedBy: true,
   /// Oldest first: "Lần 1" really is the first attempt anybody made.
-  attempts: { orderBy: { acceptedAt: 'asc' } },
+  attempts: { orderBy: { attemptNumber: 'asc' } },
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true } },
 } satisfies Prisma.HotelIssueInclude;
 
@@ -106,6 +116,24 @@ export function serializeAttempt(attempt: RepairAttemptRow, now: Date) {
     outcome: attempt.outcome,
     outcomeAt: attempt.outcomeAt ? attempt.outcomeAt.toISOString() : null,
     reason: attempt.reason,
+    /** "Nguyên nhân" as this attempt's technician determined it, if they did. */
+    cause: attempt.cause,
+    /** "Kết quả sửa chữa" — what was done. */
+    result: attempt.result,
+    /**
+     * The Technical Manager's verdict on THIS attempt, or null — not yet
+     * inspected, or made before inspection existed.
+     */
+    inspection: attempt.inspectionResult
+      ? {
+          result: attempt.inspectionResult,
+          resultLabel: INSPECTION_RESULT_LABELS[attempt.inspectionResult],
+          inspectedByName: attempt.inspectedByNameSnapshot,
+          inspectedAt: attempt.inspectedAt ? attempt.inspectedAt.toISOString() : null,
+          /** Optional note on a pass; the required reason on a fail. */
+          note: attempt.inspectionNote,
+        }
+      : null,
     durationSeconds: seconds,
     /** Formatted HERE so the screen and the exported PDF cannot disagree. */
     durationLabel: formatDuration(seconds),
@@ -128,6 +156,7 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     : null;
 
   const cannotRepairCount = issue.attempts.filter((a) => a.outcome === 'CANNOT_REPAIR').length;
+  const lifecycle = issueLifecycle(issue);
 
   return {
     id: issue.id,
@@ -144,10 +173,26 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     locationLabel: describeLocation(issue),
     category: issue.category,
     description: issue.description,
+    /** "Nguyên nhân" as the receptionist reported it — often empty. */
+    reportedCause: issue.cause,
     photoUrl: issue.photoStoredName ? issuePhotoUrl(issue.id) : null,
     status: issue.status,
+    /** Whether screens should show anything about "Nghiệm thu" at all. */
+    inspectionEnabled: inspectionEnabled(),
+    ...lifecycle,
     reportedBy: actorView(issue.reportedBy),
+    /** The reporting ACCOUNT, as it was named then — kept for audit. */
     reportedByName: issue.reportedByNameSnapshot ?? issue.reportedBy?.fullName ?? null,
+    /**
+     * "Người báo" as a person reads it: the receptionist ON THE SHIFT that
+     * reported it, else the account's name. Composed here so no screen parses
+     * "test (Đức)" back apart.
+     */
+    reporterName:
+      issue.shiftSession?.receptionistName ??
+      issue.reportedByNameSnapshot ??
+      issue.reportedBy?.fullName ??
+      null,
     acceptedBy: actorView(issue.acceptedBy),
     acceptedByName: issue.acceptedByNameSnapshot ?? issue.acceptedBy?.fullName ?? null,
     acceptedAt: issue.acceptedAt ? issue.acceptedAt.toISOString() : null,
@@ -172,14 +217,15 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     attempts: issue.attempts.map((a) => serializeAttempt(a, now)),
     cannotRepairCount,
     /**
-     * BACK IN THE QUEUE AFTER SOMEBODY TRIED.
+     * BACK IN THE QUEUE AFTER SOMEBODY TRIED — a failed inspection or a
+     * "Không sửa được".
      *
      * The operational difference between "nobody has looked at this yet" and
-     * "somebody tried and could not fix it" is the whole point of the
-     * "Không sửa được" flow, and `status` alone cannot express it — both are
-     * NEW. This is the flag the queue reads to say "Cần xử lý lại".
+     * "somebody already worked this" is the whole point of both flows, and
+     * `status` alone cannot express it — both are NEW. This is the flag the
+     * queue reads to say "Cần sửa lại".
      */
-    needsRework: issue.status === 'NEW' && cannotRepairCount > 0,
+    needsRework: lifecycle.stage === 'REWORK',
 
     createdAt: issue.createdAt.toISOString(),
     updatedAt: issue.updatedAt.toISOString(),
@@ -194,8 +240,8 @@ async function loadIssue(id: string): Promise<IssueDetail> {
 
 /**
  * Branch isolation, unchanged for Reception and deliberately absent for the
- * other two roles: ADMIN watches every branch and TECHNICAL works every branch,
- * because one maintenance team serves all eight properties.
+ * other roles: ADMIN watches every branch, and TECHNICAL and TECHNICAL_MANAGER
+ * work every branch, because one maintenance team serves all eight properties.
  */
 function assertBranchAccess(issue: IssueDetail, actor: Actor): void {
   if (actor.role === 'RECEPTIONIST' && issue.branchId !== actor.branchId) {
@@ -203,17 +249,38 @@ function assertBranchAccess(issue: IssueDetail, actor: Actor): void {
   }
 }
 
-/** The ONLY role that may move an incident through the workflow. */
+/** The ONLY role that may move an incident through the repair workflow. */
 export function assertTechnicalActor(actor: Actor): void {
   if (actor.role !== 'TECHNICAL') {
     throw ApiError.forbidden('Chỉ bộ phận kỹ thuật mới xử lý được sự cố.');
   }
 }
 
+/**
+ * The ONLY role that may judge a repair — "Quản lý kỹ thuật".
+ *
+ * Not the technician (nobody signs off their own work), and not the Admin, who
+ * monitors every incident but does not stand in the room to check the door
+ * closes. Enforced here as well as on the route, so no other path reaches it.
+ */
+export function assertInspector(actor: Actor): void {
+  if (actor.role !== 'TECHNICAL_MANAGER') {
+    throw ApiError.forbidden('Chỉ quản lý kỹ thuật mới nghiệm thu được sự cố.');
+  }
+}
+
+/** Trimmed text, or null when nothing but whitespace was sent. */
+function optionalText(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export interface CreateIssueInput extends AreaInput {
   branchId?: number;
   category?: IssueCategory | null;
   description: string;
+  /** "Nguyên nhân", if Reception already knows it. Optional. */
+  cause?: string | null;
   photo?: UploadedPhoto;
 }
 
@@ -265,6 +332,9 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
       // default nobody chose.
       category: AREA_FIELDS[area.areaCategory].category ? input.category ?? null : null,
       description,
+      // Kept exactly as reported. A technician's later determination is stored
+      // on their attempt, never written over this.
+      cause: optionalText(input.cause),
       status: 'NEW',
       reportedByUserId: actor.id,
       reportedByNameSnapshot: actor.fullName,
@@ -449,25 +519,71 @@ export async function acceptIssue(
   return updated;
 }
 
+/** Why a transition found the incident somewhere other than where it expected. */
+function finishedMessage(status: IssueStatus): string | null {
+  if (status === 'COMPLETED') return 'Sự cố này đã hoàn thành trước đó.';
+  if (status === 'AWAITING_INSPECTION') return 'Sự cố này đã hoàn thành, đang chờ nghiệm thu.';
+  return null;
+}
+
+export interface CompleteIssueInput {
+  /**
+   * "Nguyên nhân" as the technician determined it. Optional: when they leave it
+   * empty the cause already on file (reported, or an earlier attempt's) stands.
+   */
+  cause?: string | null;
+  /**
+   * "Kết quả sửa chữa" — what was done. Required while inspection is active (it
+   * is what gets inspected); optional while it is dormant, when "Hoàn thành" is
+   * the single press it has always been.
+   */
+  result?: string | null;
+}
+
 /**
- * IN_PROGRESS → COMPLETED. Reachable ONLY from IN_PROGRESS, which is what
- * guarantees a completed incident always names the technician who did the work.
+ * IN_PROGRESS → AWAITING_INSPECTION. "Hoàn thành".
+ *
+ * Reachable ONLY from IN_PROGRESS, which is what guarantees a finished repair
+ * always names the technician who did the work. The server stamps the moment —
+ * the timer stops here, not when the manager gets round to inspecting it — and
+ * the incident is NOT closed: it waits for "Quản lý kỹ thuật" to pass it.
  */
 export async function completeIssue(
   id: string,
+  input: CompleteIssueInput,
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
   assertTechnicalActor(actor);
 
+  // Trimmed BEFORE the check: "   " is not a description of a repair.
+  const result = optionalText(input.result);
+  if (!result && inspectionEnabled()) throw ApiError.validation('Vui lòng nhập kết quả sửa chữa.');
+  const cause = optionalText(input.cause);
+
   const issue = await loadIssue(id);
   const now = clock.now();
+
+  /*
+    A VERDICT NEEDS A REPAIR RECORD TO BE STAMPED ON.
+
+    Normally there is one: the attempt "Tiếp nhận" opened, or — for an incident
+    accepted before attempts existed — the one its own acceptance columns
+    describe. An incident left IN_PROGRESS by the old workflow with NO acceptance
+    time on file has neither, and cannot get one without inventing when the
+    repair began. Sending it to "Chờ nghiệm thu" would strand it there for good:
+    inspection would have nothing to judge, and no other transition accepts that
+    status. So it closes as it did before inspection existed, and its inspection
+    reads "Chưa có dữ liệu" — true, and not invented.
+  */
+  const inspectable =
+    inspectionEnabled() && (issue.attempts.some((a) => a.outcomeAt === null) || issue.acceptedAt !== null);
 
   await prisma.$transaction(async (tx) => {
     const { count } = await tx.hotelIssue.updateMany({
       where: { id, status: 'IN_PROGRESS' },
       data: {
-        status: 'COMPLETED',
+        status: inspectable ? 'AWAITING_INSPECTION' : 'COMPLETED',
         completedByUserId: actor.id,
         completedByNameSnapshot: actor.fullName,
         completedAt: now,
@@ -475,17 +591,191 @@ export async function completeIssue(
     });
     if (count === 0) {
       throw ApiError.conflict(
-        issue.status === 'COMPLETED'
-          ? 'Sự cố này đã hoàn thành trước đó.'
-          : 'Cần tiếp nhận sự cố trước khi hoàn thành.',
+        finishedMessage(issue.status) ?? 'Cần tiếp nhận sự cố trước khi hoàn thành.',
         { status: issue.status },
       );
     }
-    await recordAttemptOutcome(tx, id, 'COMPLETED', null, now, issue);
+    await recordAttemptOutcome(tx, id, 'COMPLETED', null, now, issue, { cause, result });
   });
 
   const updated = await loadIssue(id);
-  await notifyReporterStatus(updated, 'COMPLETED');
+  if (inspectable) await notifyInspectors(updated);
+  else await notifyReporterStatus(updated, 'COMPLETED');
+  return updated;
+}
+
+/**
+ * "Nguyên nhân" while the repair is under way — the technician found it and
+ * says so before they have finished.
+ *
+ * WRITTEN TO THE OPEN ATTEMPT, never to the incident: the incident keeps what
+ * Reception reported, and this is the technician's determination on THIS
+ * attempt. Guarded on the attempt still being open AND the incident still being
+ * IN_PROGRESS, in one conditional write, so a finished repair's cause cannot be
+ * edited after the fact from here.
+ */
+export async function updateRepairCause(
+  id: string,
+  input: { cause: string },
+  actor: Actor,
+): Promise<IssueDetail> {
+  assertTechnicalActor(actor);
+  const cause = input.cause.trim();
+  if (!cause) throw ApiError.validation('Vui lòng nhập nguyên nhân.');
+
+  const issue = await loadIssue(id);
+  const { count } = await prisma.technicalRepairAttempt.updateMany({
+    where: { issueId: id, outcomeAt: null, issue: { status: 'IN_PROGRESS' } },
+    data: { cause },
+  });
+  if (count > 0) return loadIssue(id);
+
+  /*
+    No open attempt on an incident that IS being repaired: one accepted before
+    attempts existed. Its acceptance columns already describe the attempt, so it
+    is opened from them — the same rule `recordAttemptOutcome` applies — and the
+    cause goes on it. The partial unique index keeps this to one open attempt
+    even if two saves race.
+  */
+  const legacy = issue.status === 'IN_PROGRESS' ? legacyAttemptData(issue) : null;
+  if (!legacy) {
+    throw ApiError.conflict(
+      issue.status === 'IN_PROGRESS'
+        ? 'Sự cố này được tiếp nhận trước khi có lịch sử sửa chữa, không có lần sửa để ghi nguyên nhân.'
+        : 'Chỉ cập nhật được nguyên nhân khi sự cố đang sửa.',
+      { status: issue.status },
+    );
+  }
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Re-read inside the transaction: a completion that landed since the load
+      // must not gain an open attempt after the fact.
+      const current = await tx.hotelIssue.findUnique({ where: { id }, select: { status: true } });
+      if (current?.status !== 'IN_PROGRESS') {
+        throw ApiError.conflict('Chỉ cập nhật được nguyên nhân khi sự cố đang sửa.', { status: current?.status });
+      }
+      const previous = await tx.technicalRepairAttempt.count({ where: { issueId: id } });
+      await tx.technicalRepairAttempt.create({
+        data: { issueId: id, attemptNumber: previous + 1, ...legacy, cause },
+      });
+    });
+  } catch (error) {
+    if (error instanceof PrismaNS.PrismaClientKnownRequestError && error.code === 'P2002') {
+      // Somebody opened it a moment ago; write the cause on that one.
+      await prisma.technicalRepairAttempt.updateMany({
+        where: { issueId: id, outcomeAt: null },
+        data: { cause },
+      });
+    } else {
+      throw error;
+    }
+  }
+  return loadIssue(id);
+}
+
+export interface InspectIssueInput {
+  result: InspectionResult;
+  /** Optional on a pass; REQUIRED on a fail — it is the rework instruction. */
+  note?: string | null;
+}
+
+/**
+ * AWAITING_INSPECTION → COMPLETED ("Nghiệm thu đạt")
+ *                     → NEW       ("Không đạt / Yêu cầu sửa lại").
+ *
+ * THE VERDICT IS STAMPED ON THE ATTEMPT IT JUDGES, and that attempt is otherwise
+ * left exactly as the technician closed it: its outcome, cause and result stay
+ * what they were. A failed inspection does not rewrite the repair — it records
+ * that the repair was not good enough, and why.
+ *
+ * A FAIL SENDS THE INCIDENT BACK TO THE QUEUE, like "Không sửa được": NEW, with
+ * the current-assignment columns cleared. The next "Tiếp nhận" then opens a NEW
+ * attempt (Lần 2), so the first repair, its inspection and the second repair are
+ * three separate, permanent facts rather than one row edited three times.
+ *
+ * Both outcomes are conditional writes on AWAITING_INSPECTION, so two managers
+ * judging the same repair at once produce one verdict and one 409.
+ */
+export async function inspectIssue(
+  id: string,
+  input: InspectIssueInput,
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  assertInspector(actor);
+  if (!inspectionEnabled()) {
+    // Dormant: the code is here for the day it is switched on, and until then
+    // no verdict may change an incident's state.
+    throw ApiError.forbidden('Chức năng nghiệm thu chưa được kích hoạt.');
+  }
+
+  const note = optionalText(input.note);
+  if (input.result === 'FAILED' && !note) {
+    throw ApiError.validation('Vui lòng nhập lý do không đạt.');
+  }
+
+  const issue = await loadIssue(id);
+  const now = clock.now();
+
+  await prisma.$transaction(async (tx) => {
+    // The incident first, then the attempt — the lock order every other
+    // transition uses, so no pair of them can deadlock.
+    const { count } = await tx.hotelIssue.updateMany({
+      where: { id, status: 'AWAITING_INSPECTION' },
+      data:
+        input.result === 'PASSED'
+          ? { status: 'COMPLETED' }
+          : {
+              status: 'NEW',
+              acceptedByUserId: null,
+              acceptedByNameSnapshot: null,
+              acceptedAt: null,
+              technicianName: null,
+              technicianPhone: null,
+              completedByUserId: null,
+              completedByNameSnapshot: null,
+              completedAt: null,
+            },
+    });
+    if (count === 0) {
+      throw ApiError.conflict(
+        issue.status === 'COMPLETED'
+          ? 'Sự cố này đã được nghiệm thu trước đó.'
+          : 'Sự cố này chưa ở trạng thái chờ nghiệm thu.',
+        { status: issue.status },
+      );
+    }
+
+    const judged = await tx.technicalRepairAttempt.findFirst({
+      where: { issueId: id, outcome: 'COMPLETED', inspectionResult: null },
+      orderBy: { attemptNumber: 'desc' },
+      select: { id: true },
+    });
+    const stamped = judged
+      ? await tx.technicalRepairAttempt.updateMany({
+          where: { id: judged.id, inspectionResult: null },
+          data: {
+            inspectionResult: input.result,
+            inspectedByUserId: actor.id,
+            inspectedByNameSnapshot: actor.fullName,
+            inspectedAt: now,
+            inspectionNote: note,
+          },
+        })
+      : { count: 0 };
+    // Rolls the status change back with it: a verdict with nothing to attach
+    // to is not recorded as if it had been.
+    if (stamped.count === 0) {
+      throw ApiError.conflict('Không tìm thấy lần sửa chờ nghiệm thu.', { status: issue.status });
+    }
+  });
+
+  const updated = await loadIssue(id);
+  if (input.result === 'PASSED') {
+    await notifyReporterStatus(updated, 'COMPLETED');
+  } else {
+    await notifyTechniciansRework(updated, note!);
+  }
   return updated;
 }
 
@@ -513,6 +803,9 @@ export async function completeIssue(
  *
  * `accepted` is passed in rather than re-read, because the caller has already
  * loaded the incident and the columns are about to change underneath it.
+ *
+ * `findings` is the technician's cause and result, written with the outcome in
+ * the same statement — they describe this attempt and no other.
  */
 async function recordAttemptOutcome(
   tx: Prisma.TransactionClient,
@@ -527,34 +820,67 @@ async function recordAttemptOutcome(
     acceptedByUserId: number | null;
     acceptedAt: Date | null;
   },
+  findings: { cause: string | null; result: string | null } = { cause: null, result: null },
 ): Promise<void> {
   const { count } = await tx.technicalRepairAttempt.updateMany({
     where: { issueId, outcomeAt: null },
-    data: { outcome, outcomeAt: at, reason },
+    data: {
+      outcome,
+      outcomeAt: at,
+      reason,
+      result: findings.result,
+      // An empty cause at completion leaves the one recorded during the repair
+      // ("Cập nhật nguyên nhân") in place rather than wiping it.
+      ...(findings.cause !== null ? { cause: findings.cause } : {}),
+    },
   });
   if (count > 0) return;
 
-  // Nothing open. Only worth recording if the incident actually names somebody —
-  // otherwise there is genuinely no work to record and no columns to lose.
-  if (!accepted.acceptedAt || !accepted.technicianName) return;
+  // Nothing open. Only worth recording if the incident says when somebody took
+  // it on — otherwise there is genuinely no work to record and no columns to lose.
+  const legacy = legacyAttemptData(accepted);
+  if (!legacy) return;
 
   const previous = await tx.technicalRepairAttempt.count({ where: { issueId } });
   await tx.technicalRepairAttempt.create({
     data: {
       issueId,
       attemptNumber: previous + 1,
-      technicianUserId: accepted.acceptedByUserId,
-      technicianNameSnapshot: accepted.technicianName,
-      // Phone is NOT NULL on the attempt; an old row could in principle lack it,
-      // and an em dash records "not known" rather than refusing to save the rest.
-      technicianPhone: accepted.technicianPhone ?? '—',
-      acceptedByNameSnapshot: accepted.acceptedByNameSnapshot,
-      acceptedAt: accepted.acceptedAt,
+      ...legacy,
       outcome,
       outcomeAt: at,
       reason,
+      cause: findings.cause,
+      result: findings.result,
     },
   });
+}
+
+/**
+ * The attempt an incident accepted BEFORE attempts existed already describes,
+ * rebuilt from its own columns — or null when it records no acceptance at all.
+ *
+ * Every value comes from what the acceptance wrote. The acceptance TIME is the
+ * one thing that cannot be stood in for: without it there is no honest start to
+ * the repair, so there is no attempt. A missing name or phone is recorded as
+ * "—" (not known) rather than borrowed from somebody else.
+ */
+function legacyAttemptData(accepted: {
+  technicianName: string | null;
+  technicianPhone: string | null;
+  acceptedByNameSnapshot: string | null;
+  acceptedByUserId: number | null;
+  acceptedAt: Date | null;
+}) {
+  if (!accepted.acceptedAt) return null;
+  return {
+    technicianUserId: accepted.acceptedByUserId,
+    technicianNameSnapshot: accepted.technicianName ?? '—',
+    // Phone is NOT NULL on the attempt; an old row could in principle lack it.
+    technicianPhone: accepted.technicianPhone ?? '—',
+    acceptedByNameSnapshot: accepted.acceptedByNameSnapshot,
+    acceptedAt: accepted.acceptedAt,
+  };
 }
 
 export interface CannotRepairInput {
@@ -627,7 +953,7 @@ export async function cannotRepairIssue(
     });
     if (count === 0) {
       throw ApiError.conflict(
-        issue.status === 'COMPLETED'
+        issue.status === 'COMPLETED' || issue.status === 'AWAITING_INSPECTION'
           ? 'Sự cố này đã hoàn thành, không thể trả lại hàng đợi.'
           : 'Cần tiếp nhận sự cố trước khi báo không sửa được.',
         { status: issue.status },
@@ -679,9 +1005,48 @@ async function notifyReporterStatus(issue: IssueDetail, status: IssueStatus): Pr
   });
 }
 
+/**
+ * A finished repair is work waiting for "Quản lý kỹ thuật", so every active one
+ * is told. The reporter is NOT told yet: to them the incident is done when it
+ * passes inspection, and a "hoàn thành" that is later failed would be a promise
+ * the hotel took back.
+ */
+async function notifyInspectors(issue: IssueDetail): Promise<void> {
+  const managers = await prisma.user.findMany({
+    where: { role: 'TECHNICAL_MANAGER', active: true },
+    select: { id: true },
+  });
+  if (managers.length === 0) return;
+  await prisma.notification.createMany({
+    data: managers.map((m) => ({
+      userId: m.id,
+      title: 'Sự cố chờ nghiệm thu',
+      body: `${describeLocation(issue)} — ${issue.branch.address}`,
+    })),
+  });
+}
+
+/** A failed inspection is work for Bộ phận kỹ thuật again — with the reason. */
+async function notifyTechniciansRework(issue: IssueDetail, reason: string): Promise<void> {
+  const technicians = await prisma.user.findMany({
+    where: { role: 'TECHNICAL', active: true },
+    select: { id: true },
+  });
+  if (technicians.length === 0) return;
+  await prisma.notification.createMany({
+    data: technicians.map((t) => ({
+      userId: t.id,
+      title: 'Sự cố cần sửa lại',
+      body: `${describeLocation(issue)} — ${reason}`,
+    })),
+  });
+}
+
 export interface ListIssuesFilter {
   branchId?: number;
   status?: IssueStatus;
+  /** Narrower than `status`: tells a fresh report from one sent back. */
+  stage?: IssueStage;
   areaCategory?: IssueAreaCategory;
   /**
    * Half-open [from, to) over `createdAt` — the instant the incident was
@@ -701,6 +1066,22 @@ export interface ListIssuesFilter {
    * exactly the one a report scoped to this week would hide.
    */
   outstanding?: boolean;
+  /**
+   * The 12-hour completion rule (`completionArchive.ts`), by the server clock:
+   * 'active' = outstanding at any age, or finished and reported < 12 hours ago;
+   * 'archive' = finished and reported ≥ 12 hours ago ("Hoàn thành vấn đề").
+   * Like `outstanding`, it ignores the period.
+   */
+  scope?: 'active' | 'archive';
+  /**
+   * Half-open [completedFrom, completedTo) over `completedAt` — the instant the
+   * technician finished the repair. Technical's "Đã hoàn thành" asks "what did
+   * we finish this week?", which is a question about completion, not report.
+   * Intersects with everything above; an unfinished incident never matches.
+   */
+  completedFrom?: Date;
+  completedTo?: Date;
+  now?: Date;
   skip: number;
   take: number;
 }
@@ -709,30 +1090,55 @@ export interface ListIssuesFilter {
  * Lists issues newest-first.
  *
  * VISIBILITY, BY ROLE:
- *   RECEPTIONIST  their own branch only, and a client-sent branchId is IGNORED
- *                 rather than refused — the scope is not theirs to choose.
- *   TECHNICAL     all eight branches, optionally narrowed by `branchId`.
- *   ADMIN         all eight branches, optionally narrowed by `branchId`.
+ *   RECEPTIONIST       their own branch only, and a client-sent branchId is
+ *                      IGNORED rather than refused — the scope is not theirs.
+ *   TECHNICAL          all eight branches, optionally narrowed by `branchId`.
+ *   TECHNICAL_MANAGER  all eight branches, optionally narrowed by `branchId`.
+ *   ADMIN              all eight branches, optionally narrowed by `branchId`.
  */
 export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promise<{ issues: IssueDetail[]; total: number }> {
-  const where: Prisma.HotelIssueWhereInput = {};
+  let where: Prisma.HotelIssueWhereInput = {};
   if (actor.role === 'RECEPTIONIST') {
     where.branchId = actor.branchId ?? -1; // -1 never matches → an unassigned receptionist sees nothing
   } else if (filter.branchId !== undefined) {
     where.branchId = filter.branchId;
   }
   if (filter.status) where.status = filter.status;
+  if (filter.stage) where = { ...where, ...stageWhere(filter.stage) };
   if (filter.areaCategory) where.areaCategory = filter.areaCategory;
 
-  if (filter.outstanding) {
+  if (filter.scope) {
+    const now = filter.now ?? getClock().now();
+    delete where.status;
+    delete where.attempts;
+    where = { ...where, AND: [filter.scope === 'active' ? activeIssueWhere(now) : archivedIssueWhere(now)] };
+    /*
+      A PERIOD NARROWS THE SCOPE, it never replaces it: "Hoàn thành vấn đề" by
+      the days the incidents were REPORTED on. The 12-hour rule above still
+      decides eligibility; this only intersects with it.
+    */
+    if (filter.from || filter.to) {
+      where.createdAt = {
+        ...(filter.from ? { gte: filter.from } : {}),
+        ...(filter.to ? { lt: filter.to } : {}),
+      };
+    }
+  } else if (filter.outstanding) {
     // Overrides an explicit status rather than intersecting with it: "tồn đọng"
     // IS a status set, and `outstanding + status=COMPLETED` is a contradiction
     // that would silently return nothing.
-    where.status = { in: ['NEW', 'IN_PROGRESS'] };
+    where.status = { in: outstandingStatuses() };
+    delete where.attempts;
   } else if (filter.from || filter.to) {
     where.createdAt = {
       ...(filter.from ? { gte: filter.from } : {}),
       ...(filter.to ? { lt: filter.to } : {}),
+    };
+  }
+  if (filter.completedFrom || filter.completedTo) {
+    where.completedAt = {
+      ...(filter.completedFrom ? { gte: filter.completedFrom } : {}),
+      ...(filter.completedTo ? { lt: filter.completedTo } : {}),
     };
   }
 

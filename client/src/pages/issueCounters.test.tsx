@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 
 afterEach(() => {
@@ -9,14 +10,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function branch(branchId: number, address: string, newCount = 0, inProgressCount = 0) {
-  return { branchId, code: `B${branchId}`, address, hotelName: `Hotel ${branchId}`, newCount, inProgressCount, totalUnresolved: newCount + inProgressCount };
+function branch(branchId: number, address: string, newCount = 0, inProgressCount = 0, awaitingInspectionCount = 0) {
+  return {
+    branchId,
+    code: `B${branchId}`,
+    address,
+    hotelName: `Hotel ${branchId}`,
+    newCount,
+    inProgressCount,
+    awaitingInspectionCount,
+    totalUnresolved: newCount + inProgressCount + awaitingInspectionCount,
+  };
 }
 
 // One branch with three unresolved (2 new + 1 in-progress); the rest zero → 8 total.
 const BY_BRANCH = [
   branch(1, '05 Trương Định', 2, 1),
-  branch(2, '260 Lý Tự Trọng', 0, 0),
+  // Its only open incident is repaired and waiting for Quản lý kỹ thuật.
+  branch(2, '260 Lý Tự Trọng', 0, 0, 1),
   branch(3, '47A Nguyễn Trãi', 0, 0),
   branch(4, '170 Nguyễn Thái Bình'),
   branch(5, '278 Lê Thánh Tôn'),
@@ -25,7 +36,13 @@ const BY_BRANCH = [
   branch(8, '191 Lê Thánh Tôn'),
 ];
 
-const ADMIN_SUMMARY = { totalUnresolved: 3, newCount: 2, inProgressCount: 1, byBranch: BY_BRANCH };
+const ADMIN_SUMMARY = {
+  totalUnresolved: 4,
+  newCount: 2,
+  inProgressCount: 1,
+  awaitingInspectionCount: 1,
+  byBranch: BY_BRANCH,
+};
 
 /*
   The summary shape the server actually sends: `range` accompanies `date` (and
@@ -42,7 +59,7 @@ const DASHBOARD_SUMMARY = {
 };
 
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: { id: 1, code: 'B1', hotelName: 'Hotel 1', address: '05 Trương Định' },
@@ -57,8 +74,9 @@ function issue(over: Record<string, unknown> = {}) {
     createdAt: '2026-07-24T02:00:00.000Z',
     updatedAt: '2026-07-24T02:00:00.000Z',
     resolvedAt: null,
+    attempts: [],
     ...over,
-  };
+  });
 }
 
 function listBody(issues: unknown[]) {
@@ -75,7 +93,8 @@ describe('Issue counters — sidebar badge', () => {
     });
     renderApp('/app/dashboard');
     // Accessible, not colour-only: the number is exposed via an aria-label.
-    expect(await screen.findByLabelText('3 sự cố chưa xử lý')).toHaveTextContent('3');
+    // 2 new + 1 being repaired + 1 repaired and awaiting inspection: all unresolved.
+    expect(await screen.findByLabelText('4 sự cố chưa xử lý')).toHaveTextContent('4');
   });
 
   it('receptionist sees only their own branch count', async () => {
@@ -132,7 +151,7 @@ describe('Issue counters — dashboard card', () => {
 
 /*
   The per-branch unresolved counts the old "Sự cố khách sạn" screen opened on.
-  That screen became the "Sự cố vật chất đang xử lý" category of "Báo cáo vấn
+  That screen became the "Sự cố cơ sở vật chất đang xử lý" category of "Báo cáo vấn
   đề"; the counts came with it, shown while every branch is on screen.
 */
 describe('Issue counters — admin per-branch counts in the incident category', () => {
@@ -165,6 +184,10 @@ describe('Issue counters — admin per-branch counts in the incident category', 
     const b1 = await screen.findByLabelText(/3 sự cố chưa xử lý tại 05 Trương Định/);
     expect(within(b1).getByText('3')).toBeInTheDocument();
     expect(within(b1).getByText('Mới: 2 · Đang sửa: 1')).toBeInTheDocument();
+    // A repair waiting for inspection is unresolved — and the breakdown says so,
+    // so the badge and its parts add up.
+    const b2 = await screen.findByLabelText(/1 sự cố chưa xử lý tại 260 Lý Tự Trọng/);
+    expect(within(b2).getByText('Mới: 0 · Đang sửa: 0 · Chờ nghiệm thu: 1')).toBeInTheDocument();
     // A zero-count branch is still shown.
     const zero = await screen.findByLabelText(/0 sự cố chưa xử lý tại 191 Lê Thánh Tôn/);
     expect(within(zero).getByText('0')).toBeInTheDocument();
@@ -180,8 +203,10 @@ describe('Issue counters — admin per-branch counts in the incident category', 
     // The page's one branch filter now says so, and the list follows it.
     expect(await screen.findByText('Chỉ chi nhánh 1')).toBeInTheDocument();
     expect(screen.getByTestId('branch-select')).toHaveValue('1');
-    // One branch on screen: its own count strip is not repeated.
-    expect(screen.queryByTestId('branch-incident-counts')).not.toBeInTheDocument();
+    // The counts stay in view in the filter block, the chosen branch marked.
+    const strip = screen.getByTestId('branch-incident-counts');
+    expect(within(strip).getByLabelText(/3 sự cố chưa xử lý tại 05 Trương Định/)).toHaveAttribute('aria-pressed', 'true');
+    expect(within(strip).getByLabelText(/1 sự cố chưa xử lý tại 260 Lý Tự Trọng/)).toHaveAttribute('aria-pressed', 'false');
 
     // Changing branch returns the page to "Tất cả" — the existing behaviour of
     // the branch filter — so the incident category is chosen again.

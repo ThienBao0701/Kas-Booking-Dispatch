@@ -1,7 +1,7 @@
 /**
  * INCIDENT REPORTING — the one issue form, and the incident views.
  *
- * "Sự cố vật chất đang xử lý" in "Báo cáo vấn đề" is now the only place a hotel
+ * "Sự cố cơ sở vật chất đang xử lý" in "Báo cáo vấn đề" is now the only place a hotel
  * incident is reported or monitored, for reception and for the Admin alike. The
  * standalone "Báo cáo sự cố" / "Sự cố khách sạn" screen these came from is gone;
  * its FORM, its range summary and its PDF export live here, unchanged, and still
@@ -16,7 +16,6 @@ import {
   ISSUE_AREAS,
   ISSUE_AREA_SUBTYPES,
   ISSUE_CATEGORIES,
-  REPAIR_OUTCOME_LABEL,
   issuesApi,
   requiresLocationDetail,
   type Issue,
@@ -24,6 +23,8 @@ import {
   type IssueAreaSubtype,
   type IssueCategory,
   issueCategoryLabel,
+  inspectionIsRelevant,
+  currentVerdict,
 } from '../api/issues';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
@@ -32,7 +33,12 @@ import { ErrorAlert } from './ErrorAlert';
 import { DateRangeField, type DateRangeValue } from './DateRangeField';
 import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
-import { IssueStatusBadge, IssueTimeline } from './IssueViews';
+import {
+  IssueInspectionBadge,
+  IssueLifecycleDetail,
+  IssueStageBadge,
+  IssueTimeline,
+} from './IssueViews';
 import { reportsApi } from '../api/reports';
 import { formatDateTime, hcmToday } from '../lib/format';
 
@@ -42,7 +48,7 @@ const MAX_BYTES = 10 * 1024 * 1024;
 /**
  * The report form, which CHANGES WITH THE AREA.
  *
- * "Sự cố" is asked first, and it decides what else is asked: a room number for a
+ * "Khu vực" is asked first, and it decides what else is asked: a room number for a
  * room, a floor for a hallway or a staircase, a fixture for the lobby. Fields
  * that do not apply are not rendered at all rather than disabled — a greyed-out
  * "Số phòng" on a rooftop report is a question the receptionist still has to
@@ -69,6 +75,9 @@ export function NewIssueModal({
   const [floorNumber, setFloorNumber] = useState('');
   const [locationDetail, setLocationDetail] = useState('');
   const [description, setDescription] = useState('');
+  // Optional: Reception often does not know why yet. The technician can fill
+  // it in during the repair, and what is typed here is never overwritten.
+  const [cause, setCause] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -81,6 +90,7 @@ export function NewIssueModal({
       issuesApi.create({
         areaCategory,
         description,
+        cause: cause.trim() || undefined,
         category: fields.category ? category : undefined,
         roomNumber: fields.roomNumber ? roomNumber : undefined,
         floorNumber: fields.floorNumber ? floorNumber : undefined,
@@ -131,7 +141,7 @@ export function NewIssueModal({
     (!detailRequired || locationDetail.trim().length > 0);
 
   const inputClass =
-    'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+    'w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
 
   return (
     <Modal
@@ -150,12 +160,12 @@ export function NewIssueModal({
       }
     >
       <div className="space-y-3">
-        <label className="block text-sm font-medium text-slate-600">
-          Sự cố
+        <label className="block text-sm font-medium text-slate-700">
+          Khu vực
           <select
             className={`${inputClass} mt-1`}
             value={areaCategory}
-            aria-label="Sự cố"
+            aria-label="Khu vực"
             onChange={(e) => {
               setAreaCategory(e.target.value as IssueAreaCategory);
               // Clear what the new area does not ask for, so a value typed under
@@ -175,7 +185,7 @@ export function NewIssueModal({
         </label>
 
         {fields.roomNumber ? (
-          <label className="block text-sm font-medium text-slate-600">
+          <label className="block text-sm font-medium text-slate-700">
             Số phòng
             <input
               className={`${inputClass} mt-1`}
@@ -188,7 +198,7 @@ export function NewIssueModal({
         ) : null}
 
         {fields.floorNumber ? (
-          <label className="block text-sm font-medium text-slate-600">
+          <label className="block text-sm font-medium text-slate-700">
             Số tầng
             <input
               className={`${inputClass} mt-1`}
@@ -201,7 +211,7 @@ export function NewIssueModal({
         ) : null}
 
         {fields.areaSubtype ? (
-          <label className="block text-sm font-medium text-slate-600">
+          <label className="block text-sm font-medium text-slate-700">
             Loại sự cố
             <select
               className={`${inputClass} mt-1`}
@@ -220,7 +230,7 @@ export function NewIssueModal({
         ) : null}
 
         {fields.category ? (
-          <label className="block text-sm font-medium text-slate-600">
+          <label className="block text-sm font-medium text-slate-700">
             Loại sự cố
             <select
               className={`${inputClass} mt-1`}
@@ -241,9 +251,9 @@ export function NewIssueModal({
           Shown for every area, but only REQUIRED where the area alone cannot say
           where to go: "Các Khu Vực Còn Lại", and "Khác" in the lobby.
         */}
-        <label className="block text-sm font-medium text-slate-600">
+        <label className="block text-sm font-medium text-slate-700">
           Vị trí cụ thể{' '}
-          {detailRequired ? null : <span className="font-normal text-slate-400">(không bắt buộc)</span>}
+          {detailRequired ? null : <span className="font-normal text-slate-500">(không bắt buộc)</span>}
           <input
             className={`${inputClass} mt-1`}
             value={locationDetail}
@@ -253,20 +263,33 @@ export function NewIssueModal({
           />
         </label>
 
-        <label className="block text-sm font-medium text-slate-600">
-          Mô tả sự cố
+        <label className="block text-sm font-medium text-slate-700">
+          Sự cố
           <textarea
             className={`${inputClass} mt-1`}
             rows={3}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             maxLength={2000}
-            placeholder="Mô tả sự cố…"
+            placeholder="Ví dụ: Máy lạnh không lạnh"
+            aria-label="Sự cố"
+          />
+        </label>
+
+        <label className="block text-sm font-medium text-slate-700">
+          Nguyên nhân <span className="font-normal text-slate-500">(không bắt buộc)</span>
+          <input
+            className={`${inputClass} mt-1`}
+            value={cause}
+            onChange={(e) => setCause(e.target.value)}
+            maxLength={1000}
+            placeholder="Ví dụ: Thiếu gas — để trống nếu chưa rõ"
+            aria-label="Nguyên nhân"
           />
         </label>
 
         <div>
-          <span className="mb-1 block text-sm font-medium text-slate-600">Ảnh (không bắt buộc)</span>
+          <span className="mb-1 block text-sm font-medium text-slate-700">Ảnh (không bắt buộc)</span>
           <input
             ref={inputRef}
             type="file"
@@ -279,7 +302,7 @@ export function NewIssueModal({
               <img
                 src={previewUrl}
                 alt="Ảnh sẽ gửi"
-                className="h-24 w-24 rounded-xl border border-slate-200 object-cover"
+                className="h-24 w-24 rounded-xl border border-line object-cover"
               />
               <button
                 type="button"
@@ -311,7 +334,7 @@ export function NewIssueModal({
  * and it is the incident list; a second one would make "the table" ambiguous to
  * anybody — a screen reader, a test, or a person — trying to refer to it.
  *
- * "Lượt không sửa được" and "Cần xử lý lại" sit side by side on purpose. They are
+ * "Lượt không sửa được" and "Cần sửa lại" sit side by side on purpose. They are
  * different numbers that sound like the same one: the first counts EVENTS (an
  * incident three technicians failed on contributes three), the second counts
  * INCIDENTS currently waiting to be picked up again (that same incident
@@ -334,20 +357,24 @@ export function IncidentRangeSummary({
   if (!summary.data) return null;
   const s = summary.data.summary;
 
+  // The two inspection figures only while inspection is part of the workflow.
+  const inspection = s.inspectionEnabled;
   const cells: { label: string; value: number; tone?: string }[] = [
     { label: 'Tổng sự cố phát sinh', value: s.total },
     { label: 'Sự cố khách sạn', value: s.newCount },
     { label: 'Đang sửa', value: s.inProgressCount },
+    ...(inspection ? [{ label: 'Chờ nghiệm thu', value: s.awaitingInspectionCount, tone: 'text-violet-700' }] : []),
     { label: 'Đã hoàn thành', value: s.completedCount },
     { label: 'Lượt không sửa được', value: s.cannotRepairAttempts, tone: 'text-rose-700' },
-    { label: 'Cần xử lý lại', value: s.needsReworkIssues, tone: 'text-rose-700' },
+    ...(inspection ? [{ label: 'Nghiệm thu không đạt', value: s.failedInspections, tone: 'text-rose-700' }] : []),
+    { label: 'Cần sửa lại', value: s.needsReworkIssues, tone: 'text-rose-700' },
   ];
 
   return (
     <div className="mb-4" data-testid="incident-range-summary">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      <div className={`grid grid-cols-2 gap-2 sm:grid-cols-3 ${inspection ? 'lg:grid-cols-4 xl:grid-cols-8' : 'lg:grid-cols-6'}`}>
         {cells.map((c) => (
-          <div key={c.label} className="rounded-xl border border-slate-300 bg-white p-3 shadow-sm">
+          <div key={c.label} className="rounded-xl border border-line bg-white p-3 shadow-sm">
             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{c.label}</p>
             <p className={`text-lg font-semibold ${c.tone ?? 'text-slate-900'}`}>{c.value}</p>
           </div>
@@ -384,6 +411,18 @@ export function IncidentExportModal({
 
   const ready = range.from !== '' && range.to !== '';
 
+  /*
+    Whether the file carries inspection results is the SERVER's to say — the
+    same flag the PDF is built with. The query is the one the period summary on
+    screen already made, so for the period on screen it is answered from cache.
+  */
+  const summary = useQuery({
+    queryKey: ['incident-range-summary', { from: range.from, to: range.to, branchId }],
+    queryFn: () => reportsApi.incidentSummary({ from: range.from, to: range.to, branchId: branchId ?? undefined }),
+    enabled: ready,
+  });
+  const inspection = summary.data?.summary.inspectionEnabled === true;
+
   function download() {
     const params = new URLSearchParams({ from: range.from, to: range.to });
     if (branchId != null) params.set('branchId', String(branchId));
@@ -415,8 +454,9 @@ export function IncidentExportModal({
             ? 'Báo cáo gồm tất cả chi nhánh.'
             : 'Báo cáo chỉ gồm chi nhánh đang lọc. Bỏ lọc để xuất tất cả.'}
         </p>
-        <p className="text-xs text-slate-500">
-          Báo cáo gồm cả lịch sử xử lý từng lần, kể cả những lần không sửa được.
+        <p className="text-xs text-slate-500" data-testid="incident-export-contents">
+          Báo cáo gồm cả lịch sử xử lý từng lần — kể cả những lần không sửa được
+          {inspection ? ' — và kết quả nghiệm thu' : ''}.
         </p>
       </div>
     </Modal>
@@ -425,24 +465,37 @@ export function IncidentExportModal({
 
 /* ------------------------------ The incident table ------------------------------ */
 
-const muted = (v: ReactNode) => <span className="text-slate-400">{v}</span>;
+const muted = (v: ReactNode) => <span className="text-slate-500">{v}</span>;
 
-/** The latest attempt's result, in the technical workflow's own words. */
-function latestResult(issue: Issue): ReactNode {
-  const attempts = issue.attempts ?? [];
-  const last = attempts[attempts.length - 1];
-  if (!last?.outcome) return muted(last ? 'Đang xử lý' : '—');
+/**
+ * The stage, and — once there is something to state — the inspection beneath
+ * it. Two badges, because "the technician finished" and "the repair passed" are
+ * different events and Reception has to be able to tell them apart.
+ */
+function statusCell(i: Issue): ReactNode {
   return (
-    <span className={last.outcome === 'CANNOT_REPAIR' ? 'text-rose-600' : 'text-emerald-700'}>
-      {REPAIR_OUTCOME_LABEL[last.outcome]}
-      {/* Breaks before the duration, never inside it. */}
-      {last.durationLabel ? (
-        <>
-          {' '}
-          <span className="whitespace-nowrap text-slate-500">· {last.durationLabel}</span>
-        </>
+    <div className="flex flex-col items-start gap-1">
+      <IssueStageBadge issue={i} />
+      {inspectionIsRelevant(i) ? <IssueInspectionBadge issue={i} /> : null}
+    </div>
+  );
+}
+
+/** The latest verdict's who and when, under its badge — never in a tooltip. */
+function inspectionCell(i: Issue): ReactNode {
+  const judged = currentVerdict(i);
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      <IssueInspectionBadge issue={i} />
+      {judged ? (
+        <span className="text-xs text-slate-600">
+          {judged.inspectedByName ?? '—'}
+          {judged.inspectedAt ? (
+            <span className="block whitespace-nowrap text-slate-500">{formatDateTime(judged.inspectedAt)}</span>
+          ) : null}
+        </span>
       ) : null}
-    </span>
+    </div>
   );
 }
 
@@ -450,9 +503,9 @@ function latestResult(issue: Issue): ReactNode {
  * ONE INCIDENT TABLE, for reception's board and the Admin's view alike.
  *
  * Every column is a field the technical workflow already maintains on
- * `HotelIssue` / `TechnicalRepairAttempt` — status through `IssueStatusBadge`,
- * result through `REPAIR_OUTCOME_LABEL`, times as the server stamped them. The
- * table stores nothing and decides nothing.
+ * `HotelIssue` / `TechnicalRepairAttempt` — the stage and the inspection through
+ * the shared badges, both labelled by the server; times as the server stamped
+ * them. The table stores nothing and decides nothing.
  */
 export function IncidentTable({
   rows,
@@ -461,6 +514,7 @@ export function IncidentTable({
   showBranch = false,
   readingMode = false,
   receptionView = false,
+  summary = false,
   compact,
   section,
   actions,
@@ -487,6 +541,12 @@ export function IncidentTable({
    * completion time and the status are what the desk is asked about.
    */
   receptionView?: boolean;
+  /**
+   * Reception's OVERVIEW (and its archive): the five facts a glance needs —
+   * STT, Khu vực, Sự cố, Nguyên nhân, Trạng thái. Who repaired it, when, and
+   * how many times stay on the category's own screen and in the Admin's.
+   */
+  summary?: boolean;
   compact?: boolean;
   section?: SectionFrame;
   actions?: (issue: Issue) => ReactNode;
@@ -514,26 +574,52 @@ export function IncidentTable({
     className: 'min-w-[8rem] font-medium text-slate-800',
     render: (i) => i.locationLabel,
   };
+  /** THE cause — the latest technician's, else what Reception reported. */
+  const cause: DataColumn<Issue> = {
+    key: 'cause',
+    header: 'Nguyên nhân',
+    secondary: true,
+    className: 'min-w-[8rem] max-w-[14rem]',
+    render: (i) =>
+      i.cause ? <span className="line-clamp-2 text-slate-700">{i.cause}</span> : muted('Chưa xác định'),
+  };
   const status: DataColumn<Issue> = {
     key: 'status',
     header: 'Trạng thái',
     className: 'whitespace-nowrap',
-    render: (i) => <IssueStatusBadge status={i.status} needsRework={i.needsRework} />,
+    render: statusCell,
   };
-  const technician: DataColumn<Issue> = {
-    key: 'technician',
-    header: 'Kỹ thuật',
+  /** "Người sửa" from the attempts themselves, never from the reporter. */
+  const repairer: DataColumn<Issue> = {
+    key: 'repairer',
+    header: 'Người sửa',
     secondary: true,
-    className: 'whitespace-nowrap',
-    render: (i) =>
-      i.technicianName ? (
+    className: 'min-w-[6rem]',
+    render: (i) => {
+      const last = i.attempts?.[i.attempts.length - 1];
+      const phone = last?.technicianPhone ?? i.technicianPhone;
+      return i.repairerName ? (
         <>
-          {i.technicianName}
-          {i.technicianPhone ? <span className="block text-xs text-slate-400">{i.technicianPhone}</span> : null}
+          {i.repairerName}
+          {phone ? <span className="block text-xs text-slate-500">{phone}</span> : null}
         </>
       ) : (
         muted('Chưa tiếp nhận')
-      ),
+      );
+    },
+  };
+  const completedAt: DataColumn<Issue> = {
+    key: 'completedAt',
+    header: 'Thời gian hoàn thành',
+    secondary: true,
+    className: 'min-w-[5.5rem] text-slate-600',
+    render: (i) => (i.completedAt ? formatDateTime(i.completedAt) : muted('—')),
+  };
+  const reportedAt: DataColumn<Issue> = {
+    key: 'createdAt',
+    header: 'Thời gian báo cáo',
+    className: 'min-w-[5.5rem] text-slate-600',
+    render: (i) => formatDateTime(i.createdAt),
   };
   const attempts: DataColumn<Issue> = {
     key: 'attempts',
@@ -545,47 +631,80 @@ export function IncidentTable({
   };
 
   /*
-    Eight columns at desk width: the free-text column is a little narrower than
-    the Admin's and the technician and "Lần sửa" headers may wrap, so "Trạng thái"
-    — the answer the desk is asked for — stays on screen instead of scrolled off.
+    Reception's order is the specification's: where, what, why, when it was
+    reported, who repaired it, when it was finished, where it stands (with the
+    inspection beneath), and how many attempts it took. Nothing to operate —
+    Reception monitors; Bộ phận kỹ thuật works the incident.
   */
-  const columns: DataColumn<Issue>[] = receptionView
+  // Admin shows "Nghiệm thu" as a column only while inspection is active.
+  const inspectionOn = rows.some((r) => r.inspectionEnabled);
+  // On a phone STT and "Nguyên nhân" fold into the row's expander, so the status stays in view.
+  const summaryColumns: DataColumn<Issue>[] = [
+    {
+      key: 'stt',
+      header: 'STT',
+      secondary: true,
+      className: 'w-[1%] whitespace-nowrap text-slate-500',
+      render: (_i, index) => index + 1,
+    },
+    { ...location, className: 'min-w-[5rem] sm:min-w-[7rem] font-medium text-slate-800' },
+    {
+      ...issue,
+      className: 'min-w-[6rem] sm:min-w-[9rem] max-w-[20rem]',
+      // The fault in full — it is what the glance is for, so it wraps rather than clamps.
+      render: (i) => (
+        <>
+          <span className="whitespace-pre-wrap text-slate-800 [overflow-wrap:anywhere]">{i.description}</span>
+          {i.category ? <span className="block text-xs text-slate-500">{issueCategoryLabel(i)}</span> : null}
+        </>
+      ),
+    },
+    cause,
+    { ...status, render: (i) => <IssueStageBadge issue={i} /> },
+  ];
+
+  const columns: DataColumn<Issue>[] = summary
+    ? summaryColumns
+    : receptionView
     ? [
         {
           key: 'stt',
           header: 'STT',
-          className: 'w-[1%] whitespace-nowrap text-slate-400',
+          className: 'w-[1%] whitespace-nowrap text-slate-500',
           render: (_i, index) => index + 1,
         },
-        { ...issue, className: 'min-w-[10rem] max-w-[20rem]' },
         { ...location, className: 'min-w-[7rem] font-medium text-slate-800' },
-        {
-          key: 'createdAt',
-          header: 'Thời gian báo cáo',
-          className: 'min-w-[5.5rem] text-slate-500',
-          render: (i) => formatDateTime(i.createdAt),
-        },
-        { ...technician, className: 'min-w-[6rem]' },
-        {
-          key: 'completedAt',
-          header: 'Thời gian hoàn thành',
-          secondary: true,
-          className: 'min-w-[5.5rem] text-slate-500',
-          render: (i) => formatDateTime(i.completedAt),
-        },
-        { ...attempts, className: 'w-[1%]' },
+        { ...issue, className: 'min-w-[9rem] max-w-[18rem]' },
+        cause,
+        reportedAt,
+        repairer,
+        completedAt,
         status,
+        { ...attempts, className: 'w-[1%]' },
       ]
     : [
         issue,
         location,
-        status,
+        cause,
+        // The Admin has "Nghiệm thu" as a column of its own, so the stage cell
+        // carries the stage alone rather than saying the inspection twice.
+        { ...status, render: (i) => <IssueStageBadge issue={i} /> },
+        ...(inspectionOn
+          ? [
+              {
+                key: 'inspection',
+                header: 'Nghiệm thu',
+                className: 'min-w-[8.5rem]',
+                render: inspectionCell,
+              },
+            ]
+          : []),
         {
           key: 'reporter',
           header: 'Người báo',
           secondary: true,
           className: 'whitespace-nowrap',
-          render: (i) => i.reportedByName ?? muted('—'),
+          render: (i) => i.reporterName ?? muted('—'),
         },
         ...(showBranch
           ? [
@@ -593,24 +712,19 @@ export function IncidentTable({
                 key: 'branch',
                 header: 'Chi nhánh',
                 secondary: true,
-                className: 'min-w-[6rem] text-slate-500',
+                className: 'min-w-[6rem] text-slate-600',
                 render: (i: Issue) => i.branch?.address ?? muted('—'),
               },
             ]
           : []),
-        {
-          key: 'createdAt',
-          header: 'Thời gian',
-          className: 'min-w-[5.5rem] text-slate-500',
-          render: (i) => formatDateTime(i.createdAt),
-        },
-        technician,
-        { key: 'result', header: 'Kết quả gần nhất', secondary: true, className: 'min-w-[7rem]', render: latestResult },
+        reportedAt,
+        repairer,
+        { ...completedAt, header: 'Hoàn thành' },
         attempts,
         {
           key: 'updatedAt',
           header: 'Cập nhật',
-          className: 'min-w-[5.5rem] text-slate-500',
+          className: 'min-w-[5.5rem] text-slate-600',
           render: (i) => formatDateTime(i.updatedAt),
         },
       ];
@@ -634,13 +748,21 @@ export function IncidentTable({
       actions={actions}
       detailToggle={readingMode ? 'always' : 'mobile'}
       multiExpand={readingMode}
-      renderDetail={(i) =>
-        i.attempts && i.attempts.length > 0 ? (
-          // IssueTimeline renders its own "Lịch sử xử lý" heading.
-          <IssueTimeline attempts={i.attempts} />
-        ) : (
-          <p className="text-sm text-slate-400">Chưa có lần xử lý nào được ghi nhận.</p>
-        )
+      // The summary is a glance: no lifecycle to open — the detail lives on the
+      // category's screen. (A phone still folds "Nguyên nhân" into its expander.)
+      renderDetail={
+        summary
+          ? undefined
+          : (i) =>
+              readingMode ? (
+                // The Admin's record: report, repair and inspection, then every attempt.
+                <IssueLifecycleDetail issue={i} showBranch={showBranch} />
+              ) : i.attempts && i.attempts.length > 0 ? (
+                // IssueTimeline renders its own "Lịch sử xử lý" heading.
+                <IssueTimeline attempts={i.attempts} stage={i.stage} showInspection={i.inspectionEnabled} />
+              ) : (
+                <p className="text-sm text-slate-500">Chưa có lần xử lý nào được ghi nhận.</p>
+              )
       }
     />
   );

@@ -1,11 +1,19 @@
 /**
- * The pieces of an incident that three different screens all have to render the
- * same way: Reception's own list, the Technical queues and the Admin monitor.
+ * The pieces of an incident that several screens all have to render the same
+ * way: Reception's own list, the Technical queues (technician and Quản lý kỹ
+ * thuật) and the Admin monitor.
  *
  * They live here rather than being copied into each page because the status
  * names, the colours and the "where is it" line are the shared vocabulary of the
- * workflow — three copies would drift, and an incident reading "Đang sửa" on one
+ * workflow — copies would drift, and an incident reading "Đang sửa" on one
  * screen and "Đang xử lý" on another is a support call.
+ *
+ * TWO BADGES, NEVER ONE
+ *
+ * "The technician finished" and "Quản lý kỹ thuật passed it" are different
+ * events, so an incident carries two badges: its STAGE (where the work stands)
+ * and its INSPECTION ("Nghiệm thu: …"). Both labels come from the server, which
+ * computes them once for every screen and export.
  *
  * THE INFORMATION HIERARCHY
  *
@@ -13,60 +21,102 @@
  * location, category, description, reporter, technician, phone and two
  * timestamps, all at the same visual weight, wrapping wherever the column
  * happened to end. A technician scanning for "which room, and who has it" had to
- * read all of it. It is now five labelled blocks in a fixed order —
+ * read all of it. It is now labelled blocks in a fixed order —
  *
  *     WHERE      branch · location · status
- *     WHAT       category and description
+ *     WHAT       category, description and cause
  *     REPORTED   who raised it, and when
  *     ASSIGNED   who is fixing it, their phone, when they took it
- *     OUTCOME    how it ended, and how long it took
+ *     OUTCOME    how it ended, how long it took, and the inspection
  *
  * — so the same question is always answered in the same place, and a block with
  * nothing true to say is not rendered at all rather than shown empty.
  */
-import { useState } from 'react';
-import { REPAIR_OUTCOME_LABEL, type Issue, type IssueStatus, type RepairAttempt } from '../api/issues';
+import { useState, type ReactNode } from 'react';
+import { CheckCircle2, CircleDashed, Clock3, XCircle } from 'lucide-react';
+import {
+  REPAIR_OUTCOME_LABEL,
+  currentVerdict,
+  type InspectionState,
+  type Issue,
+  type IssueStage,
+  type RepairAttempt,
+} from '../api/issues';
 import { formatDateTime } from '../lib/format';
 
-const STATUS_STYLES: Record<IssueStatus, string> = {
-  NEW: 'bg-amber-100 text-amber-800',
-  IN_PROGRESS: 'bg-blue-100 text-blue-700',
-  COMPLETED: 'bg-green-100 text-green-700',
+/**
+ * One colour per stage. "Cần sửa lại" gets its own BECAUSE IT IS NOT A NEW
+ * STATUS: an incident sent back is `NEW` in the database, exactly like one
+ * nobody has opened, and rendering both alike would hide the single most useful
+ * thing a technician picking up the queue could know — somebody already went,
+ * and it is still not right.
+ */
+const STAGE_STYLES: Record<IssueStage, string> = {
+  WAITING: 'bg-amber-100 text-amber-800 ring-amber-300',
+  REWORK: 'bg-rose-100 text-rose-800 ring-rose-300',
+  IN_PROGRESS: 'bg-blue-100 text-blue-800 ring-blue-300',
+  AWAITING_INSPECTION: 'bg-violet-100 text-violet-800 ring-violet-300',
+  COMPLETED: 'bg-green-100 text-green-800 ring-green-300',
+};
+
+/** Where the work stands — "Chờ kỹ thuật", "Cần sửa lại", "Chờ nghiệm thu"… */
+export function IssueStageBadge({ issue }: { issue: Pick<Issue, 'stage' | 'stageLabel'> }) {
+  return (
+    <span
+      data-testid="issue-stage"
+      className={`inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${STAGE_STYLES[issue.stage]}`}
+    >
+      {issue.stageLabel}
+    </span>
+  );
+}
+
+const INSPECTION_STYLES: Record<InspectionState, string> = {
+  PENDING: 'border-violet-300 bg-white text-violet-800',
+  PASSED: 'border-emerald-400 bg-emerald-50 text-emerald-800',
+  FAILED: 'border-rose-400 bg-rose-50 text-rose-800',
+  NO_DATA: 'border-line bg-white text-slate-600',
+};
+
+const INSPECTION_ICONS: Record<InspectionState, typeof CheckCircle2> = {
+  PENDING: Clock3,
+  PASSED: CheckCircle2,
+  FAILED: XCircle,
+  NO_DATA: CircleDashed,
 };
 
 /**
- * "Cần xử lý lại" gets its own colour BECAUSE IT IS NOT A NEW STATUS.
- *
- * An incident somebody tried and could not fix is `NEW` in the database, exactly
- * like one nobody has opened. Rendering both in amber as "Sự cố khách sạn" hides
- * the single most useful thing a technician picking up the queue could know:
- * that the last person to go could not finish it, and why.
+ * "Nghiệm thu: Đạt". Outlined, with an icon and the word "Nghiệm thu" spelled
+ * out, so it can never be mistaken for the stage badge beside it.
  */
-const REWORK_STYLE = 'bg-rose-100 text-rose-700';
-
-const STATUS_LABEL: Record<IssueStatus, string> = {
-  NEW: 'Sự cố khách sạn',
-  IN_PROGRESS: 'Đang sửa',
-  COMPLETED: 'Đã hoàn thành',
-};
-
-export function IssueStatusBadge({
-  status,
-  needsRework = false,
+export function InspectionBadge({
+  state,
+  label,
+  testId = 'attempt-inspection-badge',
 }: {
-  status: IssueStatus;
-  needsRework?: boolean;
+  state: InspectionState;
+  label: string;
+  testId?: string;
 }) {
-  const rework = status === 'NEW' && needsRework;
+  const Icon = INSPECTION_ICONS[state];
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-        rework ? REWORK_STYLE : STATUS_STYLES[status]
-      }`}
+      data-testid={testId}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${INSPECTION_STYLES[state]}`}
     >
-      {rework ? 'Cần xử lý lại' : STATUS_LABEL[status]}
+      <Icon className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+      Nghiệm thu: {label}
     </span>
   );
+}
+
+/** The issue's own inspection state, as the server labelled it. */
+export function IssueInspectionBadge({
+  issue,
+}: {
+  issue: Pick<Issue, 'inspectionState' | 'inspectionLabel'>;
+}) {
+  return <InspectionBadge state={issue.inspectionState} label={issue.inspectionLabel} testId="issue-inspection" />;
 }
 
 export function IssueThumb({ url }: { url: string }) {
@@ -76,7 +126,7 @@ export function IssueThumb({ url }: { url: string }) {
       <button
         type="button"
         onClick={() => setZoom(true)}
-        className="mt-3 block overflow-hidden rounded-xl border border-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        className="mt-3 block overflow-hidden rounded-xl border border-line focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
       >
         <img src={url} alt="Ảnh sự cố" className="h-20 w-20 object-cover" />
       </button>
@@ -99,13 +149,33 @@ export function IssueThumb({ url }: { url: string }) {
   );
 }
 
-/** One labelled fact. Renders nothing when there is nothing true to say. */
-function Field({ label, value }: { label: string; value: string | null | undefined }) {
-  if (!value) return null;
+/**
+ * One labelled fact. Renders nothing when there is nothing true to say — unless
+ * `empty` is given, for the facts whose absence IS the information
+ * ("Nguyên nhân ban đầu: Chưa có").
+ */
+function Field({
+  label,
+  value,
+  wrap = false,
+  empty,
+}: {
+  label: string;
+  value: ReactNode;
+  wrap?: boolean;
+  empty?: string;
+}) {
+  if (!value && !empty) return null;
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] uppercase tracking-wide text-slate-400">{label}</dt>
-      <dd className="truncate text-sm text-slate-800">{value}</dd>
+      <dt className="text-[11px] uppercase tracking-wide text-slate-500">{label}</dt>
+      <dd
+        className={`text-sm ${value ? 'text-slate-800' : 'italic text-slate-500'} ${
+          wrap ? 'whitespace-pre-line break-words' : 'truncate'
+        }`}
+      >
+        {value || empty}
+      </dd>
     </div>
   );
 }
@@ -115,19 +185,12 @@ function Field({ label, value }: { label: string; value: string | null | undefin
  *
  * Shows nothing while the incident is NEW and has never been worked, because
  * there is nothing true to say. It does NOT hide itself merely because the
- * status is NEW: an incident returned by a "Không sửa được" is NEW and has a
- * history, and that history is the whole reason the card is worth reading.
+ * status is NEW: an incident sent back for rework is NEW and has a history, and
+ * that history is the whole reason the card is worth reading.
  */
 export function IssueWorkTrail({ issue }: { issue: Issue }) {
   const hasHistory = issue.attempts.length > 0;
   if (issue.status === 'NEW' && !hasHistory) return null;
-
-  const outcomeLabel =
-    issue.status === 'COMPLETED'
-      ? 'Hoàn thành'
-      : issue.status === 'IN_PROGRESS'
-        ? 'Đang sửa'
-        : 'Đã trả lại hàng đợi';
 
   return (
     <div className="mt-3 space-y-3">
@@ -149,7 +212,7 @@ export function IssueWorkTrail({ issue }: { issue: Issue }) {
           Kết quả
         </h4>
         <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-3">
-          <Field label="Trạng thái" value={outcomeLabel} />
+          <Field label="Trạng thái" value={issue.stageLabel} />
           <Field
             label="Hoàn thành"
             value={issue.completedAt ? formatDateTime(issue.completedAt) : null}
@@ -167,47 +230,108 @@ export function IssueWorkTrail({ issue }: { issue: Issue }) {
         </dl>
       </section>
 
-      {hasHistory ? <IssueTimeline attempts={issue.attempts} /> : null}
+      {hasHistory ? (
+        <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
+      ) : null}
+    </div>
+  );
+}
+
+/** A verdict on one attempt, or why there is none. */
+function AttemptInspection({ attempt, pending }: { attempt: RepairAttempt; pending: boolean }) {
+  const verdict = attempt.inspection;
+  if (!verdict) {
+    // Only a FINISHED repair can be judged; a running or abandoned one has
+    // nothing to say here.
+    if (attempt.outcome !== 'COMPLETED') return null;
+    return (
+      <div className="mt-1">
+        <InspectionBadge
+          state={pending ? 'PENDING' : 'NO_DATA'}
+          label={pending ? 'Chưa nghiệm thu' : 'Chưa có dữ liệu'}
+        />
+      </div>
+    );
+  }
+  const failed = verdict.result === 'FAILED';
+  return (
+    <div
+      data-testid="attempt-inspection"
+      className={`mt-1.5 rounded-lg border px-2.5 py-1.5 ${
+        failed ? 'border-rose-300 bg-rose-50/60' : 'border-emerald-300 bg-emerald-50/60'
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <InspectionBadge state={verdict.result} label={verdict.resultLabel} />
+        <span className="text-xs text-slate-700">
+          {verdict.inspectedByName ?? '—'}
+          {verdict.inspectedAt ? ` · ${formatDateTime(verdict.inspectedAt)}` : ''}
+        </span>
+      </div>
+      {verdict.note ? (
+        <p className={`mt-1 text-xs ${failed ? 'font-medium text-rose-800' : 'text-slate-700'}`}>
+          {failed ? 'Lý do không đạt' : 'Ghi chú'}: {verdict.note}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 /**
- * Every attempt, oldest first.
+ * Every attempt, oldest first, with what each one found, what it did, and what
+ * Quản lý kỹ thuật said about it.
  *
  * WHY A TIMELINE AND NOT MORE FIELDS. An incident can be worked more than once,
  * and the fields above can only ever describe the CURRENT assignment — so a
  * second technician's acceptance replaces the first one's on the card exactly as
  * it does in the database. This is the only place that can show both, and it is
- * what "Attempt 1: Bảo, 4 phút, không có linh kiện" lives in.
+ * what "Lần 1: Bảo, 40 phút, không đạt — vẫn chưa lạnh" lives in.
+ *
+ * `stage` says whether the LAST finished repair is waiting to be judged
+ * ("Chưa nghiệm thu") or was finished before inspection existed ("Chưa có dữ
+ * liệu").
  */
-export function IssueTimeline({ attempts }: { attempts: RepairAttempt[] }) {
+export function IssueTimeline({
+  attempts,
+  stage,
+  showInspection = true,
+}: {
+  attempts: RepairAttempt[];
+  stage?: IssueStage;
+  /**
+   * False while inspection is dormant: the history then reads exactly as the
+   * operational workflow does — who, when, the cause and the result — and says
+   * nothing about a verdict. Recorded verdicts stay on the attempts.
+   */
+  showInspection?: boolean;
+}) {
   if (attempts.length === 0) return null;
+  const lastId = attempts[attempts.length - 1]?.id;
   return (
     <section data-testid="issue-timeline">
       <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
         Lịch sử xử lý
       </h4>
-      <ol className="space-y-2 border-l border-slate-200 pl-3">
+      <ol className="space-y-3 border-l-2 border-line pl-3">
         {attempts.map((attempt) => (
           <li key={attempt.id} className="relative">
             <span
               aria-hidden="true"
-              className={`absolute -left-[17px] top-1.5 h-2 w-2 rounded-full ${
-                attempt.outcome === 'CANNOT_REPAIR'
+              className={`absolute -left-[19px] top-1.5 h-2.5 w-2.5 rounded-full ring-2 ring-white ${
+                attempt.inspection?.result === 'FAILED' || attempt.outcome === 'CANNOT_REPAIR'
                   ? 'bg-rose-500'
                   : attempt.outcome === 'COMPLETED'
                     ? 'bg-green-500'
                     : 'bg-blue-500'
               }`}
             />
-            <p className="text-xs text-slate-700">
+            <p className="text-xs text-slate-800">
               <span className="font-semibold">Lần {attempt.attemptNumber}</span>
               {' · '}
               {attempt.technicianName}
               {attempt.technicianPhone ? ` · ${attempt.technicianPhone}` : ''}
             </p>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-600">
               Tiếp nhận {formatDateTime(attempt.acceptedAt)}
               {attempt.outcomeAt ? (
                 <>
@@ -220,12 +344,141 @@ export function IssueTimeline({ attempts }: { attempts: RepairAttempt[] }) {
               )}
               {attempt.durationLabel ? ` · ${attempt.durationLabel}` : ''}
             </p>
+            {attempt.cause ? (
+              <p className="text-xs text-slate-700">
+                <span className="text-slate-500">Nguyên nhân:</span> {attempt.cause}
+              </p>
+            ) : null}
+            {attempt.result ? (
+              <p className="text-xs text-slate-700">
+                <span className="text-slate-500">Kết quả:</span> {attempt.result}
+              </p>
+            ) : null}
             {attempt.reason ? (
               <p className="text-xs text-rose-700">Lý do: {attempt.reason}</p>
+            ) : null}
+            {showInspection ? (
+              <AttemptInspection
+                attempt={attempt}
+                pending={stage === 'AWAITING_INSPECTION' && attempt.id === lastId}
+              />
             ) : null}
           </li>
         ))}
       </ol>
     </section>
+  );
+}
+
+/** A titled block of the lifecycle panel. */
+function LifecyclePanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="min-w-0 rounded-xl border border-line bg-white">
+      <h4 className="border-b border-line-subtle bg-slate-50 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+        {title}
+      </h4>
+      <dl className="grid gap-x-4 gap-y-2 px-3 py-2.5 sm:grid-cols-2">{children}</dl>
+    </section>
+  );
+}
+
+/**
+ * THE WHOLE LIFECYCLE OF ONE INCIDENT: the report, the repair and the
+ * inspection, then every attempt.
+ *
+ * One component for the Admin's expanded record and for Quản lý kỹ thuật's
+ * inspection dialog, so the person judging a repair and the person auditing it
+ * later read the same facts laid out the same way.
+ *
+ * The repair block describes the LATEST attempt, read from the attempt itself:
+ * after a failed inspection the incident's current-assignment columns are empty
+ * (nobody is on it), but the last repair still happened and is still what the
+ * rework is measured against. Incidents worked before attempts existed fall back
+ * to those columns.
+ */
+export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issue; showBranch?: boolean }) {
+  const last = issue.attempts[issue.attempts.length - 1];
+  const judged = currentVerdict(issue);
+  const technician = last?.technicianName ?? issue.technicianName;
+  const acceptedAt = last?.acceptedAt ?? issue.acceptedAt;
+  const finishedAt = last ? (last.outcome === 'COMPLETED' ? last.outcomeAt : null) : issue.completedAt;
+  const duration = last?.durationLabel ?? issue.durationLabel;
+
+  return (
+    <div data-testid="issue-lifecycle" className="space-y-3">
+      {/*
+        Three across only from `xl`: at 1100 the Admin record is ~730px wide,
+        and three panels of two columns each truncated dates and names. Every
+        value here wraps rather than truncates — a lifecycle hides nothing.
+      */}
+      <div className={`grid gap-3 ${issue.inspectionEnabled ? 'xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
+        <LifecyclePanel title="Báo cáo">
+          {showBranch ? (
+            // The address, as every other incident screen names a branch — the
+            // internal code truncated to "TRUONG_DINH_…" in this narrow panel.
+            <Field label="Chi nhánh" value={issue.branch?.address} wrap />
+          ) : null}
+          <Field label="Người báo" value={issue.reporterName} wrap empty="—" />
+          <Field label="Thời gian báo cáo" value={formatDateTime(issue.createdAt)} wrap />
+          <Field label="Khu vực" value={issue.locationLabel} wrap />
+          <div className="sm:col-span-2">
+            <Field label="Sự cố" value={issue.description} wrap />
+          </div>
+          <div className="sm:col-span-2">
+            <Field label="Nguyên nhân ban đầu" value={issue.reportedCause} wrap empty="Chưa có" />
+          </div>
+        </LifecyclePanel>
+
+        <LifecyclePanel title="Sửa chữa">
+          <div className="sm:col-span-2">
+            <dt className="text-[11px] uppercase tracking-wide text-slate-500">Trạng thái</dt>
+            <dd className="mt-0.5">
+              <IssueStageBadge issue={issue} />
+            </dd>
+          </div>
+          <Field label="Người sửa" value={technician} wrap empty="Chưa có" />
+          <Field label="Số lần sửa" value={String(issue.attempts.length)} wrap />
+          <Field label="Tiếp nhận" value={acceptedAt ? formatDateTime(acceptedAt) : null} wrap empty="—" />
+          <Field label="Hoàn thành" value={finishedAt ? formatDateTime(finishedAt) : null} wrap empty="—" />
+          <Field label="Thời gian xử lý" value={duration} wrap />
+          <div className="sm:col-span-2">
+            <Field label="Nguyên nhân" value={issue.cause} wrap empty="Chưa xác định" />
+          </div>
+          <div className="sm:col-span-2">
+            <Field label="Kết quả sửa chữa" value={last?.result} wrap />
+          </div>
+        </LifecyclePanel>
+
+        {/* Only while inspection is part of the workflow — dormant, it is not shown at all. */}
+        {issue.inspectionEnabled ? (
+          <LifecyclePanel title="Nghiệm thu">
+            <div className="sm:col-span-2">
+              <dt className="text-[11px] uppercase tracking-wide text-slate-500">Trạng thái nghiệm thu</dt>
+              <dd className="mt-0.5">
+                <IssueInspectionBadge issue={issue} />
+              </dd>
+            </div>
+            <Field label="Người nghiệm thu" value={judged?.inspectedByName} wrap empty="—" />
+            <Field
+              label="Thời gian nghiệm thu"
+              value={judged?.inspectedAt ? formatDateTime(judged.inspectedAt) : null}
+              wrap
+              empty="—"
+            />
+            {judged?.note ? (
+              <div className="sm:col-span-2">
+                <Field
+                  label={judged.result === 'FAILED' ? 'Lý do không đạt' : 'Ghi chú'}
+                  value={judged.note}
+                  wrap
+                />
+              </div>
+            ) : null}
+          </LifecyclePanel>
+        ) : null}
+      </div>
+
+      <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
+    </div>
   );
 }

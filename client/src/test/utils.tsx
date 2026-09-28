@@ -38,6 +38,17 @@ export const TECHNICAL_USER: AuthUser = {
   mustChangePassword: false,
 };
 
+/** Quản lý kỹ thuật — global like the technician; judges finished repairs. */
+export const TECHNICAL_MANAGER_USER: AuthUser = {
+  id: 5,
+  username: 'quanlykythuat',
+  fullName: 'Quản lý Hùng',
+  role: 'TECHNICAL_MANAGER',
+  branch: null,
+  active: true,
+  mustChangePassword: false,
+};
+
 export const RECEPTIONIST_USER: AuthUser = {
   id: 2,
   username: 'letan',

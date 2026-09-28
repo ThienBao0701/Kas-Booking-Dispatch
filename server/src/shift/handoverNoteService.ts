@@ -26,6 +26,7 @@ import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { NOT_DELETED } from '../booking/deleteBooking';
 import { describeLocation } from '../issue/issueArea';
+import { outstandingStatuses } from '../issue/issueLifecycle';
 import { shiftDefinition, shiftWindowLabel } from './shiftTypes';
 import { isShiftRole, requireOpenSession, type ShiftActor } from './shiftService';
 
@@ -240,7 +241,7 @@ export async function pendingWork(
 ): Promise<PendingWork> {
   const [issues, awaitingCreation, awaitingReview, needsRecreation] = await Promise.all([
     client.hotelIssue.findMany({
-      where: { branchId, status: { in: ['NEW', 'IN_PROGRESS'] } },
+      where: { branchId, status: { in: outstandingStatuses() } },
       select: {
         id: true,
         status: true,
@@ -249,9 +250,11 @@ export async function pendingWork(
         areaSubtype: true,
         locationDetail: true,
         areaCategory: true,
-        // `take: 1` — this asks whether the incident has EVER come back, not how
-        // often, so one row is the whole answer and loading the rest is waste.
-        attempts: { where: { outcome: 'CANNOT_REPAIR' }, select: { id: true }, take: 1 },
+        // `take: 1` — this asks whether the incident has EVER been worked, not
+        // how often, so one row is the whole answer and loading the rest is
+        // waste. A NEW incident with any attempt came back — "Không sửa được"
+        // or a failed inspection — and both are "Cần sửa lại".
+        attempts: { select: { id: true }, take: 1 },
       },
       orderBy: { createdAt: 'desc' },
       take: 20,

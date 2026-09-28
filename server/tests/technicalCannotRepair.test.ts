@@ -420,6 +420,9 @@ describe('the incident row after a failed attempt', () => {
 
     expect((await tech.post(`/api/issues/${id}/complete`)).status).toBe(200);
     expect(await testPrisma.technicalRepairAttempt.count({ where: { issueId: id } })).toBe(0);
+    // And it is CLOSED — never parked in a queue it could not leave.
+    const issue = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
+    expect(issue.status).toBe('COMPLETED');
   });
 
   /**

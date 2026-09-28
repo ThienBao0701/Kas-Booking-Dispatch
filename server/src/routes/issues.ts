@@ -12,9 +12,11 @@ import {
   completeIssue,
   createIssue,
   getIssue,
+  inspectIssue,
   listIssues,
   serializeIssue,
   updateIssue,
+  updateRepairCause,
 } from '../issue/issueService';
 import { computeIssueSummary, computeTechnicalCounts } from '../issue/issueSummary';
 import type { UserWithBranch } from '../auth/serialize';
@@ -35,7 +37,9 @@ const CATEGORY = z.enum([
 
 const AREA = z.enum(['ROOM', 'LOBBY', 'HALLWAY', 'STAIRCASE', 'RESTAURANT', 'ROOFTOP', 'OTHER_AREA']);
 const SUBTYPE = z.enum(['RECEPTION_DESK', 'SOFA', 'FLOOR', 'CEILING', 'LIGHT_BULB', 'CLOCK', 'OTHER']);
-const STATUS = z.enum(['NEW', 'IN_PROGRESS', 'COMPLETED']);
+const STATUS = z.enum(['NEW', 'IN_PROGRESS', 'AWAITING_INSPECTION', 'COMPLETED']);
+/** The queues as people name them — see `IssueStage` in the service. */
+const STAGE = z.enum(['WAITING', 'REWORK', 'IN_PROGRESS', 'AWAITING_INSPECTION', 'COMPLETED']);
 
 /**
  * Shape only. WHICH location fields are REQUIRED is decided by `normaliseArea`
@@ -52,6 +56,8 @@ const createSchema = z.object({
   locationDetail: z.string().trim().max(500).optional(),
   category: CATEGORY.optional(),
   description: z.string().trim().min(1, 'Vui lòng nhập mô tả sự cố.').max(2000),
+  /** "Nguyên nhân" — optional: Reception often does not know it yet. */
+  cause: z.string().trim().max(1000).optional(),
 });
 
 const updateSchema = z
@@ -80,6 +86,7 @@ const listSchema = z
   .object({
     branchId: z.coerce.number().int().positive().optional(),
     status: STATUS.optional(),
+    stage: STAGE.optional(),
     areaCategory: AREA.optional(),
     from: isoDay.optional(),
     to: isoDay.optional(),
@@ -87,6 +94,11 @@ const listSchema = z
       .enum(['true', 'false'])
       .optional()
       .transform((v) => v === 'true'),
+    // The 12-hour completion rule — Reception's active board and its archive.
+    scope: z.enum(['active', 'archive']).optional(),
+    // Technical's "Đã hoàn thành" — by the day the repair was FINISHED.
+    completedFrom: isoDay.optional(),
+    completedTo: isoDay.optional(),
     page: z.coerce.number().int().positive().default(1),
     pageSize: z.coerce.number().int().positive().max(100).default(50),
   })
@@ -97,6 +109,14 @@ const listSchema = z
   .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
     message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
     path: ['from'],
+  })
+  .refine((q) => (q.completedFrom === undefined) === (q.completedTo === undefined), {
+    message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
+    path: ['completedTo'],
+  })
+  .refine((q) => q.completedFrom === undefined || q.completedTo === undefined || q.completedFrom <= q.completedTo, {
+    message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
+    path: ['completedFrom'],
   });
 
 const countsSchema = z.object({
@@ -120,6 +140,30 @@ const cannotRepairSchema = z.object({
   reason: z.string().trim().min(1, 'Vui lòng nhập lý do không sửa được.').max(1000),
 });
 
+/**
+ * "Hoàn thành": the result is required — it is what the manager inspects — and
+ * the cause is optional, because the one already on file may be right.
+ */
+const completeSchema = z.object({
+  cause: z.string().trim().max(1000).nullable().optional(),
+  // Required by the SERVICE while inspection is active; optional while dormant.
+  result: z.string().trim().max(2000).nullable().optional(),
+});
+
+/** "Nguyên nhân" recorded during the repair — required when sent at all. */
+const causeSchema = z.object({
+  cause: z.string().trim().min(1, 'Vui lòng nhập nguyên nhân.').max(1000),
+});
+
+/**
+ * "Nghiệm thu". The note is optional here and required by the SERVICE when the
+ * verdict is a fail — one rule, in the domain, whoever calls it.
+ */
+const inspectSchema = z.object({
+  result: z.enum(['PASSED', 'FAILED']),
+  note: z.string().trim().max(1000).nullable().optional(),
+});
+
 function actor(user: UserWithBranch) {
   return { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
 }
@@ -127,12 +171,23 @@ function actor(user: UserWithBranch) {
 /** Only Bộ phận kỹ thuật works the queue. Admin monitors, and is refused here. */
 const requireTechnical = requireRole('TECHNICAL');
 
+/** Only Quản lý kỹ thuật judges a repair — not the technician who made it. */
+const requireInspector = requireRole('TECHNICAL_MANAGER');
+
+/**
+ * Who REPORTS an incident: Reception (own branch) and the Admin (any branch) —
+ * the contract the create route always described. An allow-list, so a
+ * branchless department (Bộ phận kỹ thuật, Quản lý kỹ thuật, Bộ phận đặt phòng)
+ * cannot file or rewrite a report at a branch it has no desk at.
+ */
+const requireReporter = requireRole('RECEPTIONIST', 'ADMIN');
+
 /** Reception reports hotel incidents; Bộ phận kỹ thuật works them. */
 export function createIssuesRouter(): Router {
   const router = Router();
 
   // POST /api/issues — create a report (receptionist own branch, admin any branch).
-  router.post('/issues', requireAuth, requirePasswordChanged, proofUpload(), (req, res, next) => {
+  router.post('/issues', requireAuth, requirePasswordChanged, requireReporter, proofUpload(), (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = createSchema.parse(req.body ?? {});
@@ -152,14 +207,20 @@ export function createIssuesRouter(): Router {
       // dashboard and the accountability report use — one definition of what a
       // Vietnamese calendar day is, for every screen that asks for one.
       const range = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      const completed = q.completedFrom && q.completedTo ? hcmRange(q.completedFrom, q.completedTo) : null;
       const now = getClock().now();
       const { issues, total } = await listIssues(actor(user), {
         branchId: q.branchId,
         status: q.status,
+        stage: q.stage,
         areaCategory: q.areaCategory,
         from: range?.start,
         to: range?.end,
         outstanding: q.outstanding,
+        scope: q.scope,
+        completedFrom: completed?.start,
+        completedTo: completed?.end,
+        now,
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       });
@@ -217,7 +278,7 @@ export function createIssuesRouter(): Router {
   });
 
   // PUT /api/issues/:id — reporter edits while still NEW (own branch).
-  router.put('/issues/:id', requireAuth, requirePasswordChanged, (req, res, next) => {
+  router.put('/issues/:id', requireAuth, requirePasswordChanged, requireReporter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = updateSchema.parse(req.body ?? {});
@@ -238,11 +299,36 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/issues/:id/complete — Technical finishes: IN_PROGRESS → COMPLETED.
+  // POST /api/issues/:id/complete — Technical finishes the repair:
+  // IN_PROGRESS → AWAITING_INSPECTION. The server stamps the time.
   router.post('/issues/:id/complete', requireAuth, requirePasswordChanged, requireTechnical, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
-      const issue = await completeIssue(req.params.id!, actor(user), getClock());
+      const input = completeSchema.parse(req.body ?? {});
+      const issue = await completeIssue(req.params.id!, input, actor(user), getClock());
+      res.json({ issue: serializeIssue(issue) });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/cause — the technician records the cause they found,
+  // on the attempt that is still open. Reception's reported cause is untouched.
+  router.post('/issues/:id/cause', requireAuth, requirePasswordChanged, requireTechnical, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = causeSchema.parse(req.body ?? {});
+      const issue = await updateRepairCause(req.params.id!, input, actor(user));
+      res.json({ issue: serializeIssue(issue) });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/inspect — Quản lý kỹ thuật judges the repair:
+  // AWAITING_INSPECTION → COMPLETED (đạt) or → NEW (không đạt, sửa lại).
+  // `requireInspector` refuses every other role; the service re-checks it.
+  router.post('/issues/:id/inspect', requireAuth, requirePasswordChanged, requireInspector, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = inspectSchema.parse(req.body ?? {});
+      const issue = await inspectIssue(req.params.id!, input, actor(user), getClock());
       res.json({ issue: serializeIssue(issue) });
     })().catch(next);
   });

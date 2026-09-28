@@ -165,8 +165,8 @@ export function DataTable<T>({
   // Their scroll box is also a size container, so an open record can be held to
   // the visible width while the row above it scrolls (see FragmentRow).
   const headRowClass = strong
-    ? 'border-b border-slate-300 bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600'
-    : 'border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500';
+    ? 'border-b-rule border-line bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600'
+    : 'border-b-rule border-line text-xs uppercase tracking-wide text-slate-600';
   const headCellClass = strong ? 'py-2.5 font-semibold' : 'py-2 font-medium';
 
   const body = (
@@ -188,7 +188,7 @@ export function DataTable<T>({
               type="button"
               onClick={onRetry}
               data-testid={testId ? `${testId}-retry` : undefined}
-              className="mt-3 inline-flex min-h-[2.5rem] items-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              className="mt-3 inline-flex min-h-[2.5rem] items-center rounded-lg border border-line-strong px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
               Thử lại
             </button>
@@ -232,7 +232,7 @@ export function DataTable<T>({
                 ) : null}
               </tr>
             </thead>
-            <tbody className={`divide-y ${strong ? 'divide-slate-200' : 'divide-slate-100'}`}>
+            <tbody className="divide-y-rule divide-line-subtle">
               {rows.map((row, index) => {
                 const key = rowKey(row);
                 return (
@@ -262,7 +262,7 @@ export function DataTable<T>({
 
       {footer && !isLoading && !isError ? (
         <div
-          className={`border-t px-4 py-2.5 ${strong ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-slate-50/70'}`}
+          className={`border-t-rule px-4 py-2.5 ${strong ? 'border-line bg-slate-50' : 'border-line-subtle bg-slate-50/70'}`}
         >
           {footer}
         </div>
@@ -283,9 +283,9 @@ export function DataTable<T>({
   return (
     <section
       data-testid={testId}
-      className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+      className="overflow-hidden rounded-xl border-section border-line bg-white"
     >
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/70 px-4 py-2.5">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b-rule border-line bg-slate-50/70 px-4 py-2.5">
         <h3 className="text-sm font-semibold text-slate-800">
           {title}
           {badge !== undefined ? (
@@ -461,10 +461,10 @@ export function RowAction({
       onClick={onClick}
       disabled={disabled}
       data-testid={testId}
-      className={`ml-1 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+      className={`ml-1 inline-flex items-center gap-1 whitespace-nowrap rounded-lg border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
         tone === 'danger'
-          ? 'border-rose-200 text-rose-600 hover:bg-rose-50'
-          : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+          ? 'border-rose-300 text-rose-600 hover:bg-rose-50'
+          : 'border-line-strong text-slate-600 hover:bg-slate-50'
       }`}
     >
       {children}

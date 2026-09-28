@@ -48,7 +48,7 @@ describe('role-based shell and routing', () => {
       'Quản lý tài khoản',
     ]);
     /*
-      "Sự cố khách sạn" is the "Sự cố vật chất đang xử lý" category of "Báo cáo
+      "Sự cố khách sạn" is the "Sự cố cơ sở vật chất đang xử lý" category of "Báo cáo
       vấn đề" now, and "Bàn giao ca" is gone from the menu. Both addresses
       still resolve — see "the retired addresses" below.
     */
@@ -56,13 +56,14 @@ describe('role-based shell and routing', () => {
     expect(within(nav).queryByRole('link', { name: 'Bàn giao ca' })).not.toBeInTheDocument();
   });
 
-  it('shows only the four receptionist items', async () => {
+  it('shows only the five receptionist items', async () => {
     mockShell(RECEPTIONIST_USER);
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
-    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Chat box', 'Nhắc nhở']);
+    // "Hoàn thành vấn đề" is the 12-hour completion archive of II, III and IV.
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Hoàn thành vấn đề', 'Chat box', 'Nhắc nhở']);
     /*
       Removed from the MENU only. Their routes, records and APIs are untouched;
       "Báo cáo sự cố" is a category inside "Báo cáo vấn đề".

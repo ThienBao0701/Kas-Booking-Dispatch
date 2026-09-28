@@ -7,15 +7,21 @@
  * the order the categories are always listed. ONE HEADER on every screen — the
  * title, "Làm mới", and "Tổng ▾" with the open category's one primary action
  * beside it — so switching category never goes back through the overview. Each
- * category's own screen leads with the records it has produced THIS SHIFT, with
- * the shift-wide journal further down as a collapsed secondary view.
+ * category's own screen is its complete table, and nothing else: there is no
+ * shift-journal list underneath any more.
  *
  * THE OVERVIEW RE-USES EACH CATEGORY'S OWN TABLE. Nothing on it is a second
  * implementation: the payment figures are the server's drawer, the Request,
- * incident and service-quality tables are the category tables in their compact
- * form, and "Dịch vụ phòng, KPI" is reduced to its two summary figures.
+ * incident and service-quality tables are the category tables in their SUMMARY
+ * form — the facts a glance needs and a status, nothing more — and "Dịch vụ
+ * phòng, KPI" is reduced to its two summary figures.
  *
- * "Sự cố vật chất đang xử lý" is a live read of the existing Technical
+ * II, III AND IV ARE THE BRANCH'S, NOT THE SHIFT'S. They show every unfinished
+ * record however old, and every completion until it is 12 hours past its
+ * receipt; after that "Hoàn thành vấn đề" has it. Payments and room services
+ * stay with the shift that recorded them.
+ *
+ * "Sự cố cơ sở vật chất đang xử lý" is a live read of the existing Technical
  * workflow. Its "+ Báo cáo sự cố" opens the SAME dialog the standalone "Báo cáo
  * sự cố" menu entry used to open — one issue form, one issue API, one issue
  * model.
@@ -32,35 +38,32 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, ChevronDown, ChevronRight, Plus, RefreshCw } from 'lucide-react';
+import { Check, ChevronDown, Plus, RefreshCw } from 'lucide-react';
 import {
   reportsApi,
-  type OperationalReport,
   type ReportCategory,
   type RoomServiceType,
 } from '../api/receptionReports';
 import { useIsReception, useShiftSession } from '../hooks/useShiftSession';
-import { QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { PaymentLedger, PaymentOverview } from '../components/PaymentLedger';
-import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
+import { ACTIVE_REPORTS_KEY, CASH_KEY, FACILITY_BOARD_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import {
   GuestRequestForm,
   RoomServiceForm,
   ServiceQualityForm,
 } from '../components/OperationalForms';
 import { FacilityIssueBoard } from '../components/FacilityIssueBoard';
+import { MoreNote } from '../components/MoreNote';
 import {
   GuestRequestTable,
   RoomServiceOverview,
   RoomServiceTable,
   ServiceQualityTable,
 } from '../components/OperationalTables';
-import { OperationalRecordDetail } from '../components/OperationalRecord';
 import { AdminOperationalReportsPage } from './AdminOperationalReportsPage';
-import { formatDateTime } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
 import {
   CATEGORY_FALLBACK_LABELS,
@@ -117,11 +120,25 @@ function ReceptionJournal() {
     refetchOnWindowFocus: true,
   });
 
+  /*
+    II AND IV ARE NOT THE SHIFT'S, they are the branch's: a request taken on
+    Ca A and still open on Ca B is Ca B's to finish, and a completion stays in
+    view until it is 12 hours past its receipt — then "Hoàn thành vấn đề" has
+    it. The server clock decides; this screen only asks.
+  */
+  const active = useQuery({
+    queryKey: [...ACTIVE_REPORTS_KEY, sessionId],
+    queryFn: () => reportsApi.active(),
+    enabled: sessionId !== null,
+    refetchOnWindowFocus: true,
+  });
+
   const refresh = async () => {
-    // Prefix match: the key carries the session id, and both must move together
-    // or a table and its totals drift apart.
+    // Prefix match: the keys carry the session id, and the tables, the totals
+    // and the drawer must move together or they drift apart.
     await queryClient.invalidateQueries({ queryKey: REPORTS_KEY });
     await queryClient.invalidateQueries({ queryKey: CASH_KEY });
+    await queryClient.invalidateQueries({ queryKey: FACILITY_BOARD_KEY });
   };
 
   const label = (c: ReportCategory) =>
@@ -137,6 +154,21 @@ function ReceptionJournal() {
     isError: list.isError,
     error: list.error,
     onRetry: () => void list.refetch(),
+    canEdit: true,
+  };
+  /** II and IV: the branch's active set, across shifts. */
+  const current = (c: ReportCategory) => (active.data?.reports ?? []).filter((r) => r.category === c);
+  /** The overview is a glance at what is live: a withdrawn row is not. */
+  const currentLive = (c: ReportCategory) => current(c).filter((r) => !r.voided);
+  /** Said under a II/IV table when the server returned only its newest page. */
+  const more = (c: 'GUEST_REQUEST' | 'CUSTOMER_COMPLAINT') => (
+    <MoreNote shown={current(c).length} total={active.data?.totals?.[c]} />
+  );
+  const activeState = {
+    isLoading: sessionId !== null && active.isLoading,
+    isError: active.isError,
+    error: active.error,
+    onRetry: () => void active.refetch(),
     canEdit: true,
   };
 
@@ -157,8 +189,8 @@ function ReceptionJournal() {
         labelOf={title}
         onPick={openCategory}
         onOverview={openOverview}
-        refreshing={list.isFetching}
-        onRefresh={() => void list.refetch()}
+        refreshing={list.isFetching || active.isFetching}
+        onRefresh={() => void refresh()}
         action={category ? { label: ADD_LABELS[category], onClick: () => setAdding(true) } : null}
       />
 
@@ -171,36 +203,49 @@ function ReceptionJournal() {
             <span aria-hidden="true" className="h-px flex-1 bg-slate-300" />
           </div>
           <PaymentOverview title={title('PAYMENT')} section={{ marker: CATEGORY_MARKERS.PAYMENT }} />
-          <GuestRequestTable
-            rows={byCategory('GUEST_REQUEST')}
-            title={title('GUEST_REQUEST')}
-            onChanged={refresh}
-            onToast={setToast}
-            {...tableState}
-            canEdit={false}
-            compact
-            section={{ marker: CATEGORY_MARKERS.GUEST_REQUEST }}
-          />
+          {/*
+            II, III and IV in their SUMMARY form — the five facts a glance needs
+            and a status that is only "Đã tiếp nhận" or "Đã hoàn thành". Times,
+            handling and controls live on each category's own screen.
+          */}
+          <div>
+            <GuestRequestTable
+              rows={currentLive('GUEST_REQUEST')}
+              title={title('GUEST_REQUEST')}
+              onChanged={refresh}
+              onToast={setToast}
+              {...activeState}
+              canEdit={false}
+              variant="summary"
+              compact
+              section={{ marker: CATEGORY_MARKERS.GUEST_REQUEST }}
+            />
+            {more('GUEST_REQUEST')}
+          </div>
           <FacilityIssueBoard
-            currentShiftFacilityReports={byCategory('FACILITY_ISSUE')}
             title={title('FACILITY_ISSUE')}
             onLogged={refresh}
             onToast={setToast}
             reportOpen={false}
             onCloseReport={() => undefined}
+            summary
             compact
             section={{ marker: CATEGORY_MARKERS.FACILITY_ISSUE }}
           />
-          <ServiceQualityTable
-            rows={byCategory('CUSTOMER_COMPLAINT')}
-            title={title('CUSTOMER_COMPLAINT')}
-            onChanged={refresh}
-            onToast={setToast}
-            {...tableState}
-            canEdit={false}
-            compact
-            section={{ marker: CATEGORY_MARKERS.CUSTOMER_COMPLAINT }}
-          />
+          <div>
+            <ServiceQualityTable
+              rows={currentLive('CUSTOMER_COMPLAINT')}
+              title={title('CUSTOMER_COMPLAINT')}
+              onChanged={refresh}
+              onToast={setToast}
+              {...activeState}
+              canEdit={false}
+              variant="summary"
+              compact
+              section={{ marker: CATEGORY_MARKERS.CUSTOMER_COMPLAINT }}
+            />
+            {more('CUSTOMER_COMPLAINT')}
+          </div>
           {/* Two figures and nothing else — the detail lives on the category's own screen. */}
           <RoomServiceOverview
             rows={byCategory('ROOM_SERVICE')}
@@ -249,13 +294,15 @@ function ReceptionJournal() {
                   />
                 </Modal>
               ) : null}
-              <GuestRequestTable rows={byCategory('GUEST_REQUEST')} onChanged={refresh} onToast={setToast} {...tableState} />
+              <div>
+                <GuestRequestTable rows={current('GUEST_REQUEST')} onChanged={refresh} onToast={setToast} {...activeState} />
+                {more('GUEST_REQUEST')}
+              </div>
             </>
           ) : null}
 
           {category === 'FACILITY_ISSUE' ? (
             <FacilityIssueBoard
-              currentShiftFacilityReports={byCategory('FACILITY_ISSUE')}
               onLogged={refresh}
               onToast={setToast}
               reportOpen={adding}
@@ -278,7 +325,15 @@ function ReceptionJournal() {
                   />
                 </Modal>
               ) : null}
-              <ServiceQualityTable rows={byCategory('CUSTOMER_COMPLAINT')} onChanged={refresh} onToast={setToast} {...tableState} />
+              <div>
+                <ServiceQualityTable
+                  rows={current('CUSTOMER_COMPLAINT')}
+                  onChanged={refresh}
+                  onToast={setToast}
+                  {...activeState}
+                />
+                {more('CUSTOMER_COMPLAINT')}
+              </div>
             </>
           ) : null}
 
@@ -299,8 +354,9 @@ function ReceptionJournal() {
                 </Modal>
               ) : null}
               {/*
-                FIVE SECTIONS, ONE PER SERVICE, stacked — not five tabs. Each holds
-                only its own service's rows; the columns follow the service.
+                SIX SECTIONS, ONE PER SERVICE, stacked — not six tabs. Each holds
+                only its own service's rows; the columns follow the service, and
+                "Review" holds its two counts where the others hold a price.
               */}
               <div className="space-y-4" data-testid="room-service-groups">
                 {ROOM_SERVICE_ORDER.map((type) => (
@@ -321,20 +377,11 @@ function ReceptionJournal() {
           ) : null}
 
           {/*
-            THE SHIFT JOURNAL — secondary, cross-category, collapsed by default.
-
-            The category table above is the primary presentation; this remains
-            for "what did I enter this shift, in order, regardless of
-            category?", which is a real question at handover time but not the
-            one being asked while looking at one category.
+            NO SHIFT JOURNAL ON THIS SCREEN. The collapsed "Nhật ký ca hiện tại"
+            list was removed from Reception at the operators' request: each
+            category's table is the record. The rows and their correction
+            history are unchanged on the server and stay in the Admin's view.
           */}
-          <SecondaryJournal
-            rows={all}
-            isLoading={tableState.isLoading}
-            isError={tableState.isError}
-            error={tableState.error}
-            onRetry={tableState.onRetry}
-          />
         </CategoryShell>
       )}
 
@@ -518,7 +565,7 @@ function TotalMenu({
             aria-label="Danh mục báo cáo"
             data-testid="category-menu"
             onKeyDown={onMenuKeyDown}
-            className="absolute left-0 z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-300 bg-white p-1 shadow-lg"
+            className="absolute left-0 z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-white p-1 shadow-lg"
           >
             <p role="presentation" className="px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               Xem chi tiết danh mục
@@ -558,10 +605,13 @@ function TotalMenu({
 /** What each category is for, in one line, on its own screen. */
 const CATEGORY_HINTS: Record<ReportCategory, string> = {
   PAYMENT: 'Tiền đầu ca, các giao dịch trong ca và tiền cuối ca.',
-  GUEST_REQUEST: 'Yêu cầu của khách cần thực hiện hoặc bàn giao cho ca sau.',
-  FACILITY_ISSUE: 'Sự cố cơ sở vật chất đang chờ hoặc đang được kỹ thuật xử lý.',
-  CUSTOMER_COMPLAINT: 'Phản ánh của khách về chất lượng và dịch vụ.',
-  ROOM_SERVICE: 'Bán phòng, upgrade, hút thuốc, giặt ủi và các dịch vụ khác.',
+  GUEST_REQUEST:
+    'Yêu cầu của khách cần thực hiện hoặc bàn giao cho ca sau. Đã hoàn thành đủ 12 giờ kể từ lúc tiếp nhận sẽ chuyển sang “Hoàn thành vấn đề”.',
+  FACILITY_ISSUE:
+    'Sự cố cơ sở vật chất đang chờ hoặc đang được kỹ thuật xử lý. Đã hoàn thành đủ 12 giờ kể từ lúc báo sẽ chuyển sang “Hoàn thành vấn đề”.',
+  CUSTOMER_COMPLAINT:
+    'Phản ánh của khách về chất lượng và dịch vụ. Đã hoàn thành đủ 12 giờ kể từ lúc tiếp nhận sẽ chuyển sang “Hoàn thành vấn đề”.',
+  ROOM_SERVICE: 'Bán phòng, upgrade, hút thuốc, giặt ủi, dịch vụ khác và số review của khách.',
 };
 
 /** The one primary action of each category, in the header's lower-right. */
@@ -595,103 +645,5 @@ function CategoryShell({
       </div>
       {children}
     </div>
-  );
-}
-
-/**
- * "NHẬT KÝ CA HIỆN TẠI" — demoted, not deleted.
- *
- * A native `<details>` disclosure: closed by default, so the page reads as
- * FORM → PRIMARY TABLE → (optional journal) rather than FORM → tiny journal.
- * Muted typography throughout, so opening it never competes for attention with
- * the category table above.
- */
-function SecondaryJournal({
-  rows,
-  isLoading,
-  isError,
-  error,
-  onRetry,
-}: {
-  rows: OperationalReport[];
-  isLoading: boolean;
-  isError: boolean;
-  error: unknown;
-  onRetry: () => void;
-}) {
-  const [openId, setOpenId] = useState<string | null>(null);
-
-  return (
-    <details
-      data-testid="journal-section"
-      className="group rounded-lg border border-slate-200 bg-slate-50/60 open:bg-white"
-    >
-      <summary
-        data-testid="journal-toggle"
-        className="cursor-pointer select-none list-none px-3 py-2 text-sm font-medium text-slate-500 hover:text-slate-700"
-      >
-        <span className="inline-flex items-center gap-1.5">
-          <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:hidden" aria-hidden="true" />
-          <ChevronDown className="hidden h-3.5 w-3.5 group-open:block" aria-hidden="true" />
-          Nhật ký ca hiện tại
-          <span className="font-normal text-slate-400">({rows.length})</span>
-        </span>
-      </summary>
-
-      <div className="border-t border-slate-200 px-1 pb-1">
-        <QueryState isLoading={isLoading} isError={isError} error={error} onRetry={onRetry}>
-          {rows.length === 0 ? (
-            <p className="px-3 py-4 text-sm text-slate-400">Chưa có bản ghi nào trong ca này.</p>
-          ) : (
-            <ul className="divide-y divide-slate-100" data-testid="journal-list">
-              {rows.map((row) => {
-                const open = openId === row.id;
-                return (
-                  <li key={row.id} className={row.voided ? 'bg-slate-50/80' : ''}>
-                    <button
-                      type="button"
-                      onClick={() => setOpenId(open ? null : row.id)}
-                      data-testid={`journal-row-${row.id}`}
-                      className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-slate-50"
-                    >
-                      {open ? (
-                        <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
-                      ) : (
-                        <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
-                      )}
-                      <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-slate-400">
-                          <span>{formatDateTime(row.createdAt)}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-medium text-slate-600">{row.categoryLabel}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{row.createdByName}</span>
-                          {row.voided ? (
-                            <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700">
-                              Đã hủy
-                            </span>
-                          ) : null}
-                        </span>
-                        <span
-                          className={`block truncate text-sm ${row.voided ? 'text-slate-400 line-through' : 'text-slate-700'}`}
-                        >
-                          {row.summary}
-                        </span>
-                      </span>
-                    </button>
-
-                    {open ? (
-                      <div className="border-t border-slate-100 bg-slate-50/50 px-3 py-2.5">
-                        <OperationalRecordDetail row={row} />
-                      </div>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </QueryState>
-      </div>
-    </details>
   );
 }

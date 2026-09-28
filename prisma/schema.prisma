@@ -62,6 +62,10 @@ enum UserRole {
   RECEPTIONIST
   BOOKING_DEPARTMENT
   TECHNICAL
+  /// "Quản lý kỹ thuật" — inspects completed repairs (nghiệm thu). A global
+  /// department like TECHNICAL, but it cannot accept, repair or complete: it
+  /// only passes or fails the work a technician has finished.
+  TECHNICAL_MANAGER
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -446,12 +450,18 @@ enum IssueCategory {
 /// Lifecycle of a reported hotel incident, and a real state machine: each step
 /// is taken by a different party and each one is refused out of order.
 ///
-///   NEW          a receptionist reported it; nobody has picked it up.
-///   IN_PROGRESS  Bộ phận kỹ thuật accepted it and named the technician who is
-///                doing the work. Reachable ONLY from NEW.
-///   COMPLETED    the technician finished. Reachable ONLY from IN_PROGRESS, so
-///                a completed incident always has a named technician and an
-///                accepted-at instant — "who fixed it?" can never be blank.
+///   NEW                  a receptionist reported it; nobody has picked it up —
+///                        or an inspection FAILED / the technician could not
+///                        repair it, and it waits to be picked up again.
+///   IN_PROGRESS          Bộ phận kỹ thuật accepted it and named the technician
+///                        who is doing the work. Reachable ONLY from NEW.
+///   AWAITING_INSPECTION  the technician finished ("Chờ nghiệm thu"). Reachable
+///                        ONLY from IN_PROGRESS. Finished work is not accepted
+///                        work: the Technical Manager still has to inspect it.
+///   COMPLETED            the Technical Manager passed the inspection. Reachable
+///                        ONLY from AWAITING_INSPECTION — plus every incident
+///                        completed before inspection existed, which stays
+///                        COMPLETED with no inspection record, never an invented one.
 ///
 /// COMPLETED is terminal: nothing reopens an incident, and nothing deletes one.
 ///
@@ -462,6 +472,19 @@ enum IssueStatus {
   NEW
   IN_PROGRESS
   COMPLETED
+  AWAITING_INSPECTION
+}
+
+/// "Nghiệm thu" — the Technical Manager's verdict on ONE repair attempt.
+///
+/// PASSED closes the incident (COMPLETED). FAILED sends it back to the queue as
+/// "Cần sửa lại"; the attempt it judged stays exactly as it was completed, and
+/// the next acceptance opens a new attempt that gets its own inspection.
+enum InspectionResult {
+  /// "Đạt".
+  PASSED
+  /// "Không đạt" — always with a reason.
+  FAILED
 }
 
 /// How one technician's attempt at an incident ENDED.
@@ -540,6 +563,7 @@ model User {
   handoversReceived        ShiftHandover[]               @relation("HandoverIncomingUser")
   handoverNotesWritten     ShiftHandoverNote[]           @relation("HandoverNoteAuthor")
   repairAttempts           TechnicalRepairAttempt[]      @relation("AttemptTechnician")
+  repairInspections        TechnicalRepairAttempt[]      @relation("AttemptInspector")
   operationalReports       ReceptionOperationalReport[]  @relation("OperationalReportCreatedBy")
   operationalReportsVoided ReceptionOperationalReport[]  @relation("OperationalReportVoidedBy")
   guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
@@ -1712,6 +1736,11 @@ model HotelIssue {
   /// a description — the receptionist is not asked to classify it.
   category        IssueCategory?
   description     String
+  /// "Nguyên nhân" AS REPORTED — optional; a receptionist is not expected to
+  /// know why the air conditioner stopped. Never overwritten: a technician's
+  /// determination is recorded on their attempt, and the incident's current
+  /// cause is read as the latest one of those, else this.
+  cause           String?
   /// Server-generated file name of the (optional, single) attached photo. Only
   /// metadata + a safe relative path live here, never the image bytes.
   photoStoredName String?
@@ -2212,17 +2241,36 @@ model TechnicalRepairAttempt {
   /// Why it could not be repaired. REQUIRED for CANNOT_REPAIR and null
   /// otherwise — an incident that came back to the queue always says why.
   reason     String?
+  /// "Nguyên nhân" as THIS attempt's technician determined it, recorded when
+  /// the attempt is completed. Optional: the reported cause may already be right.
+  cause      String?
+  /// "Kết quả sửa chữa" — what was done. Required to complete an attempt.
+  result     String?
+
+  /// THE INSPECTION OF THIS ATTEMPT ("Nghiệm thu"), written once by the Technical
+  /// Manager, all together. Null until then — and null forever on attempts made
+  /// before inspection existed: an inspection nobody performed is never invented.
+  inspectionResult        InspectionResult?
+  inspectedByUserId       Int?
+  inspectedByNameSnapshot String?
+  /// Server time.
+  inspectedAt             DateTime?
+  /// Optional note on a pass; the REQUIRED reason on a fail.
+  inspectionNote          String?
 
   createdAt DateTime @default(now())
 
   issue          HotelIssue @relation("AttemptIssue", fields: [issueId], references: [id], onDelete: Cascade)
   technicianUser User?      @relation("AttemptTechnician", fields: [technicianUserId], references: [id])
+  inspectedBy    User?      @relation("AttemptInspector", fields: [inspectedByUserId], references: [id])
 
   @@unique([issueId, attemptNumber])
   @@index([issueId, acceptedAt])
   /// "How many attempts failed in this period?" — the Admin range summary.
   @@index([outcome, outcomeAt])
   @@index([technicianUserId])
+  @@index([inspectedByUserId])
+  @@index([inspectionResult, inspectedAt])
 }
 
 /// "BÀN GIAO CA" — what the outgoing shift wants the next one to know.
@@ -2326,6 +2374,9 @@ enum RoomServiceType {
   LAUNDRY
   /// Dịch vụ khác — carries `serviceName`.
   OTHER
+  /// Review — a KPI count, not a sale: carries `tripadvisorCount` and
+  /// `googleCount`, and its `price` is always 0 and never revenue.
+  REVIEW
 }
 
 /// What happened to an operational record after it was created.
@@ -2597,27 +2648,31 @@ model RoomServiceReport {
   id       String @id @default(cuid())
   reportId String @unique
 
-  serviceType   RoomServiceType
-  guestName     String
+  serviceType      RoomServiceType
+  guestName        String
   /// Mã EZ — the PMS reference, as typed. Asked for on every subtype.
-  ezCode        String?
+  ezCode           String?
   /// SĐT — LEGACY ("Bán phòng" asked for it once). Kept on older rows.
-  phone         String?
+  phone            String?
   /// Số phòng — LEGACY, no longer asked for. Kept on older rows.
-  roomNumber    String?
+  roomNumber       String?
   /// Hạng phòng — "Bán phòng".
-  roomClass     String?
+  roomClass        String?
   /// "Upgrade": từ hạng phòng → tới hạng phòng.
-  fromRoomClass String?
-  toRoomClass   String?
+  fromRoomClass    String?
+  toRoomClass      String?
   /// Số đêm — "Bán phòng" and "Upgrade", a whole number of nights, at least 1.
   /// Null on the other subtypes and on rows recorded before it was asked for.
-  nights        Int?
+  nights           Int?
   /// Loại hình dịch vụ — LEGACY ("Dịch vụ khác" asked for it once).
-  serviceName   String?
+  serviceName      String?
   /// Giá tiền, whole đồng, non-negative.
-  price         Int
-  note          String?
+  price            Int
+  note             String?
+  /// Review only — how many reviews the receptionist reports, per site. Whole
+  /// numbers, at least 0; null on every other service.
+  tripadvisorCount Int?
+  googleCount      Int?
 
   report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
 

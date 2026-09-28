@@ -193,6 +193,13 @@ const envSchema = z
     // production; even when true the tools additionally refuse to run in production.
     ENABLE_DEV_TEST_TOOLS: booleanFromEnv.default(false),
 
+    // --- Technical inspection ("Nghiệm thu" by Quản lý kỹ thuật) ---
+    // Implemented and DORMANT. While false (the default) the technician's
+    // "Hoàn thành" closes an incident, as it always has, and every inspection
+    // route and screen stays inactive. Turning it on is a product decision, not
+    // a deployment detail.
+    TECHNICAL_INSPECTION_ENABLED: booleanFromEnv.default(false),
+
     // --- Proof OCR (advisory extraction only) ---
     // When false (the safe default), proof upload still works and the Admin reads
     // the screenshot manually; every analysis is recorded as DISABLED. When true,

@@ -41,7 +41,7 @@ export const CATEGORY_ORDER: ReportCategory[] = [
 export const CATEGORY_FALLBACK_LABELS: Record<ReportCategory, string> = {
   PAYMENT: 'Theo dõi thanh toán',
   GUEST_REQUEST: 'Vấn đề khách yêu cầu',
-  FACILITY_ISSUE: 'Sự cố vật chất đang xử lý',
+  FACILITY_ISSUE: 'Sự cố cơ sở vật chất đang xử lý',
   CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
 };
@@ -51,7 +51,7 @@ export const CATEGORY_FALLBACK_LABELS: Record<ReportCategory, string> = {
  * its `PAYMENT_SOURCES`, for the same reason as the labels above. The server
  * refuses anything outside its own list whatever this one says.
  */
-export const PAYMENT_SOURCE_FALLBACK = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'];
+export const PAYMENT_SOURCE_FALLBACK = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking'];
 
 /**
  * Each category's number in the official report — the same I–V the exported PDF

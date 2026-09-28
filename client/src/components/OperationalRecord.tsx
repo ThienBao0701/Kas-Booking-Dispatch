@@ -16,6 +16,7 @@ import { CircleAlert, History } from 'lucide-react';
 import type { OperationalReport } from '../api/receptionReports';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
+import { IssueTimeline } from './IssueViews';
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -77,12 +78,6 @@ function Completion({
     </>
   );
 }
-
-const ISSUE_STATUS_LABEL: Record<string, string> = {
-  NEW: 'Chờ tiếp nhận',
-  IN_PROGRESS: 'Đang sửa',
-  COMPLETED: 'Hoàn thành',
-};
 
 export function OperationalRecordDetail({
   row,
@@ -150,16 +145,35 @@ export function OperationalRecordDetail({
               <span className="font-mono text-xs">{row.facility.issueId}</span>
             </Field>
             <Field label="Khu vực / Vị trí">{row.facility.issue.locationLabel}</Field>
-            <Field label="Mô tả">{row.facility.issue.description}</Field>
-            <Field label="Trạng thái kỹ thuật">
-              {row.facility.issue.needsRework
-                ? 'Cần xử lý lại'
-                : (ISSUE_STATUS_LABEL[row.facility.issue.status] ?? row.facility.issue.status)}
+            <Field label="Sự cố">{row.facility.issue.description}</Field>
+            <Field label="Nguyên nhân">{row.facility.issue.cause}</Field>
+            {/*
+              The stage as the server labels it for every screen — and the
+              inspection only while inspection is part of the workflow.
+            */}
+            <Field label="Trạng thái kỹ thuật">{row.facility.issue.stageLabel}</Field>
+            {row.facility.issue.inspectionEnabled ? (
+              <Field label="Nghiệm thu">{row.facility.issue.inspectionLabel}</Field>
+            ) : null}
+            <Field label="Người sửa">{row.facility.issue.repairerName}</Field>
+            <Field label="SĐT kỹ thuật">
+              {row.facility.issue.attempts[row.facility.issue.attempts.length - 1]?.technicianPhone ??
+                row.facility.issue.technicianPhone}
             </Field>
-            <Field label="Người xử lý">{row.facility.issue.technicianName}</Field>
-            <Field label="SĐT kỹ thuật">{row.facility.issue.technicianPhone}</Field>
+            <Field label="Thời gian hoàn thành">
+              {row.facility.issue.completedAt ? formatDateTime(row.facility.issue.completedAt) : null}
+            </Field>
             <Field label="Thời gian sửa">{row.facility.issue.durationLabel}</Field>
             <Field label="Số lần sửa">{String(row.facility.issue.attempts.length)}</Field>
+            {row.facility.issue.attempts.length > 0 ? (
+              <div className="sm:col-span-2 lg:col-span-4">
+                <IssueTimeline
+                  attempts={row.facility.issue.attempts}
+                  stage={row.facility.issue.stage}
+                  showInspection={row.facility.issue.inspectionEnabled}
+                />
+              </div>
+            ) : null}
           </>
         ) : null}
 
@@ -192,8 +206,18 @@ export function OperationalRecordDetail({
             {row.roomService.serviceType === 'ROOM_SALE' || row.roomService.serviceType === 'UPGRADE' ? (
               <Field label="Số đêm">{row.roomService.nights ? String(row.roomService.nights) : null}</Field>
             ) : null}
-            <Field label="Giá tiền">{formatVnd(row.roomService.price)}</Field>
-            <Field label="Ghi chú">{row.roomService.note}</Field>
+            {row.roomService.serviceType === 'REVIEW' ? (
+              // Review is a count of guest reviews, not a sale: no price, no note.
+              <>
+                <Field label="Tripadvisor">{String(row.roomService.tripadvisorCount ?? 0)}</Field>
+                <Field label="Google">{String(row.roomService.googleCount ?? 0)}</Field>
+              </>
+            ) : (
+              <>
+                <Field label="Giá tiền">{formatVnd(row.roomService.price)}</Field>
+                <Field label="Ghi chú">{row.roomService.note}</Field>
+              </>
+            )}
             <Legacy label="SĐT" value={row.roomService.phone} />
             <Legacy label="Số phòng" value={row.roomService.roomNumber} />
             <Legacy label="Loại hình dịch vụ" value={row.roomService.serviceName} />
