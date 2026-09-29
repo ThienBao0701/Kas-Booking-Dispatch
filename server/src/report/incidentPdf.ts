@@ -14,6 +14,7 @@ import type { IncidentRangeSummary } from '../issue/issueSummary';
 import { shiftDefinition } from '../shift/shiftTypes';
 import { describeLocation, ISSUE_AREA_LABELS } from '../issue/issueArea';
 import { ISSUE_CATEGORY_LABELS, type IssueDetail } from '../issue/issueService';
+import { INSPECTION_RESULT_LABELS, issueLifecycle } from '../issue/issueLifecycle';
 import { hcmDateTime, periodLabel, rankedTotals } from './format';
 import {
   addPageNumbers,
@@ -31,6 +32,7 @@ export const INCIDENT_REPORT_TITLE = 'KAS – BÁO CÁO SỰ CỐ KHÁCH SẠN';
 export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
   NEW: 'Sự cố khách sạn',
   IN_PROGRESS: 'Đang sửa',
+  AWAITING_INSPECTION: 'Chờ nghiệm thu',
   COMPLETED: 'Đã hoàn thành',
 };
 
@@ -51,7 +53,10 @@ const COLUMNS: Column<IssueDetail>[] = assertFitsLandscape('incident report', [
   { header: 'Chi nhánh', width: 68, value: (i) => i.branch?.code ?? '—' },
   { header: 'Vị trí', width: 100, value: (i) => describeLocation(i) },
   { header: 'Loại sự cố', width: 52, value: (i) => (i.category ? ISSUE_CATEGORY_LABELS[i.category] : '—') },
-  { header: 'Mô tả', width: 100, value: (i) => i.description },
+  // The cause rides in the description's cell rather than a column of its own:
+  // the table is already at the page width, and "what is wrong" and "why" are
+  // read together anyway.
+  { header: 'Mô tả', width: 100, value: (i) => describeWithCause(i) },
   { header: 'Người báo', width: 56, value: (i) => i.reportedByNameSnapshot ?? i.reportedBy?.fullName ?? '—' },
   { header: 'Ca', width: 28, value: (i) => (i.shiftType ? shiftDefinition(i.shiftType).name : '—') },
   { header: 'Thời gian báo', width: 66, value: (i) => hcmDateTime(i.createdAt) },
@@ -70,17 +75,77 @@ const COLUMNS: Column<IssueDetail>[] = assertFitsLandscape('incident report', [
 ]);
 
 /**
- * The status as an operator reads it — with "Cần xử lý lại" distinguished from a
- * report nobody has touched.
+ * The status as an operator reads it — the SAME stage label every screen shows,
+ * so "Cần sửa lại" is distinguished from a report nobody has touched.
  *
  * Both are NEW in the database, and printing both as "Sự cố khách sạn" would
  * hide the single most actionable fact in the report: that somebody already went
- * and could not fix it.
+ * and it is not fixed.
  */
 function statusLabel(issue: IssueDetail): string {
-  const failed = issue.attempts.some((a) => a.outcome === 'CANNOT_REPAIR');
-  if (issue.status === 'NEW' && failed) return 'Cần xử lý lại';
-  return ISSUE_STATUS_LABELS[issue.status];
+  return issueLifecycle(issue).stageLabel;
+}
+
+/** "Mô tả", then the ONE canonical cause when there is one. */
+function describeWithCause(issue: IssueDetail): string {
+  const { cause } = issueLifecycle(issue);
+  return cause ? `${issue.description}\nNguyên nhân: ${cause}` : issue.description;
+}
+
+/**
+ * Every INSPECTED attempt — who judged it, when, and why it failed.
+ *
+ * Its own table, for the reason the attempts have theirs: an incident can be
+ * failed and passed, and a row per incident could show only one verdict.
+ * Attempts nobody inspected (older work, or work still waiting) are not listed
+ * here — an empty verdict is not a verdict.
+ */
+const INSPECTION_COLUMNS: Column<InspectionLine>[] = assertFitsLandscape('incident inspections', [
+  { header: 'Chi nhánh', width: 60, value: (l) => l.branchCode },
+  { header: 'Vị trí', width: 96, value: (l) => l.location },
+  { header: 'Lần', width: 28, value: (l) => String(l.attemptNumber) },
+  { header: 'Người sửa', width: 72, value: (l) => l.technicianName },
+  { header: 'Nguyên nhân', width: 110, value: (l) => l.cause },
+  { header: 'Kết quả sửa chữa', width: 118, value: (l) => l.result },
+  { header: 'Nghiệm thu', width: 56, value: (l) => l.verdict },
+  { header: 'Người nghiệm thu', width: 72, value: (l) => l.inspector },
+  { header: 'Thời gian', width: 66, value: (l) => hcmDateTime(l.inspectedAt) },
+  { header: 'Ghi chú / Lý do', width: 96, value: (l) => l.note },
+]);
+
+interface InspectionLine {
+  branchCode: string;
+  location: string;
+  attemptNumber: number;
+  technicianName: string;
+  cause: string;
+  result: string;
+  verdict: string;
+  inspector: string;
+  inspectedAt: Date | null;
+  note: string;
+}
+
+function inspectionLines(issues: IssueDetail[]): InspectionLine[] {
+  const lines: InspectionLine[] = [];
+  for (const issue of issues) {
+    for (const attempt of issue.attempts) {
+      if (!attempt.inspectionResult) continue;
+      lines.push({
+        branchCode: issue.branch?.code ?? '—',
+        location: describeLocation(issue),
+        attemptNumber: attempt.attemptNumber,
+        technicianName: attempt.technicianNameSnapshot,
+        cause: attempt.cause ?? '—',
+        result: attempt.result ?? '—',
+        verdict: INSPECTION_RESULT_LABELS[attempt.inspectionResult],
+        inspector: attempt.inspectedByNameSnapshot ?? '—',
+        inspectedAt: attempt.inspectedAt,
+        note: attempt.inspectionNote ?? '—',
+      });
+    }
+  }
+  return lines;
 }
 
 /**
@@ -197,6 +262,14 @@ export async function buildIncidentReportPdf(input: IncidentReportInput): Promis
     drawTable(doc, ATTEMPT_COLUMNS, attempts);
   }
 
+  // Only while inspection is part of the workflow; dormant, nothing about it prints.
+  const inspections = input.summary.inspectionEnabled ? inspectionLines(input.issues) : [];
+  if (inspections.length > 0) {
+    doc.addPage();
+    sectionTitle(doc, 'NGHIỆM THU');
+    drawTable(doc, INSPECTION_COLUMNS, inspections);
+  }
+
   const byBranch = new Map<string, number>();
   const byStatus = new Map<string, number>();
   const byArea = new Map<string, number>();
@@ -215,7 +288,7 @@ export async function buildIncidentReportPdf(input: IncidentReportInput): Promis
     TWO NUMBERS THAT LOOK LIKE ONE, REPORTED SEPARATELY ON PURPOSE.
 
     "Lượt không sửa được" counts EVENTS in the period — one incident three
-    technicians failed on contributes three. "Sự cố cần xử lý lại" counts
+    technicians failed on contributes three. "Sự cố cần sửa lại" counts
     INCIDENTS currently waiting to be picked up again — that same incident
     contributes one, and contributes none at all once somebody accepts it.
     Printing either alone, or adding them together, produces a number nobody can
@@ -225,7 +298,13 @@ export async function buildIncidentReportPdf(input: IncidentReportInput): Promis
     so the file and the table it was printed from cannot differ.
   */
   doc.text(`Lượt không sửa được: ${input.summary.cannotRepairAttempts}`);
-  doc.text(`Sự cố cần xử lý lại: ${input.summary.needsReworkIssues}`);
+  if (input.summary.inspectionEnabled) {
+    doc.text(`Lượt nghiệm thu không đạt: ${input.summary.failedInspections}`);
+  }
+  doc.text(`Sự cố cần sửa lại: ${input.summary.needsReworkIssues}`);
+  if (input.summary.inspectionEnabled) {
+    doc.text(`Chờ nghiệm thu: ${input.summary.awaitingInspectionCount}`);
+  }
   doc.text(`Chưa hoàn thành trên toàn hệ thống: ${input.summary.outstandingTotal}`);
 
   drawTotals(doc, 'Theo chi nhánh', rankedTotals(byBranch));

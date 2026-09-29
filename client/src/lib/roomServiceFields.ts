@@ -30,6 +30,11 @@ import type { RoomServiceType } from '../api/receptionReports';
 export const ROOM_SERVICE_PRICE_LABEL = 'Tổng giá tiền';
 
 export interface RoomServiceFieldRules {
+  /**
+   * "Review" — a KPI COUNT, not a sale: Tên khách, Mã EZ, Tripadvisor and
+   * Google, and nothing else (no price, no note, no room fields).
+   */
+  review: boolean;
   /** "Hạng phòng" — only "Bán phòng". */
   roomClass: boolean;
   /** The from/to pair — only "Upgrade" has a direction. */
@@ -40,6 +45,7 @@ export interface RoomServiceFieldRules {
 
 export function roomServiceFields(type: RoomServiceType): RoomServiceFieldRules {
   return {
+    review: type === 'REVIEW',
     roomClass: type === 'ROOM_SALE',
     upgrade: type === 'UPGRADE',
     nights: type === 'ROOM_SALE' || type === 'UPGRADE',
@@ -53,6 +59,7 @@ export const ROOM_SERVICE_ORDER: RoomServiceType[] = [
   'SMOKING',
   'LAUNDRY',
   'OTHER',
+  'REVIEW',
 ];
 
 export const ROOM_SERVICE_FALLBACK_LABELS: Record<RoomServiceType, string> = {
@@ -61,4 +68,38 @@ export const ROOM_SERVICE_FALLBACK_LABELS: Record<RoomServiceType, string> = {
   SMOKING: 'Hút thuốc',
   LAUNDRY: 'Giặt ủi',
   OTHER: 'Dịch vụ khác',
+  REVIEW: 'Review',
 };
+
+/**
+ * REVENUE LEAVES "REVIEW" OUT — its rows are counts. Read from the server's
+ * `countsAsRevenue`, with the type as the fallback for an older payload.
+ */
+export function isRevenue(row: { roomService: { serviceType: RoomServiceType; countsAsRevenue?: boolean } | null }): boolean {
+  if (!row.roomService) return false;
+  return row.roomService.countsAsRevenue ?? row.roomService.serviceType !== 'REVIEW';
+}
+
+/**
+ * "Tổng doanh thu": the live (non-voided) services' prices — never a review.
+ */
+export function serviceRevenue(
+  rows: { voided: boolean; roomService: { serviceType: RoomServiceType; price: number; countsAsRevenue?: boolean } | null }[],
+): number {
+  return rows.filter((r) => !r.voided && isRevenue(r)).reduce((sum, r) => sum + (r.roomService?.price ?? 0), 0);
+}
+
+/**
+ * "Tổng đánh giá (review)": SUM(Tripadvisor) + SUM(Google) over the live
+ * "Review" rows. A withdrawn review counts for nothing.
+ */
+export function reviewTotal(
+  rows: {
+    voided: boolean;
+    roomService: { serviceType: RoomServiceType; tripadvisorCount?: number | null; googleCount?: number | null } | null;
+  }[],
+): number {
+  return rows
+    .filter((r) => !r.voided && r.roomService?.serviceType === 'REVIEW')
+    .reduce((sum, r) => sum + (r.roomService?.tripadvisorCount ?? 0) + (r.roomService?.googleCount ?? 0), 0);
+}

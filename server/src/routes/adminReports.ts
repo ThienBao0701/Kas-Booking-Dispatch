@@ -32,7 +32,7 @@ import {
   sessionsForBusinessDates,
 } from '../reception/businessDate';
 import { hcmDateOnly } from '../lib/clock';
-import { buildOperationalReportPdf } from '../report/operationalPdf';
+import { buildOperationalReportPdf, operationalPdfFileName } from '../report/operationalPdf';
 import { buildOperationalReportWorkbook } from '../report/operationalExcel';
 import type { Response } from 'express';
 
@@ -131,7 +131,8 @@ const drillDownQuery = z
     path: ['from'],
   });
 
-function operationalFileName(from: string, to: string, ext: 'pdf' | 'xlsx'): string {
+/** The workbook's name. The PDF is named by `operationalPdfFileName` (branch + business date). */
+function operationalFileName(from: string, to: string, ext: 'xlsx'): string {
   return `KAS-bao-cao-van-de-le-tan-${from}-${to}.${ext}`;
 }
 
@@ -459,7 +460,8 @@ export function createAdminReportsRouter(): Router {
         branchId: q.branchId,
         category: q.category,
       });
-      sendPdf(res, await buildOperationalReportPdf(data), operationalFileName(q.from, q.to, 'pdf'));
+      // "05_Truong Dinh_07-01-2027.pdf" — the branch and the business date.
+      sendPdf(res, await buildOperationalReportPdf(data), operationalPdfFileName(data, q.branchId !== undefined));
     })().catch(next);
   });
 

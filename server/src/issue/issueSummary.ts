@@ -3,8 +3,9 @@
  * no persisted counter table and no duplicate totals — the numbers are always a
  * query over the current data.
  *
- * "Unresolved" = NEW + IN_PROGRESS. COMPLETED issues stay in history but are
- * never counted here.
+ * "Unresolved" = NEW + IN_PROGRESS + AWAITING_INSPECTION: a repair nobody has
+ * passed yet is not finished. COMPLETED issues stay in history but are never
+ * counted here.
  *
  * Branch rules mirror the rest of the app: an Admin and Bộ phận kỹ thuật each see
  * every branch (including branches with zero unresolved issues); a receptionist
@@ -13,6 +14,7 @@
 import type { Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { seesAllBranches } from '../middleware/auth';
+import { inspectionEnabled, outstandingStatuses, stageWhere } from './issueLifecycle';
 
 // The full role enum, not a two-member union: a new role must not silently fail
 // to compile here. Which roles are ALLOWED is decided by the checks below and
@@ -26,6 +28,7 @@ export interface BranchIssueSummary {
   hotelName: string;
   newCount: number;
   inProgressCount: number;
+  awaitingInspectionCount: number;
   totalUnresolved: number;
 }
 
@@ -33,6 +36,7 @@ export interface IssueSummary {
   totalUnresolved: number;
   newCount: number;
   inProgressCount: number;
+  awaitingInspectionCount: number;
   byBranch: BranchIssueSummary[];
 }
 
@@ -47,7 +51,7 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
     orderBy: { id: 'asc' },
   });
 
-  const where: Prisma.HotelIssueWhereInput = { status: { in: ['NEW', 'IN_PROGRESS'] } };
+  const where: Prisma.HotelIssueWhereInput = { status: { in: outstandingStatuses() } };
   if (!isGlobal) where.branchId = scopedBranchId;
 
   const groups = await prisma.hotelIssue.groupBy({
@@ -58,14 +62,17 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
 
   const newByBranch = new Map<number, number>();
   const inProgressByBranch = new Map<number, number>();
+  const awaitingByBranch = new Map<number, number>();
   for (const g of groups) {
-    const target = g.status === 'NEW' ? newByBranch : inProgressByBranch;
+    const target =
+      g.status === 'NEW' ? newByBranch : g.status === 'IN_PROGRESS' ? inProgressByBranch : awaitingByBranch;
     target.set(g.branchId, (target.get(g.branchId) ?? 0) + g._count._all);
   }
 
   const byBranch: BranchIssueSummary[] = branches.map((b) => {
     const newCount = newByBranch.get(b.id) ?? 0;
     const inProgressCount = inProgressByBranch.get(b.id) ?? 0;
+    const awaitingInspectionCount = awaitingByBranch.get(b.id) ?? 0;
     return {
       branchId: b.id,
       code: b.code,
@@ -73,26 +80,40 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
       hotelName: b.hotelName,
       newCount,
       inProgressCount,
-      totalUnresolved: newCount + inProgressCount,
+      awaitingInspectionCount,
+      totalUnresolved: newCount + inProgressCount + awaitingInspectionCount,
     };
   });
 
   const newCount = byBranch.reduce((s, b) => s + b.newCount, 0);
   const inProgressCount = byBranch.reduce((s, b) => s + b.inProgressCount, 0);
-  return { totalUnresolved: newCount + inProgressCount, newCount, inProgressCount, byBranch };
+  const awaitingInspectionCount = byBranch.reduce((s, b) => s + b.awaitingInspectionCount, 0);
+  return {
+    totalUnresolved: newCount + inProgressCount + awaitingInspectionCount,
+    newCount,
+    inProgressCount,
+    awaitingInspectionCount,
+    byBranch,
+  };
 }
 
 export interface TechnicalCounts {
-  /** "Sự cố khách sạn" — reported, nobody has picked it up. */
+  /** "Sự cố khách sạn" — reported, nobody has worked it yet. */
   newCount: number;
+  /** "Cần sửa lại" — back in the queue after an attempt (failed inspection or "Không sửa được"). */
+  reworkCount: number;
   /** "Đang sửa" — accepted, a named technician is on it. */
   inProgressCount: number;
-  /** "Đã hoàn thành" — finished. */
+  /** "Chờ nghiệm thu" — repaired, waiting for Quản lý kỹ thuật. */
+  awaitingInspectionCount: number;
+  /** "Đã hoàn thành" — passed (or finished before inspection existed). */
   completedCount: number;
+  /** Whether the "Chờ nghiệm thu" queue is part of the workflow at all. */
+  inspectionEnabled: boolean;
 }
 
 /**
- * The three workflow-queue totals behind the Technical tabs.
+ * The workflow-queue totals behind the Technical tabs.
  *
  * COUNTED IN THE DATABASE, NEVER IN THE BROWSER. The list each tab shows is
  * paginated, so deriving "Đang sửa (12)" from a loaded page would show the size
@@ -114,19 +135,40 @@ export async function computeTechnicalCounts(
     where.branchId = branchId;
   }
 
-  const groups = await prisma.hotelIssue.groupBy({
-    by: ['status'],
-    where,
-    _count: { _all: true },
-  });
+  /*
+    "Sự cố khách sạn" and "Cần sửa lại" are each COUNTED, never one derived by
+    subtracting the other: under READ COMMITTED every statement takes its own
+    snapshot, and "NEW minus rework" read across two of them went negative when
+    a failed inspection landed in between. REPEATABLE READ then gives the whole
+    set one snapshot, so the tabs also add up; a read-only transaction at that
+    level cannot hit a serialization failure.
+  */
+  const { groups, waitingCount, reworkCount } = await prisma.$transaction(
+    async (tx) => ({
+      groups: await tx.hotelIssue.groupBy({
+        by: ['status'],
+        where,
+        _count: { _all: true },
+      }),
+      waitingCount: await tx.hotelIssue.count({ where: { ...where, ...stageWhere('WAITING') } }),
+      reworkCount: await tx.hotelIssue.count({ where: { ...where, ...stageWhere('REWORK') } }),
+    }),
+    { isolationLevel: 'RepeatableRead' },
+  );
 
   const of = (status: string): number =>
     groups.find((g) => g.status === status)?._count._all ?? 0;
 
+  const inspection = inspectionEnabled();
   return {
-    newCount: of('NEW'),
+    newCount: waitingCount,
+    reworkCount,
     inProgressCount: of('IN_PROGRESS'),
-    completedCount: of('COMPLETED'),
+    // While inspection is dormant there is no such queue, and a row finished
+    // during its trial counts as what it is: finished.
+    awaitingInspectionCount: inspection ? of('AWAITING_INSPECTION') : 0,
+    completedCount: of('COMPLETED') + (inspection ? 0 : of('AWAITING_INSPECTION')),
+    inspectionEnabled: inspection,
   };
 }
 
@@ -135,6 +177,8 @@ export interface IncidentRangeSummary {
   total: number;
   newCount: number;
   inProgressCount: number;
+  /** "Chờ nghiệm thu" — repaired, not yet judged. */
+  awaitingInspectionCount: number;
   completedCount: number;
   /**
    * How many "Không sửa được" ATTEMPTS ended inside the period.
@@ -160,6 +204,13 @@ export interface IncidentRangeSummary {
    * it cannot disagree with the total it sits under.
    */
   needsReworkIssues: number;
+  /**
+   * How many INSPECTIONS failed inside the period — an event count, by when the
+   * manager judged it, like `cannotRepairAttempts`.
+   */
+  failedInspections: number;
+  /** Whether the inspection figures are part of the workflow at all. */
+  inspectionEnabled: boolean;
   /**
    * Everything not finished, at any age, ignoring the period entirely.
    *
@@ -205,7 +256,7 @@ export async function computeIncidentRangeSummary(
     per-status counts were taken after would not add up, and a report that does
     not add up is worse than a slightly stale one.
   */
-  const { groups, cannotRepairAttempts, needsReworkIssues, outstandingTotal } =
+  const { groups, cannotRepairAttempts, needsReworkIssues, failedInspections, outstandingTotal } =
     await prisma.$transaction(async (tx) => ({
       groups: await tx.hotelIssue.groupBy({
         by: ['status'],
@@ -225,32 +276,42 @@ export async function computeIncidentRangeSummary(
       // DISTINCT incidents, because this counts rows of HotelIssue and not of
       // TechnicalRepairAttempt — `some` is an existence test, so three failed
       // attempts on one incident still match exactly one row.
+      // Any attempt at all: a failed inspection sends an incident back exactly
+      // as "Không sửa được" does, and both are "Cần sửa lại".
       needsReworkIssues: await tx.hotelIssue.count({
+        where: { ...reportedInRange, ...stageWhere('REWORK') },
+      }),
+      failedInspections: await tx.technicalRepairAttempt.count({
         where: {
-          ...reportedInRange,
-          status: 'NEW',
-          attempts: { some: { outcome: 'CANNOT_REPAIR' } },
+          inspectionResult: 'FAILED',
+          inspectedAt: { gte: filter.start, lt: filter.end },
+          ...(filter.branchId !== undefined ? { issue: { branchId: filter.branchId } } : {}),
         },
       }),
       outstandingTotal: await tx.hotelIssue.count({
-        where: { ...branch, status: { in: ['NEW', 'IN_PROGRESS'] } },
+        where: { ...branch, status: { in: outstandingStatuses() } },
       }),
     }));
 
   const of = (status: string): number =>
     groups.find((g) => g.status === status)?._count._all ?? 0;
 
+  const inspection = inspectionEnabled();
   const newCount = of('NEW');
   const inProgressCount = of('IN_PROGRESS');
-  const completedCount = of('COMPLETED');
+  const awaitingInspectionCount = inspection ? of('AWAITING_INSPECTION') : 0;
+  const completedCount = of('COMPLETED') + (inspection ? 0 : of('AWAITING_INSPECTION'));
 
   return {
-    total: newCount + inProgressCount + completedCount,
+    total: newCount + inProgressCount + awaitingInspectionCount + completedCount,
     newCount,
     inProgressCount,
+    awaitingInspectionCount,
     completedCount,
     cannotRepairAttempts,
     needsReworkIssues,
+    failedInspections,
     outstandingTotal,
+    inspectionEnabled: inspection,
   };
 }

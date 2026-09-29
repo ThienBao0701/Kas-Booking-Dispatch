@@ -62,7 +62,7 @@ export function DateRangeField({
   }
 
   const inputClass =
-    'min-h-[2.75rem] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 ' +
+    'min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-700 hover:border-slate-600 ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
 
   return (

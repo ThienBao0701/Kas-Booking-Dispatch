@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 
 afterEach(() => {
@@ -32,7 +33,7 @@ const OPEN_SHIFT = {
 };
 
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: BRANCH,
@@ -68,7 +69,7 @@ function issue(over: Record<string, unknown> = {}) {
     cannotRepairCount: 0,
     needsRework: false,
     ...over,
-  };
+  });
 }
 
 function listBody(issues: unknown[]) {
@@ -105,13 +106,13 @@ function adminRoutes(issues: unknown[]) {
   };
 }
 
-describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"', () => {
+describe('incidents — receptionist, in "Sự cố cơ sở vật chất đang xử lý"', () => {
   it('creates a new issue report via the existing modal form', async () => {
     let created = false;
     const journal: unknown[] = [];
     const fetchMock = installApiMock(
       receptionRoutes({
-        'GET /api/issues?pageSize=100&outstanding=true': () => listBody(created ? [issue()] : []),
+        'GET /api/issues?scope=active&pageSize=100': () => listBody(created ? [issue()] : []),
         'POST /api/issues': () => {
           created = true;
           return { status: 201, body: { issue: issue() } };
@@ -135,9 +136,9 @@ describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"
     const dialog = await screen.findByRole('dialog');
 
     // The area is asked FIRST, and it decides the rest of the form.
-    expect(within(dialog).getByLabelText('Sự cố')).toHaveValue('ROOM');
+    expect(within(dialog).getByLabelText('Khu vực')).toHaveValue('ROOM');
     await user.type(within(dialog).getByText('Số phòng').querySelector('input')!, '301');
-    await user.type(within(dialog).getByLabelText('Mô tả sự cố'), 'Máy lạnh không lạnh');
+    await user.type(within(dialog).getByLabelText('Sự cố'), 'Máy lạnh không lạnh');
     await user.click(within(dialog).getByRole('button', { name: 'Gửi báo cáo' }));
 
     expect(await screen.findByText('Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.')).toBeInTheDocument();
@@ -151,7 +152,7 @@ describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"
 
   it('shows the reported incident with its location and status, not who reported it', async () => {
     installApiMock(
-      receptionRoutes({ 'GET /api/issues?pageSize=100&outstanding=true': () => listBody([issue()]) }),
+      receptionRoutes({ 'GET /api/issues?scope=active&pageSize=100': () => listBody([issue()]) }),
     );
 
     renderApp('/app/reports?category=FACILITY_ISSUE');
@@ -160,13 +161,14 @@ describe('incidents — receptionist, in "Sự cố vật chất đang xử lý"
     const row = await within(board).findByTestId('row-i1');
     expect(within(row).getByText('Phòng · Phòng 301')).toBeInTheDocument();
     expect(within(row).getByText('Máy lạnh không lạnh')).toBeInTheDocument();
-    expect(within(row).getByText('Sự cố khách sạn')).toBeInTheDocument();
+    // A fresh report waits for the technician — said as the status, not the queue name.
+    expect(within(row).getByText('Chờ kỹ thuật')).toBeInTheDocument();
     // "Người báo" is not a reception column any more.
     expect(within(row).queryByText('Lễ tân Một')).not.toBeInTheDocument();
   });
 });
 
-describe('incidents — admin, in "Sự cố vật chất đang xử lý"', () => {
+describe('incidents — admin, in "Sự cố cơ sở vật chất đang xử lý"', () => {
   /**
    * THE ADMIN IS READ-ONLY FOR THE WORKFLOW.
    *
@@ -205,12 +207,41 @@ describe('incidents — admin, in "Sự cố vật chất đang xử lý"', () =
     expect(within(table).queryByRole('button', { name: /Đã xử lý/ })).toBeNull();
   });
 
-  it('renders visually distinct NEW / IN_PROGRESS / COMPLETED status badges', async () => {
+  it('renders visually distinct badges for every stage — and no inspection while it is dormant', async () => {
     installApiMock(
       adminRoutes([
         issue({ id: 'a', status: 'NEW' }),
         issue({ id: 'b', status: 'IN_PROGRESS' }),
         issue({ id: 'c', status: 'COMPLETED' }),
+        // Finished before inspection was switched off: it reads as finished.
+        issue({ id: 'd', status: 'AWAITING_INSPECTION' }),
+        issue({ id: 'e', status: 'NEW', needsRework: true }),
+      ]),
+    );
+    renderApp('/app/issues');
+
+    const table = await screen.findByTestId('admin-incident-table');
+    const badge = (id: string, label: string) => within(within(table).getByTestId(`row-${id}`)).getByText(label).className;
+
+    await within(table).findByTestId('row-a');
+    expect(badge('a', 'Chờ kỹ thuật')).toMatch(/amber/);
+    expect(badge('b', 'Đang sửa')).toMatch(/blue/);
+    expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('d', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
+    expect(within(table).queryByText('Chờ nghiệm thu')).not.toBeInTheDocument();
+    expect(within(table).queryByTestId('issue-inspection')).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Nghiệm thu' })).not.toBeInTheDocument();
+  });
+
+  it('with inspection switched on, adds "Chờ nghiệm thu" and the inspection beside every stage', async () => {
+    installApiMock(
+      adminRoutes([
+        issue({ id: 'a', status: 'NEW', inspectionEnabled: true }),
+        issue({ id: 'b', status: 'IN_PROGRESS', inspectionEnabled: true }),
+        issue({ id: 'c', status: 'COMPLETED', inspectionEnabled: true }),
+        issue({ id: 'd', status: 'AWAITING_INSPECTION', inspectionEnabled: true }),
+        issue({ id: 'e', status: 'NEW', needsRework: true, inspectionEnabled: true }),
       ]),
     );
     renderApp('/app/issues');
@@ -221,8 +252,17 @@ describe('incidents — admin, in "Sự cố vật chất đang xử lý"', () =
     const badge = (id: string, label: string) => within(within(table).getByTestId(`row-${id}`)).getByText(label).className;
 
     await within(table).findByTestId('row-a');
-    expect(badge('a', 'Sự cố khách sạn')).toMatch(/amber/);
+    expect(badge('a', 'Chờ kỹ thuật')).toMatch(/amber/);
     expect(badge('b', 'Đang sửa')).toMatch(/blue/);
     expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('d', 'Chờ nghiệm thu')).toMatch(/violet/);
+    expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
+    // "Nghiệm thu" is its own labelled badge, never folded into the stage.
+    expect(within(within(table).getByTestId('row-c')).getByTestId('issue-inspection')).toHaveTextContent(
+      'Nghiệm thu: Chưa có dữ liệu',
+    );
+    expect(within(within(table).getByTestId('row-d')).getByTestId('issue-inspection')).toHaveTextContent(
+      'Nghiệm thu: Chưa nghiệm thu',
+    );
   });
 });

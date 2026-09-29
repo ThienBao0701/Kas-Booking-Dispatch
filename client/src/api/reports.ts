@@ -87,8 +87,14 @@ export interface IncidentRangeSummary {
   total: number;
   newCount: number;
   inProgressCount: number;
+  /** "Chờ nghiệm thu" — repaired, not yet judged. */
+  awaitingInspectionCount: number;
   completedCount: number;
   cannotRepairAttempts: number;
+  /** Inspections that FAILED in the period — events, like `cannotRepairAttempts`. */
+  failedInspections: number;
+  /** Whether the inspection figures belong on screen at all. */
+  inspectionEnabled: boolean;
   needsReworkIssues: number;
   /** Everything unfinished at any age — deliberately outside the period. */
   outstandingTotal: number;

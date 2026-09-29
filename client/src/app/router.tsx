@@ -34,6 +34,7 @@ import { NewBookingsPage } from '../pages/NewBookingsPage';
 import { PendingReviewPage, RejectedPage } from '../pages/VerificationBookingsPage';
 import { HistoryPage } from '../pages/HistoryPage';
 import { OperationalReportsPage } from '../pages/OperationalReportsPage';
+import { CompletedIssuesPage } from '../pages/CompletedIssuesPage';
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -50,6 +51,9 @@ import { NotFoundPage } from '../pages/NotFoundPage';
  */
 const BOOKING_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
 
+/** The technical screens: the technician works them, the manager inspects from them. */
+const TECHNICAL_ROLES: readonly UserRole[] = ['TECHNICAL', 'TECHNICAL_MANAGER'];
+
 /** Sends each role to its natural landing page. */
 function RoleLanding() {
   const { user } = useAuth();
@@ -57,6 +61,8 @@ function RoleLanding() {
   // Without this, a technician landed on the receptionist inbox — a branch-scoped
   // screen they have no branch for, so it was permanently empty.
   if (user?.role === 'TECHNICAL') return <Navigate to="/app/technical/new" replace />;
+  // Quản lý kỹ thuật's own work is the inspection queue.
+  if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/technical/awaiting-inspection" replace />;
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
   return <Navigate to="/app/new" replace />;
@@ -108,7 +114,7 @@ export function AppRoutes() {
           <Route path="booking/:id" element={<RequireRole role={BOOKING_ROLES}><BookingDetailPage /></RequireRole>} />
           {/*
             OLD ADDRESSES, KEPT AS REDIRECTS. Incidents are reported and watched
-            in "Báo cáo vấn đề" → "Sự cố vật chất đang xử lý" now, and "Bàn giao
+            in "Báo cáo vấn đề" → "Sự cố cơ sở vật chất đang xử lý" now, and "Bàn giao
             ca" has no screen of its own. A bookmark, a notification or an old
             link still lands somewhere that works instead of on a blank page.
             Only the screens went: the incident and handover APIs and every
@@ -127,6 +133,8 @@ export function AppRoutes() {
             the Admin endpoints to everyone else.
           */}
           <Route path="reports" element={<RequireRole role={BOOKING_ROLES}><OperationalReportsPage /></RequireRole>} />
+          {/* Reception's 12-hour completion archive — a query over the same records. */}
+          <Route path="completed-issues" element={<RequireRole role="RECEPTIONIST"><CompletedIssuesPage /></RequireRole>} />
           {/*
             Bộ phận kỹ thuật. `queue` is a real path segment so each workflow
             state has its own address and can be bookmarked or opened alongside.
@@ -146,7 +154,7 @@ export function AppRoutes() {
           <Route
             path="technical/:queue"
             element={
-              <RequireRole role="TECHNICAL">
+              <RequireRole role={TECHNICAL_ROLES}>
                 <TechnicalPage />
               </RequireRole>
             }

@@ -15,7 +15,7 @@ export type PaymentMethod = 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
 /** "Bộ phận" of a delivered item. */
 export type DeliveryDepartment = 'RECEPTION' | 'HOUSEKEEPING' | 'TECHNICAL';
 
-export type RoomServiceType = 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER';
+export type RoomServiceType = 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER' | 'REVIEW';
 
 /**
  * The labels come from the SERVER, not from a constant here.
@@ -135,6 +135,11 @@ export interface RoomServiceDetail {
   nights: number | null;
   price: number;
   note: string | null;
+  /** "Review" only — the counts the receptionist reports; null elsewhere. */
+  tripadvisorCount: number | null;
+  googleCount: number | null;
+  /** False for "Review": a count, never revenue. Decided by the server. */
+  countsAsRevenue: boolean;
   /** Legacy fields, no longer asked for; null on current rows. */
   phone: string | null;
   roomNumber: string | null;
@@ -253,8 +258,12 @@ export interface NewRoomServiceInput {
   fromRoomClass?: string;
   toRoomClass?: string;
   nights?: number;
-  price: number;
+  /** Every service but "Review", which is a count, not a sale. */
+  price?: number;
   note?: string;
+  /** "Review" only. */
+  tripadvisorCount?: number;
+  googleCount?: number;
 }
 
 /**
@@ -291,6 +300,23 @@ interface ListResponse {
   counts: CategoryCounts;
 }
 
+/** II and IV as the desk must see them — see `completionArchive.ts` on the server. */
+export interface ActiveJournalResponse {
+  reports: OperationalReport[];
+  /** Each category's full count — `reports` is a page (newest first). */
+  totals: { GUEST_REQUEST: number; CUSTOMER_COMPLAINT: number };
+  archiveAfterHours: number;
+}
+
+/** "Hoàn thành vấn đề": completed II and IV received at least 12 hours ago. */
+export interface ArchivedJournalResponse {
+  reports: OperationalReport[];
+  totals: { GUEST_REQUEST: number; CUSTOMER_COMPLAINT: number };
+  /** The received-day window the server applied, or null for the whole archive. */
+  range: { from: string; to: string } | null;
+  archiveAfterHours: number;
+}
+
 function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -305,6 +331,19 @@ export const reportsApi = {
 
   list: (params: { category?: ReportCategory; shiftSessionId?: string; from?: string; to?: string } = {}) =>
     api.get<ListResponse>(`/reception/reports${query(params)}`),
+
+  /**
+   * Requests and service-quality reports, across shifts: unfinished at any age,
+   * or completed within 12 hours of receipt. The server clock decides.
+   */
+  active: () => api.get<ActiveJournalResponse>('/reception/reports/active'),
+
+  /**
+   * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —
+   * optionally only those RECEIVED between `from` and `to` (inclusive days).
+   */
+  archive: (params: { from?: string; to?: string } = {}) =>
+    api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
   create: (input: NewReportInput) =>
     api.post<{ report: OperationalReport }>('/reception/reports', input),
@@ -338,8 +377,8 @@ export const reportsApi = {
  * the working list; `archived` is "Hoàn thành vấn đề".
  */
 export const deliveriesApi = {
-  list: (scope: 'active' | 'archived', params: { branchId?: number } = {}) =>
-    api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[] }>(
+  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string } = {}) =>
+    api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[]; total?: number }>(
       `/hotel-deliveries${query({ scope, ...params })}`,
     ),
 };
@@ -389,7 +428,10 @@ export const adminReportsApi = {
  *
  * The browser's own download handling gets the file name from
  * Content-Disposition and the bytes straight to disk; fetching into memory to
- * build a blob would hold a multi-megabyte workbook in the tab for no gain.
+ * build a blob would hold a multi-megabyte file in the tab for no gain.
+ *
+ * PDF ONLY. The report's Excel action was removed at the operators' request;
+ * the server's .xlsx endpoint is left in place, unlinked from this screen.
  */
 /** The export's scope — the same three filters the screen uses. */
 export interface OperationalExportScope {
@@ -401,8 +443,4 @@ export interface OperationalExportScope {
 
 export function operationalPdfUrl(params: OperationalExportScope): string {
   return `/api/admin/reports/operational.pdf${query({ ...params })}`;
-}
-
-export function operationalXlsxUrl(params: OperationalExportScope): string {
-  return `/api/admin/reports/operational.xlsx${query({ ...params })}`;
 }

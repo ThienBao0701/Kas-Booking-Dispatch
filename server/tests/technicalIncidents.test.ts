@@ -246,7 +246,15 @@ describe('Bộ phận kỹ thuật works every branch', () => {
 
     const res = await tech.get('/api/issues/counts');
     expect(res.status).toBe(200);
-    expect(res.body.counts).toEqual({ newCount: 2, inProgressCount: 0, completedCount: 0 });
+    expect(res.body.counts).toEqual({
+      newCount: 2,
+      reworkCount: 0,
+      inProgressCount: 0,
+      // Inspection is dormant: there is no such queue in the active workflow.
+      awaitingInspectionCount: 0,
+      completedCount: 0,
+      inspectionEnabled: false,
+    });
   });
 
   it('sees all eight branches in the branch list', async () => {

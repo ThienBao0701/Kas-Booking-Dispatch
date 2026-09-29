@@ -47,6 +47,8 @@ import {
   assertHeadersFit,
   createReportDocument,
   DATE_SAMPLE,
+  FRAME_COLOR,
+  FRAME_WIDTH,
   drawTable,
   ensureSpace,
   finishDocument,
@@ -234,36 +236,37 @@ const GUEST_REQUEST_COLUMNS = checked<Numbered<SerializedReport>>('operational g
 
 /* ------------------- III. Sự cố cơ sở vật chất đang xử lý ------------------- */
 
-const ISSUE_STATUS_LABEL: Record<string, string> = {
-  NEW: 'Chờ tiếp nhận',
-  IN_PROGRESS: 'Đang sửa',
-  COMPLETED: 'Hoàn thành',
-};
-
+/**
+ * The stage label the screens show — "Cần sửa lại" included, which the status
+ * alone would call new — and, once there is one to state, the inspection.
+ */
 function issueStatus(r: SerializedReport): string {
   const issue = r.facility?.issue;
   if (!issue) return '';
-  // "Cần xử lý lại" is a NEW incident that has already been attempted — the
-  // status alone would call it new and hide that somebody has already tried.
-  if (issue.needsRework) return 'Cần xử lý lại';
-  return ISSUE_STATUS_LABEL[issue.status] ?? issue.status;
+  const judged =
+    issue.inspectionEnabled &&
+    (issue.stage === 'AWAITING_INSPECTION' || issue.stage === 'COMPLETED' || issue.inspectionState === 'FAILED');
+  return judged ? `${issue.stageLabel}\nNghiệm thu: ${issue.inspectionLabel}` : issue.stageLabel;
 }
 
 const FACILITY_COLUMNS = checked<Numbered<SerializedReport>>('operational facilities', [
   { header: 'STT', width: 26, value: (r) => String(r.stt) },
-  { header: 'Vị trí', width: 120, value: (r) => r.facility?.issue.locationLabel ?? '' },
-  { header: 'Mô tả', width: 180, value: (r) => withVoid(r, r.facility?.issue.description) },
-  { header: 'Trạng thái', width: 80, value: issueStatus },
+  { header: 'Khu vực', width: 108, value: (r) => r.facility?.issue.locationLabel ?? '' },
+  { header: 'Sự cố', width: 150, value: (r) => withVoid(r, r.facility?.issue.description) },
+  { header: 'Nguyên nhân', width: 100, value: (r) => r.facility?.issue.cause ?? '' },
+  { header: 'Trạng thái', width: 88, value: issueStatus },
   {
-    header: 'Kỹ thuật',
-    width: 90,
-    value: (r) => r.facility?.issue.technicianName ?? '',
+    header: 'Người sửa',
+    width: 80,
+    // From the attempts — the person who did the latest repair, not whoever
+    // happens to be on the incident's current-assignment columns.
+    value: (r) => r.facility?.issue.repairerName ?? '',
   },
-  { header: 'Người báo', width: 80, value: (r) => r.createdByName },
+  { header: 'Người báo', width: 70, value: (r) => r.createdByName },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
   {
-    header: 'Số lần',
+    header: 'Lần sửa',
     width: 40,
     align: 'right',
     value: (r) => String(r.facility?.issue.attempts.length ?? 0),
@@ -317,6 +320,9 @@ function serviceDetail(r: SerializedReport): string {
     parts.push(`Từ ${s.fromRoomClass ?? '?'} lên ${s.toRoomClass ?? '?'}`);
   }
   if (s.nights) parts.push(`${s.nights} đêm`);
+  // "Review": the counts are the whole record.
+  if (s.tripadvisorCount !== null) parts.push(`Tripadvisor ${s.tripadvisorCount}`);
+  if (s.googleCount !== null) parts.push(`Google ${s.googleCount}`);
   // Legacy fields an older row may carry; never on a row recorded since.
   if (s.serviceName) parts.push(s.serviceName);
   if (s.roomNumber) parts.push(`P. ${s.roomNumber}`);
@@ -331,7 +337,13 @@ const ROOM_SERVICE_COLUMNS = checked<Numbered<SerializedReport>>('operational ro
   { header: 'Tên khách', width: 110, value: (r) => r.roomService?.guestName ?? '' },
   { header: 'Mã EZ', width: 50, value: (r) => r.roomService?.ezCode ?? '' },
   { header: 'Chi tiết', width: 236, value: serviceDetail },
-  { header: `${ROOM_SERVICE_PRICE_LABEL} (₫)`, width: MONEY_COLUMN_WIDTH, align: 'right', value: (r) => formatVndPlain(r.roomService?.price ?? null) },
+  {
+    header: `${ROOM_SERVICE_PRICE_LABEL} (₫)`,
+    width: MONEY_COLUMN_WIDTH,
+    align: 'right',
+    // A review is a count, not a sale — no price is printed for it.
+    value: (r) => formatVndPlain(r.roomService?.countsAsRevenue === false ? null : (r.roomService?.price ?? null)),
+  },
   { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
@@ -389,6 +401,41 @@ function categoryCounts(counts: Partial<Record<OperationalReportCategory, number
   return parts.length ? parts.join('  ·  ') : 'Không có bản ghi';
 }
 
+/** How tall a category's title bar is: one 9pt line and its padding. */
+const BAND_HEIGHT = 17;
+
+/**
+ * A CATEGORY'S TITLE BAR — "I. Theo dõi thanh toán (3)" — the full width of
+ * its table and framed with it, so the title, the header and the rows read as
+ * one box, and I through V as five boxes rather than one long listing.
+ */
+function categoryBand(doc: PdfDoc, text: string, width: number): void {
+  const x = doc.page.margins.left;
+  const y = doc.y;
+  doc.save().lineWidth(FRAME_WIDTH).rect(x, y, width, BAND_HEIGHT).fillAndStroke('#F1F5F9', FRAME_COLOR).restore();
+  doc.fillColor('#000').font(FONT_BOLD).fontSize(9);
+  doc.text(text, x + 6, y + 4, { width: width - 12, lineBreak: false });
+  doc.font(FONT_REGULAR).fontSize(8);
+  doc.x = x;
+  doc.y = y + BAND_HEIGHT;
+}
+
+/**
+ * A SHIFT'S HEADING, with a rule the width of the page under it: the shift is
+ * the unit the categories below belong to, and it reads as the start of one.
+ */
+function shiftHeading(doc: PdfDoc, text: string): void {
+  const left = doc.page.margins.left;
+  const right = doc.page.width - doc.page.margins.right;
+  doc.x = left;
+  doc.moveDown(0.3);
+  doc.fillColor('#000').font(FONT_BOLD).fontSize(10).text(text);
+  const y = doc.y + 1.5;
+  doc.save().lineWidth(1.5).strokeColor(FRAME_COLOR).moveTo(left, y).lineTo(right, y).stroke().restore();
+  doc.y = y + 3;
+  doc.font(FONT_REGULAR).fontSize(8);
+}
+
 /** Muted small print, from the left margin. */
 function note(doc: PdfDoc, text: string, bold = false): void {
   doc.x = doc.page.margins.left;
@@ -410,6 +457,56 @@ function openShiftBlock(doc: PdfDoc, section: BranchOperationalReport): void {
     note(doc, `  - Ngày ${dayLabel(s.businessDate)} · ${s.shiftName} (${s.shiftWindow}) · ${s.receptionistName}`);
   }
   doc.moveDown(0.3);
+}
+
+/** Plain ASCII for a filename: the Vietnamese marks dropped, and đ → d (NFD leaves đ alone). */
+function asciiFold(text: string): string {
+  return text
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+/** "2027-01-07" → "07-01-2027": the business date as it is read, with no "/". */
+function fileDate(iso: string): string {
+  const [y, m, d] = iso.split('-');
+  return `${d}-${m}-${y}`;
+}
+
+/** What Windows (and every other filesystem) refuses in a name, and control characters. */
+// eslint-disable-next-line no-control-regex
+const FILENAME_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
+
+/**
+ * THE FILE IS NAMED FOR ITS BRANCH AND ITS BUSINESS DATE:
+ *
+ *   05_Truong Dinh_07-01-2027.pdf            one branch, one day
+ *   05_Truong Dinh_01-01-2027_07-01-2027.pdf one branch, a period
+ *   Tat ca chi nhanh_07-01-2027.pdf          every branch
+ *
+ * "05" and "Truong Dinh" are the branch's address as operators say it — its
+ * leading house number, then the street — folded to plain ASCII so the name
+ * survives every download folder and zip tool. The date is the REPORT's
+ * business date (the period asked for), never the moment the file was built.
+ * Anything a filesystem refuses ("/", ":", …) becomes "-".
+ */
+export function operationalPdfFileName(
+  data: Pick<OperationalReportData, 'from' | 'to' | 'branches'>,
+  /** True when ONE branch was asked for — not merely when only one exists. */
+  singleBranch: boolean,
+): string {
+  const dates = data.from === data.to ? fileDate(data.from) : `${fileDate(data.from)}_${fileDate(data.to)}`;
+  const branch = singleBranch && data.branches.length === 1 ? data.branches[0]!.branch : null;
+  let who = 'Tat ca chi nhanh';
+  if (branch) {
+    const address = asciiFold(branch.address).replace(/\s+/g, ' ').trim();
+    // "05 Truong Dinh" → "05" + "Truong Dinh"; an address without a leading
+    // number falls back to the branch number the system gave it.
+    const split = /^(\d\S*)\s+(.+)$/.exec(address);
+    who = split ? `${split[1]}_${split[2]}` : `${branch.branchNumber}_${address}`;
+  }
+  return `${`${who}_${dates}`.replace(FILENAME_UNSAFE, '-')}.pdf`;
 }
 
 export async function buildOperationalReportPdf(data: OperationalReportData): Promise<Buffer> {
@@ -497,25 +594,28 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
         doc.x = doc.page.margins.left;
         // The shift heading plus a table header's worth of room, so a shift is
         // never announced at the foot of one page and listed on the next.
-        ensureSpace(doc, 44);
-        doc.font(FONT_BOLD).fontSize(9.5);
-        doc.text(`${shift.shiftName} · ${shift.shiftWindow}   -   Nhân viên: ${shift.receptionistName}`);
+        ensureSpace(doc, 60);
+        shiftHeading(doc, `${shift.shiftName} · ${shift.shiftWindow}   -   Nhân viên: ${shift.receptionistName}`);
         const counts = Object.fromEntries(CATEGORIES.map((c) => [c, rows?.[c].length ?? 0]));
         note(doc, categoryCounts(counts));
-        doc.moveDown(0.15);
+        doc.moveDown(0.35);
 
         for (const category of CATEGORIES) {
           const list = rows?.[category] ?? [];
           if (list.length === 0) continue;
           doc.x = doc.page.margins.left;
+          const columns = COLUMNS_BY_CATEGORY[category];
           const table = numbered(list);
-          // The heading, the table header and its first row stay together.
-          ensureSpace(doc, 12 + tableLeadHeight(doc, COLUMNS_BY_CATEGORY[category], table));
-          doc.font(FONT_BOLD).fontSize(8);
-          doc.text(`${CATEGORY_NUMERALS[category]}. ${CATEGORY_LABELS[category]} (${list.length})`);
-          doc.font(FONT_REGULAR).fontSize(8);
-          drawTable(doc, COLUMNS_BY_CATEGORY[category], table);
-          doc.moveDown(0.2);
+          // The title bar, the table header and its first row stay together.
+          ensureSpace(doc, BAND_HEIGHT + tableLeadHeight(doc, columns, table));
+          categoryBand(
+            doc,
+            `${CATEGORY_NUMERALS[category]}. ${CATEGORY_LABELS[category]} (${list.length})`,
+            columns.reduce((sum, c) => sum + c.width, 0),
+          );
+          drawTable(doc, columns, table, { frame: true });
+          // Clear air between one framed section and the next.
+          doc.moveDown(0.8);
         }
 
         // THE SHIFT'S OWN DRAWER — its subtotal, closing the shift's section.

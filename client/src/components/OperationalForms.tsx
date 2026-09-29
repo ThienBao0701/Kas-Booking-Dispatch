@@ -10,7 +10,7 @@
  * Those come from the open shift, on the server. An employee field would be the
  * one thing that made every record here deniable.
  *
- * "Sự cố vật chất đang xử lý" has NO form here — it is a monitoring board, not
+ * "Sự cố cơ sở vật chất đang xử lý" has NO form here — it is a monitoring board, not
  * an entry category. See `FacilityIssueBoard.tsx`.
  */
 import { useState } from 'react';
@@ -70,12 +70,12 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
         e.preventDefault();
         if (ready) onSubmit();
       }}
-      className={bare ? 'space-y-3' : 'space-y-3 rounded-2xl border border-slate-200 bg-white px-4 py-4'}
+      className={bare ? 'space-y-3' : 'space-y-3 rounded-2xl border border-line bg-white px-4 py-4'}
     >
       {bare ? null : <p className="text-sm font-semibold text-slate-800">{title}</p>}
       {children}
       {error ? <ErrorAlert>{error}</ErrorAlert> : null}
-      <div className={`flex justify-end gap-2 ${bare ? 'border-t border-slate-100 pt-3' : ''}`}>
+      <div className={`flex justify-end gap-2 ${bare ? 'border-t border-line-subtle pt-3' : ''}`}>
         {onCancel ? (
           <Button type="button" variant="secondary" onClick={onCancel} data-testid={`${testId}-cancel`}>
             Hủy
@@ -127,7 +127,7 @@ function TextArea({
         rows={3}
         maxLength={maxLength}
         data-testid={testId}
-        className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
       />
     </label>
   );
@@ -270,6 +270,14 @@ export function ServiceQualityForm({
 /* ------------------------- Dịch vụ phòng, KPI ------------------------- */
 
 /** "Số đêm" as typed — a positive whole number, or null. Never a silent zero. */
+/** A review count as typed: blank is 0, anything else must be whole digits. */
+function parseCount(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return 0;
+  if (!/^\d+$/.test(trimmed)) return null;
+  return Number(trimmed);
+}
+
 function parseNights(value: string): number | null {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return null;
@@ -310,6 +318,9 @@ export function RoomServiceForm({
   const [nights, setNights] = useState('');
   const [price, setPrice] = useState('');
   const [note, setNote] = useState('');
+  // "Review": two whole-number counts, as digits typed.
+  const [tripadvisor, setTripadvisor] = useState('');
+  const [google, setGoogle] = useState('');
 
   const { mutation, error } = useCreateReport(async () => {
     setServiceType('');
@@ -321,6 +332,8 @@ export function RoomServiceForm({
     setNights('');
     setPrice('');
     setNote('');
+    setTripadvisor('');
+    setGoogle('');
     await onCreated();
   });
 
@@ -328,16 +341,36 @@ export function RoomServiceForm({
     options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
   const needs = serviceType ? roomServiceFields(serviceType) : null;
 
+  // A blank count is 0; the pair must report at least one review.
+  const tripadvisorCount = parseCount(tripadvisor);
+  const googleCount = parseCount(google);
+  const reviewReady =
+    tripadvisorCount !== null && googleCount !== null && tripadvisorCount + googleCount > 0;
+
   const ready =
     needs !== null &&
     guestName.trim().length > 0 &&
-    parseVnd(price) !== null &&
+    (needs.review ? reviewReady : parseVnd(price) !== null) &&
     (!needs.roomClass || roomClass.trim().length > 0) &&
     (!needs.upgrade || (fromRoomClass.trim().length > 0 && toRoomClass.trim().length > 0)) &&
     (!needs.nights || parseNights(nights) !== null);
 
   const submit = () => {
     if (!serviceType || !needs) return;
+    if (needs.review) {
+      // A count, not a sale: no price and no note are sent at all.
+      mutation.mutate({
+        category: 'ROOM_SERVICE',
+        roomService: {
+          serviceType,
+          guestName: guestName.trim(),
+          ezCode: ezCode.trim() || undefined,
+          tripadvisorCount: tripadvisorCount ?? 0,
+          googleCount: googleCount ?? 0,
+        },
+      });
+      return;
+    }
     mutation.mutate({
       category: 'ROOM_SERVICE',
       roomService: {
@@ -374,7 +407,7 @@ export function RoomServiceForm({
           value={serviceType}
           onChange={(e) => setServiceType(e.target.value as RoomServiceType | '')}
           data-testid="room-service-type"
-          className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+          className="block w-full rounded-xl border border-line-strong bg-white px-3 py-2.5 text-sm text-slate-900 hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-600"
         >
           <option value="">— Chọn dịch vụ —</option>
           {ROOM_SERVICE_ORDER.map((t) => (
@@ -392,8 +425,18 @@ export function RoomServiceForm({
             <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="room-service-ez" />
           </div>
 
+          {/*
+            THE SAME COLUMN WIDTHS AS THE ROWS AROUND IT. "Bán phòng" has two
+            fields here (Hạng phòng, Số đêm) and gets two columns, like Tên
+            khách / Mã EZ above and Giá tiền / Ghi chú below; "Upgrade" has
+            three (Từ, Tới hạng phòng, Số đêm) and gets three. Two fields in a
+            three-column grid left them visibly narrower than their neighbours.
+          */}
           {needs.roomClass || needs.upgrade || needs.nights ? (
-            <div className="grid gap-3 sm:grid-cols-3" data-testid="room-service-conditional">
+            <div
+              className={`grid gap-3 ${needs.upgrade ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}
+              data-testid="room-service-conditional"
+            >
               {needs.roomClass ? (
                 <Input label="Hạng phòng" value={roomClass} onChange={(e) => setRoomClass(e.target.value)} data-testid="room-service-class" />
               ) : null}
@@ -414,9 +457,18 @@ export function RoomServiceForm({
                 </>
               ) : null}
               {needs.nights ? (
+                /*
+                  A whole number of nights, typed directly — the same numeric
+                  field as the review counts: a number keyboard on a phone,
+                  and anything but digits dropped as it is typed. The
+                  "at least 1" rule is unchanged (parseNights, and the server).
+                */
                 <Input
                   label="Số đêm"
+                  type="number"
                   inputMode="numeric"
+                  min={1}
+                  step={1}
                   value={nights}
                   onChange={(e) => setNights(e.target.value.replace(/\D/g, ''))}
                   data-testid="room-service-nights"
@@ -425,10 +477,42 @@ export function RoomServiceForm({
             </div>
           ) : null}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <MoneyInput label={ROOM_SERVICE_PRICE_LABEL} required value={price} onChange={setPrice} data-testid="room-service-price" />
-            <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
-          </div>
+          {needs.review ? (
+            /*
+              "REVIEW" IS A COUNT: how many reviews the guest left on each site,
+              as the receptionist reports them. Whole numbers only — never
+              review text, never a price.
+            */
+            <div className="grid gap-3 sm:grid-cols-2" data-testid="room-service-review-counts">
+              <Input
+                label="Tripadvisor"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                step={1}
+                value={tripadvisor}
+                onChange={(e) => setTripadvisor(e.target.value.replace(/\D/g, ''))}
+                placeholder="0"
+                data-testid="room-service-tripadvisor"
+              />
+              <Input
+                label="Google"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                step={1}
+                value={google}
+                onChange={(e) => setGoogle(e.target.value.replace(/\D/g, ''))}
+                placeholder="0"
+                data-testid="room-service-google"
+              />
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MoneyInput label={ROOM_SERVICE_PRICE_LABEL} required value={price} onChange={setPrice} data-testid="room-service-price" />
+              <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
+            </div>
+          )}
         </>
       ) : (
         <p className="text-sm text-slate-500" data-testid="room-service-pick-first">
@@ -505,7 +589,7 @@ export function DeliveryForm({
             value={department}
             onChange={(e) => setDepartment(e.target.value as DeliveryDepartment | '')}
             data-testid="delivery-department"
-            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+            className="block w-full rounded-xl border border-line-strong bg-white px-3 py-2.5 text-sm font-normal text-slate-900 hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-600"
           >
             <option value="">— Chọn bộ phận —</option>
             {departments.map((d) => (

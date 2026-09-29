@@ -15,7 +15,12 @@ export interface ManagedUser {
 }
 
 /** The roles this screen can create. An admin is bootstrapped, never minted here. */
-export type ManageableRole = 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL' | 'HOUSEKEEPING';
+export type ManageableRole =
+  | 'RECEPTIONIST'
+  | 'BOOKING_DEPARTMENT'
+  | 'TECHNICAL'
+  | 'TECHNICAL_MANAGER'
+  | 'HOUSEKEEPING';
 
 /**
  * The departments that are GLOBAL — no branch, by definition.
@@ -24,7 +29,7 @@ export type ManageableRole = 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL'
  * negative form silently classified any NEW branchless role as a receptionist,
  * demanded a branch for it, and was then refused by the server.
  */
-export const GLOBAL_ROLES: readonly ManageableRole[] = ['BOOKING_DEPARTMENT', 'TECHNICAL'];
+export const GLOBAL_ROLES: readonly ManageableRole[] = ['BOOKING_DEPARTMENT', 'TECHNICAL', 'TECHNICAL_MANAGER'];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
   return !GLOBAL_ROLES.includes(role ?? 'RECEPTIONIST');

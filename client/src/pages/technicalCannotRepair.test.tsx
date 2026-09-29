@@ -2,10 +2,9 @@
  * "KHÔNG SỬA ĐƯỢC" and the reorganised incident card, from the technician's side.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
- *   1. "Hoàn thành" stays a DIRECT action and "Không sửa được" asks for a reason.
- *      The confirmation belongs on the outcome that cannot be recorded without
- *      one, not on the one that happens most.
- *   2. A returned incident reads as "Cần xử lý lại", not as a fresh report —
+ *   1. Both outcomes ask for what they cannot be recorded without: "Hoàn thành"
+ *      the result the manager will inspect, "Không sửa được" the reason.
+ *   2. A returned incident reads as "Cần sửa lại", not as a fresh report —
  *      both are NEW, and telling them apart is the point of the whole flow.
  *   3. The attempt history is on screen: who went, when, how long, and why they
  *      stopped, for every attempt and not just the last.
@@ -15,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TECHNICAL_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -41,7 +41,7 @@ function attempt(over: Record<string, unknown> = {}) {
 }
 
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: BRANCH,
@@ -75,11 +75,11 @@ function issue(over: Record<string, unknown> = {}) {
     createdAt: '2026-09-16T16:09:00.000Z',
     updatedAt: '2026-09-17T08:54:00.000Z',
     ...over,
-  };
+  });
 }
 
 function routes(
-  queue: 'NEW' | 'IN_PROGRESS' | 'COMPLETED',
+  queue: 'WAITING' | 'REWORK' | 'IN_PROGRESS' | 'COMPLETED',
   issues: unknown[],
   extra: Record<string, (init: RequestInit) => { status: number; body?: unknown }> = {},
 ) {
@@ -97,9 +97,18 @@ function routes(
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
     'GET /api/issues/counts': () => ({
       status: 200,
-      body: { counts: { newCount: 1, inProgressCount: 1, completedCount: 0 } },
+      body: {
+        counts: {
+          newCount: 1,
+          reworkCount: 0,
+          inProgressCount: 1,
+          awaitingInspectionCount: 0,
+          completedCount: 0,
+          inspectionEnabled: false,
+        },
+      },
     }),
-    [`GET /api/issues?status=${queue}&pageSize=100`]: () => ({
+    [`GET /api/issues?stage=${queue}&pageSize=100`]: () => ({
       status: 200,
       body: { issues, pagination: { page: 1, pageSize: 100, total: issues.length, totalPages: 1 } },
     }),
@@ -107,7 +116,7 @@ function routes(
   };
 }
 
-const QUEUE_PATH = { NEW: 'new', IN_PROGRESS: 'in-progress', COMPLETED: 'completed' } as const;
+const QUEUE_PATH = { WAITING: 'new', REWORK: 'rework', IN_PROGRESS: 'in-progress', COMPLETED: 'completed' } as const;
 
 describe('the two outcomes of a repair', () => {
   it('offers both "Hoàn thành" and "Không sửa được" on an incident being worked', async () => {
@@ -119,8 +128,8 @@ describe('the two outcomes of a repair', () => {
   });
 
   it('offers neither on an incident nobody has accepted', async () => {
-    installApiMock(routes('NEW', [issue({ status: 'NEW', acceptedAt: null, technicianName: null })]));
-    renderApp(`/app/technical/${QUEUE_PATH.NEW}`);
+    installApiMock(routes('WAITING', [issue({ status: 'NEW', acceptedAt: null, technicianName: null })]));
+    renderApp(`/app/technical/${QUEUE_PATH.WAITING}`);
 
     expect(await screen.findByTestId('accept-i1')).toBeInTheDocument();
     expect(screen.queryByTestId('complete-i1')).not.toBeInTheDocument();
@@ -128,15 +137,15 @@ describe('the two outcomes of a repair', () => {
   });
 
   /**
-   * "Hoàn thành" needs nothing from the technician beyond the press, and a
-   * confirmation dialog on the path that happens most is friction for nothing.
+   * While inspection is DORMANT, "Hoàn thành" is the bare press it was before
+   * inspection: no result is asked for, and the incident is finished.
    */
-  it('completes directly, with no dialog in the way', async () => {
-    let completed = false;
+  it('finishes the repair with one press while inspection is dormant', async () => {
+    let sent: Record<string, unknown> | null = null;
     installApiMock(
       routes('IN_PROGRESS', [issue()], {
-        'POST /api/issues/i1/complete': () => {
-          completed = true;
+        'POST /api/issues/i1/complete': (init) => {
+          sent = JSON.parse(String(init.body)) as Record<string, unknown>;
           return { status: 200, body: { issue: issue({ status: 'COMPLETED' }) } };
         },
       }),
@@ -145,7 +154,39 @@ describe('the two outcomes of a repair', () => {
     renderApp(`/app/technical/${QUEUE_PATH.IN_PROGRESS}`);
 
     await user.click(await screen.findByTestId('complete-i1'));
-    await waitFor(() => expect(completed).toBe(true));
+    await waitFor(() => expect(sent).toEqual({}));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  /**
+   * With inspection switched on, "Hoàn thành" is no longer a bare press: it
+   * records the result that Quản lý kỹ thuật will inspect, and nothing is sent
+   * until there is one.
+   */
+  it('asks for the result before it finishes the repair when inspection is on', async () => {
+    let sent: Record<string, unknown> | null = null;
+    installApiMock(
+      routes('IN_PROGRESS', [issue({ inspectionEnabled: true })], {
+        'POST /api/issues/i1/complete': (init) => {
+          sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return { status: 200, body: { issue: issue({ status: 'AWAITING_INSPECTION', inspectionEnabled: true }) } };
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp(`/app/technical/${QUEUE_PATH.IN_PROGRESS}`);
+
+    await user.click(await screen.findByTestId('complete-i1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
+    expect(sent).toBeNull();
+    expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
+    // Whitespace is not a result.
+    await user.type(within(dialog).getByTestId('complete-result'), '   ');
+    expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
+
+    await user.type(within(dialog).getByTestId('complete-result'), 'Đã thông tắc');
+    await user.click(within(dialog).getByTestId('complete-confirm'));
+    await waitFor(() => expect(sent).toEqual({ result: 'Đã thông tắc' }));
   });
 
   it('asks for a reason before it will return an incident to the queue', async () => {
@@ -235,18 +276,18 @@ describe('an incident that came back', () => {
    * picking up the queue could know: that the last person to go could not finish
    * it, and why.
    */
-  it('reads as "Cần xử lý lại", not as a fresh report', async () => {
-    installApiMock(routes('NEW', [returned]));
-    renderApp(`/app/technical/${QUEUE_PATH.NEW}`);
+  it('reads as "Cần sửa lại", in its own queue, not as a fresh report', async () => {
+    installApiMock(routes('REWORK', [returned]));
+    renderApp(`/app/technical/${QUEUE_PATH.REWORK}`);
 
-    const queue = await screen.findByRole('list', { name: 'Sự cố khách sạn' });
-    expect(within(queue).getByText('Cần xử lý lại')).toBeInTheDocument();
-    expect(within(queue).queryByText('Sự cố khách sạn')).not.toBeInTheDocument();
+    const queue = await screen.findByRole('list', { name: 'Cần sửa lại' });
+    expect(within(queue).getByTestId('issue-stage')).toHaveTextContent('Cần sửa lại');
+    expect(within(queue).queryByText('Chờ kỹ thuật')).not.toBeInTheDocument();
   });
 
   it('shows the failed attempt: who, when, how long and why', async () => {
-    installApiMock(routes('NEW', [returned]));
-    renderApp(`/app/technical/${QUEUE_PATH.NEW}`);
+    installApiMock(routes('REWORK', [returned]));
+    renderApp(`/app/technical/${QUEUE_PATH.REWORK}`);
 
     const timeline = await screen.findByTestId('issue-timeline');
     expect(within(timeline).getByText(/Lần 1/)).toBeInTheDocument();
@@ -258,8 +299,8 @@ describe('an incident that came back', () => {
   });
 
   it('can still be accepted again', async () => {
-    installApiMock(routes('NEW', [returned]));
-    renderApp(`/app/technical/${QUEUE_PATH.NEW}`);
+    installApiMock(routes('REWORK', [returned]));
+    renderApp(`/app/technical/${QUEUE_PATH.REWORK}`);
     expect(await screen.findByTestId('accept-i1')).toBeInTheDocument();
   });
 });

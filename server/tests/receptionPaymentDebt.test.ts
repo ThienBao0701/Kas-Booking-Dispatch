@@ -60,8 +60,10 @@ afterAll(async () => {
   await resetAll();
 });
 
+// "Nguồn" is required for a new payment; these tests are about method and note,
+// so they say "Khác" unless one names its own source.
 const pay = (payment: Record<string, unknown>) =>
-  letan.post('/api/reception/reports').send({ category: 'PAYMENT', payment });
+  letan.post('/api/reception/reports').send({ category: 'PAYMENT', payment: { source: 'Khác', ...payment } });
 
 async function cash() {
   const res = await letan.get('/api/reception/shifts/cash');
@@ -190,5 +192,12 @@ describe('"Nguồn"', () => {
 
   it('still refuses a source outside the list', async () => {
     expect((await pay({ method: 'CASH', amount: 1000, source: 'Facebook' })).status).toBe(422);
+  });
+
+  it('still refuses a new payment with no source at all', async () => {
+    const res = await letan
+      .post('/api/reception/reports')
+      .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 1000 } });
+    expect(res.status).toBe(422);
   });
 });

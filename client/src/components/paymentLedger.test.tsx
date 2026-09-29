@@ -43,7 +43,7 @@ const OPTIONS = {
   categories: [
     { code: 'PAYMENT', label: 'Theo dõi thanh toán' },
     { code: 'GUEST_REQUEST', label: 'Vấn đề khách yêu cầu' },
-    { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
+    { code: 'FACILITY_ISSUE', label: 'Sự cố cơ sở vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
     { code: 'HOTEL_DELIVERY', label: 'Giao nhận hàng hóa' },
@@ -157,7 +157,7 @@ function shellRoutes(
       body: { reports: [payment()], counts: { ...EMPTY_COUNTS, PAYMENT: 1 } },
     }),
     'GET /api/reception/shifts/cash': () => ({ status: 200, body: { cash: cash() } }),
-    'GET /api/issues?pageSize=100&outstanding=true': () => ({
+    'GET /api/issues?scope=active&pageSize=100': () => ({
       status: 200,
       body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 0 } },
     }),
@@ -260,6 +260,30 @@ describe('the sheet', () => {
     const cells = within(row).getAllByRole('cell').map((c) => c.textContent);
     // STT, Tên khách, Mã EZ, Nguồn, Tiền mặt, Chuyển khoản, Cà thẻ, Công nợ, Chi, Ghi chú, Thao tác.
     expect(cells.slice(4, 9)).toEqual(['—', '—', '500.000 ₫', '200.000 ₫', '—']);
+  });
+
+  it('shows a transfer under "Chuyển khoản", immediately after "Tiền mặt"', async () => {
+    installApiMock(
+      shellRoutes({
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: {
+            reports: [
+              payment({}, { method: 'TRANSFER', methodLabel: 'Chuyển khoản', amount: 240000, cash: 0, transfer: 240000, card: 0 }),
+            ],
+            counts: { ...EMPTY_COUNTS, PAYMENT: 1 },
+          },
+        }),
+      }),
+    );
+    await openPayment();
+
+    const table = await screen.findByTestId('payment-table');
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.indexOf('Chuyển khoản')).toBe(headers.indexOf('Tiền mặt') + 1);
+    const cells = within(within(table).getByTestId('payment-row-p1')).getAllByRole('cell').map((c) => c.textContent);
+    expect(cells[headers.indexOf('Tiền mặt')]).toBe('—');
+    expect(cells[headers.indexOf('Chuyển khoản')]).toBe('240.000 ₫');
   });
 
   it('says so plainly when the shift has no transactions', async () => {
@@ -429,6 +453,7 @@ describe('adding a transaction', () => {
     await openPaymentForm();
 
     await userEvent.type(await screen.findByTestId('payment-ez'), 'EZ999');
+    await userEvent.selectOptions(screen.getByTestId('payment-source'), 'Booking');
     await userEvent.type(screen.getByTestId('payment-guest'), 'Khách B');
     await userEvent.selectOptions(screen.getByTestId('payment-method'), 'TRANSFER');
     await userEvent.type(screen.getByTestId('payment-amount'), '3150000');
@@ -441,6 +466,7 @@ describe('adding a transaction', () => {
     expect(body.payment.amount).toBe(3150000);
     expect(body.payment.expense).toBe(100000);
     expect(body.payment.ezCode).toBe('EZ999');
+    expect(body.payment.source).toBe('Booking');
 
     /*
       The dialog closes itself. It used to be a permanent form that blanked its
@@ -682,7 +708,8 @@ describe('the opening-cash reminder', () => {
     await screen.findByTestId('opening-cash-warning');
 
     await userEvent.click(screen.getByTestId('category-add'));
-    await userEvent.type(await screen.findByTestId('payment-amount'), '150000');
+    await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Walking');
+    await userEvent.type(screen.getByTestId('payment-amount'), '150000');
     await userEvent.click(screen.getByTestId('payment-add'));
     await waitFor(() => expect(posted).toHaveLength(1));
   });
@@ -719,6 +746,35 @@ describe('"Nguồn" is a controlled select', () => {
       // No `receivable`: Công nợ is a payment METHOD now, not a second amount box.
       payment: { source: 'Agoda', method: 'CASH', amount: 100000, expense: 0 },
     });
+  });
+
+  /**
+   * REQUIRED ON A NEW PAYMENT. The form says so before the server has to: a
+   * walk-in is "Walking", not a blank.
+   */
+  it('will not send a new payment without a source, and says why', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: payment() } };
+        },
+      }),
+    );
+    await openPaymentForm();
+
+    await userEvent.type(await screen.findByTestId('payment-amount'), '100000');
+    await userEvent.click(screen.getByTestId('payment-add'));
+    expect(await screen.findByTestId('payment-source-error')).toHaveTextContent('Vui lòng chọn nguồn.');
+    expect(screen.getByTestId('payment-source')).toHaveAttribute('aria-invalid', 'true');
+    expect(posted).toHaveLength(0);
+
+    await userEvent.selectOptions(screen.getByTestId('payment-source'), 'Walking');
+    expect(screen.queryByTestId('payment-source-error')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('payment-add'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect((posted[0] as { payment: Record<string, unknown> }).payment.source).toBe('Walking');
   });
 
   it('keeps an older free-text source on a correction instead of rewriting it', async () => {
@@ -768,7 +824,9 @@ describe('Công nợ is a method, and the note travels with the payment', () => 
     );
     await openPaymentForm();
 
-    await userEvent.selectOptions(await screen.findByTestId('payment-method'), 'DEBT');
+    // "Nguồn" is required for a new payment; "Khác" is for what is no booking channel.
+    await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Khác');
+    await userEvent.selectOptions(screen.getByTestId('payment-method'), 'DEBT');
     await userEvent.type(screen.getByTestId('payment-amount'), '750000');
     await userEvent.type(screen.getByTestId('payment-note'), 'Công ty chuyển khoản cuối tháng');
     await userEvent.click(screen.getByTestId('payment-add'));
@@ -776,7 +834,7 @@ describe('Công nợ is a method, and the note travels with the payment', () => 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       category: 'PAYMENT',
-      payment: { method: 'DEBT', amount: 750000, expense: 0, note: 'Công ty chuyển khoản cuối tháng' },
+      payment: { source: 'Khác', method: 'DEBT', amount: 750000, expense: 0, note: 'Công ty chuyển khoản cuối tháng' },
     });
   });
 
@@ -784,6 +842,7 @@ describe('Công nợ is a method, and the note travels with the payment', () => 
     installApiMock(shellRoutes());
     await openPaymentForm();
     expect(await screen.findByTestId('payment-add')).toBeDisabled();
+    await userEvent.selectOptions(screen.getByTestId('payment-source'), 'Walking');
     await userEvent.type(screen.getByTestId('payment-amount'), '1000');
     expect(screen.getByTestId('payment-add')).toBeEnabled();
   });

@@ -273,7 +273,7 @@ function PaymentSummaryStrip({
     return (
       <div
         data-testid="cash-summary-loading"
-        className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500"
+        className="flex items-center gap-2 rounded-xl border border-line bg-white px-4 py-3 text-sm text-slate-500"
       >
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
         Đang tải số dư ca…
@@ -311,8 +311,8 @@ function PaymentSummaryStrip({
           </Button>
         </div>
       ) : null}
-      <div data-testid="cash-summary-strip" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-5">
+      <div data-testid="cash-summary-strip" className="overflow-hidden rounded-xl border-section border-line bg-white">
+        <div className="grid grid-cols-2 gap-0.5 bg-line-subtle sm:grid-cols-5">
           <OpeningCashCell
             openingCash={summary.openingCash}
             editing={editingOpening}
@@ -337,7 +337,7 @@ function PaymentSummaryStrip({
             </p>
           </div>
         </div>
-        <p className="border-t border-slate-100 px-3 py-1.5 text-[11px] text-slate-400">
+        <p className="border-t-rule border-line-subtle px-3 py-1.5 text-[11px] text-slate-400">
           Tiền cuối ca = Tiền đầu ca + Thu tiền mặt − Chi tiền mặt. Chuyển khoản và cà thẻ không làm
           thay đổi tiền mặt.
           {summary.voidedCount > 0 ? (
@@ -447,11 +447,12 @@ const EMPTY_FORM = {
 };
 
 const selectClass =
-  'block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600';
+  'block w-full rounded-xl border border-line-strong bg-white px-3 py-2.5 text-sm text-slate-900 hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-600';
 
 /**
- * "NGUỒN" IS A SELECT, NOT A TEXT BOX — the five channels the server accepts
- * (`/reception/reports/options`), or none for a walk-in. Free text is how one
+ * "NGUỒN" IS A SELECT, NOT A TEXT BOX — the six channels the server accepts
+ * (`/reception/reports/options`), "Walking" being the walk-in. REQUIRED on a
+ * new payment: the placeholder is a prompt, not a value. Free text is how one
  * channel became three spellings in a report.
  */
 function SourceSelect({
@@ -461,6 +462,7 @@ function SourceSelect({
   sources,
   className = selectClass,
   testId,
+  invalid = false,
 }: {
   id?: string;
   value: string;
@@ -468,12 +470,21 @@ function SourceSelect({
   sources: string[];
   className?: string;
   testId: string;
+  invalid?: boolean;
 }) {
   // An older row may carry a source typed before the list was closed. It is
   // offered as-is so a correction does not silently rewrite it.
   const legacy = value && !sources.includes(value) ? value : null;
   return (
-    <select id={id} value={value} onChange={(e) => onChange(e.target.value)} data-testid={testId} className={className}>
+    <select
+      id={id}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      data-testid={testId}
+      aria-required="true"
+      aria-invalid={invalid ? true : undefined}
+      className={`${className} ${invalid ? '!border-red-500' : ''}`}
+    >
       <option value="">— Chọn nguồn —</option>
       {sources.map((s) => (
         <option key={s} value={s}>
@@ -500,6 +511,9 @@ function NewPaymentForm({
 }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState<string | null>(null);
+  // "Nguồn" turns red only after an attempt to save without it — not while the
+  // receptionist is still filling the form top to bottom.
+  const [triedSubmit, setTriedSubmit] = useState(false);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
@@ -509,7 +523,7 @@ function NewPaymentForm({
         category: 'PAYMENT',
         payment: {
           ezCode: form.ezCode.trim() || undefined,
-          source: form.source || undefined,
+          source: form.source,
           guestName: form.guestName.trim() || undefined,
           method: form.method,
           // Parsed at the boundary: the grouped display never leaves the field.
@@ -520,22 +534,26 @@ function NewPaymentForm({
       }),
     onSuccess: async () => {
       setError(null);
+      setTriedSubmit(false);
       setForm(EMPTY_FORM);
       await onCreated();
     },
     onError: (e) => setError(toUserMessage(e)),
   });
 
-  const ready = parseVnd(form.amount) !== null;
+  // The server refuses a payment without a source; the form says so first.
+  const missingSource = form.source === '';
+  const ready = parseVnd(form.amount) !== null && !missingSource;
 
   return (
     <form
       data-testid="payment-form"
       onSubmit={(e) => {
         e.preventDefault();
+        setTriedSubmit(true);
         if (ready) create.mutate();
       }}
-      className={bare ? 'space-y-2.5' : 'space-y-2.5 rounded-xl border border-slate-200 bg-white px-4 py-3'}
+      className={bare ? 'space-y-2.5' : 'space-y-2.5 rounded-xl border border-line bg-white px-4 py-3'}
     >
       {bare ? null : <p className="text-sm font-semibold text-slate-800">Thêm giao dịch</p>}
 
@@ -557,7 +575,7 @@ function NewPaymentForm({
         <Input label="Mã EZ" value={form.ezCode} onChange={(e) => set('ezCode', e.target.value)} data-testid="payment-ez" />
         <div className="space-y-1.5">
           <label htmlFor="payment-source" className="block text-sm font-medium text-slate-700">
-            Nguồn
+            Nguồn <span className="text-rose-600">*</span>
           </label>
           <SourceSelect
             id="payment-source"
@@ -565,7 +583,13 @@ function NewPaymentForm({
             onChange={(v) => set('source', v)}
             sources={sources}
             testId="payment-source"
+            invalid={triedSubmit && missingSource}
           />
+          {triedSubmit && missingSource ? (
+            <p className="text-xs text-red-600" data-testid="payment-source-error">
+              Vui lòng chọn nguồn.
+            </p>
+          ) : null}
         </div>
         <Input label="Tên khách" value={form.guestName} onChange={(e) => set('guestName', e.target.value)} data-testid="payment-guest" />
       </div>
@@ -612,19 +636,24 @@ function NewPaymentForm({
           rows={2}
           maxLength={2000}
           data-testid="payment-note"
-          className="block w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+          className="block w-full rounded-xl border border-line-strong px-3 py-2.5 text-sm font-normal text-slate-900 hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-600"
         />
       </label>
 
       {error ? <ErrorAlert>{error}</ErrorAlert> : null}
 
-      <div className={`flex justify-end gap-2 ${bare ? 'border-t border-slate-100 pt-3' : ''}`}>
+      <div className={`flex justify-end gap-2 ${bare ? 'border-t border-line-subtle pt-3' : ''}`}>
         {onCancel ? (
           <Button type="button" variant="secondary" onClick={onCancel} data-testid="payment-cancel">
             Hủy
           </Button>
         ) : null}
-        <Button type="submit" disabled={!ready} loading={create.isPending} data-testid="payment-add">
+        <Button
+          type="submit"
+          disabled={parseVnd(form.amount) === null}
+          loading={create.isPending}
+          data-testid="payment-add"
+        >
           <Plus className="h-4 w-4" aria-hidden="true" />
           Thêm
         </Button>
@@ -660,8 +689,8 @@ function PaymentTable({
   const [voidingId, setVoidingId] = useState<string | null>(null);
 
   return (
-    <section data-testid="payment-table-section" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <header className="flex items-center justify-between border-b border-slate-200 bg-slate-50/70 px-4 py-2.5">
+    <section data-testid="payment-table-section" className="overflow-hidden rounded-xl border-section border-line bg-white">
+      <header className="flex items-center justify-between border-b-rule border-line bg-slate-50/70 px-4 py-2.5">
         <h3 className="text-sm font-semibold text-slate-800">
           Danh sách giao dịch trong ca
           <span className="ml-2 rounded bg-slate-200/80 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
@@ -682,7 +711,7 @@ function PaymentTable({
             <button
               type="button"
               onClick={onRetry}
-              className="mt-3 inline-flex min-h-[2.5rem] items-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              className="mt-3 inline-flex min-h-[2.5rem] items-center rounded-lg border border-line-strong px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
               Thử lại
             </button>
@@ -712,7 +741,7 @@ function PaymentTable({
               says who and the booking says where. The Admin's table keeps all of
               them.
             */}
-            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <thead className="border-b-rule border-line bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">STT</th>
                 <th className="px-3 py-2 text-left font-medium">Tên khách</th>
@@ -727,7 +756,7 @@ function PaymentTable({
                 <th className="w-[1%] whitespace-nowrap px-3 py-2 text-right font-medium">Thao tác</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y-rule divide-line-subtle">
               {rows.map((row, index) =>
                 editingId === row.id ? (
                   <EditRow
@@ -789,7 +818,7 @@ function ReadRow({
       data-testid={`payment-row-${row.id}`}
       className={`transition-colors hover:bg-slate-50 ${row.voided ? 'bg-slate-50 text-slate-400 line-through' : ''}`}
     >
-      <td className="px-3 py-2.5 align-top text-slate-400">{index + 1}</td>
+      <td className="px-3 py-2.5 align-top text-slate-500">{index + 1}</td>
       <td className="min-w-[7rem] px-3 py-2.5 align-top">
         {p.guestName ?? '—'}
         {row.voided ? (
@@ -826,7 +855,7 @@ function ReadRow({
               type="button"
               onClick={onEdit}
               data-testid={`payment-edit-${row.id}`}
-              className="ml-1 inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              className="ml-1 inline-flex items-center gap-1 rounded-lg border border-line-strong px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               <Pencil className="h-3 w-3" aria-hidden="true" />
               Sửa
@@ -835,7 +864,7 @@ function ReadRow({
               type="button"
               onClick={onVoid}
               data-testid={`payment-void-${row.id}`}
-              className="ml-1 inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
+              className="ml-1 inline-flex items-center gap-1 rounded-lg border border-rose-300 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
             >
               <Trash2 className="h-3 w-3" aria-hidden="true" />
               Xóa
@@ -895,11 +924,11 @@ function EditRow({
     onError: (e) => setError(toUserMessage(e)),
   });
 
-  const cell = 'w-full rounded-lg border border-slate-300 px-2 py-1 text-xs';
+  const cell = 'w-full rounded-lg border border-line-strong bg-white px-2 py-1 text-xs';
 
   return (
     <tr data-testid={`payment-edit-row-${row.id}`} className="bg-amber-50/40">
-      <td className="px-3 py-2 align-top text-slate-400">{index + 1}</td>
+      <td className="px-3 py-2 align-top text-slate-500">{index + 1}</td>
       <td className="px-2 py-2 align-top">
         <input className={cell} value={draft.guestName} onChange={(e) => setDraft({ ...draft, guestName: e.target.value })} />
         {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
@@ -977,7 +1006,7 @@ function EditRow({
           type="button"
           onClick={onCancel}
           data-testid={`payment-cancel-${row.id}`}
-          className="ml-1 inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600"
+          className="ml-1 inline-flex items-center gap-1 rounded-lg border border-line-strong px-2 py-1 text-xs font-medium text-slate-600"
         >
           <X className="h-3 w-3" aria-hidden="true" />
           Hủy sửa

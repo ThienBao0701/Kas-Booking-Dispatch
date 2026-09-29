@@ -19,3 +19,13 @@ export const CASH_KEY = ['reception', 'reports', 'cash'];
  * written through the journal moves this too, so a write invalidates both.
  */
 export const DELIVERIES_KEY = ['reception', 'deliveries'];
+
+/**
+ * II and IV across shifts, and "Hoàn thành vấn đề" — both UNDER `REPORTS_KEY`,
+ * so every write that refreshes the journal refreshes them with it.
+ */
+export const ACTIVE_REPORTS_KEY = ['reception', 'reports', 'active'];
+export const ARCHIVED_REPORTS_KEY = ['reception', 'reports', 'archive'];
+
+/** The facility board's and the archive's own reads of the incidents (III). */
+export const FACILITY_BOARD_KEY = ['reception', 'facility-board'];

@@ -65,6 +65,7 @@ export function createNavBadgesRouter(): Router {
       if (
         user.role === 'BOOKING_DEPARTMENT' ||
         user.role === 'TECHNICAL' ||
+        user.role === 'TECHNICAL_MANAGER' ||
         user.role === 'HOUSEKEEPING'
       ) {
         res.json({ counts: EMPTY, serverNow: now.toISOString() });

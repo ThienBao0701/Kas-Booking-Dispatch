@@ -24,6 +24,7 @@ import type { BranchOperationalReport, OperationalReportData } from '../receptio
 import type { SerializedReport } from '../reception/reportService';
 import { CATEGORY_LABELS, ROOM_SERVICE_PRICE_LABEL } from '../reception/reportTypes';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
+import { inspectionEnabled } from '../issue/issueLifecycle';
 import { hcmDateTime, hcmDayLabel } from './format';
 
 /** Vietnamese thousands separators over a real number. */
@@ -238,9 +239,22 @@ export async function buildOperationalReportWorkbook(
     { header: 'Khu vực / Vị trí', key: 'location', width: 30 },
     { header: 'Loại sự cố', key: 'category', width: 18 },
     { header: 'Mô tả', key: 'description', width: 46 },
+    // The ONE canonical cause — the latest technician's, else the reported one.
+    { header: 'Nguyên nhân', key: 'cause', width: 36 },
     { header: 'Trạng thái kỹ thuật', key: 'status', width: 18 },
     { header: 'Người xử lý', key: 'technician', width: 20 },
     { header: 'SĐT kỹ thuật', key: 'phone', width: 16 },
+    { header: 'Thời gian hoàn thành', key: 'completedAt', width: 20 },
+    // "Nghiệm thu" only while it is part of the workflow. Dormant, the file has
+    // no such columns — the values stay on the attempts, not in the export.
+    ...(inspectionEnabled()
+      ? [
+          { header: 'Nghiệm thu', key: 'inspection', width: 16 },
+          { header: 'Người nghiệm thu', key: 'inspector', width: 20 },
+          { header: 'Thời gian nghiệm thu', key: 'inspectedAt', width: 20 },
+          { header: 'Ghi chú nghiệm thu', key: 'inspectionNote', width: 36 },
+        ]
+      : []),
     { header: 'Số lần sửa', key: 'attempts', width: 12 },
     { header: 'Không sửa được', key: 'cannotRepair', width: 16 },
     { header: 'Người báo', key: 'createdBy', width: 20 },
@@ -252,6 +266,14 @@ export async function buildOperationalReportWorkbook(
   for (const section of data.branches) {
     section.byCategory.FACILITY_ISSUE.forEach((row, i) => {
       const issue = row.facility?.issue;
+      // The verdict the "Nghiệm thu" column states, and only that one: while a
+      // later repair awaits inspection the column says "Chưa nghiệm thu", and an
+      // earlier round's inspector and reason beside it would read as a verdict
+      // on the repair nobody has judged yet. Never inferred for older work.
+      const judged =
+        issue && (issue.inspectionState === 'PASSED' || issue.inspectionState === 'FAILED')
+          ? [...issue.attempts].reverse().find((a) => a.inspection)
+          : undefined;
       facilities.addRow({
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
@@ -262,9 +284,15 @@ export async function buildOperationalReportWorkbook(
         location: issue?.locationLabel ?? '',
         category: issue?.category ?? '',
         description: issue?.description ?? '',
-        status: issue ? (issue.needsRework ? 'Cần xử lý lại' : issue.status) : '',
-        technician: issue?.technicianName ?? '',
+        cause: issue?.cause ?? '',
+        status: issue?.stageLabel ?? '',
+        technician: issue?.repairerName ?? '',
         phone: issue?.technicianPhone ?? '',
+        completedAt: issue?.completedAt ? when(issue.completedAt) : '',
+        inspection: issue?.inspectionLabel ?? '',
+        inspector: judged?.inspection?.inspectedByName ?? '',
+        inspectedAt: judged?.inspection?.inspectedAt ? when(judged.inspection.inspectedAt) : '',
+        inspectionNote: judged?.inspection?.note ?? '',
         attempts: issue?.attempts.length ?? 0,
         cannotRepair: issue?.cannotRepairCount ?? 0,
         createdBy: row.createdByName,
@@ -334,6 +362,9 @@ export async function buildOperationalReportWorkbook(
     { header: 'Từ hạng phòng', key: 'from', width: 18 },
     { header: 'Tới hạng phòng', key: 'to', width: 18 },
     { header: 'Số đêm', key: 'nights', width: 10 },
+    // "Review" rows: the counts, as numbers. Blank on every other service.
+    { header: 'Tripadvisor', key: 'tripadvisor', width: 12 },
+    { header: 'Google', key: 'google', width: 10 },
     { header: ROOM_SERVICE_PRICE_LABEL, key: 'price', width: 18 },
     { header: 'Ghi chú', key: 'note', width: 32 },
     { header: 'Nhân viên', key: 'staff', width: 20 },
@@ -365,7 +396,10 @@ export async function buildOperationalReportWorkbook(
         phone: s?.phone ?? '',
         room: s?.roomNumber ?? '',
         serviceName: s?.serviceName ?? '',
-        price: s?.price ?? 0,
+        // A review is a count, not a sale: no price to state.
+        price: s && !s.countsAsRevenue ? null : (s?.price ?? 0),
+        tripadvisor: s?.tripadvisorCount ?? null,
+        google: s?.googleCount ?? null,
         note: s?.note ?? '',
         staff: row.createdByName,
         shift: row.shiftName ?? '',

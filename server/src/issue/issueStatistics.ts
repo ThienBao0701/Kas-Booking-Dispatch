@@ -23,6 +23,7 @@ import { durationSeconds, formatDuration } from '../lib/duration';
 import { hcmRange } from '../booking/recreationReport';
 import { ISSUE_AREA_LABELS } from './issueArea';
 import { ISSUE_CATEGORY_LABELS } from './issueService';
+import { completedStatuses, outstandingStatuses, stageWhere } from './issueLifecycle';
 
 /** The periods the screen offers. A closed list, so the query cannot be made huge. */
 export const STATISTICS_PERIOD_DAYS = [7, 30, 90] as const;
@@ -103,12 +104,12 @@ export async function computeIncidentStatistics(
       where: reported,
       _count: { _all: true },
     }),
-    needsRework: await tx.hotelIssue.count({
-      where: { ...reported, status: 'NEW', attempts: { some: { outcome: 'CANNOT_REPAIR' } } },
-    }),
+    // "Cần sửa lại": back in the queue after an attempt — the one definition the
+    // queue, the counters and the exports share (`issueLifecycle.stageWhere`).
+    needsRework: await tx.hotelIssue.count({ where: { ...reported, ...stageWhere('REWORK') } }),
     outstanding: await tx.hotelIssue.groupBy({
       by: ['status'],
-      where: { ...branch, status: { in: ['NEW', 'IN_PROGRESS'] } },
+      where: { ...branch, status: { in: outstandingStatuses() } },
       _count: { _all: true },
     }),
     // Timestamps only: the trend is bucketed by HCM day below, and a day is not
@@ -127,14 +128,21 @@ export async function computeIncidentStatistics(
     }),
   }));
 
-  const count = (status: string) =>
-    result.byStatus.find((g) => g.status === status)?._count._all ?? 0;
-  const newCount = count('NEW');
-  const inProgressCount = count('IN_PROGRESS');
-  const completedCount = count('COMPLETED');
+  /*
+    WHAT "FINISHED" MEANS IS THE LIFECYCLE'S, NOT THIS FILE'S. With inspection
+    dormant a technician's "Hoàn thành" (AWAITING_INSPECTION in the database)
+    closes the incident; with it on, only a pass does. Anything neither new nor
+    finished is being worked, "Chờ nghiệm thu" included.
+  */
+  const finishedStatuses = new Set<string>(completedStatuses());
+  const sumOf = (groups: { status: string; _count: { _all: number } }[], keep: (status: string) => boolean) =>
+    groups.reduce((n, g) => (keep(g.status) ? n + g._count._all : n), 0);
+  const newCount = sumOf(result.byStatus, (st) => st === 'NEW');
+  const completedCount = sumOf(result.byStatus, (st) => finishedStatuses.has(st));
+  const inProgressCount = sumOf(result.byStatus, (st) => st !== 'NEW' && !finishedStatuses.has(st));
 
-  const outstandingOf = (status: string) =>
-    result.outstanding.find((g) => g.status === status)?._count._all ?? 0;
+  const outstandingNew = sumOf(result.outstanding, (st) => st === 'NEW');
+  const outstandingInProgress = sumOf(result.outstanding, (st) => st !== 'NEW');
 
   const byArea = result.byArea
     .map((g) => ({
@@ -155,9 +163,8 @@ export async function computeIncidentStatistics(
 
   const byBranch = result.branches.map((b) => {
     const rows = result.byBranchStatus.filter((g) => g.branchId === b.id);
-    const of = (status: string) => rows.find((g) => g.status === status)?._count._all ?? 0;
-    const completed = of('COMPLETED');
-    const total = of('NEW') + of('IN_PROGRESS') + completed;
+    const completed = sumOf(rows, (st) => finishedStatuses.has(st));
+    const total = sumOf(rows, () => true);
     return {
       branchId: b.id,
       branchNumber: b.branchNumber,
@@ -210,15 +217,17 @@ export async function computeIncidentStatistics(
       needsReworkCount: result.needsRework,
     },
     outstanding: {
-      total: outstandingOf('NEW') + outstandingOf('IN_PROGRESS'),
-      newCount: outstandingOf('NEW'),
-      inProgressCount: outstandingOf('IN_PROGRESS'),
+      total: outstandingNew + outstandingInProgress,
+      newCount: outstandingNew,
+      inProgressCount: outstandingInProgress,
     },
-    byStatus: (['NEW', 'IN_PROGRESS', 'COMPLETED'] as const).map((status) => ({
-      status,
-      label: STATUS_LABELS[status],
-      count: count(status),
-    })),
+    byStatus: (
+      [
+        ['NEW', newCount],
+        ['IN_PROGRESS', inProgressCount],
+        ['COMPLETED', completedCount],
+      ] as const
+    ).map(([status, count]) => ({ status, label: STATUS_LABELS[status], count })),
     byArea,
     byCategory,
     byBranch,

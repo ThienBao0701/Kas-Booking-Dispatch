@@ -16,11 +16,28 @@ export type IssueCategory =
   | 'OTHER';
 
 /**
- * The three workflow states. COMPLETED was called RESOLVED before the technical
- * department existed; the enum value itself was renamed in the database, so
- * there is no legacy literal to keep accepting here.
+ * The workflow states as stored. COMPLETED was called RESOLVED before the
+ * technical department existed; the enum value itself was renamed in the
+ * database, so there is no legacy literal to keep accepting here.
+ *
+ * AWAITING_INSPECTION is "the technician finished" — NOT "Đã hoàn thành". Only
+ * Quản lý kỹ thuật passing the repair makes an incident COMPLETED.
  */
-export type IssueStatus = 'NEW' | 'IN_PROGRESS' | 'COMPLETED';
+export type IssueStatus = 'NEW' | 'IN_PROGRESS' | 'AWAITING_INSPECTION' | 'COMPLETED';
+
+/**
+ * Where an incident stands, as people say it — computed by the SERVER
+ * (`issueLifecycle`), so every screen and export uses one vocabulary.
+ *
+ * WAITING and REWORK are both NEW in the database; REWORK has been worked
+ * before (a failed inspection or a "Không sửa được").
+ */
+export type IssueStage = 'WAITING' | 'REWORK' | 'IN_PROGRESS' | 'AWAITING_INSPECTION' | 'COMPLETED';
+
+/** "Nghiệm thu" for the incident. NO_DATA: finished before inspection existed. */
+export type InspectionState = 'PENDING' | 'PASSED' | 'FAILED' | 'NO_DATA';
+
+export type InspectionResult = 'PASSED' | 'FAILED';
 
 /** WHERE the incident is — the first thing the report form asks. */
 export type IssueAreaCategory =
@@ -93,6 +110,7 @@ export const ISSUE_AREA_SUBTYPE_LABEL: Record<IssueAreaSubtype, string> = Object
 export const ISSUE_STATUS_LABEL: Record<IssueStatus, string> = {
   NEW: 'Sự cố khách sạn',
   IN_PROGRESS: 'Đang sửa',
+  AWAITING_INSPECTION: 'Chờ nghiệm thu',
   COMPLETED: 'Đã hoàn thành',
 };
 
@@ -154,8 +172,23 @@ export interface RepairAttempt {
   outcome: RepairOutcome | null;
   outcomeAt: string | null;
   reason: string | null;
+  /** "Nguyên nhân" as THIS attempt's technician determined it. */
+  cause: string | null;
+  /** "Kết quả sửa chữa". */
+  result: string | null;
+  /** Quản lý kỹ thuật's verdict on this attempt — null until there is one. */
+  inspection: AttemptInspection | null;
   durationSeconds: number | null;
   durationLabel: string | null;
+}
+
+export interface AttemptInspection {
+  result: InspectionResult;
+  resultLabel: string;
+  inspectedByName: string | null;
+  inspectedAt: string | null;
+  /** Optional note on a pass; the required reason on a fail. */
+  note: string | null;
 }
 
 export interface Issue {
@@ -171,10 +204,28 @@ export interface Issue {
   locationLabel: string;
   category: IssueCategory | null;
   description: string;
+  /** "Nguyên nhân" as Reception reported it — often empty. */
+  reportedCause: string | null;
+  /** THE cause: the latest technician's determination, else the reported one. */
+  cause: string | null;
   photoUrl: string | null;
   status: IssueStatus;
+  /**
+   * Whether "Nghiệm thu" is part of the active workflow. Implemented, and
+   * DORMANT until switched on: while false, no screen shows anything about it.
+   */
+  inspectionEnabled: boolean;
+  stage: IssueStage;
+  stageLabel: string;
+  inspectionState: InspectionState;
+  inspectionLabel: string;
+  /** "Người sửa": the latest attempt's technician. */
+  repairerName: string | null;
   reportedBy: Actor | null;
+  /** The reporting ACCOUNT's name, kept for audit. */
   reportedByName: string | null;
+  /** "Người báo" as a person reads it — composed by the server. */
+  reporterName: string | null;
   acceptedBy: Actor | null;
   acceptedByName: string | null;
   acceptedAt: string | null;
@@ -193,11 +244,12 @@ export interface Issue {
   attempts: RepairAttempt[];
   cannotRepairCount: number;
   /**
-   * Back in the queue after somebody tried and could not fix it.
+   * Back in the queue after somebody worked it — a failed inspection or a
+   * "Không sửa được".
    *
    * `status` alone cannot say this — a fresh report and a returned one are both
    * NEW — so the server derives the difference and the queue renders it as
-   * "Cần xử lý lại".
+   * "Cần sửa lại".
    */
   needsRework: boolean;
   /** What the desk corrected after filing ("Sửa vấn đề"), oldest first. */
@@ -257,6 +309,36 @@ export interface IncidentStatistics {
   trend: { date: string; reported: number; completed: number }[];
 }
 
+/**
+ * Whether the inspection is worth stating yet. While a fresh report waits or a
+ * first repair is under way there is nothing to judge, and "Chưa nghiệm thu"
+ * beside "Chờ kỹ thuật" would only be noise.
+ */
+export function inspectionIsRelevant(
+  issue: Pick<Issue, 'stage' | 'inspectionState'> & { inspectionEnabled?: boolean },
+): boolean {
+  // Dormant: nothing about inspection is shown, however the data reads.
+  if (issue.inspectionEnabled === false) return false;
+  return (
+    issue.stage === 'AWAITING_INSPECTION' || issue.stage === 'COMPLETED' || issue.inspectionState === 'FAILED'
+  );
+}
+
+/**
+ * The verdict the incident's inspection badge is ABOUT, or null.
+ *
+ * Only when the badge states one (Đạt / Không đạt). While a later repair waits
+ * for inspection the badge says "Chưa nghiệm thu", and showing the previous
+ * round's inspector, time and reason beside it would read as a verdict on the
+ * repair nobody has judged yet — that round stays in the attempt history.
+ */
+export function currentVerdict(
+  issue: Pick<Issue, 'inspectionState' | 'attempts'>,
+): AttemptInspection | null {
+  if (issue.inspectionState !== 'PASSED' && issue.inspectionState !== 'FAILED') return null;
+  return [...(issue.attempts ?? [])].reverse().find((a) => a.inspection)?.inspection ?? null;
+}
+
 /** The fault type, or an em dash for the areas that are not asked for one. */
 export function issueCategoryLabel(issue: Pick<Issue, 'category'>): string {
   return issue.category ? ISSUE_CATEGORY_LABEL[issue.category] : '—';
@@ -267,7 +349,7 @@ export interface IssueListResponse {
   pagination: Pagination;
 }
 
-/** Unresolved (NEW + IN_PROGRESS) counters for one branch. */
+/** Unresolved (NEW + IN_PROGRESS + AWAITING_INSPECTION) counters for one branch. */
 export interface BranchIssueSummary {
   branchId: number;
   code: string;
@@ -275,6 +357,7 @@ export interface BranchIssueSummary {
   hotelName: string;
   newCount: number;
   inProgressCount: number;
+  awaitingInspectionCount: number;
   totalUnresolved: number;
 }
 
@@ -283,14 +366,21 @@ export interface IssueSummary {
   totalUnresolved: number;
   newCount: number;
   inProgressCount: number;
+  awaitingInspectionCount: number;
   byBranch: BranchIssueSummary[];
 }
 
-/** The three queue totals, counted server-side across every branch. */
+/** The queue totals, counted server-side across every branch. */
 export interface TechnicalCounts {
+  /** Fresh reports nobody has worked. */
   newCount: number;
+  /** "Cần sửa lại". */
+  reworkCount: number;
   inProgressCount: number;
+  awaitingInspectionCount: number;
   completedCount: number;
+  /** Whether the "Chờ nghiệm thu" queue exists in the active workflow. */
+  inspectionEnabled: boolean;
 }
 
 function query(params: Record<string, string | number | undefined>): string {
@@ -305,6 +395,8 @@ function query(params: Record<string, string | number | undefined>): string {
 export interface NewIssueInput {
   areaCategory: IssueAreaCategory;
   description: string;
+  /** "Nguyên nhân" — optional. */
+  cause?: string;
   category?: IssueCategory;
   roomNumber?: string;
   floorNumber?: string;
@@ -328,10 +420,16 @@ export const issuesApi = {
     params: {
       branchId?: number;
       status?: IssueStatus;
+      stage?: IssueStage;
       areaCategory?: IssueAreaCategory;
       from?: string;
       to?: string;
       outstanding?: boolean;
+      /** The 12-hour completion rule: Reception's active board, or its archive. */
+      scope?: 'active' | 'archive';
+      /** Technical's "Đã hoàn thành": inclusive HCM days of the technician's completion. */
+      completedFrom?: string;
+      completedTo?: string;
       page?: number;
       pageSize?: number;
     } = {},
@@ -348,6 +446,7 @@ export const issuesApi = {
     const form = new FormData();
     form.append('areaCategory', input.areaCategory);
     form.append('description', input.description);
+    if (input.cause?.trim()) form.append('cause', input.cause.trim());
     // Only the fields this area actually uses are sent; the server drops any
     // that do not belong to it anyway.
     if (input.category) form.append('category', input.category);
@@ -368,7 +467,17 @@ export const issuesApi = {
   accept: (id: string, input: AcceptIssueInput) =>
     api.post<{ issue: Issue }>(`/issues/${id}/accept`, input),
 
-  complete: (id: string) => api.post<{ issue: Issue }>(`/issues/${id}/complete`, {}),
+  /** "Hoàn thành": the result is required; the cause only when the technician changed it. */
+  complete: (id: string, input: { result?: string; cause?: string } = {}) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/complete`, input),
+
+  /** "Nguyên nhân" found during the repair, on the attempt still open. */
+  updateCause: (id: string, input: { cause: string }) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/cause`, input),
+
+  /** "Nghiệm thu" — Quản lý kỹ thuật only. A fail needs its reason. */
+  inspect: (id: string, input: { result: InspectionResult; note?: string }) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/inspect`, input),
 
   /** "Không sửa được" — back to the queue, with a reason that is required. */
   cannotRepair: (id: string, input: { reason: string }) =>

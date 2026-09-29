@@ -240,6 +240,8 @@ describe('the six categories', () => {
       'Hút thuốc',
       'Giặt ủi',
       'Dịch vụ khác',
+      // A KPI count, not a sale — see the Review tests.
+      'Review',
     ]);
   });
 
@@ -418,7 +420,7 @@ describe('the six categories', () => {
   });
 });
 
-describe('"Nguồn" on a payment is a closed list for new entries', () => {
+describe('"Nguồn" on a payment is a closed, REQUIRED list for new entries', () => {
   beforeEach(async () => {
     setClock({ now: () => hcm('2026-09-19', '08:00') });
     await checkIn(letan, 'A', 'Nguyễn Văn A');
@@ -427,8 +429,8 @@ describe('"Nguồn" on a payment is a closed list for new entries', () => {
   const pay = (payment: Record<string, unknown>) =>
     letan.post('/api/reception/reports').send({ category: 'PAYMENT', payment });
 
-  it('accepts exactly Booking, Agoda, Ctrip, Traveloka and Expedia', async () => {
-    for (const source of ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia']) {
+  it('accepts exactly Booking, Agoda, Ctrip, Traveloka, Expedia and Walking', async () => {
+    for (const source of ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking']) {
       const res = await pay({ source, method: 'CASH', amount: 1000 });
       expect(res.status, source).toBe(201);
       expect(res.body.report.payment.source).toBe(source);
@@ -443,21 +445,31 @@ describe('"Nguồn" on a payment is a closed list for new entries', () => {
     expect(await testPrisma.receptionPayment.count()).toBe(0);
   });
 
-  it('allows no source at all — a walk-in came through no channel', async () => {
-    const res = await pay({ method: 'CASH', amount: 1000 });
-    expect(res.status).toBe(201);
-    expect(res.body.report.payment.source).toBeNull();
+  /**
+   * A walk-in is "Walking", not a blank: a blank cannot be told apart from a
+   * receptionist who forgot, and the per-channel totals would silently lose it.
+   */
+  it('refuses a new payment with no source — missing, empty or whitespace', async () => {
+    for (const payment of [
+      { method: 'CASH', amount: 1000 },
+      { source: '', method: 'CASH', amount: 1000 },
+      { source: '   ', method: 'CASH', amount: 1000 },
+    ]) {
+      const res = await pay(payment);
+      expect(res.status, JSON.stringify(payment)).toBe(422);
+    }
+    expect(await testPrisma.receptionPayment.count()).toBe(0);
   });
 
   it('no longer stores a room sent by an old client, but does store the note', async () => {
-    const res = await pay({ method: 'CASH', amount: 1000, roomNumber: '101', note: 'ghi chú' });
+    const res = await pay({ source: 'Walking', method: 'CASH', amount: 1000, roomNumber: '101', note: 'ghi chú' });
     expect(res.status).toBe(201);
     // "Số phòng" is still not asked for; "Ghi chú" is asked for again.
     expect(res.body.report.payment).toMatchObject({ roomNumber: null, note: 'ghi chú' });
   });
 
   it('leaves an older free-text source alone when another field is corrected', async () => {
-    const res = await pay({ method: 'CASH', amount: 1000 });
+    const res = await pay({ source: 'Walking', method: 'CASH', amount: 1000 });
     const id = res.body.report.id as string;
     // A row typed before the list was closed.
     await testPrisma.receptionPayment.update({ where: { reportId: id }, data: { source: 'agoda.com' } });
@@ -474,6 +486,21 @@ describe('"Nguồn" on a payment is a closed list for new entries', () => {
     const valid = await letan.patch(`/api/reception/reports/${id}`).send({ payment: { source: 'Agoda' } });
     expect(valid.status).toBe(200);
     expect(valid.body.report.payment.source).toBe('Agoda');
+
+    // …and it cannot be corrected to nothing.
+    const emptied = await letan.patch(`/api/reception/reports/${id}`).send({ payment: { source: '' } });
+    expect(emptied.status).toBe(422);
+  });
+
+  it('leaves an older row with NO source readable and correctable', async () => {
+    const res = await pay({ source: 'Walking', method: 'CASH', amount: 1000 });
+    const id = res.body.report.id as string;
+    // A row saved before the source was required.
+    await testPrisma.receptionPayment.update({ where: { reportId: id }, data: { source: null } });
+
+    const corrected = await letan.patch(`/api/reception/reports/${id}`).send({ payment: { amount: 3000 } });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body.report.payment).toMatchObject({ source: null, amount: 3000 });
   });
 });
 
@@ -642,7 +669,7 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
     await checkIn(letan, 'A', 'Nguyễn A');
     const payment = await letan
       .post('/api/reception/reports')
-      .send({ category: 'PAYMENT', payment: { method: 'CASH', amount: 1000 } });
+      .send({ category: 'PAYMENT', payment: { source: 'Walking', method: 'CASH', amount: 1000 } });
     const res = await complete(letan, payment.body.report.id, { resolution: 'Đã xử lý' });
     expect(res.status).toBe(422);
   });
@@ -902,7 +929,7 @@ describe('branch isolation and roles', () => {
     await checkIn(letan, 'A', 'Nguyễn A');
     const payment = await letan.post('/api/reception/reports').send({
       category: 'PAYMENT',
-      payment: { method: 'CASH', amount: 300000 },
+      payment: { source: 'Walking', method: 'CASH', amount: 300000 },
     });
     expect(payment.status).toBe(201);
     const id = payment.body.report.id;

@@ -5,6 +5,7 @@ import { getClock, hcmDateOnly } from '../lib/clock';
 import { z } from 'zod';
 import { computeStatistics } from '../booking/statistics';
 import { NOT_DELETED } from '../booking/deleteBooking';
+import { outstandingStatuses } from '../issue/issueLifecycle';
 
 const HCM_OFFSET_MS = 7 * 60 * 60 * 1000;
 
@@ -230,7 +231,7 @@ export function createAdminDashboardRouter(): Router {
         */
         prisma.hotelIssue.count({ where: { createdAt: { gte: start, lt: end } } }),
         prisma.hotelIssue.count({
-          where: { createdAt: { gte: start, lt: end }, status: { in: ['NEW', 'IN_PROGRESS'] } },
+          where: { createdAt: { gte: start, lt: end }, status: { in: outstandingStatuses() } },
         }),
       ]);
 

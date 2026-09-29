@@ -293,6 +293,31 @@ const ROW_PADDING = 4;
 const HEADER_FILL = '#E8EEF4';
 const ROW_STRIPE = '#F6F8FA';
 
+/**
+ * The frame of a table drawn with `{ frame: true }` — the PDF twin of the
+ * screen's report borders: a medium-grey outline (`line`, slate-400) and a
+ * lighter rule under each row (`line-subtle`, slate-300). Never black: it
+ * separates, it does not shout.
+ */
+export const FRAME_COLOR = '#94A3B8';
+export const FRAME_WIDTH = 1;
+const RULE_COLOR = '#CBD5E1';
+const RULE_WIDTH = 0.6;
+
+export interface TableOptions {
+  /**
+   * An outline around the table and a rule under every row. Drawn ROW BY ROW —
+   * each row its own left and right edge — so a table that continues onto the
+   * next page stays one continuous box there, under its repeated header.
+   * Off by default: the reports that do not ask for it keep their look.
+   */
+  frame?: boolean;
+}
+
+function strokeLine(doc: PdfDoc, x1: number, y1: number, x2: number, y2: number, color: string, width: number): void {
+  doc.save().lineWidth(width).strokeColor(color).moveTo(x1, y1).lineTo(x2, y2).stroke().restore();
+}
+
 function rowHeight(doc: PdfDoc, columns: Column<unknown>[], cells: string[]): number {
   let tallest = 0;
   cells.forEach((text, i) => {
@@ -323,9 +348,11 @@ export function tableLeadHeight<T>(doc: PdfDoc, columns: Column<T>[], rows: T[])
   return header + first;
 }
 
-export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[]): void {
+export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[], options: TableOptions = {}): void {
   const cols = columns as Column<unknown>[];
   const startX = doc.page.margins.left;
+  const tableWidth = cols.reduce((s, c) => s + c.width, 0);
+  const frame = options.frame === true;
 
   // The header goes with its first row: a header alone at the foot of a page,
   // its rows on the next, reads as an empty table.
@@ -350,6 +377,10 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[]): void
     });
     doc.y = top + h;
     doc.font(FONT_REGULAR).fontSize(8);
+    // The header is the top of the box — on every page the table reaches.
+    if (frame) {
+      doc.save().lineWidth(FRAME_WIDTH).strokeColor(FRAME_COLOR).rect(startX, top, tableWidth, h).stroke().restore();
+    }
   };
 
   drawHeader();
@@ -361,6 +392,9 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[]): void
     // A row that would cross the bottom margin starts a new page, with the
     // header repeated — otherwise page 2 onwards is a grid of unlabelled cells.
     if (doc.y + h > doc.page.height - doc.page.margins.bottom) {
+      // A framed table is closed on the page it leaves, and reopens under its
+      // repeated header on the next.
+      if (frame && index > 0) strokeLine(doc, startX, doc.y, startX + tableWidth, doc.y, FRAME_COLOR, FRAME_WIDTH);
       doc.addPage();
       drawHeader();
     }
@@ -379,6 +413,22 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[]): void
       x += cols[i]!.width;
     });
     doc.y = top + h;
+    if (frame) {
+      // This row's own sides, and a rule beneath it — the last row's rule is
+      // the bottom of the box, in the frame's weight.
+      const last = index === rows.length - 1;
+      strokeLine(doc, startX, top, startX, top + h, FRAME_COLOR, FRAME_WIDTH);
+      strokeLine(doc, startX + tableWidth, top, startX + tableWidth, top + h, FRAME_COLOR, FRAME_WIDTH);
+      strokeLine(
+        doc,
+        startX,
+        top + h,
+        startX + tableWidth,
+        top + h,
+        last ? FRAME_COLOR : RULE_COLOR,
+        last ? FRAME_WIDTH : RULE_WIDTH,
+      );
+    }
   });
 
   // Hand the cursor back at the left margin: every cell above moved it, and the

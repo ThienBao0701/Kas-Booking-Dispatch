@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 
 afterEach(() => {
@@ -9,14 +10,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function branch(branchId: number, address: string, newCount = 0, inProgressCount = 0) {
-  return { branchId, code: `B${branchId}`, address, hotelName: `Hotel ${branchId}`, newCount, inProgressCount, totalUnresolved: newCount + inProgressCount };
+function branch(branchId: number, address: string, newCount = 0, inProgressCount = 0, awaitingInspectionCount = 0) {
+  return {
+    branchId,
+    code: `B${branchId}`,
+    address,
+    hotelName: `Hotel ${branchId}`,
+    newCount,
+    inProgressCount,
+    awaitingInspectionCount,
+    totalUnresolved: newCount + inProgressCount + awaitingInspectionCount,
+  };
 }
 
 // One branch with three unresolved (2 new + 1 in-progress); the rest zero → 8 total.
 const BY_BRANCH = [
   branch(1, '05 Trương Định', 2, 1),
-  branch(2, '260 Lý Tự Trọng', 0, 0),
+  // Its only open incident is repaired and waiting for Quản lý kỹ thuật.
+  branch(2, '260 Lý Tự Trọng', 0, 0, 1),
   branch(3, '47A Nguyễn Trãi', 0, 0),
   branch(4, '170 Nguyễn Thái Bình'),
   branch(5, '278 Lê Thánh Tôn'),
@@ -25,7 +36,13 @@ const BY_BRANCH = [
   branch(8, '191 Lê Thánh Tôn'),
 ];
 
-const ADMIN_SUMMARY = { totalUnresolved: 3, newCount: 2, inProgressCount: 1, byBranch: BY_BRANCH };
+const ADMIN_SUMMARY = {
+  totalUnresolved: 4,
+  newCount: 2,
+  inProgressCount: 1,
+  awaitingInspectionCount: 1,
+  byBranch: BY_BRANCH,
+};
 
 /*
   The summary shape the server actually sends: `range` accompanies `date` (and
@@ -42,7 +59,7 @@ const DASHBOARD_SUMMARY = {
 };
 
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: { id: 1, code: 'B1', hotelName: 'Hotel 1', address: '05 Trương Định' },
@@ -57,8 +74,9 @@ function issue(over: Record<string, unknown> = {}) {
     createdAt: '2026-07-24T02:00:00.000Z',
     updatedAt: '2026-07-24T02:00:00.000Z',
     resolvedAt: null,
+    attempts: [],
     ...over,
-  };
+  });
 }
 
 function listBody(issues: unknown[]) {
@@ -75,7 +93,8 @@ describe('Issue counters — sidebar badge', () => {
     });
     renderApp('/app/dashboard');
     // Accessible, not colour-only: the number is exposed via an aria-label.
-    expect(await screen.findByLabelText('3 sự cố chưa xử lý')).toHaveTextContent('3');
+    // 2 new + 1 being repaired + 1 repaired and awaiting inspection: all unresolved.
+    expect(await screen.findByLabelText('4 sự cố chưa xử lý')).toHaveTextContent('4');
   });
 
   it('receptionist sees only their own branch count', async () => {
@@ -171,7 +190,7 @@ describe('Issue counters — the branch selector carries them', () => {
       '— Chọn chi nhánh —',
       'Tất cả chi nhánh',
       '05 Trương Định - Chi nhánh 01 (3)',
-      '260 Lý Tự Trọng - Chi nhánh 02 (0)',
+      '260 Lý Tự Trọng - Chi nhánh 02 (1)',
       '47A Nguyễn Trãi - Chi nhánh 03 (0)',
       '170 Nguyễn Thái Bình - Chi nhánh 04 (0)',
       '278 Lê Thánh Tôn - Chi nhánh 05 (0)',

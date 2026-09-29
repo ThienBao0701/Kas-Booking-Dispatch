@@ -33,7 +33,8 @@ import type {
 export const CATEGORY_LABELS: Record<OperationalReportCategory, string> = {
   PAYMENT: 'Theo dõi thanh toán',
   GUEST_REQUEST: 'Vấn đề khách yêu cầu',
-  FACILITY_ISSUE: 'Sự cố vật chất đang xử lý',
+  // 31 characters as well — this label names an XLSX sheet too.
+  FACILITY_ISSUE: 'Sự cố cơ sở vật chất đang xử lý',
   // 31 characters: exactly Excel's sheet-name limit, which this label also is.
   CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
@@ -92,6 +93,7 @@ export const ROOM_SERVICE_LABELS: Record<RoomServiceType, string> = {
   SMOKING: 'Hút thuốc',
   LAUNDRY: 'Giặt ủi',
   OTHER: 'Dịch vụ khác',
+  REVIEW: 'Review',
 };
 
 export const ROOM_SERVICE_TYPES: readonly RoomServiceType[] = [
@@ -100,18 +102,33 @@ export const ROOM_SERVICE_TYPES: readonly RoomServiceType[] = [
   'SMOKING',
   'LAUNDRY',
   'OTHER',
+  'REVIEW',
 ];
 
 /**
- * "Nguồn" on a payment — A CLOSED LIST, for new entries.
+ * "Review" is a KPI COUNT, not a sale. Its rows carry the number of reviews the
+ * receptionist reports per site, store price 0, and are never revenue — every
+ * revenue figure leaves them out by this one predicate.
+ */
+export function isRevenueService(serviceType: RoomServiceType): boolean {
+  return serviceType !== 'REVIEW';
+}
+
+/** The most reviews one row may report per site — generous, and not unbounded. */
+export const MAX_REVIEW_COUNT = 10_000;
+
+/**
+ * "Nguồn" on a payment — A CLOSED LIST, and REQUIRED, for new entries.
  *
- * The booking channels the desk actually takes money for. The form offers only
- * these, and the service refuses anything else on create and on a correction
- * that changes the value — a free-text source is how "Agoda", "agoda" and
- * "AGD" became three channels in one report.
+ * The channels the desk actually takes money through, "Walking" being the guest
+ * who walked in and "Khác" anything that is not a booking channel. The form
+ * offers only these, and the service refuses anything else — including nothing
+ * at all — on create, and on a correction that changes the value. A free-text source is how "Agoda", "agoda" and "AGD" became three
+ * channels in one report; an optional one is how a third of the rows had none.
  *
- * OLDER ROWS ARE NOT REWRITTEN. They were typed freely and keep what was typed;
- * a correction that leaves the source untouched does not have to "fix" it.
+ * OLDER ROWS ARE NOT REWRITTEN. They were typed freely, or left empty, and keep
+ * exactly that; a correction that leaves the source untouched does not have to
+ * "fix" it.
  */
 export const PAYMENT_SOURCES = [
   'Booking',

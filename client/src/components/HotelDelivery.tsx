@@ -14,15 +14,13 @@
  * row's detail panel on a phone.
  */
 import { useState } from 'react';
-import { Archive } from 'lucide-react';
 import { type OperationalReport, type ReportOptions } from '../api/receptionReports';
-import { useDeliveries } from '../hooks/useDeliveries';
 import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
 import { RecordEditDialog, VoidDialog, VoidedNote, type EditField } from './RecordDialogs';
 import { Actions } from './RecordRowActions';
 import { formatDateTime } from '../lib/format';
-import { COMPLETED_ISSUES_TITLE, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
+import { HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
 
 const statusBadge = (label: string) => (
   <span className="inline-flex whitespace-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
@@ -190,40 +188,5 @@ export function DeliveryTable({
         />
       ) : null}
     </>
-  );
-}
-
-/**
- * "HOÀN THÀNH VẤN ĐỀ" — what has been completed for more than the archive window.
- *
- * It holds a DEDICATED "Giao nhận hàng hóa của khách sạn" table, and that table
- * is the only thing in it: nothing else in this application is archived by the
- * 12-hour rule, so nothing else is listed. The rows are the delivery records
- * themselves, read from the archived side of the server's split; there is no
- * second copy that was "moved".
- */
-export function CompletedIssuesView({ hours }: { hours: number }) {
-  const archived = useDeliveries('archived');
-  return (
-    <div className="space-y-3" data-testid="completed-issues">
-      <p className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-        <Archive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
-        <span>
-          Các mục đã hoàn thành quá {hours} giờ được chuyển từ danh mục đang theo dõi sang {COMPLETED_ISSUES_TITLE}.
-          Bản ghi không bị sao chép hay xóa — chỉ đổi nơi hiển thị.
-        </span>
-      </p>
-      <DeliveryTable
-        rows={archived.data?.deliveries ?? []}
-        testId="completed-delivery-table"
-        isLoading={archived.isLoading}
-        isError={archived.isError}
-        error={archived.error}
-        onRetry={() => void archived.refetch()}
-        emptyTitle="Chưa có mục nào hoàn thành quá thời hạn"
-        emptyMessage={`Các mục giao nhận sẽ xuất hiện ở đây sau ${hours} giờ kể từ khi hoàn thành.`}
-        section={{}}
-      />
-    </div>
   );
 }

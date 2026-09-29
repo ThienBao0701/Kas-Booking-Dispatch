@@ -36,15 +36,25 @@ import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/s
 import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
 import {
+  ACTIVE_PAGE_SIZE,
+  ARCHIVE_PAGE_SIZE,
+  ARCHIVABLE_CATEGORIES,
+  activeJournalWhere,
+  archivedJournalWhere,
+  type ReceivedWindow,
+} from './completionArchive';
+import {
   CATEGORY_LABELS,
   DELIVERY_DEPARTMENTS,
   DELIVERY_DEPARTMENT_LABELS,
   HOTEL_DELIVERY_TITLE,
+  MAX_REVIEW_COUNT,
   PAYMENT_METHOD_LABELS,
   PAYMENT_SOURCES,
   ROOM_SERVICE_LABELS,
   ROOM_SERVICE_PRICE_LABEL,
   formatVnd,
+  isRevenueService,
 } from './reportTypes';
 import { isArchived } from './deliveryLifecycle';
 
@@ -129,7 +139,13 @@ export function reportSummary(row: ReportDetail): string {
       .join(' · ');
   }
   if (row.roomService) {
-    return `${ROOM_SERVICE_LABELS[row.roomService.serviceType]} · ${row.roomService.guestName} · ${formatVnd(row.roomService.price)}`;
+    const s = row.roomService;
+    // A review has no price to state; its counts are what it records.
+    const what =
+      s.serviceType === 'REVIEW'
+        ? `Tripadvisor ${s.tripadvisorCount ?? 0} · Google ${s.googleCount ?? 0}`
+        : formatVnd(s.price);
+    return `${ROOM_SERVICE_LABELS[s.serviceType]} · ${s.guestName} · ${what}`;
   }
   if (row.delivery) {
     return `${DELIVERY_DEPARTMENT_LABELS[row.delivery.department]} · ${row.delivery.itemName} · SL ${row.delivery.quantity}`;
@@ -281,6 +297,11 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
           nights: row.roomService.nights,
           price: row.roomService.price,
           note: row.roomService.note,
+          /** "Review" only — null on every other service. */
+          tripadvisorCount: row.roomService.tripadvisorCount,
+          googleCount: row.roomService.googleCount,
+          /** False for "Review": a count, never revenue. */
+          countsAsRevenue: isRevenueService(row.roomService.serviceType),
           /** Legacy fields, no longer asked for; kept readable on older rows. */
           phone: row.roomService.phone,
           roomNumber: row.roomService.roomNumber,
@@ -414,15 +435,15 @@ function optional(value: string | undefined | null): string | null {
  * ------------------------------------------------------------------ */
 
 /**
- * "Nguồn", as a new entry must carry it: one of `PAYMENT_SOURCES`, or nothing.
+ * "Nguồn", as a new entry must carry it: one of `PAYMENT_SOURCES`.
  *
- * Nothing is allowed — a walk-in paying at the desk came through no channel —
- * but anything outside the list is refused rather than stored. See the list's
- * own comment for why it is closed.
+ * REQUIRED. A walk-in is "Walking", not a blank — a blank cannot be told apart
+ * from a receptionist who forgot. Anything outside the list is refused rather
+ * than stored; see the list's own comment for why it is closed.
  */
-function assertSource(value: string | undefined | null): string | null {
+function assertSource(value: string | undefined | null): string {
   const source = optional(value);
-  if (source === null) return null;
+  if (source === null) throw ApiError.validation('Vui lòng chọn nguồn.');
   if (!(PAYMENT_SOURCES as readonly string[]).includes(source)) {
     throw ApiError.validation(`Nguồn không hợp lệ. Chọn một trong: ${PAYMENT_SOURCES.join(', ')}.`);
   }
@@ -503,15 +524,27 @@ export interface ComplaintInput {
 }
 
 export interface RoomServiceInput {
-  serviceType: 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER';
+  serviceType: 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER' | 'REVIEW';
   guestName: string;
   ezCode?: string;
   roomClass?: string;
   fromRoomClass?: string;
   toRoomClass?: string;
   nights?: number;
-  price: number;
+  /** Required on every service but "Review", which is a count, not a sale. */
+  price?: number;
   note?: string;
+  /** "Review" only. */
+  tripadvisorCount?: number;
+  googleCount?: number;
+}
+
+/** A review count: a whole number from 0 up. Refused, never coerced. */
+function assertReviewCount(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_REVIEW_COUNT) {
+    throw ApiError.validation(`${label} phải là số nguyên từ 0 đến ${MAX_REVIEW_COUNT}.`);
+  }
+  return value;
 }
 
 /**
@@ -530,17 +563,38 @@ export interface RoomServiceInput {
  * these rows end up in a financial report.
  */
 export function normaliseRoomService(input: RoomServiceInput) {
-  const common = {
+  const who = {
     serviceType: input.serviceType,
     guestName: required(input.guestName, 'tên khách'),
     ezCode: optional(input.ezCode),
-    price: assertMoney(input.price, ROOM_SERVICE_PRICE_LABEL),
-    note: optional(input.note),
     phone: null,
     roomNumber: null,
     serviceName: null,
   };
   const none = { roomClass: null, fromRoomClass: null, toRoomClass: null, nights: null };
+  const noCounts = { tripadvisorCount: null, googleCount: null };
+
+  /*
+    "REVIEW" IS A COUNT, NOT A SALE. Tên khách, Mã EZ and the two counts — no
+    price (stored 0, never revenue), no note, no room fields. A row reporting
+    no review at all is not a review record, so at least one count must be
+    above zero.
+  */
+  if (input.serviceType === 'REVIEW') {
+    const tripadvisorCount = assertReviewCount(input.tripadvisorCount ?? 0, 'Tripadvisor');
+    const googleCount = assertReviewCount(input.googleCount ?? 0, 'Google');
+    if (tripadvisorCount + googleCount === 0) {
+      throw ApiError.validation('Vui lòng nhập số lượng review (Tripadvisor hoặc Google).');
+    }
+    return { ...who, ...none, price: 0, note: null, tripadvisorCount, googleCount };
+  }
+
+  const common = {
+    ...who,
+    ...noCounts,
+    price: assertMoney(input.price, ROOM_SERVICE_PRICE_LABEL),
+    note: optional(input.note),
+  };
 
   switch (input.serviceType) {
     case 'ROOM_SALE':
@@ -784,6 +838,74 @@ export async function listReports(
   });
 }
 
+type ArchivableCategory = (typeof ARCHIVABLE_CATEGORIES)[number];
+
+/**
+ * One page per category of II and IV, newest first, with each category's full
+ * count — so a screen that shows a page can say when there are more.
+ */
+async function pageByCategory(
+  base: Prisma.ReceptionOperationalReportWhereInput,
+  pageSize: number,
+  client: PrismaClient,
+): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
+  const perCategory = await Promise.all(
+    ARCHIVABLE_CATEGORIES.map(async (category) => {
+      const where = { AND: [base, { category }] };
+      const [rows, total] = await Promise.all([
+        client.receptionOperationalReport.findMany({
+          where,
+          include: REPORT_INCLUDE,
+          orderBy: { createdAt: 'desc' },
+          take: pageSize,
+        }),
+        client.receptionOperationalReport.count({ where }),
+      ]);
+      return { category, rows, total };
+    }),
+  );
+  return {
+    reports: perCategory.flatMap((c) => c.rows),
+    totals: {
+      GUEST_REQUEST: perCategory.find((c) => c.category === 'GUEST_REQUEST')?.total ?? 0,
+      CUSTOMER_COMPLAINT: perCategory.find((c) => c.category === 'CUSTOMER_COMPLAINT')?.total ?? 0,
+    },
+  };
+}
+
+/**
+ * II and IV as the desk sees them NOW — the branch's unfinished records and its
+ * completions from the last 12 hours, whichever shift took them. See
+ * `completionArchive.ts` for the rule; `currentShiftSessionId` only adds the
+ * open shift's withdrawn rows back, struck through, where they were.
+ */
+export async function listActiveJournal(
+  actor: ReportActor,
+  now: Date,
+  currentShiftSessionId: string | null,
+  client: PrismaClient = prisma,
+): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
+  return pageByCategory(
+    activeJournalWhere(reportVisibilityWhere(actor), now, currentShiftSessionId),
+    ACTIVE_PAGE_SIZE,
+    client,
+  );
+}
+
+/**
+ * II and IV in "Hoàn thành vấn đề": completed and received at least 12 hours
+ * ago. Newest first, a page per category, with each category's full count so a
+ * screen can say when there are more.
+ */
+export async function listArchivedJournal(
+  actor: ReportActor,
+  now: Date,
+  received: ReceivedWindow | null = null,
+  client: PrismaClient = prisma,
+): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
+  return pageByCategory(archivedJournalWhere(reportVisibilityWhere(actor), now, received), ARCHIVE_PAGE_SIZE, client);
+}
+
 export async function countReports(
   actor: ReportActor,
   filter: ListReportsFilter = {},
@@ -866,7 +988,18 @@ const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
   */
   FACILITY_ISSUE: [],
   CUSTOMER_COMPLAINT: ['guestName', 'ezCode', 'description'],
-  ROOM_SERVICE: ['guestName', 'ezCode', 'roomClass', 'fromRoomClass', 'toRoomClass', 'nights', 'price', 'note'],
+  ROOM_SERVICE: [
+    'guestName',
+    'ezCode',
+    'roomClass',
+    'fromRoomClass',
+    'toRoomClass',
+    'nights',
+    'price',
+    'note',
+    'tripadvisorCount',
+    'googleCount',
+  ],
   /*
     `completedAt` is absent on purpose, like a request's `resolution`: it is the
     hand-over instant and the archive clock runs from it, so a correction may
@@ -874,6 +1007,21 @@ const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
   */
   HOTEL_DELIVERY: ['department', 'itemName', 'quantity', 'note'],
 };
+
+/**
+ * A room service's correctable fields depend on the SERVICE: a "Review" corrects
+ * its guest and its two counts — never a price it does not have — and every
+ * other service everything but the counts.
+ */
+function editableFields(current: ReportDetail): readonly string[] {
+  const all = EDITABLE[current.category];
+  if (current.category !== 'ROOM_SERVICE') return all;
+  const review = current.roomService?.serviceType === 'REVIEW';
+  const reviewFields = ['guestName', 'ezCode', 'tripadvisorCount', 'googleCount'];
+  return review ? reviewFields : all.filter((f) => f !== 'tripadvisorCount' && f !== 'googleCount');
+}
+
+const COUNT_FIELDS: Record<string, string> = { tripadvisorCount: 'Tripadvisor', googleCount: 'Google' };
 
 const MONEY_FIELDS = new Set(['amount', 'receivable', 'expense', 'price']);
 
@@ -917,7 +1065,7 @@ export async function updateReport(
   }
 
   const session = await requireOpenSession(actor, client);
-  const allowed = EDITABLE[current.category];
+  const allowed = editableFields(current);
   if (allowed.length === 0) {
     throw ApiError.validation('Báo cáo này không có nội dung để sửa.');
   }
@@ -999,7 +1147,9 @@ export async function updateReport(
       const before = detail[field] ?? null;
       const next = MONEY_FIELDS.has(field)
         ? assertMoney(raw, moneyLabel(field))
-        : field === 'method'
+        : field in COUNT_FIELDS
+          ? assertReviewCount(raw, COUNT_FIELDS[field]!)
+          : field === 'method'
           ? assertMethod(raw)
           : field === 'department'
             ? assertDepartment(raw)
@@ -1011,8 +1161,9 @@ export async function updateReport(
       if (auditValue(before) === auditValue(next)) continue;
       /*
         A SOURCE IS CHECKED ONLY WHEN IT CHANGES. An older row typed "agoda.com"
-        before the list was closed; correcting its amount must not force a
-        change of source, and re-saving it untouched is skipped just above.
+        before the list was closed, or left it empty; correcting its amount must
+        not force a change of source, and re-saving it untouched is skipped just
+        above. A CHANGE must land inside the list — it cannot become empty.
       */
       if (field === 'source') assertSource(next as string | null);
       data[field] = next;
@@ -1021,6 +1172,24 @@ export async function updateReport(
     }
 
     if (changes.length === 0) return fresh.id;
+
+    /*
+      A REVIEW KEEPS AT LEAST ONE REVIEW. The same rule as on creation: after
+      the correction, Tripadvisor + Google must still be above zero — a Review
+      row reporting no review at all is not a review record. The PAIR is judged,
+      and both counts go into the guard, so two single-field corrections racing
+      each other cannot zero one count each and both succeed.
+    */
+    if (Object.keys(data).some((f) => f in COUNT_FIELDS)) {
+      const counts = detail as { tripadvisorCount?: number | null; googleCount?: number | null };
+      const tripadvisor = (data.tripadvisorCount as number | undefined) ?? counts.tripadvisorCount ?? 0;
+      const google = (data.googleCount as number | undefined) ?? counts.googleCount ?? 0;
+      if (tripadvisor + google === 0) {
+        throw ApiError.validation('Vui lòng nhập số lượng review (Tripadvisor hoặc Google).');
+      }
+      guard.tripadvisorCount = counts.tripadvisorCount ?? null;
+      guard.googleCount = counts.googleCount ?? null;
+    }
 
     const where = { reportId: id, ...guard, report: { is: { voidedAt: null } } };
     let changed = 0;

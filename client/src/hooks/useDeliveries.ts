@@ -10,12 +10,19 @@ const POLL_MS = 30_000;
  *
  * Which rows come back — the whole branch for Reception, one department for
  * Technical and Housekeeping — and which side of the rule each is on are the
- * SERVER's decisions; this hook filters nothing.
+ * SERVER's decisions; this hook filters nothing. `received` narrows the list to
+ * the days a delivery was received on — sent to the server, never applied here.
  */
-export function useDeliveries(scope: 'active' | 'archived') {
+export function useDeliveries(
+  scope: 'active' | 'archived',
+  received?: { from: string; to: string } | null,
+  enabled = true,
+) {
   return useQuery({
-    queryKey: [...DELIVERIES_KEY, scope],
-    queryFn: () => deliveriesApi.list(scope),
+    // The received-day window is part of the key: another period is another list.
+    queryKey: [...DELIVERIES_KEY, scope, received ?? null],
+    queryFn: () => deliveriesApi.list(scope, received ?? {}),
+    enabled,
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,
   });

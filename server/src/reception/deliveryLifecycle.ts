@@ -11,16 +11,14 @@
  * "is it archived?" goes through `isArchived`, so the rule is stated exactly once.
  */
 import type { Prisma } from '@prisma/client';
+import { COMPLETION_ARCHIVE_HOURS, archiveCutoff } from './completionArchive';
 
-/** How long a completed delivery stays in the active list. */
-export const HOTEL_DELIVERY_ARCHIVE_HOURS = 12;
-
-const HOUR_MS = 60 * 60 * 1000;
-
-/** The instant at or before which a completion counts as archived. */
-export function archiveCutoff(now: Date): Date {
-  return new Date(now.getTime() - HOTEL_DELIVERY_ARCHIVE_HOURS * HOUR_MS);
-}
+/**
+ * How long a completed delivery stays in the active list — the SAME twelve hours
+ * as requests, incidents and service-quality reports (`completionArchive.ts`),
+ * so "Hoàn thành vấn đề" means one thing across the journal.
+ */
+export const HOTEL_DELIVERY_ARCHIVE_HOURS = COMPLETION_ARCHIVE_HOURS;
 
 /** True once `HOTEL_DELIVERY_ARCHIVE_HOURS` have passed since `completedAt`. */
 export function isArchived(completedAt: Date, now: Date): boolean {

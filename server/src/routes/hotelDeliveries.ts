@@ -25,11 +25,28 @@ import { getClock } from '../lib/clock';
 import { requireAuth, requirePasswordChanged } from '../middleware/auth';
 import { REPORT_INCLUDE, serializeReport } from '../reception/reportService';
 import { lifecycleWhere } from '../reception/deliveryLifecycle';
+import { hcmRange } from '../booking/recreationReport';
 
-const querySchema = z.object({
-  scope: z.enum(['active', 'archived']).default('active'),
-  branchId: z.coerce.number().int().positive().optional(),
-});
+const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+const querySchema = z
+  .object({
+    scope: z.enum(['active', 'archived']).default('active'),
+    branchId: z.coerce.number().int().positive().optional(),
+    // The days a delivery was RECEIVED on (inclusive Vietnamese calendar days) —
+    // the same instant the 12-hour rule runs from. A window narrows a list; it
+    // never admits a row the rule keeps on the other side.
+    from: isoDay.optional(),
+    to: isoDay.optional(),
+  })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
+    path: ['to'],
+  })
+  .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+    message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
+    path: ['from'],
+  });
 
 /** Who may read which deliveries — the whole authorization rule, in one function. */
 export function deliveryVisibilityWhere(
@@ -69,21 +86,31 @@ export function createHotelDeliveriesRouter(): Router {
       const q = querySchema.parse(req.query);
       const now = getClock().now();
       const visible = deliveryVisibilityWhere(user, { branchId: q.branchId });
+      const received = q.from && q.to ? hcmRange(q.from, q.to) : null;
 
-      const rows = await prisma.receptionOperationalReport.findMany({
-        where: {
-          ...visible,
-          category: 'HOTEL_DELIVERY',
-          // Combined with the role's own `delivery` filter, never replacing it.
-          AND: [{ delivery: { is: lifecycleWhere(q.scope, now) } }],
-        },
-        include: REPORT_INCLUDE,
-        orderBy: { createdAt: 'desc' },
-        take: 500,
-      });
+      const where: Prisma.ReceptionOperationalReportWhereInput = {
+        ...visible,
+        category: 'HOTEL_DELIVERY',
+        // Combined with the role's own `delivery` filter, never replacing it.
+        AND: [
+          { delivery: { is: lifecycleWhere(q.scope, now) } },
+          ...(received ? [{ createdAt: { gte: received.start, lt: received.end } }] : []),
+        ],
+      };
+      const [rows, total] = await Promise.all([
+        prisma.receptionOperationalReport.findMany({
+          where,
+          include: REPORT_INCLUDE,
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+        }),
+        prisma.receptionOperationalReport.count({ where }),
+      ]);
       res.json({
         scope: q.scope,
         deliveries: rows.map((r) => serializeReport(r, now)),
+        // The full count: the list is a page, and a screen can say so.
+        total,
       });
     })().catch(next);
   });

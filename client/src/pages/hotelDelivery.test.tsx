@@ -156,7 +156,11 @@ function receptionRoutes(extra: Record<string, Handler> = {}): Record<string, Ha
         },
       },
     }),
-    'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/reception/reports/active': () => ({
+      status: 200,
+      body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, archiveAfterHours: 12 },
+    }),
+    'GET /api/issues?scope=active&pageSize=100': () => ({
       status: 200,
       body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 0 } },
     }),
@@ -331,55 +335,60 @@ describe('correcting a delivery', () => {
 });
 
 describe('"Hoàn thành vấn đề"', () => {
-  it('is the last item of the menu, and opens a dedicated delivery table from the archived list', async () => {
+  const RANGE = /^GET \/api\/hotel-deliveries\?scope=archived&from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/;
+
+  function archiveRoutes(seen: string[], deliveries: unknown[] = [delivery('d9', { delivery: { itemName: 'Ga giường', quantity: 8 } }, true)]) {
+    const routes = receptionRoutes();
+    // The page's own reads: the journal archive and the archived incidents.
+    routes['GET /api/hotel-deliveries?scope=archived'] = () => ({ status: 200, body: { scope: 'archived', deliveries: [] } });
+    const today = new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
+    const from = new Date(Date.now() + 7 * 3600_000 - 6 * 86_400_000).toISOString().slice(0, 10);
+    routes[`GET /api/hotel-deliveries?scope=archived&from=${from}&to=${today}`] = () => {
+      seen.push(`${from}..${today}`);
+      return { status: 200, body: { scope: 'archived', deliveries, total: deliveries.length } };
+    };
+    routes[`GET /api/reception/reports/archive?from=${from}&to=${today}`] = () => ({
+      status: 200,
+      body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, range: { from, to: today }, archiveAfterHours: 12 },
+    });
+    routes[`GET /api/issues?scope=archive&from=${from}&to=${today}&pageSize=100`] = () => ({
+      status: 200,
+      body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } },
+    });
+    return routes;
+  }
+
+  it('shows the archived deliveries as the fourth section, from the server\'s own list and by the day received', async () => {
     const seen: string[] = [];
-    installApiMock(
-      receptionRoutes({
-        'GET /api/hotel-deliveries?scope=archived': () => {
-          seen.push('archived');
-          return {
-            status: 200,
-            body: { scope: 'archived', deliveries: [delivery('d9', { delivery: { itemName: 'Ga giường', quantity: 8 } }, true)] },
-          };
-        },
-      }),
-    );
-    renderApp('/app/reports');
+    installApiMock(archiveRoutes(seen));
+    renderApp('/app/completed-issues');
 
-    const menu = await openMenu();
-    const items = within(menu).getAllByRole('menuitemradio');
-    expect(items[items.length - 1]).toHaveTextContent('Hoàn thành vấn đề');
-
-    await userEvent.click(within(menu).getByTestId('category-COMPLETED'));
-    const view = await screen.findByTestId('completed-issues');
-    expect(screen.getByTestId('category-view')).toContainElement(view);
-    expect(within(screen.getByTestId('category-view')).getByRole('heading', { level: 2, name: 'Hoàn thành vấn đề' })).toBeInTheDocument();
-
-    const table = await within(view).findByTestId('completed-delivery-table');
+    const page = await screen.findByTestId('completed-issues');
+    const table = await within(page).findByTestId('completed-delivery-table');
     expect(within(table).getAllByRole('heading')[0]).toHaveTextContent('Giao nhận hàng hóa của khách sạn');
     expect(await within(table).findByText('Ga giường')).toBeInTheDocument();
-    // The archive is read-only, and holds only what the server put on that side.
+    // Holds only what the server put on that side, and is read-only.
     expect(within(table).queryByText('Khăn tắm')).not.toBeInTheDocument();
     expect(within(table).queryByTestId('edit-d9')).not.toBeInTheDocument();
-    expect(seen.length).toBeGreaterThan(0);
-    // The 12 comes from the server.
-    expect(view).toHaveTextContent('12 giờ');
+    // The window is sent to the server, not applied here.
+    expect(seen).toHaveLength(1);
+    expect(RANGE.test(`GET /api/hotel-deliveries?scope=archived&from=${seen[0]!.split('..')[0]}&to=${seen[0]!.split('..')[1]}`)).toBe(true);
   });
 
-  it('marks itself in the menu, and "Tổng" goes back to the overview', async () => {
+  it('is no longer a category of the reception journal', async () => {
     installApiMock(receptionRoutes());
     renderApp('/app/reports');
-    await userEvent.click(within(await openMenu()).getByTestId('category-COMPLETED'));
-    await screen.findByTestId('completed-issues');
-
     const menu = await openMenu();
-    const checked = within(menu).getAllByRole('menuitemradio').filter((i) => i.getAttribute('aria-checked') === 'true');
-    expect(checked.map((i) => i.textContent)).toEqual(['Hoàn thành vấn đề']);
-    await userEvent.keyboard('{Escape}');
+    expect(within(menu).queryByTestId('category-COMPLETED')).not.toBeInTheDocument();
+    const items = within(menu).getAllByRole('menuitemradio');
+    expect(items[items.length - 1]).toHaveTextContent('Giao nhận hàng hóa của khách sạn');
+  });
 
-    await userEvent.click(screen.getByTestId('report-total-overview'));
-    expect(await screen.findByTestId('report-overview')).toBeInTheDocument();
-    expect(screen.queryByTestId('completed-issues')).not.toBeInTheDocument();
+  it('says when a period holds none', async () => {
+    installApiMock(archiveRoutes([], []));
+    renderApp('/app/completed-issues');
+    const table = await screen.findByTestId('completed-delivery-table');
+    expect(await within(table).findByText('Không có vấn đề hoàn thành trong khoảng thời gian này.')).toBeInTheDocument();
   });
 });
 

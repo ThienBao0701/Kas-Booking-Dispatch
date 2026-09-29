@@ -68,8 +68,9 @@ afterAll(async () => {
   await resetAll();
 });
 
+/** "Nguồn" is required on a new payment; these tests are about cash, so a walk-in. */
 async function pay(payment: Record<string, unknown>, agent: Agent = letan) {
-  return agent.post('/api/reception/reports').send({ category: 'PAYMENT', payment });
+  return agent.post('/api/reception/reports').send({ category: 'PAYMENT', payment: { source: 'Walking', ...payment } });
 }
 
 async function cash(agent: Agent = letan) {

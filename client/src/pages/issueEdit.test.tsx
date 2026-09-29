@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -35,7 +36,7 @@ const SESSION = {
 };
 
 function issue(id: string, over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id,
     branchId: 1,
     branch: null,
@@ -59,7 +60,7 @@ function issue(id: string, over: Record<string, unknown> = {}) {
     attempts: [],
     edits: [],
     ...over,
-  };
+  });
 }
 
 type Handler = (init: RequestInit) => { status: number; body?: unknown };
@@ -97,7 +98,11 @@ function routes(issues: unknown[], extra: Record<string, Handler> = {}): Record<
     }),
     'GET /api/reception/shifts/cash': () => ({ status: 200, body: { cash: { openingCash: null, cashCollected: 0, transferCollected: 0, cardCollected: 0, receivable: 0, cashExpense: 0, endingCash: null, paymentCount: 0, voidedCount: 0 } } }),
     'GET /api/hotel-deliveries?scope=active': () => ({ status: 200, body: { scope: 'active', deliveries: [] } }),
-    'GET /api/issues?pageSize=100&outstanding=true': () => ({
+        'GET /api/reception/reports/active': () => ({
+      status: 200,
+      body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, archiveAfterHours: 12 },
+    }),
+    'GET /api/issues?scope=active&pageSize=100': () => ({
       status: 200,
       body: { issues, pagination: { page: 1, pageSize: 100, total: issues.length, totalPages: 1 } },
     }),
@@ -137,10 +142,10 @@ describe('the dialog', () => {
     await userEvent.click(await within(board).findByTestId('edit-issue-i1'));
 
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
-    expect(within(dialog).getByLabelText('Sự cố')).toHaveValue('ROOM');
+    expect(within(dialog).getByLabelText('Khu vực')).toHaveValue('ROOM');
     expect(within(dialog).getByPlaceholderText('Ví dụ: 301')).toHaveValue('301');
     expect(within(dialog).getByLabelText('Loại sự cố')).toHaveValue('AIR_CONDITIONER');
-    expect(within(dialog).getByPlaceholderText('Mô tả sự cố…')).toHaveValue('Máy lạnh không mát');
+    expect(within(dialog).getByLabelText('Sự cố')).toHaveValue('Máy lạnh không mát');
     expect(dialog).toHaveTextContent('Thời gian báo cáo, trạng thái và lịch sử sửa chữa được giữ nguyên');
     // Nothing that belongs to the repair is editable here.
     expect(within(dialog).queryByText(/Kỹ thuật viên|Trạng thái|Tiếp nhận/)).not.toBeInTheDocument();
@@ -153,7 +158,7 @@ describe('the dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
 
     expect(within(dialog).getByTestId('edit-issue-save')).toBeDisabled();
-    const description = within(dialog).getByPlaceholderText('Mô tả sự cố…');
+    const description = within(dialog).getByLabelText('Sự cố');
     await userEvent.type(description, ' — rò nước');
     expect(within(dialog).getByTestId('edit-issue-save')).toBeEnabled();
     await userEvent.clear(description);
@@ -175,7 +180,7 @@ describe('the dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
 
     // A room becomes a hallway: the room number and the fault type stop applying.
-    await userEvent.selectOptions(within(dialog).getByLabelText('Sự cố'), 'HALLWAY');
+    await userEvent.selectOptions(within(dialog).getByLabelText('Khu vực'), 'HALLWAY');
     await userEvent.type(within(dialog).getByPlaceholderText('Ví dụ: 3'), '3');
     await userEvent.click(within(dialog).getByTestId('edit-issue-save'));
 
@@ -199,7 +204,7 @@ describe('the dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
 
     await userEvent.clear(within(dialog).getByPlaceholderText('Ví dụ: 301'));
-    await userEvent.type(within(dialog).getByPlaceholderText('Mô tả sự cố…'), '!');
+    await userEvent.type(within(dialog).getByLabelText('Sự cố'), '!');
     expect(within(dialog).getByTestId('edit-issue-save')).toBeDisabled();
   });
 
@@ -218,7 +223,7 @@ describe('the dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
 
     // It was never asked where it was, and is not asked now.
-    expect(within(dialog).queryByLabelText('Sự cố')).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Khu vực')).not.toBeInTheDocument();
     await userEvent.type(within(dialog).getByRole('textbox'), ' (đã kiểm tra)');
     await userEvent.click(within(dialog).getByTestId('edit-issue-save'));
     await waitFor(() => expect(put).toHaveLength(1));
@@ -237,7 +242,7 @@ describe('the dialog', () => {
     const board = await openBoard();
     await userEvent.click(await within(board).findByTestId('edit-issue-i1'));
     const dialog = await screen.findByRole('dialog', { name: 'Sửa vấn đề' });
-    await userEvent.type(within(dialog).getByPlaceholderText('Mô tả sự cố…'), '!');
+    await userEvent.type(within(dialog).getByLabelText('Sự cố'), '!');
     await userEvent.click(within(dialog).getByTestId('edit-issue-save'));
     expect(await within(dialog).findByText(/Không thể sửa sự cố đã hoàn thành/)).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Sửa vấn đề' })).toBeInTheDocument();
