@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { CalendarCheck2, ClipboardList, StickyNote } from 'lucide-react';
+import { Building2, CalendarCheck2, ChevronDown, ClipboardList, StickyNote } from 'lucide-react';
 import {
   type BookingDetail,
   type OperationalRecord,
@@ -187,6 +187,42 @@ export function BookingDetailView({
     else setToast(message);
   }
 
+  /*
+    THE CARDS BOTH ROLES HAVE, built once and placed by role below: a receptionist
+    reads them in this order because they type the figures into the PMS; the Admin
+    reads the evidence first and finds them under "Chi tiết đơn hàng".
+  */
+  const pmsCard = <PmsNoteCard booking={b} {...(cut ? { cut } : {})} />;
+  // H5/H10 — rooms and nightly rates are never collapsed for a receptionist. A
+  // receptionist types these figures into the PMS; hiding them behind a
+  // disclosure adds a click to every booking and invites transcribing from
+  // memory. Absent entirely when there are no rooms, rather than an empty container.
+  const roomsCard =
+    b.rooms.length > 0 ? (
+      <Card className="p-5" data-testid="rooms-section">
+        <p className="mb-3 text-sm font-semibold text-slate-700">
+          Phòng &amp; giá từng đêm ({b.rooms.length})
+        </p>
+        <div className="space-y-3">
+          {b.rooms.map((room) => (
+            <RoomCard key={room.id} room={room} />
+          ))}
+        </div>
+      </Card>
+    ) : null;
+  // Warnings (never for a missing phone — that is not a blocking condition)
+  const warningsCard =
+    b.warnings.length > 0 ? (
+      <Card className="border-amber-200 bg-amber-50/50 p-5">
+        <p className="mb-2 text-sm font-semibold text-amber-800">Cảnh báo trích xuất</p>
+        <ul className="list-inside list-disc space-y-1 text-sm text-amber-700">
+          {b.warnings.map((w, i) => (
+            <li key={`${w.code}-${i}`}>{w.message}</li>
+          ))}
+        </ul>
+      </Card>
+    ) : null;
+
   return (
     <div className="space-y-5" data-testid="booking-detail">
       {/*
@@ -247,6 +283,13 @@ export function BookingDetailView({
               in the main card below. Duplicating it here gave them a second,
               uncopyable rendering of the same string to mistype from.
             */}
+            {/* The Admin dispatches across eight hotels: which one is part of who this is. */}
+            {isAdmin && b.branch ? (
+              <p className="mt-1 flex items-center gap-1.5 text-sm font-medium text-slate-600" data-testid="booking-header-branch">
+                <Building2 className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                {b.branch.address}
+              </p>
+            ) : null}
             <div className="mt-2 space-y-1 text-sm text-slate-700">
               <StayLine label="Nhận phòng" date={b.checkInDate} time={CHECK_IN_TIME} />
               <StayLine label="Trả phòng" date={b.checkOutDate} time={CHECK_OUT_TIME} />
@@ -334,8 +377,6 @@ export function BookingDetailView({
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <ReadField label="Chi nhánh" value={b.branch?.address ?? '—'} />
             <PaymentField booking={b} />
-            <ReadField label="Check-in" value={formatDate(b.checkInDate)} />
-            <ReadField label="Check-out" value={formatDate(b.checkOutDate)} />
           </div>
         ) : null}
         {b.specialRequest ? (
@@ -345,87 +386,104 @@ export function BookingDetailView({
         ) : null}
       </Card>
 
-      <PmsNoteCard booking={b} {...(cut ? { cut } : {})} />
-
-      {/*
-        H5/H10 — rooms and nightly rates are never collapsed. A receptionist
-        types these figures into the PMS; hiding them behind a disclosure adds
-        a click to every booking and invites transcribing from memory. Absent
-        entirely when there are no rooms, rather than an empty container.
-      */}
-      {b.rooms.length > 0 ? (
-        <Card className="p-5" data-testid="rooms-section">
-          <p className="mb-3 text-sm font-semibold text-slate-700">
-            Phòng &amp; giá từng đêm ({b.rooms.length})
-          </p>
-          <div className="space-y-3">
-            {b.rooms.map((room) => (
-              <RoomCard key={room.id} room={room} />
-            ))}
-          </div>
-        </Card>
-      ) : null}
-
-      {/* Warnings (never for a missing phone — that is not a blocking condition) */}
-      {b.warnings.length > 0 ? (
-        <Card className="border-amber-200 bg-amber-50/50 p-5">
-          <p className="mb-2 text-sm font-semibold text-amber-800">Cảnh báo trích xuất</p>
-          <ul className="list-inside list-disc space-y-1 text-sm text-amber-700">
-            {b.warnings.map((w, i) => (
-              <li key={`${w.code}-${i}`}>{w.message}</li>
-            ))}
-          </ul>
-        </Card>
-      ) : null}
-
-      {/*
-        What actually happened during the stay. ADMIN-only, and the last of the
-        record-keeping cards: the edit history and the activity log that used to
-        sit beside it were removed in 5.2d for both roles, because nobody in the
-        pilot reads a booking's history off the booking. The backend audit is
-        untouched and still records everything.
-      */}
-      {isAdmin ? <OperationalCard record={b.operational} /> : null}
-
-      {/* Proof-of-creation workflow (upload / review / verdict) */}
-      <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />
-
-      {/* Admin-only meta */}
       {isAdmin ? (
-        <Card className="p-5">
-          <p className="mb-2 text-sm font-semibold text-slate-700">Thông tin điều phối (Admin)</p>
-          <div className="grid gap-2 text-sm text-slate-600 sm:grid-cols-2">
-            <span>Gửi lúc (sentAt): {formatDateTime(b.sentAt)} {b.sentBy ? `· ${b.sentBy.fullName}` : ''}</span>
-            <span>Xác nhận lúc (completedAt): {formatDateTime(b.completedAt)} {b.completedBy ? `· ${b.completedBy.fullName}` : ''}</span>
-            <span>Tạo lúc: {formatDateTime(b.createdAt)}</span>
-            <span>Phiên bản trích xuất: {b.parserVersion ?? '—'}</span>
-          </div>
-          {b.requestAudit ? <RequestAuditBlock audit={b.requestAudit} /> : null}
-          {b.rawText ? (
-            <details className="mt-3">
-              <summary className="cursor-pointer text-sm font-medium text-brand-600">Xem nội dung Booking.com gốc</summary>
-              <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-3 text-xs text-slate-600">{b.rawText}</pre>
-            </details>
-          ) : null}
-        </Card>
-      ) : null}
+        <>
+          {warningsCard}
+          {/* Proof-of-creation workflow (upload / review / verdict) — the checking state and its actions. */}
+          <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />
 
-      {isAdmin ? (
-        <div className="flex justify-end gap-2">
           {/*
-            Only for a withdrawn order, and only because the SERVER said so —
-            `canRedispatch` is derived from the same two conditions the endpoint
-            enforces, so the control cannot offer something the write refuses.
+            THE ORIGINAL CONTENT stays one click away, on its own line. It is the
+            evidence the review is checked against, so it is never buried.
           */}
-          {b.canRedispatch ? (
-            <RedispatchButton bookingId={b.id} guestName={b.customerName} onDone={setToast} />
+          {b.rawText ? (
+            <Card className="p-0" data-testid="raw-content-card">
+              <details className="group px-5 py-3">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium text-brand-600">
+                  Xem nội dung Booking.com gốc
+                  <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+                </summary>
+                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+                  {b.rawText}
+                </pre>
+              </details>
+            </Card>
           ) : null}
-          <DeleteBookingButton bookingId={b.id} guestName={b.customerName} isAdmin={isAdmin} />
-        </div>
-      ) : null}
+
+          {/*
+            SECONDARY, COLLAPSED. What the receptionist works from (the PMS note,
+            the rooms and nightly rates) and what the system recorded about the
+            order (times, versions, request provenance) are still all here — one
+            click down instead of above the evidence. Nothing was deleted.
+          */}
+          <Disclosure title="Chi tiết đơn hàng" hint="Ghi chú PMS · phòng & giá từng đêm" testId="booking-detail-more">
+            {pmsCard}
+            {roomsCard}
+          </Disclosure>
+          <Disclosure title="Chi tiết nội bộ" hint="Thời gian · phiên bản trích xuất · nguồn yêu cầu" testId="booking-internal-more">
+            <OperationalCard record={b.operational} />
+            <div className="grid gap-2 text-sm text-slate-600 sm:grid-cols-2" data-testid="booking-internal-times">
+              <span>Gửi lúc (sentAt): {formatDateTime(b.sentAt)} {b.sentBy ? `· ${b.sentBy.fullName}` : ''}</span>
+              <span>Xác nhận lúc (completedAt): {formatDateTime(b.completedAt)} {b.completedBy ? `· ${b.completedBy.fullName}` : ''}</span>
+              <span>Tạo lúc: {formatDateTime(b.createdAt)}</span>
+              <span>Phiên bản trích xuất: {b.parserVersion ?? '—'}</span>
+            </div>
+            {b.requestAudit ? <RequestAuditBlock audit={b.requestAudit} /> : null}
+          </Disclosure>
+
+          <div className="flex justify-end gap-2">
+            {/*
+              Only for a withdrawn order, and only because the SERVER said so —
+              `canRedispatch` is derived from the same two conditions the endpoint
+              enforces, so the control cannot offer something the write refuses.
+            */}
+            {b.canRedispatch ? (
+              <RedispatchButton bookingId={b.id} guestName={b.customerName} onDone={setToast} />
+            ) : null}
+            <DeleteBookingButton bookingId={b.id} guestName={b.customerName} isAdmin={isAdmin} />
+          </div>
+        </>
+      ) : (
+        <>
+          {pmsCard}
+          {roomsCard}
+          {warningsCard}
+          <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />
+        </>
+      )}
 
       <Toast message={toast} onDone={() => setToast(null)} />
     </div>
+  );
+}
+
+/**
+ * A collapsed group of secondary cards: a one-line summary that opens to the
+ * cards themselves. A native `<details>`, so it needs no state, keeps its own
+ * open/closed memory while the panel is on screen, and is keyboard-operable.
+ */
+function Disclosure({
+  title,
+  hint,
+  testId,
+  children,
+}: {
+  title: string;
+  hint: string;
+  testId: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="group rounded-2xl border border-slate-200 bg-white" data-testid={testId}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3">
+        <span>
+          <span className="text-sm font-semibold text-slate-700">{title}</span>
+          <span className="ml-2 text-xs text-slate-400">{hint}</span>
+        </span>
+        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" aria-hidden="true" />
+      </summary>
+      <div className="space-y-4 border-t border-slate-100 px-4 py-4">{children}</div>
+    </details>
   );
 }
 

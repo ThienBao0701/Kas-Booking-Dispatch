@@ -95,6 +95,7 @@ const reportCategory = z.enum([
   'FACILITY_ISSUE',
   'CUSTOMER_COMPLAINT',
   'ROOM_SERVICE',
+  'HOTEL_DELIVERY',
 ]);
 
 /**

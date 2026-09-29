@@ -23,14 +23,22 @@
  *
  * REPORTING A NEW FAULT HAPPENS HERE, through the SAME dialog the old standalone
  * "Báo cáo sự cố" screen used — `NewIssueModal`, in IncidentReporting — and the
- * incident is then recorded in this shift's journal in the same step. Reception
- * sees progress here and operates nothing: there is no per-row action.
+ * incident is then recorded in this shift's journal in the same step.
+ *
+ * THE ONE PER-ROW ACTION IS "SỬA VẤN ĐỀ": correct what the report says while the
+ * incident is still open. It runs through the same `EditIssueModal` field set as
+ * the report form and the server keeps the old words, the report time, the status
+ * and the whole repair history. Reception still operates no repair — accepting,
+ * finishing and giving up a job remain the technical department's alone.
  */
+import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { Pencil } from 'lucide-react';
 import { issuesApi, type Issue } from '../api/issues';
 import { reportsApi, type OperationalReport } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
-import { IncidentTable, NewIssueModal } from './IncidentReporting';
+import { RowAction } from './DataTable';
+import { EditIssueModal, IncidentTable, NewIssueModal } from './IncidentReporting';
 import type { SectionFrame } from './ReportSection';
 
 export function FacilityIssueBoard({
@@ -62,6 +70,8 @@ export function FacilityIssueBoard({
     // having to leave the tab.
     refetchInterval: 30_000,
   });
+
+  const [editing, setEditing] = useState<Issue | null>(null);
 
   const logToJournal = useMutation({
     mutationFn: (issueId: string) =>
@@ -113,7 +123,30 @@ export function FacilityIssueBoard({
         onRetry={() => void issues.refetch()}
         emptyTitle="Không có sự cố nào đang chờ xử lý"
         emptyMessage="Mọi sự cố cơ sở vật chất của chi nhánh đã được xử lý xong."
+        actions={(issue) =>
+          // A completed incident is a closed record: nothing left to correct.
+          issue.status === 'COMPLETED' ? (
+            <span className="text-xs text-slate-300">—</span>
+          ) : (
+            <RowAction onClick={() => setEditing(issue)} testId={`edit-issue-${issue.id}`}>
+              <Pencil className="h-3 w-3" aria-hidden="true" />
+              Sửa vấn đề
+            </RowAction>
+          )
+        }
       />
+      {editing ? (
+        <EditIssueModal
+          issue={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            void issues.refetch();
+            void onLogged();
+            onToast('Đã lưu chỉnh sửa sự cố.');
+          }}
+        />
+      ) : null}
     </>
   );
 }

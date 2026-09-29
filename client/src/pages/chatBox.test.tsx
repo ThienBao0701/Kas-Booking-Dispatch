@@ -87,16 +87,25 @@ function mountChat(
 /* ================================================================== */
 
 describe('who can see Chat box', () => {
-  it('shows the menu item to an Admin', async () => {
+  /*
+    "Chat box" is no longer a menu entry: the chat is the bubble in the corner of
+    every page. The question threads' pages are unchanged and still open by
+    address (and from a link in the bubble), so nothing that was written is lost.
+  */
+  it('has no menu item for an Admin — the chat is the bubble', async () => {
     mountChat(ADMIN_USER);
     renderApp('/app/chat');
-    expect(await screen.findByRole('link', { name: /Chat box/ })).toBeInTheDocument();
+    await screen.findByTestId('chat-conversations');
+    expect(screen.queryByRole('link', { name: /Chat box/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-bubble')).toBeInTheDocument();
   });
 
-  it('shows the menu item to a receptionist', async () => {
+  it('has no menu item for a receptionist — the chat is the bubble', async () => {
     mountChat(RECEPTIONIST_USER);
     renderApp('/app/chat');
-    expect(await screen.findByRole('link', { name: /Chat box/ })).toBeInTheDocument();
+    await screen.findByTestId('chat-conversations');
+    expect(screen.queryByRole('link', { name: /Chat box/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-bubble')).toBeInTheDocument();
   });
 
   it('does NOT show it to Bộ phận đặt phòng', async () => {

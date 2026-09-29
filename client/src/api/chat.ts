@@ -68,7 +68,7 @@ export interface ChatMessageView {
   id: string;
   conversationId: string;
   body: string;
-  senderRole: 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL';
+  senderRole: 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL' | 'HOUSEKEEPING';
   /** Null on an anonymous author's messages — the account never reaches here. */
   sender: { id: number; fullName: string } | null;
   /** What to PRINT: the sender's name, or "Ẩn danh". Decided by the server. */
@@ -101,12 +101,53 @@ export interface ChatConversationView {
   messageCount: number;
 }
 
+/**
+ * ONE ENTRY OF THE CHAT BUBBLE'S BRANCH LIST.
+ *
+ * The list is the branch table (the server builds it from `Branch`), so a hotel
+ * added under "Khách sạn & chi nhánh" appears here with no change on this side.
+ * A receptionist's list has exactly one entry — their own branch.
+ */
+export interface ChatChannelView {
+  branchId: number;
+  branchNumber: number;
+  address: string;
+  hotelName: string;
+  /** Null until somebody has written. */
+  conversationId: string | null;
+  lastMessage: { preview: string; createdAt: string; senderLabel: string; mine: boolean } | null;
+  /** Messages by somebody else since this reader last opened the channel. */
+  unreadCount: number;
+}
+
+/**
+ * The bubble polls at this rate while closed (the badge) and, once a branch is
+ * open, re-reads its messages at `CHAT_POLL_MS`. No realtime transport exists in
+ * this application, and a badge that is twenty seconds late is not worth one.
+ */
+export const CHAT_CHANNELS_POLL_MS = 20_000;
+
 /** The authenticated bytes endpoint. Never a public or guessable file path. */
 export function chatAttachmentUrl(attachmentId: string): string {
   return `/api/chat/attachments/${attachmentId}/file`;
 }
 
 export const chatApi = {
+  /** The bubble: one entry per branch the caller may open, with unread counts. */
+  channels: () => api.get<{ channels: ChatChannelView[] }>('/chat/channels'),
+
+  channelMessages: (branchId: number) =>
+    api.get<{ messages: ChatMessageView[] }>(`/chat/channels/${branchId}/messages`),
+
+  sendChannelMessage: (branchId: number, body: string, images: File[]) => {
+    const form = new FormData();
+    form.append('body', body);
+    for (const image of images) form.append('images', image);
+    return api.postForm<{ message: ChatMessageView }>(`/chat/channels/${branchId}/messages`, form);
+  },
+
+  markChannelRead: (branchId: number) => api.post<{ ok: true }>(`/chat/channels/${branchId}/read`, {}),
+
   listConversations: () =>
     api.get<{ conversations: ChatConversationView[] }>('/chat/conversations'),
 

@@ -31,9 +31,13 @@ import {
 import { setOpeningCash, shiftCashSummary, sumPayments, withEndingCash } from '../reception/cashService';
 import { MAX_VND } from '../reception/reportService';
 import { requireOpenSession } from '../shift/shiftService';
+import { HOTEL_DELIVERY_ARCHIVE_HOURS } from '../reception/deliveryLifecycle';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
+  DELIVERY_DEPARTMENTS,
+  DELIVERY_DEPARTMENT_LABELS,
+  HOTEL_DELIVERY_TITLE,
   PAYMENT_SOURCES,
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
@@ -47,8 +51,10 @@ const CATEGORY = z.enum([
   'FACILITY_ISSUE',
   'CUSTOMER_COMPLAINT',
   'ROOM_SERVICE',
+  'HOTEL_DELIVERY',
 ]);
-const METHOD = z.enum(['CASH', 'TRANSFER', 'CARD']);
+const METHOD = z.enum(['CASH', 'TRANSFER', 'CARD', 'DEBT']);
+const DEPARTMENT = z.enum(['RECEPTION', 'HOUSEKEEPING', 'TECHNICAL']);
 const SERVICE = z.enum(['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER']);
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -90,6 +96,7 @@ const paymentSchema = z.object({
   amount: money,
   receivable: money.optional(),
   expense: money.optional(),
+  note: text(2000).optional(),
 });
 
 const guestRequestSchema = z.object({
@@ -125,7 +132,19 @@ const roomServiceSchema = z.object({
 });
 
 /**
- * A DISCRIMINATED UNION, not one object with five optional blocks.
+ * Quantity is a NUMBER on the wire. `z.number().int()` refuses "5" and "năm"
+ * alike — the field is not free text, and coercing a string here would turn an
+ * empty box into a delivery of zero.
+ */
+const deliverySchema = z.object({
+  department: DEPARTMENT,
+  itemName: text(300).min(1, 'Vui lòng nhập tên hàng hóa.'),
+  quantity: z.number({ invalid_type_error: 'Số lượng phải là số.' }).int('Số lượng phải là số nguyên.'),
+  note: text(2000).optional(),
+});
+
+/**
+ * A DISCRIMINATED UNION, not one object with six optional blocks.
  *
  * zod then refuses a body carrying both a payment and a complaint outright,
  * instead of the service having to decide which one wins. A report is exactly
@@ -137,6 +156,7 @@ const createSchema = z.discriminatedUnion('category', [
   z.object({ category: z.literal('FACILITY_ISSUE'), facility: facilitySchema }),
   z.object({ category: z.literal('CUSTOMER_COMPLAINT'), complaint: complaintSchema }),
   z.object({ category: z.literal('ROOM_SERVICE'), roomService: roomServiceSchema }),
+  z.object({ category: z.literal('HOTEL_DELIVERY'), delivery: deliverySchema }),
 ]);
 
 const updateSchema = z.object({
@@ -144,6 +164,7 @@ const updateSchema = z.object({
   guestRequest: guestRequestSchema.partial().optional(),
   complaint: complaintSchema.partial().optional(),
   roomService: roomServiceSchema.partial().optional(),
+  delivery: deliverySchema.partial().optional(),
   reason: text(1000).optional(),
 });
 
@@ -196,6 +217,9 @@ export function createReceptionReportsRouter(): Router {
         paymentMethods: PAYMENT_METHODS.map((m) => ({ code: m, label: PAYMENT_METHOD_LABELS[m] })),
         roomServiceTypes: ROOM_SERVICE_TYPES.map((t) => ({ code: t, label: ROOM_SERVICE_LABELS[t] })),
         paymentSources: PAYMENT_SOURCES,
+        deliveryDepartments: DELIVERY_DEPARTMENTS.map((d) => ({ code: d, label: DELIVERY_DEPARTMENT_LABELS[d] })),
+        deliveryTitle: HOTEL_DELIVERY_TITLE,
+        deliveryArchiveHours: HOTEL_DELIVERY_ARCHIVE_HOURS,
       });
     },
   );

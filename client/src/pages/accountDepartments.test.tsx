@@ -206,6 +206,47 @@ describe('locking and unlocking, from every section', () => {
     expect(within(admin).queryByRole('button', { name: /Khoá|Mở khoá/ })).not.toBeInTheDocument();
   });
 
+  it('lists a Buồng phòng account in its own section, with the branch it works in', async () => {
+    mount({}, [...USERS, user(7, 'HOUSEKEEPING', { branch: BRANCH })]);
+    renderApp('/app/settings');
+
+    const housekeeping = await screen.findByTestId('department-HOUSEKEEPING');
+    expect(within(housekeeping).getByTestId('row-7')).toHaveTextContent('05 Trương Định');
+    // Between Lễ tân and Kỹ thuật, and shown only because it has an account.
+    const order = screen.getAllByTestId(/^department-/).map((el) => el.getAttribute('data-testid'));
+    expect(order.indexOf('department-HOUSEKEEPING')).toBe(order.indexOf('department-RECEPTIONIST') + 1);
+  });
+
+  it('creates a Buồng phòng account only with a branch, and sends it', async () => {
+    const posted: Record<string, unknown>[] = [];
+    mount({
+      'POST /api/admin/users': (init) => {
+        posted.push(JSON.parse(String(init.body)));
+        return { status: 201, body: { user: user(8, 'HOUSEKEEPING', { branch: BRANCH }) } };
+      },
+    });
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByRole('button', { name: /Thêm bộ phận/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Thêm tài khoản' });
+    await userEvent.type(within(dialog).getByLabelText('Tên đăng nhập'), 'buongphong1');
+    await userEvent.type(within(dialog).getByLabelText('Họ tên'), 'Buồng phòng Một');
+    await userEvent.type(within(dialog).getByLabelText(/Mật khẩu tạm/), 'Matkhau123');
+    await userEvent.selectOptions(within(dialog).getByLabelText('Vai trò'), 'HOUSEKEEPING');
+
+    // Room inspections are made in one hotel, so the branch is asked for — and required.
+    const create = within(dialog).getByRole('button', { name: 'Tạo' });
+    expect(within(dialog).getByLabelText('Chi nhánh')).toBeInTheDocument();
+    expect(create).toBeDisabled();
+
+    await userEvent.selectOptions(within(dialog).getByLabelText('Chi nhánh'), '1');
+    expect(create).toBeEnabled();
+    await userEvent.click(create);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', branchId: 1, username: 'buongphong1' });
+  });
+
   it('still creates accounts from the same dialog', async () => {
     mount();
     renderApp('/app/settings');

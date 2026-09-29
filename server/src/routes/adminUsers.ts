@@ -13,7 +13,7 @@ import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware
  * The roles this endpoint may create. ADMIN is deliberately absent: an
  * administrator is bootstrapped, never minted through the user-management API.
  */
-const MANAGEABLE_ROLES = ['RECEPTIONIST', 'BOOKING_DEPARTMENT', 'TECHNICAL'] as const;
+const MANAGEABLE_ROLES = ['RECEPTIONIST', 'BOOKING_DEPARTMENT', 'TECHNICAL', 'HOUSEKEEPING'] as const;
 
 /**
  * The roles that are GLOBAL — branchless by definition. Listing them once, and
@@ -28,6 +28,7 @@ const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   RECEPTIONIST: 'lễ tân',
   BOOKING_DEPARTMENT: 'bộ phận đặt phòng',
   TECHNICAL: 'bộ phận kỹ thuật',
+  HOUSEKEEPING: 'bộ phận buồng phòng',
 };
 
 const createUserSchema = z
@@ -45,6 +46,12 @@ const createUserSchema = z
   // would silently inherit branch-scoped access somewhere later.
   .refine((v) => v.role !== 'RECEPTIONIST' || v.branchId !== undefined, {
     message: 'Tài khoản lễ tân phải thuộc một chi nhánh.',
+    path: ['branchId'],
+  })
+  // Housekeeping inspects rooms in ONE hotel, and the inspection is stamped with
+  // that hotel from the account — so an account without one could record nothing.
+  .refine((v) => v.role !== 'HOUSEKEEPING' || v.branchId !== undefined, {
+    message: 'Tài khoản buồng phòng phải thuộc một chi nhánh.',
     path: ['branchId'],
   })
   .refine((v) => !GLOBAL_ROLES.includes(v.role) || v.branchId === undefined, {

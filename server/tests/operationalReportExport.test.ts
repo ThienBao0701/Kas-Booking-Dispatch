@@ -201,7 +201,7 @@ describe('the drill-down returns records, not counts', () => {
       guestName: 'Nguyễn Khách',
       roomNumber: '101',
       method: 'CASH',
-      methodLabel: 'Thu tiền mặt',
+      methodLabel: 'Tiền mặt',
       amount: 300000,
       receivable: 50000,
       expense: 100000,
@@ -224,6 +224,7 @@ describe('the drill-down returns records, not counts', () => {
       FACILITY_ISSUE: 1,
       CUSTOMER_COMPLAINT: 1,
       ROOM_SERVICE: 1,
+      HOTEL_DELIVERY: 0,
     });
     // And the rows are still there — the count never replaces them.
     expect(res.body.reports).toHaveLength(5);
@@ -502,6 +503,7 @@ describe('branch drill-down', () => {
       FACILITY_ISSUE: 1,
       CUSTOMER_COMPLAINT: 1,
       ROOM_SERVICE: 1,
+      HOTEL_DELIVERY: 0,
     });
   });
 
@@ -620,7 +622,7 @@ describe('the exports', () => {
     expect((one.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
   });
 
-  it('produces an XLSX with six sheets and real numbers', async () => {
+  it('produces an XLSX with seven sheets and real numbers', async () => {
     await seedFullDay(letan, 'Nguyễn Văn A');
 
     const res = await admin
@@ -646,6 +648,9 @@ describe('the exports', () => {
       'Sự cố vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ',
       'Dịch vụ phòng, KPI',
+      // Short on purpose: Excel refuses a sheet name over 31 characters, and the
+      // full name of the category ("Giao nhận hàng hóa của khách sạn") is 32.
+      'Giao nhận hàng hóa',
     ]);
 
     const payments = wb.getWorksheet('Theo dõi thanh toán')!;
@@ -778,6 +783,7 @@ describe('the period is applied by the server', () => {
       FACILITY_ISSUE: 1,
       CUSTOMER_COMPLAINT: 1,
       ROOM_SERVICE: 1,
+      HOTEL_DELIVERY: 0,
     });
     expect(res.body.reports).toHaveLength(1);
   });

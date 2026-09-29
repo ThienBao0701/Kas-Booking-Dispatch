@@ -199,13 +199,13 @@ describe('the shift owns the record', () => {
   });
 });
 
-describe('the five categories', () => {
+describe('the six categories', () => {
   beforeEach(async () => {
     setClock({ now: () => hcm('2026-09-19', '08:00') });
     await checkIn(letan, 'A', 'Nguyễn Văn A');
   });
 
-  it('lists exactly five, with their Vietnamese labels', async () => {
+  it('lists exactly six, with their Vietnamese labels', async () => {
     const res = await letan.get('/api/reception/reports/options');
     expect(res.status).toBe(200);
     expect(res.body.categories.map((c: { code: string }) => c.code)).toEqual([
@@ -214,15 +214,25 @@ describe('the five categories', () => {
       'FACILITY_ISSUE',
       'CUSTOMER_COMPLAINT',
       'ROOM_SERVICE',
+      'HOTEL_DELIVERY',
     ]);
     expect(res.body.categories[0].label).toBe('Theo dõi thanh toán');
     expect(res.body.categories[3].label).toBe('Vấn đề về chất lượng và dịch vụ');
     // "Nguồn" is a closed list for new entries, served once like the labels.
-    expect(res.body.paymentSources).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia']);
+    expect(res.body.paymentSources).toEqual([
+      'Booking',
+      'Agoda',
+      'Ctrip',
+      'Traveloka',
+      'Expedia',
+      'Walking',
+      'Khác',
+    ]);
     expect(res.body.paymentMethods.map((m: { label: string }) => m.label)).toEqual([
-      'Thu tiền mặt',
+      'Tiền mặt',
       'Chuyển khoản',
       'Cà thẻ',
+      'Công nợ',
     ]);
     expect(res.body.roomServiceTypes.map((t: { label: string }) => t.label)).toEqual([
       'Bán phòng',
@@ -439,10 +449,11 @@ describe('"Nguồn" on a payment is a closed list for new entries', () => {
     expect(res.body.report.payment.source).toBeNull();
   });
 
-  it('no longer stores a room or a note sent by an old client', async () => {
+  it('no longer stores a room sent by an old client, but does store the note', async () => {
     const res = await pay({ method: 'CASH', amount: 1000, roomNumber: '101', note: 'ghi chú' });
     expect(res.status).toBe(201);
-    expect(res.body.report.payment).toMatchObject({ roomNumber: null, note: null });
+    // "Số phòng" is still not asked for; "Ghi chú" is asked for again.
+    expect(res.body.report.payment).toMatchObject({ roomNumber: null, note: 'ghi chú' });
   });
 
   it('leaves an older free-text source alone when another field is corrected', async () => {

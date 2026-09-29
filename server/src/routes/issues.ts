@@ -17,6 +17,7 @@ import {
   updateIssue,
 } from '../issue/issueService';
 import { computeIssueSummary, computeTechnicalCounts } from '../issue/issueSummary';
+import { STATISTICS_PERIOD_DAYS, computeIncidentStatistics } from '../issue/issueStatistics';
 import type { UserWithBranch } from '../auth/serialize';
 
 const CATEGORY = z.enum([
@@ -56,8 +57,12 @@ const createSchema = z.object({
 
 const updateSchema = z
   .object({
+    areaCategory: AREA.optional(),
     roomNumber: z.string().trim().max(50).nullable().optional(),
-    category: CATEGORY.optional(),
+    floorNumber: z.string().trim().max(50).nullable().optional(),
+    areaSubtype: SUBTYPE.nullable().optional(),
+    locationDetail: z.string().trim().max(500).nullable().optional(),
+    category: CATEGORY.nullable().optional(),
     description: z.string().trim().min(1).max(2000).optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'Cần ít nhất một trường để cập nhật.' });
@@ -193,6 +198,41 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
+  /*
+    GET /api/issues/statistics — Technical's "Thống kê" (Admin may read it too).
+
+    Declared before "/issues/:id" so "statistics" is never captured as an id.
+    `days` is a CLOSED list (7, 30, 90) so the period cannot be made arbitrarily
+    large; the numbers are counts over the incidents that already exist.
+  */
+  router.get(
+    '/issues/statistics',
+    requireAuth,
+    requirePasswordChanged,
+    requireRole('TECHNICAL', 'ADMIN'),
+    (req, res, next) => {
+      (async () => {
+        const q = z
+          .object({
+            days: z.coerce
+              .number()
+              .int()
+              .refine((n) => (STATISTICS_PERIOD_DAYS as readonly number[]).includes(n), {
+                message: 'Khoảng thời gian không hợp lệ.',
+              })
+              .default(30),
+            branchId: z.coerce.number().int().positive().optional(),
+          })
+          .parse(req.query);
+        const statistics = await computeIncidentStatistics({
+          days: q.days as (typeof STATISTICS_PERIOD_DAYS)[number],
+          branchId: q.branchId,
+        });
+        res.json({ statistics });
+      })().catch(next);
+    },
+  );
+
   // GET /api/issues/:id — detail (branch-isolated).
   router.get('/issues/:id', requireAuth, requirePasswordChanged, (req, res, next) => {
     (async () => {
@@ -216,12 +256,13 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
-  // PUT /api/issues/:id — reporter edits while still NEW (own branch).
+  // PUT /api/issues/:id — "Sửa vấn đề": reception (own branch) or Admin corrects an
+  // OPEN incident; every changed field is kept in HotelIssueEdit.
   router.put('/issues/:id', requireAuth, requirePasswordChanged, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = updateSchema.parse(req.body ?? {});
-      const issue = await updateIssue(req.params.id!, input, actor(user));
+      const issue = await updateIssue(req.params.id!, input, actor(user), getClock());
       res.json({ issue: serializeIssue(issue) });
     })().catch(next);
   });

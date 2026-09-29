@@ -32,15 +32,56 @@ import { ErrorAlert } from './ErrorAlert';
 import { DateRangeField, type DateRangeValue } from './DateRangeField';
 import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
-import { IssueStatusBadge, IssueTimeline } from './IssueViews';
+import { IssueEditHistory, IssueStatusBadge, IssueTimeline } from './IssueViews';
 import { reportsApi } from '../api/reports';
 import { formatDateTime, hcmToday } from '../lib/format';
 
 const ACCEPTED = 'image/png,image/jpeg,image/webp';
 const MAX_BYTES = 10 * 1024 * 1024;
 
+/** What the incident form holds — the same fields for reporting one and for correcting one. */
+export interface IssueFormValue {
+  areaCategory: IssueAreaCategory;
+  category: IssueCategory;
+  areaSubtype: IssueAreaSubtype | '';
+  roomNumber: string;
+  floorNumber: string;
+  locationDetail: string;
+  description: string;
+}
+
+const EMPTY_ISSUE_FORM: IssueFormValue = {
+  areaCategory: 'ROOM',
+  category: 'AIR_CONDITIONER',
+  areaSubtype: '',
+  roomNumber: '',
+  floorNumber: '',
+  locationDetail: '',
+  description: '',
+};
+
+const inputClass =
+  'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+
 /**
- * The report form, which CHANGES WITH THE AREA.
+ * The description is ALWAYS required, and trimmed before it counts — "   " is
+ * not a description. The other requirements follow the area.
+ */
+function issueFormReady(v: IssueFormValue): boolean {
+  const fields = AREA_FIELDS[v.areaCategory];
+  return (
+    v.description.trim().length > 0 &&
+    (!fields.roomNumber || v.roomNumber.trim().length > 0) &&
+    (!fields.floorNumber || v.floorNumber.trim().length > 0) &&
+    (!fields.areaSubtype || v.areaSubtype !== '') &&
+    (!requiresLocationDetail(v.areaCategory, v.areaSubtype) || v.locationDetail.trim().length > 0)
+  );
+}
+
+/**
+ * The report form's fields, WHICH CHANGE WITH THE AREA — shared by "Báo cáo sự cố
+ * mới" and "Sửa vấn đề", so the two cannot disagree about what a hallway report
+ * asks for.
  *
  * "Sự cố" is asked first, and it decides what else is asked: a room number for a
  * room, a floor for a hallway or a staircase, a fixture for the lobby. Fields
@@ -53,6 +94,137 @@ const MAX_BYTES = 10 * 1024 * 1024;
  * authority: it re-checks every rule, and refuses a request that skipped the
  * form entirely.
  */
+function IssueFormFields({
+  value,
+  onChange,
+}: {
+  value: IssueFormValue;
+  onChange: (patch: Partial<IssueFormValue>) => void;
+}) {
+  const fields = AREA_FIELDS[value.areaCategory];
+  const detailRequired = requiresLocationDetail(value.areaCategory, value.areaSubtype);
+  return (
+    <>
+      <label className="block text-sm font-medium text-slate-600">
+        Sự cố
+        <select
+          className={`${inputClass} mt-1`}
+          value={value.areaCategory}
+          aria-label="Sự cố"
+          onChange={(e) =>
+            onChange({
+              areaCategory: e.target.value as IssueAreaCategory,
+              // Clear what the new area does not ask for, so a value typed under
+              // a previous choice cannot be submitted invisibly.
+              areaSubtype: '',
+              roomNumber: '',
+              floorNumber: '',
+              locationDetail: '',
+            })
+          }
+        >
+          {ISSUE_AREAS.map((a) => (
+            <option key={a.value} value={a.value}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {fields.roomNumber ? (
+        <label className="block text-sm font-medium text-slate-600">
+          Số phòng
+          <input
+            className={`${inputClass} mt-1`}
+            value={value.roomNumber}
+            onChange={(e) => onChange({ roomNumber: e.target.value })}
+            placeholder="Ví dụ: 301"
+            maxLength={50}
+          />
+        </label>
+      ) : null}
+
+      {fields.floorNumber ? (
+        <label className="block text-sm font-medium text-slate-600">
+          Số tầng
+          <input
+            className={`${inputClass} mt-1`}
+            value={value.floorNumber}
+            onChange={(e) => onChange({ floorNumber: e.target.value })}
+            placeholder="Ví dụ: 3"
+            maxLength={50}
+          />
+        </label>
+      ) : null}
+
+      {fields.areaSubtype ? (
+        <label className="block text-sm font-medium text-slate-600">
+          Loại sự cố
+          <select
+            className={`${inputClass} mt-1`}
+            value={value.areaSubtype}
+            aria-label="Loại sự cố"
+            onChange={(e) => onChange({ areaSubtype: e.target.value as IssueAreaSubtype | '' })}
+          >
+            <option value="">— Chọn —</option>
+            {ISSUE_AREA_SUBTYPES.map((st) => (
+              <option key={st.value} value={st.value}>
+                {st.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {fields.category ? (
+        <label className="block text-sm font-medium text-slate-600">
+          Loại sự cố
+          <select
+            className={`${inputClass} mt-1`}
+            value={value.category}
+            aria-label="Loại sự cố"
+            onChange={(e) => onChange({ category: e.target.value as IssueCategory })}
+          >
+            {ISSUE_CATEGORIES.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {/*
+        Shown for every area, but only REQUIRED where the area alone cannot say
+        where to go: "Các Khu Vực Còn Lại", and "Khác" in the lobby.
+      */}
+      <label className="block text-sm font-medium text-slate-600">
+        Vị trí cụ thể{' '}
+        {detailRequired ? null : <span className="font-normal text-slate-400">(không bắt buộc)</span>}
+        <input
+          className={`${inputClass} mt-1`}
+          value={value.locationDetail}
+          onChange={(e) => onChange({ locationDetail: e.target.value })}
+          placeholder="Ví dụ: hồ bơi tầng thượng, kho tầng hầm…"
+          maxLength={500}
+        />
+      </label>
+
+      <label className="block text-sm font-medium text-slate-600">
+        Mô tả sự cố
+        <textarea
+          className={`${inputClass} mt-1`}
+          rows={3}
+          value={value.description}
+          onChange={(e) => onChange({ description: e.target.value })}
+          maxLength={2000}
+          placeholder="Mô tả sự cố…"
+        />
+      </label>
+    </>
+  );
+}
+
 export function NewIssueModal({
   onClose,
   onCreated,
@@ -62,30 +234,23 @@ export function NewIssueModal({
 }) {
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [areaCategory, setAreaCategory] = useState<IssueAreaCategory>('ROOM');
-  const [category, setCategory] = useState<IssueCategory>('AIR_CONDITIONER');
-  const [areaSubtype, setAreaSubtype] = useState<IssueAreaSubtype | ''>('');
-  const [roomNumber, setRoomNumber] = useState('');
-  const [floorNumber, setFloorNumber] = useState('');
-  const [locationDetail, setLocationDetail] = useState('');
-  const [description, setDescription] = useState('');
+  const [form, setForm] = useState<IssueFormValue>(EMPTY_ISSUE_FORM);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  const fields = AREA_FIELDS[areaCategory];
-  const detailRequired = requiresLocationDetail(areaCategory, areaSubtype);
+  const fields = AREA_FIELDS[form.areaCategory];
 
   const create = useMutation({
     mutationFn: () =>
       issuesApi.create({
-        areaCategory,
-        description,
-        category: fields.category ? category : undefined,
-        roomNumber: fields.roomNumber ? roomNumber : undefined,
-        floorNumber: fields.floorNumber ? floorNumber : undefined,
-        areaSubtype: fields.areaSubtype && areaSubtype ? areaSubtype : undefined,
-        locationDetail: locationDetail || undefined,
+        areaCategory: form.areaCategory,
+        description: form.description,
+        category: fields.category ? form.category : undefined,
+        roomNumber: fields.roomNumber ? form.roomNumber : undefined,
+        floorNumber: fields.floorNumber ? form.floorNumber : undefined,
+        areaSubtype: fields.areaSubtype && form.areaSubtype ? form.areaSubtype : undefined,
+        locationDetail: form.locationDetail || undefined,
         photo: file ?? undefined,
       }),
     onSuccess: ({ issue }) => {
@@ -119,19 +284,7 @@ export function NewIssueModal({
     setPreviewUrl(URL.createObjectURL(picked));
   }
 
-  /**
-   * The description is ALWAYS required, and trimmed before it counts — "   " is
-   * not a description. The other requirements follow the area.
-   */
-  const ready =
-    description.trim().length > 0 &&
-    (!fields.roomNumber || roomNumber.trim().length > 0) &&
-    (!fields.floorNumber || floorNumber.trim().length > 0) &&
-    (!fields.areaSubtype || areaSubtype !== '') &&
-    (!detailRequired || locationDetail.trim().length > 0);
-
-  const inputClass =
-    'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+  const ready = issueFormReady(form);
 
   return (
     <Modal
@@ -150,120 +303,7 @@ export function NewIssueModal({
       }
     >
       <div className="space-y-3">
-        <label className="block text-sm font-medium text-slate-600">
-          Sự cố
-          <select
-            className={`${inputClass} mt-1`}
-            value={areaCategory}
-            aria-label="Sự cố"
-            onChange={(e) => {
-              setAreaCategory(e.target.value as IssueAreaCategory);
-              // Clear what the new area does not ask for, so a value typed under
-              // a previous choice cannot be submitted invisibly.
-              setAreaSubtype('');
-              setRoomNumber('');
-              setFloorNumber('');
-              setLocationDetail('');
-            }}
-          >
-            {ISSUE_AREAS.map((a) => (
-              <option key={a.value} value={a.value}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {fields.roomNumber ? (
-          <label className="block text-sm font-medium text-slate-600">
-            Số phòng
-            <input
-              className={`${inputClass} mt-1`}
-              value={roomNumber}
-              onChange={(e) => setRoomNumber(e.target.value)}
-              placeholder="Ví dụ: 301"
-              maxLength={50}
-            />
-          </label>
-        ) : null}
-
-        {fields.floorNumber ? (
-          <label className="block text-sm font-medium text-slate-600">
-            Số tầng
-            <input
-              className={`${inputClass} mt-1`}
-              value={floorNumber}
-              onChange={(e) => setFloorNumber(e.target.value)}
-              placeholder="Ví dụ: 3"
-              maxLength={50}
-            />
-          </label>
-        ) : null}
-
-        {fields.areaSubtype ? (
-          <label className="block text-sm font-medium text-slate-600">
-            Loại sự cố
-            <select
-              className={`${inputClass} mt-1`}
-              value={areaSubtype}
-              aria-label="Loại sự cố"
-              onChange={(e) => setAreaSubtype(e.target.value as IssueAreaSubtype | '')}
-            >
-              <option value="">— Chọn —</option>
-              {ISSUE_AREA_SUBTYPES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-
-        {fields.category ? (
-          <label className="block text-sm font-medium text-slate-600">
-            Loại sự cố
-            <select
-              className={`${inputClass} mt-1`}
-              value={category}
-              aria-label="Loại sự cố"
-              onChange={(e) => setCategory(e.target.value as IssueCategory)}
-            >
-              {ISSUE_CATEGORIES.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-
-        {/*
-          Shown for every area, but only REQUIRED where the area alone cannot say
-          where to go: "Các Khu Vực Còn Lại", and "Khác" in the lobby.
-        */}
-        <label className="block text-sm font-medium text-slate-600">
-          Vị trí cụ thể{' '}
-          {detailRequired ? null : <span className="font-normal text-slate-400">(không bắt buộc)</span>}
-          <input
-            className={`${inputClass} mt-1`}
-            value={locationDetail}
-            onChange={(e) => setLocationDetail(e.target.value)}
-            placeholder="Ví dụ: hồ bơi tầng thượng, kho tầng hầm…"
-            maxLength={500}
-          />
-        </label>
-
-        <label className="block text-sm font-medium text-slate-600">
-          Mô tả sự cố
-          <textarea
-            className={`${inputClass} mt-1`}
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            maxLength={2000}
-            placeholder="Mô tả sự cố…"
-          />
-        </label>
+        <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
 
         <div>
           <span className="mb-1 block text-sm font-medium text-slate-600">Ảnh (không bắt buộc)</span>
@@ -299,6 +339,112 @@ export function NewIssueModal({
 
         {localError ? <ErrorAlert>{localError}</ErrorAlert> : null}
         {create.isError ? <ErrorAlert>{toUserMessage(create.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * "SỬA VẤN ĐỀ" — correct what an open incident says.
+ *
+ * THE SAME FIELDS AS THE REPORT FORM (`IssueFormFields`), filled with what is
+ * stored, and nothing else: there is no status here, no technician and no time.
+ * The report time, the status and the whole repair history are untouched by the
+ * server, and the words that are replaced are kept in the incident's edit
+ * history — the dialog says so, so nobody hesitates to fix a wrong room number.
+ *
+ * A LEGACY report (filed before the structured form) was never asked where it
+ * was, and is not asked now: only its description can be corrected.
+ */
+export function EditIssueModal({
+  issue,
+  onClose,
+  onSaved,
+}: {
+  issue: Issue;
+  onClose: () => void;
+  onSaved: (issue: Issue) => void;
+}) {
+  const queryClient = useQueryClient();
+  const legacy = issue.areaCategory === null;
+  const initial: IssueFormValue = {
+    areaCategory: issue.areaCategory ?? 'ROOM',
+    category: issue.category ?? 'OTHER',
+    areaSubtype: issue.areaSubtype ?? '',
+    roomNumber: issue.roomNumber ?? '',
+    floorNumber: issue.floorNumber ?? '',
+    locationDetail: issue.locationDetail ?? '',
+    description: issue.description,
+  };
+  const [form, setForm] = useState<IssueFormValue>(initial);
+  const fields = AREA_FIELDS[form.areaCategory];
+
+  const save = useMutation({
+    mutationFn: () =>
+      issuesApi.update(
+        issue.id,
+        legacy
+          ? { description: form.description.trim() }
+          : {
+              areaCategory: form.areaCategory,
+              description: form.description.trim(),
+              category: fields.category ? form.category : null,
+              roomNumber: fields.roomNumber ? form.roomNumber.trim() : null,
+              floorNumber: fields.floorNumber ? form.floorNumber.trim() : null,
+              areaSubtype: fields.areaSubtype && form.areaSubtype ? form.areaSubtype : null,
+              locationDetail: form.locationDetail.trim() || null,
+            },
+      ),
+    onSuccess: ({ issue: updated }) => {
+      void queryClient.invalidateQueries({ queryKey: ['issues'] });
+      onSaved(updated);
+    },
+  });
+
+  const ready = legacy ? form.description.trim().length > 0 : issueFormReady(form);
+  const changed = JSON.stringify(form) !== JSON.stringify(initial);
+
+  return (
+    <Modal
+      open
+      title="Sửa vấn đề"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} data-testid="edit-issue-cancel">
+            Hủy
+          </Button>
+          <Button
+            onClick={() => save.mutate()}
+            loading={save.isPending}
+            disabled={!ready || !changed}
+            data-testid="edit-issue-save"
+          >
+            Lưu
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          Thời gian báo cáo, trạng thái và lịch sử sửa chữa được giữ nguyên. Nội dung cũ được lưu trong lịch sử
+          chỉnh sửa của sự cố.
+        </p>
+        {legacy ? (
+          <label className="block text-sm font-medium text-slate-600">
+            Mô tả sự cố
+            <textarea
+              className={`${inputClass} mt-1`}
+              rows={3}
+              value={form.description}
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              maxLength={2000}
+            />
+          </label>
+        ) : (
+          <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
+        )}
+        {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );
@@ -545,9 +691,9 @@ export function IncidentTable({
   };
 
   /*
-    Eight columns at desk width: the free-text column is a little narrower than
-    the Admin's and the technician and "Lần sửa" headers may wrap, so "Trạng thái"
-    — the answer the desk is asked for — stays on screen instead of scrolled off.
+    Seven columns at desk width: the free-text column is a little narrower than
+    the Admin's and the technician header may wrap, so "Trạng thái" — the answer
+    the desk is asked for — stays on screen instead of scrolled off.
   */
   const columns: DataColumn<Issue>[] = receptionView
     ? [
@@ -573,7 +719,9 @@ export function IncidentTable({
           className: 'min-w-[5.5rem] text-slate-500',
           render: (i) => formatDateTime(i.completedAt),
         },
-        { ...attempts, className: 'w-[1%]' },
+        // No "Lần sửa": how many times a technician went is the technical
+        // department's working detail. It is still one click down, in the
+        // expanded row's "Lịch sử xử lý", for the incident it belongs to.
         status,
       ]
     : [
@@ -632,16 +780,21 @@ export function IncidentTable({
       emptyTitle={emptyTitle}
       emptyMessage={emptyMessage}
       actions={actions}
-      detailToggle={readingMode ? 'always' : 'mobile'}
+      // Reception's table dropped "Lần sửa", so the repair history is reached by
+      // opening the row — at every width, not only on a phone.
+      detailToggle={readingMode || receptionView ? 'always' : 'mobile'}
       multiExpand={readingMode}
-      renderDetail={(i) =>
-        i.attempts && i.attempts.length > 0 ? (
-          // IssueTimeline renders its own "Lịch sử xử lý" heading.
-          <IssueTimeline attempts={i.attempts} />
-        ) : (
-          <p className="text-sm text-slate-400">Chưa có lần xử lý nào được ghi nhận.</p>
-        )
-      }
+      renderDetail={(i) => (
+        <div className="space-y-3">
+          {i.attempts && i.attempts.length > 0 ? (
+            // IssueTimeline renders its own "Lịch sử xử lý" heading.
+            <IssueTimeline attempts={i.attempts} />
+          ) : (
+            <p className="text-sm text-slate-400">Chưa có lần xử lý nào được ghi nhận.</p>
+          )}
+          <IssueEditHistory edits={i.edits ?? []} />
+        </div>
+      )}
     />
   );
 }

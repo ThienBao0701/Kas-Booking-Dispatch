@@ -27,7 +27,7 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { Prisma, PrismaClient, ShiftType } from '@prisma/client';
+import type { HotelDeliveryDepartment, Prisma, PrismaClient, ShiftType } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
@@ -37,11 +37,16 @@ import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
 import {
   CATEGORY_LABELS,
+  DELIVERY_DEPARTMENTS,
+  DELIVERY_DEPARTMENT_LABELS,
+  HOTEL_DELIVERY_TITLE,
   PAYMENT_METHOD_LABELS,
   PAYMENT_SOURCES,
   ROOM_SERVICE_LABELS,
+  ROOM_SERVICE_PRICE_LABEL,
   formatVnd,
 } from './reportTypes';
+import { isArchived } from './deliveryLifecycle';
 
 export type ReportActor = ShiftActor;
 
@@ -64,6 +69,7 @@ export const REPORT_INCLUDE = {
   facility: { include: { issue: { include: ISSUE_INCLUDE } } },
   complaint: { include: { completedBy: { select: { id: true, fullName: true } } } },
   roomService: true,
+  delivery: true,
   /// Oldest first: a correction history reads forwards.
   audits: { orderBy: { createdAt: 'asc' } },
 } satisfies Prisma.ReceptionOperationalReportInclude;
@@ -124,6 +130,9 @@ export function reportSummary(row: ReportDetail): string {
   }
   if (row.roomService) {
     return `${ROOM_SERVICE_LABELS[row.roomService.serviceType]} · ${row.roomService.guestName} · ${formatVnd(row.roomService.price)}`;
+  }
+  if (row.delivery) {
+    return `${DELIVERY_DEPARTMENT_LABELS[row.delivery.department]} · ${row.delivery.itemName} · SL ${row.delivery.quantity}`;
   }
   return CATEGORY_LABELS[row.category];
 }
@@ -192,15 +201,23 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
           method: row.payment.method,
           methodLabel: PAYMENT_METHOD_LABELS[row.payment.method],
           amount: row.payment.amount,
-          receivable: row.payment.receivable,
+          /*
+            "Công nợ" AS THE COLUMN REPORTS IT: a row whose METHOD is Công nợ
+            holds its debt in `amount` (the method decides where the amount
+            belongs), and an older row carried a debt beside its cash in the
+            legacy `receivable` column. Both are summed here, once, so the
+            screen, the PDF and the XLSX read one number.
+          */
+          receivable: paymentDebt(row.payment),
           expense: row.payment.expense,
           note: row.payment.note,
-          /* The three money columns the table shows, already split by method so
+          /* The money columns the table shows, already split by method so
              the screen, the PDF and the XLSX cannot disagree about which column
              a row belongs in. */
           cash: row.payment.method === 'CASH' ? row.payment.amount : 0,
           transfer: row.payment.method === 'TRANSFER' ? row.payment.amount : 0,
           card: row.payment.method === 'CARD' ? row.payment.amount : 0,
+          debt: row.payment.method === 'DEBT' ? row.payment.amount : 0,
         }
       : null,
 
@@ -271,8 +288,33 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
         }
       : null,
 
+    delivery: row.delivery
+      ? {
+          department: row.delivery.department,
+          departmentLabel: DELIVERY_DEPARTMENT_LABELS[row.delivery.department],
+          itemName: row.delivery.itemName,
+          quantity: row.delivery.quantity,
+          note: row.delivery.note,
+          /** Born completed — submitting the form is the hand-over. */
+          status: 'COMPLETED' as const,
+          statusLabel: 'Đã hoàn thành',
+          completedAt: row.delivery.completedAt.toISOString(),
+          /**
+           * Past the 12-hour rule, so it is listed under "Hoàn thành vấn đề"
+           * rather than in the active table. Derived from `now` on every read.
+           */
+          archived: isArchived(row.delivery.completedAt, now),
+          title: HOTEL_DELIVERY_TITLE,
+        }
+      : null,
+
     audits: row.audits.map(serializeReportAudit),
   };
+}
+
+/** The debt a payment row reports: its own amount if it IS a debt, plus any legacy column. */
+export function paymentDebt(p: { method: string; amount: number; receivable: number }): number {
+  return p.receivable + (p.method === 'DEBT' ? p.amount : 0);
 }
 
 export type SerializedReport = ReturnType<typeof serializeReport>;
@@ -403,10 +445,43 @@ export interface PaymentInput {
   ezCode?: string;
   source?: string;
   guestName?: string;
-  method: 'CASH' | 'TRANSFER' | 'CARD';
+  method: 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
+  /** "Thu tiền" — under Công nợ it is the amount owed; it never moves the drawer. */
   amount: number;
+  /** LEGACY second column; the form no longer sends it. */
   receivable?: number;
   expense?: number;
+  /** "Ghi chú". */
+  note?: string;
+}
+
+/** The largest quantity one delivery row may record. */
+export const MAX_DELIVERY_QUANTITY = 100_000;
+
+/** Bộ phận, Tên hàng hóa, Số lượng and an optional note. */
+export interface DeliveryInput {
+  department: HotelDeliveryDepartment;
+  itemName: string;
+  quantity: number;
+  note?: string;
+}
+
+function assertDepartment(value: unknown): HotelDeliveryDepartment {
+  if (typeof value === 'string' && (DELIVERY_DEPARTMENTS as readonly string[]).includes(value)) {
+    return value as HotelDeliveryDepartment;
+  }
+  throw ApiError.validation('Vui lòng chọn bộ phận.');
+}
+
+/** "Số lượng": a number, whole, at least 1. Free text is refused, not coerced. */
+export function assertQuantity(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw ApiError.validation('Số lượng phải là số nguyên từ 1 trở lên.');
+  }
+  if (value > MAX_DELIVERY_QUANTITY) {
+    throw ApiError.validation(`Số lượng không được vượt quá ${MAX_DELIVERY_QUANTITY}.`);
+  }
+  return value;
 }
 
 /** Tên khách, Mã EZ and "Nội dung" (`note`) — the whole of the current form. */
@@ -442,7 +517,7 @@ export interface RoomServiceInput {
 /**
  * WHICH FIELDS EACH ROOM-SERVICE SUBTYPE MUST CARRY.
  *
- * Every subtype: Tên khách, Mã EZ, Giá tiền, Ghi chú. On top of that, "Bán
+ * Every subtype: Tên khách, Mã EZ, Tổng giá tiền, Ghi chú. On top of that, "Bán
  * phòng" requires Hạng phòng and Số đêm, "Upgrade" requires Từ / Tới hạng
  * phòng and Số đêm, and the other three ask for nothing more.
  *
@@ -459,7 +534,7 @@ export function normaliseRoomService(input: RoomServiceInput) {
     serviceType: input.serviceType,
     guestName: required(input.guestName, 'tên khách'),
     ezCode: optional(input.ezCode),
-    price: assertMoney(input.price, 'Giá tiền'),
+    price: assertMoney(input.price, ROOM_SERVICE_PRICE_LABEL),
     note: optional(input.note),
     phone: null,
     roomNumber: null,
@@ -495,7 +570,8 @@ export type CreateReportInput =
   | { category: 'GUEST_REQUEST'; guestRequest: GuestRequestInput }
   | { category: 'FACILITY_ISSUE'; facility: FacilityInput }
   | { category: 'CUSTOMER_COMPLAINT'; complaint: ComplaintInput }
-  | { category: 'ROOM_SERVICE'; roomService: RoomServiceInput };
+  | { category: 'ROOM_SERVICE'; roomService: RoomServiceInput }
+  | { category: 'HOTEL_DELIVERY'; delivery: DeliveryInput };
 
 /**
  * Create one journal entry.
@@ -572,15 +648,16 @@ async function buildCreateData(
       return {
         ...scalars,
         payment: {
-          // Số phòng and Ghi chú are no longer asked for; new rows leave them null.
+          // Số phòng is no longer asked for; new rows leave it null. Ghi chú is.
           create: {
             ezCode: optional(p.ezCode),
             source: assertSource(p.source),
             guestName: optional(p.guestName),
             method: p.method,
-            amount: assertMoney(p.amount, 'Số tiền'),
+            amount: assertMoney(p.amount, 'Thu tiền'),
             receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
             expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
+            note: optional(p.note),
           },
         },
       };
@@ -632,6 +709,24 @@ async function buildCreateData(
       };
     case 'ROOM_SERVICE':
       return { ...scalars, roomService: { create: normaliseRoomService(input.roomService) } };
+    case 'HOTEL_DELIVERY':
+      return {
+        ...scalars,
+        delivery: {
+          /*
+            BORN "ĐÃ HOÀN THÀNH": submitting the form is the hand-over, so the
+            completion instant IS the creation instant. See
+            `deliveryLifecycle.ts` for how the 12-hour rule reads it.
+          */
+          create: {
+            department: assertDepartment(input.delivery.department),
+            itemName: required(input.delivery.itemName, 'tên hàng hóa'),
+            quantity: assertQuantity(input.delivery.quantity),
+            note: optional(input.delivery.note),
+            completedAt: base.createdAt,
+          },
+        },
+      };
   }
 }
 
@@ -715,6 +810,7 @@ export async function countByCategory(
     FACILITY_ISSUE: 0,
     CUSTOMER_COMPLAINT: 0,
     ROOM_SERVICE: 0,
+    HOTEL_DELIVERY: 0,
   };
   for (const row of grouped) counts[row.category] = row._count._all;
   return counts;
@@ -760,7 +856,7 @@ async function loadOwn(
  * more, so an older row keeps them exactly as recorded.
  */
 const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
-  PAYMENT: ['ezCode', 'source', 'guestName', 'method', 'amount', 'receivable', 'expense'],
+  PAYMENT: ['ezCode', 'source', 'guestName', 'method', 'amount', 'receivable', 'expense', 'note'],
   // `resolution` is absent on purpose: it is written only by `completeReport`.
   GUEST_REQUEST: ['guestName', 'ezCode', 'note'],
   /*
@@ -771,6 +867,12 @@ const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
   FACILITY_ISSUE: [],
   CUSTOMER_COMPLAINT: ['guestName', 'ezCode', 'description'],
   ROOM_SERVICE: ['guestName', 'ezCode', 'roomClass', 'fromRoomClass', 'toRoomClass', 'nights', 'price', 'note'],
+  /*
+    `completedAt` is absent on purpose, like a request's `resolution`: it is the
+    hand-over instant and the archive clock runs from it, so a correction may
+    change WHAT was delivered but never WHEN.
+  */
+  HOTEL_DELIVERY: ['department', 'itemName', 'quantity', 'note'],
 };
 
 const MONEY_FIELDS = new Set(['amount', 'receivable', 'expense', 'price']);
@@ -785,6 +887,7 @@ export interface UpdateReportInput {
   guestRequest?: Partial<GuestRequestInput>;
   complaint?: Partial<ComplaintInput>;
   roomService?: Partial<RoomServiceInput>;
+  delivery?: Partial<DeliveryInput>;
   /** Optional free-text justification, stored on every field row of this edit. */
   reason?: string;
 }
@@ -835,6 +938,7 @@ export async function updateReport(
     FACILITY_ISSUE: undefined,
     CUSTOMER_COMPLAINT: patch.complaint as Record<string, unknown> | undefined,
     ROOM_SERVICE: patch.roomService as Record<string, unknown> | undefined,
+    HOTEL_DELIVERY: patch.delivery as Record<string, unknown> | undefined,
   };
   const supplied: Record<string, unknown> = suppliedByCategory[current.category] ?? {};
 
@@ -869,12 +973,17 @@ export async function updateReport(
         guestRequest: true,
         complaint: true,
         roomService: true,
+        delivery: true,
       },
     });
     if (!fresh) throw ApiError.notFound('Không tìm thấy báo cáo.');
     if (fresh.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy, không thể sửa.');
 
-    const detail = (fresh.payment ?? fresh.guestRequest ?? fresh.complaint ?? fresh.roomService) as
+    const detail = (fresh.payment ??
+      fresh.guestRequest ??
+      fresh.complaint ??
+      fresh.roomService ??
+      fresh.delivery) as
       | Record<string, unknown>
       | null;
     if (!detail) throw ApiError.validation('Báo cáo này không có nội dung để sửa.');
@@ -892,9 +1001,13 @@ export async function updateReport(
         ? assertMoney(raw, moneyLabel(field))
         : field === 'method'
           ? assertMethod(raw)
-          : field === 'nights'
-            ? correctedNights(raw, (detail as { serviceType?: string }).serviceType)
-            : normaliseText(field, raw, current.category);
+          : field === 'department'
+            ? assertDepartment(raw)
+            : field === 'quantity'
+              ? assertQuantity(raw)
+              : field === 'nights'
+                ? correctedNights(raw, (detail as { serviceType?: string }).serviceType)
+                : normaliseText(field, raw, current.category);
       if (auditValue(before) === auditValue(next)) continue;
       /*
         A SOURCE IS CHECKED ONLY WHEN IT CHANGES. An older row typed "agoda.com"
@@ -923,6 +1036,9 @@ export async function updateReport(
         break;
       case 'ROOM_SERVICE':
         changed = (await tx.roomServiceReport.updateMany({ where, data })).count;
+        break;
+      case 'HOTEL_DELIVERY':
+        changed = (await tx.hotelDeliveryReport.updateMany({ where, data })).count;
         break;
       default:
         throw ApiError.validation('Báo cáo này không có nội dung để sửa.');
@@ -966,14 +1082,14 @@ export async function updateReport(
 }
 
 function moneyLabel(field: string): string {
-  if (field === 'amount') return 'Số tiền';
+  if (field === 'amount') return 'Thu tiền';
   if (field === 'receivable') return 'Công nợ';
   if (field === 'expense') return 'Chi tiền';
-  return 'Giá tiền';
+  return 'Tổng giá tiền';
 }
 
-function assertMethod(raw: unknown): 'CASH' | 'TRANSFER' | 'CARD' {
-  if (raw === 'CASH' || raw === 'TRANSFER' || raw === 'CARD') return raw;
+function assertMethod(raw: unknown): 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT' {
+  if (raw === 'CASH' || raw === 'TRANSFER' || raw === 'CARD' || raw === 'DEBT') return raw;
   throw ApiError.validation('Phương thức thanh toán không hợp lệ.');
 }
 
@@ -990,6 +1106,7 @@ function correctedNights(raw: unknown, serviceType: string | undefined): number 
 const TEXT_REQUIRED: Record<string, string> = {
   guestName: 'tên khách',
   description: 'mô tả',
+  itemName: 'tên hàng hóa',
   roomClass: 'hạng phòng',
   fromRoomClass: 'từ hạng phòng',
   toRoomClass: 'tới hạng phòng',

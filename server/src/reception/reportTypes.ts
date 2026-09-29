@@ -12,6 +12,7 @@
  * fetches this list once; it does not keep its own copy.
  */
 import type {
+  HotelDeliveryDepartment,
   OperationalReportCategory,
   ReceptionPaymentMethod,
   RoomServiceType,
@@ -36,7 +37,17 @@ export const CATEGORY_LABELS: Record<OperationalReportCategory, string> = {
   // 31 characters: exactly Excel's sheet-name limit, which this label also is.
   CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
+  /*
+    SHORT ON PURPOSE. The operator's full name for this category is "Giao nhận
+    hàng hóa của khách sạn" (the reception screens print it in full), but this
+    string also names an XLSX sheet, and Excel refuses a sheet name over 31
+    characters — the full name is 32.
+  */
+  HOTEL_DELIVERY: 'Giao nhận hàng hóa',
 };
+
+/** The category's full name, for screens and section headings that have room for it. */
+export const HOTEL_DELIVERY_TITLE = 'Giao nhận hàng hóa của khách sạn';
 
 /** Declaration order IS the order of the menu and of the report's sections. */
 export const CATEGORIES: readonly OperationalReportCategory[] = [
@@ -45,24 +56,35 @@ export const CATEGORIES: readonly OperationalReportCategory[] = [
   'FACILITY_ISSUE',
   'CUSTOMER_COMPLAINT',
   'ROOM_SERVICE',
+  'HOTEL_DELIVERY',
 ];
 
-/** Roman numerals I–V, the way the PDF numbers its sections. */
+/** Roman numerals I–VI, the way the PDF numbers its sections. */
 export const CATEGORY_NUMERALS: Record<OperationalReportCategory, string> = {
   PAYMENT: 'I',
   GUEST_REQUEST: 'II',
   FACILITY_ISSUE: 'III',
   CUSTOMER_COMPLAINT: 'IV',
   ROOM_SERVICE: 'V',
+  HOTEL_DELIVERY: 'VI',
 };
 
 export const PAYMENT_METHOD_LABELS: Record<ReceptionPaymentMethod, string> = {
-  CASH: 'Thu tiền mặt',
+  CASH: 'Tiền mặt',
   TRANSFER: 'Chuyển khoản',
   CARD: 'Cà thẻ',
+  DEBT: 'Công nợ',
 };
 
-export const PAYMENT_METHODS: readonly ReceptionPaymentMethod[] = ['CASH', 'TRANSFER', 'CARD'];
+/** The order of the "Phương thức thanh toán" selector. */
+export const PAYMENT_METHODS: readonly ReceptionPaymentMethod[] = ['CASH', 'TRANSFER', 'CARD', 'DEBT'];
+
+/**
+ * THE PRICE COLUMN'S NAME on every "Dịch vụ phòng" subtype — screen, PDF and
+ * XLSX. "Tổng giá tiền": the total for the stay or the service, not a unit price.
+ * (The client's own copy is `ROOM_SERVICE_PRICE_LABEL` in lib/roomServiceFields.ts.)
+ */
+export const ROOM_SERVICE_PRICE_LABEL = 'Tổng giá tiền';
 
 export const ROOM_SERVICE_LABELS: Record<RoomServiceType, string> = {
   ROOM_SALE: 'Bán phòng',
@@ -91,7 +113,28 @@ export const ROOM_SERVICE_TYPES: readonly RoomServiceType[] = [
  * OLDER ROWS ARE NOT REWRITTEN. They were typed freely and keep what was typed;
  * a correction that leaves the source untouched does not have to "fix" it.
  */
-export const PAYMENT_SOURCES = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'] as const;
+export const PAYMENT_SOURCES = [
+  'Booking',
+  'Agoda',
+  'Ctrip',
+  'Traveloka',
+  'Expedia',
+  'Walking',
+  'Khác',
+] as const;
+
+/** "Bộ phận" of a delivered item, in the order of the selector. */
+export const DELIVERY_DEPARTMENT_LABELS: Record<HotelDeliveryDepartment, string> = {
+  RECEPTION: 'Lễ tân',
+  HOUSEKEEPING: 'Buồng phòng',
+  TECHNICAL: 'Kỹ thuật',
+};
+
+export const DELIVERY_DEPARTMENTS: readonly HotelDeliveryDepartment[] = [
+  'RECEPTION',
+  'HOUSEKEEPING',
+  'TECHNICAL',
+];
 
 /**
  * "7.570.000 ₫".

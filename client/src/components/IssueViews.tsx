@@ -25,7 +25,13 @@
  * nothing true to say is not rendered at all rather than shown empty.
  */
 import { useState } from 'react';
-import { REPAIR_OUTCOME_LABEL, type Issue, type IssueStatus, type RepairAttempt } from '../api/issues';
+import {
+  REPAIR_OUTCOME_LABEL,
+  type Issue,
+  type IssueEdit,
+  type IssueStatus,
+  type RepairAttempt,
+} from '../api/issues';
 import { formatDateTime } from '../lib/format';
 
 const STATUS_STYLES: Record<IssueStatus, string> = {
@@ -227,5 +233,47 @@ export function IssueTimeline({ attempts }: { attempts: RepairAttempt[] }) {
         ))}
       </ol>
     </section>
+  );
+}
+
+/**
+ * What the desk corrected after filing the report — the words that were there,
+ * the words that replaced them, who and when.
+ *
+ * SHOWN WHEREVER THE INCIDENT IS: the reception board, the Admin's monitor and
+ * the technician's card all render it, so a technician on the way with the old
+ * description is never the only person who cannot see that it changed. Renders
+ * nothing for an incident that was never corrected.
+ */
+export function IssueEditHistory({ edits }: { edits: IssueEdit[] }) {
+  if (edits.length === 0) return null;
+  return (
+    <section data-testid="issue-edit-history">
+      <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+        Lịch sử chỉnh sửa
+      </h4>
+      <ul className="space-y-1">
+        {edits.map((e) => (
+          <li key={e.id} className="text-xs text-slate-600">
+            <span className="font-medium text-slate-700">{e.fieldLabel}</span>: {e.oldValue ?? '—'} →{' '}
+            {e.newValue ?? '—'} · {e.actorName} · {formatDateTime(e.createdAt)}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** A one-line flag for an incident that has been corrected — for a card that has no room for the list. */
+export function IssueEditedFlag({ issue }: { issue: Pick<Issue, 'edits'> }) {
+  // `?? []`: an incident from a payload that predates the edit history has none.
+  if ((issue.edits ?? []).length === 0) return null;
+  return (
+    <span
+      data-testid="issue-edited-flag"
+      className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-200"
+    >
+      Đã chỉnh sửa
+    </span>
   );
 }

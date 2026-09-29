@@ -7,9 +7,13 @@ export type ReportCategory =
   | 'GUEST_REQUEST'
   | 'FACILITY_ISSUE'
   | 'CUSTOMER_COMPLAINT'
-  | 'ROOM_SERVICE';
+  | 'ROOM_SERVICE'
+  | 'HOTEL_DELIVERY';
 
-export type PaymentMethod = 'CASH' | 'TRANSFER' | 'CARD';
+export type PaymentMethod = 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
+
+/** "Bộ phận" of a delivered item. */
+export type DeliveryDepartment = 'RECEPTION' | 'HOUSEKEEPING' | 'TECHNICAL';
 
 export type RoomServiceType = 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER';
 
@@ -27,6 +31,11 @@ export interface ReportOptions {
   roomServiceTypes: { code: RoomServiceType; label: string }[];
   /** "Nguồn" for a new payment — a closed list, the server's. */
   paymentSources: string[];
+  deliveryDepartments: { code: DeliveryDepartment; label: string }[];
+  /** "Giao nhận hàng hóa của khách sạn" — the full name; `categories` carries the short one. */
+  deliveryTitle: string;
+  /** How long a completed delivery stays active before "Hoàn thành vấn đề". */
+  deliveryArchiveHours: number;
 }
 
 export interface ReportAudit {
@@ -56,6 +65,8 @@ export interface PaymentDetail {
   cash: number;
   transfer: number;
   card: number;
+  /** The amount when the method IS Công nợ. */
+  debt: number;
 }
 
 /**
@@ -130,6 +141,23 @@ export interface RoomServiceDetail {
   serviceName: string | null;
 }
 
+/**
+ * One delivered item — born "Đã hoàn thành". `archived` is the SERVER's reading
+ * of the 12-hour rule on this very response; the client never computes it.
+ */
+export interface DeliveryDetail {
+  department: DeliveryDepartment;
+  departmentLabel: string;
+  itemName: string;
+  quantity: number;
+  note: string | null;
+  status: 'COMPLETED';
+  statusLabel: string;
+  completedAt: string;
+  archived: boolean;
+  title: string;
+}
+
 export interface OperationalReport {
   id: string;
   category: ReportCategory;
@@ -169,6 +197,7 @@ export interface OperationalReport {
   facility: FacilityIssueDetail | null;
   complaint: ComplaintDetail | null;
   roomService: RoomServiceDetail | null;
+  delivery: DeliveryDetail | null;
   audits: ReportAudit[];
 }
 
@@ -197,8 +226,10 @@ export interface NewPaymentInput {
   guestName?: string;
   method: PaymentMethod;
   amount: number;
+  /** LEGACY; the form no longer sends it — Công nợ is a method now. */
   receivable?: number;
   expense?: number;
+  note?: string;
 }
 
 /** Tên khách, Mã EZ and Nội dung — the whole of the form. */
@@ -235,13 +266,23 @@ export type NewReportInput =
   | { category: 'GUEST_REQUEST'; guestRequest: NewGuestRequestInput }
   | { category: 'FACILITY_ISSUE'; facility: { issueId: string } }
   | { category: 'CUSTOMER_COMPLAINT'; complaint: NewComplaintInput }
-  | { category: 'ROOM_SERVICE'; roomService: NewRoomServiceInput };
+  | { category: 'ROOM_SERVICE'; roomService: NewRoomServiceInput }
+  | { category: 'HOTEL_DELIVERY'; delivery: NewDeliveryInput };
+
+/** Bộ phận, Tên hàng hóa, Số lượng (a number) and an optional note. */
+export interface NewDeliveryInput {
+  department: DeliveryDepartment;
+  itemName: string;
+  quantity: number;
+  note?: string;
+}
 
 export interface UpdateReportInput {
   payment?: Partial<NewPaymentInput>;
   guestRequest?: Partial<NewGuestRequestInput>;
   complaint?: Partial<NewComplaintInput>;
   roomService?: Partial<NewRoomServiceInput>;
+  delivery?: Partial<NewDeliveryInput>;
   reason?: string;
 }
 
@@ -289,6 +330,18 @@ export const reportsApi = {
 
   setOpeningCash: (openingCash: number) =>
     api.put<{ cash: CashSummary }>('/reception/shifts/cash', { openingCash }),
+};
+
+/**
+ * "Giao nhận hàng hóa" as every role that may read it sees it — the SAME rows as
+ * the reception journal, scoped by the server to the caller's role. `active` is
+ * the working list; `archived` is "Hoàn thành vấn đề".
+ */
+export const deliveriesApi = {
+  list: (scope: 'active' | 'archived', params: { branchId?: number } = {}) =>
+    api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[] }>(
+      `/hotel-deliveries${query({ scope, ...params })}`,
+    ),
 };
 
 /* ---------------------------- Admin drill-down ---------------------------- */

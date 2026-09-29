@@ -36,6 +36,7 @@ export const CATEGORY_ORDER: ReportCategory[] = [
   'FACILITY_ISSUE',
   'CUSTOMER_COMPLAINT',
   'ROOM_SERVICE',
+  'HOTEL_DELIVERY',
 ];
 
 export const CATEGORY_FALLBACK_LABELS: Record<ReportCategory, string> = {
@@ -44,14 +45,34 @@ export const CATEGORY_FALLBACK_LABELS: Record<ReportCategory, string> = {
   FACILITY_ISSUE: 'Sự cố vật chất đang xử lý',
   CUSTOMER_COMPLAINT: 'Vấn đề về chất lượng và dịch vụ',
   ROOM_SERVICE: 'Dịch vụ phòng, KPI',
+  HOTEL_DELIVERY: 'Giao nhận hàng hóa',
 };
+
+/**
+ * The full name of the sixth category, which the server keeps short because it
+ * also names an XLSX sheet (Excel's limit is 31 characters; this is 32). Every
+ * screen with room for it prints this one; `/reception/reports/options` also
+ * carries it as `deliveryTitle`.
+ */
+export const HOTEL_DELIVERY_TITLE = 'Giao nhận hàng hóa của khách sạn';
+
+/** "Hoàn thành vấn đề" — where a delivery goes twelve hours after it was completed. */
+export const COMPLETED_ISSUES_TITLE = 'Hoàn thành vấn đề';
 
 /**
  * "Nguồn" for a new payment, before the server has spoken — a fallback copy of
  * its `PAYMENT_SOURCES`, for the same reason as the labels above. The server
  * refuses anything outside its own list whatever this one says.
  */
-export const PAYMENT_SOURCE_FALLBACK = ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'];
+export const PAYMENT_SOURCE_FALLBACK = [
+  'Booking',
+  'Agoda',
+  'Ctrip',
+  'Traveloka',
+  'Expedia',
+  'Walking',
+  'Khác',
+];
 
 /**
  * Each category's number in the official report — the same I–V the exported PDF
@@ -64,6 +85,7 @@ export const CATEGORY_MARKERS: Record<ReportCategory, string> = {
   FACILITY_ISSUE: 'III',
   CUSTOMER_COMPLAINT: 'IV',
   ROOM_SERVICE: 'V',
+  HOTEL_DELIVERY: 'VI',
 };
 
 /**
@@ -75,4 +97,5 @@ export const CATEGORY_MARKERS: Record<ReportCategory, string> = {
  */
 export const RECEPTION_CATEGORY_TITLES: Partial<Record<ReportCategory, string>> = {
   GUEST_REQUEST: 'Vấn đề khách yêu cầu thực hiện (Request)',
+  HOTEL_DELIVERY: HOTEL_DELIVERY_TITLE,
 };

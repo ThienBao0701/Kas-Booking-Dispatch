@@ -57,11 +57,18 @@ datasource db {
 ///   reaches the incident queues and nothing else. It is the ONLY role that may
 ///   move an incident NEW → IN_PROGRESS → COMPLETED; an Admin watches and
 ///   reports but never performs the work, so it never performs the transition.
+/// HOUSEKEEPING     = Bộ phận buồng phòng. Bound to ONE branch by `User.branchId`
+///   like a receptionist, because a room inspection belongs to the hotel it was
+///   made in. It is NOT a receptionist: `requireAuth` confines it to the
+///   housekeeping and hotel-delivery endpoints, so no booking, incident or
+///   report route that scopes "everyone who is not an admin" by branch can ever
+///   serve it.
 enum UserRole {
   ADMIN
   RECEPTIONIST
   BOOKING_DEPARTMENT
   TECHNICAL
+  HOUSEKEEPING
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -545,6 +552,12 @@ model User {
   guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
   complaintsCompleted      CustomerComplaintReport[]     @relation("ComplaintCompletedBy")
   operationalReportAudits  ReceptionReportAudit[]        @relation("ReportAuditActor")
+  issueEdits               HotelIssueEdit[]              @relation("IssueEditActor")
+  chatReadStates           ChatReadState[]               @relation("ChatReadStateUser")
+  roomInspections          RoomInspection[]              @relation("RoomInspectionCreatedBy")
+  roomIssuesVoided         RoomInspectionIssue[]         @relation("RoomIssueVoidedBy")
+  roomCollectionsRecorded  RoomIssueCollection[]         @relation("RoomCollectionRecordedBy")
+  roomCollectionEvents     RoomIssueCollectionEvent[]    @relation("RoomCollectionEventActor")
 
   @@index([branchId])
   @@index([role])
@@ -638,6 +651,8 @@ model Branch {
   handoverNotes           ShiftHandoverNote[]
   operationalReports      ReceptionOperationalReport[]
   operationalReportAudits ReceptionReportAudit[]
+  roomInspections         RoomInspection[]
+  roomInspectionIssues    RoomInspectionIssue[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -1767,6 +1782,8 @@ model HotelIssue {
   /// a copy: "Sự cố cơ sở vật chất" in the journal is this row, seen from the
   /// desk that reported it, and there is exactly one incident system.
   operationalReports FacilityIssueReport[]    @relation("FacilityReportIssue")
+  /// What a receptionist changed AFTER the report was filed — one row per field.
+  edits              HotelIssueEdit[]         @relation("IssueEdits")
 
   @@index([branchId, status])
   @@index([status])
@@ -1877,6 +1894,18 @@ model ChatConversation {
   /// badge at once, rather than from four places that must each remember.
   anonymous Boolean @default(false)
 
+  /// THE PERSISTENT CONVERSATION BETWEEN THE ADMINS AND ONE BRANCH — the chat
+  /// bubble's thread. Exactly one per branch (partial unique index
+  /// `ChatConversation_one_channel_per_branch`, created in the migration because
+  /// Prisma cannot express it), created the first time anybody writes to it.
+  ///
+  /// Visibility is the BRANCH, not the author: every Admin and every receptionist
+  /// of that branch reads it. That is the opposite of the question threads
+  /// above, which is why a channel is never returned by `visibilityWhere` and a
+  /// question thread is never returned by `channelWhere`. Channels carry no
+  /// category, are never anonymous and are never "closed".
+  branchChannel Boolean @default(false)
+
   /// Admin moderation. The original content is NEVER edited; a verdict is
   /// recorded BESIDE it, so "what was said" and "what we did about it" can never
   /// be confused for each other.
@@ -1896,7 +1925,9 @@ model ChatConversation {
   handledBy    User?                  @relation("ChatConversationHandledBy", fields: [handledByUserId], references: [id])
   shiftSession ReceptionShiftSession? @relation("ChatShiftSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
   messages     ChatMessage[]
+  readStates   ChatReadState[]
 
+  @@index([branchChannel, branchId])
   @@index([createdByUserId, lastMessageAt])
   @@index([status, lastMessageAt])
   @@index([lastMessageAt])
@@ -2295,6 +2326,8 @@ enum OperationalReportCategory {
   CUSTOMER_COMPLAINT
   /// Dịch vụ phòng
   ROOM_SERVICE
+  /// Giao nhận hàng hóa của khách sạn — see `HotelDeliveryReport`.
+  HOTEL_DELIVERY
 }
 
 /// How a guest paid. THE ONLY THING THAT MOVES THE CASH DRAWER IS `CASH`.
@@ -2310,6 +2343,11 @@ enum ReceptionPaymentMethod {
   TRANSFER
   /// Cà thẻ.
   CARD
+  /// Công nợ — recorded as owed, and like transfer and card it NEVER reaches the
+  /// drawer. The amount is stored in `amount`, exactly like the other methods;
+  /// the method decides which column it is reported under. (`receivable` is the
+  /// legacy second column older rows used to carry a debt beside a cash amount.)
+  DEBT
 }
 
 /// The five "Dịch vụ phòng" subtypes. Each one asks for a different set of
@@ -2410,6 +2448,7 @@ model ReceptionOperationalReport {
   facility     FacilityIssueReport?
   complaint    CustomerComplaintReport?
   roomService  RoomServiceReport?
+  delivery     HotelDeliveryReport?
 
   audits ReceptionReportAudit[] @relation("ReportAuditReport")
 
@@ -2683,4 +2722,257 @@ model ReceptionReportAudit {
   @@index([shiftSessionId])
   @@index([actorUserId])
   @@index([action])
+}
+
+/// WHAT WAS CHANGED ON A HOTEL INCIDENT AFTER IT WAS REPORTED — one row per field.
+///
+/// A receptionist can correct the description, the place or the fault type
+/// ("Sửa vấn đề") while the incident is still open. The incident row keeps its
+/// `createdAt`, its status, its technician and every repair attempt exactly as
+/// they were; the words that used to be there are kept HERE, so a technician who
+/// went out against the old description can always be shown what it said.
+/// Append-only, like `ReceptionReportAudit`, and for the same reason.
+model HotelIssueEdit {
+  id                String   @id @default(cuid())
+  issueId           String
+  /// The incident's own column name ("description", "roomNumber", …).
+  field             String
+  oldValue          String?
+  newValue          String?
+  actorUserId       Int
+  /// The editor's name at the time; renaming an account never rewrites this.
+  actorNameSnapshot String
+  /// Server time, from the business clock.
+  createdAt         DateTime
+
+  issue HotelIssue @relation("IssueEdits", fields: [issueId], references: [id], onDelete: Cascade)
+  actor User       @relation("IssueEditActor", fields: [actorUserId], references: [id])
+
+  @@index([issueId, createdAt])
+  @@index([actorUserId])
+}
+
+/// WHAT A USER HAS READ IN A CHAT CONVERSATION — the unread badge's only source.
+///
+/// One row per (conversation, person). "Unread" for a person is every message in
+/// the conversation newer than `lastReadAt` that somebody ELSE wrote; a person
+/// with no row has read nothing. It is a cursor and not a per-message flag, so
+/// opening a conversation is one upsert however long it is, and the count is one
+/// indexed query instead of a scan of `ChatMessage`.
+model ChatReadState {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         Int
+  lastReadAt     DateTime
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User             @relation("ChatReadStateUser", fields: [userId], references: [id])
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+/// Which department a delivered/received item belongs to — "Bộ phận".
+enum HotelDeliveryDepartment {
+  /// Lễ tân
+  RECEPTION
+  /// Buồng phòng
+  HOUSEKEEPING
+  /// Kỹ thuật
+  TECHNICAL
+}
+
+/// "GIAO NHẬN HÀNG HÓA CỦA KHÁCH SẠN" — one item handed over or received.
+///
+/// A DETAIL ROW OF THE RECEPTION JOURNAL, not a table of its own lifecycle. The
+/// branch, the shift, the receptionist, the creation instant, the void and the
+/// correction trail all come from the `ReceptionOperationalReport` root this
+/// hangs off — the same shape as the five categories before it, so there is one
+/// authorization filter and one export pipeline, not two.
+///
+/// "ĐÃ HOÀN THÀNH" IS THE STATE IT IS BORN IN. Submitting the form is the act of
+/// completing the hand-over, so `completedAt` is stamped with the report's own
+/// `createdAt` and never null. The record stays in the active list for
+/// `HOTEL_DELIVERY_ARCHIVE_HOURS` (server/src/reception/deliveryLifecycle.ts)
+/// after that instant and is then shown under "Hoàn thành vấn đề" — a
+/// consequence of READING the clock, not a job that rewrites rows, so there is
+/// nothing to fall behind and no status that can disagree with the time.
+model HotelDeliveryReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  department HotelDeliveryDepartment
+  /// Tên hàng hóa.
+  itemName   String
+  /// Số lượng — a whole number of at least 1.
+  quantity   Int
+  note       String?
+
+  completedAt DateTime
+
+  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  /// A department's own view (Technical, Housekeeping) and the archive split.
+  @@index([department, completedAt])
+  @@index([completedAt])
+}
+
+/// What a room inspection found — the six things Bộ phận buồng phòng records.
+enum RoomIssueType {
+  /// Hút thuốc
+  SMOKING
+  /// Phòng có mùi
+  ODOR
+  /// Cơ sở vật chất hư hỏng
+  DAMAGED_FACILITY
+  /// Khách quên đồ
+  LOST_ITEM
+  /// Phòng có khách nhưng hệ thống không có
+  UNREGISTERED_GUEST
+  /// Vấn đề khác
+  OTHER
+}
+
+/// Where the money for a room issue stands. No collection row at all reads as
+/// PENDING with no amount — the state every issue is born in.
+enum RoomCollectionStatus {
+  /// Chưa thu
+  PENDING
+  /// Đã thu — carries a method.
+  COLLECTED
+  /// Không thu được — carries a reason.
+  UNCOLLECTIBLE
+}
+
+/// How a room issue was paid. THREE values, and no "Công nợ": a collection is
+/// money received, and a debt is by definition money that was not.
+enum RoomCollectionMethod {
+  /// Tiền mặt
+  CASH
+  /// Chuyển khoản
+  TRANSFER
+  /// Cà thẻ
+  CARD
+}
+
+/// ONE ROOM INSPECTION — "Buồng phòng: tình trạng sử dụng phòng".
+///
+/// The header of what Bộ phận buồng phòng saw in one room at one moment: which
+/// hotel, which room, who cleaned it and who recorded it. What was WRONG lives
+/// in `RoomInspectionIssue` — one row per finding, because each finding is
+/// collected, waived and reported on independently of the others.
+///
+/// The branch is the recorder's own, stamped by the server from the account;
+/// nothing the browser sends can name another one.
+model RoomInspection {
+  id                    String   @id @default(cuid())
+  branchId              Int
+  roomNumber            String
+  /// Người dọn / người kiểm tra — as typed. The account that saved the form is
+  /// `createdByUserId`; these are often two different people.
+  staffName             String
+  createdByUserId       Int
+  createdByNameSnapshot String
+  /// Server time, from the business clock.
+  createdAt             DateTime
+
+  branch    Branch                @relation(fields: [branchId], references: [id])
+  createdBy User                  @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
+  issues    RoomInspectionIssue[]
+
+  @@index([branchId, createdAt])
+  @@index([createdAt])
+  @@index([createdByUserId])
+}
+
+/// ONE FINDING FROM A ROOM INSPECTION — the record Reception collects against.
+///
+/// `branchId` repeats the inspection's, so "this branch's open issues" is one
+/// indexed read and the branch filter cannot be forgotten by a join that
+/// forgot the inspection. It is written once, from the inspection, and never
+/// updated.
+///
+/// VOIDED, NEVER DELETED — the same rule as every operational record. Only an
+/// Admin voids one, with a reason.
+model RoomInspectionIssue {
+  id           String        @id @default(cuid())
+  inspectionId String
+  branchId     Int
+  type         RoomIssueType
+  /// Mô tả — required for `OTHER`, optional for the rest.
+  note         String?
+  createdAt    DateTime
+
+  voidedAt             DateTime?
+  voidedByUserId       Int?
+  voidedByNameSnapshot String?
+  voidReason           String?
+
+  inspection RoomInspection             @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  branch     Branch                     @relation(fields: [branchId], references: [id])
+  voidedBy   User?                      @relation("RoomIssueVoidedBy", fields: [voidedByUserId], references: [id])
+  collection RoomIssueCollection?
+  events     RoomIssueCollectionEvent[]
+
+  @@index([branchId, createdAt])
+  @@index([inspectionId])
+  @@index([type])
+}
+
+/// THE MONEY SIDE OF ONE ROOM ISSUE — kept apart from the Payment Ledger on
+/// purpose.
+///
+/// A room-issue collection is not a front-desk sale: it never enters the shift
+/// drawer, never appears in "Theo dõi thanh toán" and is never summed with it.
+/// It REFERENCES the issue it settles and nothing else in the payment world, so
+/// neither side can corrupt the other's totals.
+///
+/// This row is the CURRENT state; `RoomIssueCollectionEvent` keeps every save.
+/// The two invariants the form enforces are also enforced by CHECK constraints
+/// (see the migration): a COLLECTED row has a method, an UNCOLLECTIBLE row has a
+/// non-blank reason.
+model RoomIssueCollection {
+  id      String                @id @default(cuid())
+  issueId String                @unique
+  /// Whole đồng, non-negative.
+  amount  Int
+  status  RoomCollectionStatus
+  method  RoomCollectionMethod?
+  /// Lý do không thu được.
+  reason  String?
+  note    String?
+
+  recordedByUserId       Int
+  recordedByNameSnapshot String
+  shiftSessionId         String?
+  shiftType              ShiftType?
+  createdAt              DateTime
+  updatedAt              DateTime
+
+  issue      RoomInspectionIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  recordedBy User                @relation("RoomCollectionRecordedBy", fields: [recordedByUserId], references: [id])
+
+  @@index([status])
+  @@index([updatedAt])
+}
+
+/// EVERY SAVE OF A ROOM-ISSUE COLLECTION, oldest first — the trail behind the
+/// current state on `RoomIssueCollection`. Append-only.
+model RoomIssueCollectionEvent {
+  id                String                @id @default(cuid())
+  issueId           String
+  amount            Int
+  status            RoomCollectionStatus
+  method            RoomCollectionMethod?
+  reason            String?
+  note              String?
+  actorUserId       Int
+  actorNameSnapshot String
+  actorRole         UserRole
+  createdAt         DateTime
+
+  issue RoomInspectionIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  actor User                @relation("RoomCollectionEventActor", fields: [actorUserId], references: [id])
+
+  @@index([issueId, createdAt])
 }

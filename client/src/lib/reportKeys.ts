@@ -13,3 +13,9 @@
  */
 export const REPORTS_KEY = ['reception', 'reports'];
 export const CASH_KEY = ['reception', 'reports', 'cash'];
+/**
+ * "Giao nhận hàng hóa" as the delivery lists read it (`/hotel-deliveries`) — the
+ * branch-wide active/archived split, NOT the shift-scoped journal. A delivery
+ * written through the journal moves this too, so a write invalidates both.
+ */
+export const DELIVERIES_KEY = ['reception', 'deliveries'];

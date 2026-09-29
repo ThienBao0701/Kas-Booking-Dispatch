@@ -1,7 +1,10 @@
 import {
+  BarChart3,
+  BedDouble,
   BellRing,
   Building2,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardPaste,
   NotebookPen,
   FileText,
@@ -9,7 +12,7 @@ import {
   History,
   Inbox,
   LayoutDashboard,
-  MessagesSquare,
+  PackageCheck,
   RotateCcw,
   ScanSearch,
   Send,
@@ -32,14 +35,15 @@ export const ADMIN_NAV: NavItem[] = [
   { to: '/app/waiting', label: 'Chờ chi nhánh tạo', icon: Inbox },
   { to: '/app/pending-review', label: 'Chờ kiểm tra', icon: ScanSearch },
   { to: '/app/rejected', label: 'Cần tạo lại', icon: RotateCcw },
-  { to: '/app/completed', label: 'Đã xác nhận đúng', icon: CheckCircle2 },
   { to: '/app/history', label: 'Lịch sử', icon: History },
   // "Sự cố khách sạn" and "Bàn giao ca" are gone: incidents live under
   // "Báo cáo vấn đề" -> "Sự cố vật chất đang xử lý"; handover has no screen.
+  // "Đã xác nhận đúng" is gone too (its address redirects to "Lịch sử"), and
+  // "Chat box" is the bubble in the corner of every page, not a menu entry.
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
+  { to: '/app/housekeeping', label: 'Buồng phòng', icon: BedDouble },
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
   { to: '/app/charge-documents', label: 'Chứng từ', icon: FileText },
-  { to: '/app/chat', label: 'Chat box', icon: MessagesSquare },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
   { to: '/app/branches', label: 'Khách sạn & chi nhánh', icon: Building2 },
   { to: '/app/settings', label: 'Quản lý tài khoản', icon: Users },
@@ -63,7 +67,9 @@ export const BOOKING_DEPARTMENT_NAV: NavItem[] = [
 /**
  * Receptionist creates externally, uploads proof, then tracks the verdict.
  *
- * SIX ENTRIES CAME OUT, AND NO SCREEN OR RECORD WENT WITH THEM.
+ * SIX ENTRIES CAME OUT, AND NO SCREEN OR RECORD WENT WITH THEM. ("Chat box" is the
+ * seventh, and it went the same way: its pages are still routes, and the chat
+ * itself is the bubble on every page.)
  *
  * "Chờ Admin kiểm tra", "Cần tạo lại", "Đã xác nhận đúng" and "Lịch sử" are no
  * longer on reception's menu; their routes still exist, so a notification or
@@ -74,7 +80,9 @@ export const BOOKING_DEPARTMENT_NAV: NavItem[] = [
 export const RECEPTIONIST_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
-  { to: '/app/chat', label: 'Chat box', icon: MessagesSquare },
+  // Collection on what Bộ phận buồng phòng found — its own screen, apart from
+  // the payment ledger inside "Báo cáo vấn đề".
+  { to: '/app/room-collections', label: 'Thu tiền buồng phòng', icon: BedDouble },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
 ];
 
@@ -90,12 +98,25 @@ export const TECHNICAL_NAV: NavItem[] = [
   { to: '/app/technical/new', label: 'Sự cố khách sạn', icon: Wrench },
   { to: '/app/technical/in-progress', label: 'Đang sửa', icon: Hammer },
   { to: '/app/technical/completed', label: 'Đã hoàn thành', icon: CheckCircle2 },
+  { to: '/app/technical/statistics', label: 'Thống kê', icon: BarChart3 },
+  { to: '/app/deliveries', label: 'Giao nhận hàng hóa', icon: PackageCheck },
+];
+
+/**
+ * Bộ phận buồng phòng: record a room's condition, and see the deliveries
+ * addressed to it. Two entries, and the server confines the role to exactly the
+ * routes behind them.
+ */
+export const HOUSEKEEPING_NAV: NavItem[] = [
+  { to: '/app/inspections', label: 'Kiểm tra phòng', icon: ClipboardCheck },
+  { to: '/app/deliveries', label: 'Giao nhận hàng hóa', icon: PackageCheck },
 ];
 
 export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'ADMIN') return ADMIN_NAV;
   if (role === 'BOOKING_DEPARTMENT') return BOOKING_DEPARTMENT_NAV;
   if (role === 'TECHNICAL') return TECHNICAL_NAV;
+  if (role === 'HOUSEKEEPING') return HOUSEKEEPING_NAV;
   // Receptionist, and anything unrecognised: never the Chứng từ menu.
   return RECEPTIONIST_NAV;
 }
@@ -104,10 +125,16 @@ export function navForRole(role: UserRole | undefined): NavItem[] {
 export function titleForPath(pathname: string): string {
   if (pathname.startsWith('/app/booking/')) return 'Chi tiết đơn';
   if (pathname.startsWith('/app/charge-documents/')) return 'Chi tiết chứng từ';
-  if (pathname.startsWith('/app/chat/')) return 'Chat box';
+  if (pathname.startsWith('/app/chat')) return 'Chat box';
   if (pathname.startsWith('/app/reminders')) return 'Nhắc nhở';
   if (pathname.startsWith('/app/resend-orders')) return 'Gửi lại đơn';
-  const all = [...ADMIN_NAV, ...RECEPTIONIST_NAV, ...BOOKING_DEPARTMENT_NAV, ...TECHNICAL_NAV];
+  const all = [
+    ...ADMIN_NAV,
+    ...RECEPTIONIST_NAV,
+    ...BOOKING_DEPARTMENT_NAV,
+    ...TECHNICAL_NAV,
+    ...HOUSEKEEPING_NAV,
+  ];
   const match = all
     .slice()
     .sort((a, b) => b.to.length - a.to.length)

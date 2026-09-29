@@ -177,10 +177,12 @@ export interface EditField {
   /** The server's own field name — it is what the audit row will record. */
   name: string;
   label: string;
-  /** `integer`: a whole number, such as "Số đêm". */
-  kind?: 'text' | 'textarea' | 'money' | 'integer';
+  /** `integer`: a whole number, such as "Số đêm". `select`: one of `options`. */
+  kind?: 'text' | 'textarea' | 'money' | 'integer' | 'select';
   required?: boolean;
   placeholder?: string;
+  /** The choices of a `select`, as `{ value: the server's code, label }`. */
+  options?: { value: string; label: string }[];
 }
 
 /** A positive whole number as typed, or null — never a silent zero. */
@@ -207,7 +209,7 @@ export function RecordEditDialog({
 }: {
   report: OperationalReport;
   fields: EditField[];
-  block: 'guestRequest' | 'complaint' | 'roomService';
+  block: 'guestRequest' | 'complaint' | 'roomService' | 'delivery';
   onClose: () => void;
   onSaved: () => void | Promise<void>;
 }) {
@@ -305,6 +307,22 @@ export function RecordEditDialog({
                 onChange={(e) => setDraft((d) => ({ ...d, [f.name]: e.target.value.replace(/\D/g, '') }))}
                 data-testid={`record-edit-${f.name}`}
               />
+            ) : f.kind === 'select' ? (
+              <label key={f.name} className="block space-y-1.5 text-sm font-medium text-slate-700">
+                {f.label}
+                <select
+                  value={draft[f.name] ?? ''}
+                  onChange={(e) => setDraft((d) => ({ ...d, [f.name]: e.target.value }))}
+                  data-testid={`record-edit-${f.name}`}
+                  className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+                >
+                  {(f.options ?? []).map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ) : f.kind === 'textarea' ? (
               <label key={f.name} className="block text-sm font-medium text-slate-700 sm:col-span-2">
                 {f.label}

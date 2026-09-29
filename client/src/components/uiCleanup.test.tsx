@@ -17,7 +17,7 @@
  * Anything that re-derived it would be inventing money.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -272,10 +272,52 @@ describe('J the admin booking detail', () => {
     expect(screen.queryByTestId('ota-metadata-card')).toBeNull();
   });
 
-  it('keeps the operational information an Admin works from', () => {
+  it('keeps the operational information an Admin works from — minus the dispatch section', () => {
     mount(otaBooking('AGODA', { rooms: [ROOM] }), true);
     expect(screen.getByTestId('pms-note-card')).toBeInTheDocument();
-    expect(screen.getByText(/Thông tin điều phối/)).toBeInTheDocument();
+    expect(screen.getByTestId('rooms-section')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Xoá đơn/ })).toBeInTheDocument();
+    // "Thông tin điều phối (Admin)" is gone as a section.
+    expect(screen.queryByText(/Thông tin điều phối/)).toBeNull();
+  });
+
+  it('moves the internal details out of the main hierarchy, and deletes none of them', () => {
+    mount(otaBooking('AGODA', { rooms: [ROOM], parserVersion: 'p-9' }), true);
+    // Collapsed by default: a native <details> that is not `open`.
+    const internal = screen.getByTestId('booking-internal-more') as HTMLDetailsElement;
+    expect(internal.open).toBe(false);
+    expect(within(internal).getByText(/Chi tiết nội bộ/)).toBeInTheDocument();
+    // …and everything the removed section held is still inside it.
+    const times = within(internal).getByTestId('booking-internal-times');
+    expect(times).toHaveTextContent('Gửi lúc (sentAt)');
+    expect(times).toHaveTextContent('Xác nhận lúc (completedAt)');
+    expect(times).toHaveTextContent('Phiên bản trích xuất: p-9');
+    // The PMS note and the rooms are secondary for an Admin, one click down.
+    const more = screen.getByTestId('booking-detail-more') as HTMLDetailsElement;
+    expect(more.open).toBe(false);
+    expect(within(more).getByTestId('pms-note-card')).toBeInTheDocument();
+    expect(within(more).getByTestId('rooms-section')).toBeInTheDocument();
+  });
+
+  it('keeps the original booking content, on its own line and never collapsed away', () => {
+    mount(otaBooking('AGODA', { rooms: [ROOM], rawText: 'NỘI DUNG GỐC CỦA ĐƠN' }), true);
+    const card = screen.getByTestId('raw-content-card');
+    expect(within(card).getByText('Xem nội dung Booking.com gốc')).toBeInTheDocument();
+    expect(card).toHaveTextContent('NỘI DUNG GỐC CỦA ĐƠN');
+    // Not inside either of the collapsed groups.
+    expect(screen.getByTestId('booking-detail-more').contains(card)).toBe(false);
+    expect(screen.getByTestId('booking-internal-more').contains(card)).toBe(false);
+  });
+
+  it('puts the evidence and its actions above the secondary details', () => {
+    mount(otaBooking('AGODA', { rooms: [ROOM] }), true);
+    const proof = screen.getByTestId('proof-section');
+    const more = screen.getByTestId('booking-detail-more');
+    expect(proof.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows no raw-content card when the booking has no original text', () => {
+    mount(otaBooking('AGODA', { rooms: [ROOM] }), true);
+    expect(screen.queryByTestId('raw-content-card')).toBeNull();
   });
 });

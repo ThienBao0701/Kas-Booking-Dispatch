@@ -50,8 +50,10 @@ describe('receptionist sidebar badges', () => {
     renderApp('/app/new');
 
     expect(await screen.findByTestId('nav-badge-new')).toHaveTextContent('3');
-    expect(screen.getByTestId('nav-badge-chat')).toHaveTextContent('4');
     expect(screen.getByTestId('nav-badge-reminders')).toHaveTextContent('2');
+    // "Chat box" left the menu, so there is no item for its badge; unread chat
+    // is the bubble's own badge, counted per reader by the server.
+    expect(screen.queryByTestId('nav-badge-chat')).not.toBeInTheDocument();
     // "Chờ Admin kiểm tra" and "Cần tạo lại" left reception's menu, so there is
     // no item to carry either badge — even though the server still counts them.
     expect(screen.queryByTestId('nav-badge-pending-review')).not.toBeInTheDocument();
@@ -104,7 +106,7 @@ describe('admin sidebar badges', () => {
     expect(await screen.findByTestId('nav-badge-resend-orders')).toHaveTextContent('4');
     expect(screen.getByTestId('nav-badge-pending-review')).toHaveTextContent('3');
     expect(screen.getByTestId('nav-badge-rejected')).toHaveTextContent('2');
-    expect(screen.getByTestId('nav-badge-chat')).toHaveTextContent('6');
+    expect(screen.queryByTestId('nav-badge-chat')).not.toBeInTheDocument();
     // Admin's equivalent of "Đơn mới" is "Chờ chi nhánh tạo".
     expect(screen.getByTestId('nav-badge-waiting')).toHaveTextContent('5');
   });

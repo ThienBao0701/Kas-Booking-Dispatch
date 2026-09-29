@@ -32,7 +32,13 @@ import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { PageHeader, QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
-import { IssueStatusBadge, IssueThumb, IssueWorkTrail } from '../components/IssueViews';
+import {
+  IssueEditHistory,
+  IssueEditedFlag,
+  IssueStatusBadge,
+  IssueThumb,
+  IssueWorkTrail,
+} from '../components/IssueViews';
 import { formatDateTime } from '../lib/format';
 
 const POLL_MS = 20_000;
@@ -172,6 +178,8 @@ export function TechnicalPage() {
                           <span className="text-sm text-slate-500">{issueCategoryLabel(issue)}</span>
                         ) : null}
                         <IssueStatusBadge status={issue.status} needsRework={issue.needsRework} />
+                        {/* The desk corrected this report after it was filed — see the history below. */}
+                        <IssueEditedFlag issue={issue} />
                       </div>
 
                       {/* WHAT */}
@@ -188,6 +196,11 @@ export function TechnicalPage() {
 
                       {/* ASSIGNED + OUTCOME + the attempt history. */}
                       <IssueWorkTrail issue={issue} />
+                      {(issue.edits ?? []).length > 0 ? (
+                        <div className="mt-3">
+                          <IssueEditHistory edits={issue.edits} />
+                        </div>
+                      ) : null}
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-2">
                       {issue.status === 'NEW' ? (

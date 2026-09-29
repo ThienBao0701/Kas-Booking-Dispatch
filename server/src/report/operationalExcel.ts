@@ -22,7 +22,7 @@
 import ExcelJS from 'exceljs';
 import type { BranchOperationalReport, OperationalReportData } from '../reception/operationalReport';
 import type { SerializedReport } from '../reception/reportService';
-import { CATEGORY_LABELS } from '../reception/reportTypes';
+import { CATEGORY_LABELS, ROOM_SERVICE_PRICE_LABEL } from '../reception/reportTypes';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import { hcmDateTime, hcmDayLabel } from './format';
 
@@ -78,6 +78,7 @@ export async function buildOperationalReportWorkbook(
     { header: CATEGORY_LABELS.FACILITY_ISSUE, key: 'facilities', width: 24 },
     { header: CATEGORY_LABELS.CUSTOMER_COMPLAINT, key: 'complaints', width: 26 },
     { header: CATEGORY_LABELS.ROOM_SERVICE, key: 'services', width: 20 },
+    { header: CATEGORY_LABELS.HOTEL_DELIVERY, key: 'deliveries', width: 20 },
     { header: 'Tổng bản ghi', key: 'total', width: 14 },
   ];
   headerRow(summary);
@@ -117,6 +118,7 @@ export async function buildOperationalReportWorkbook(
       facilities: section.counts.FACILITY_ISSUE,
       complaints: section.counts.CUSTOMER_COMPLAINT,
       services: section.counts.ROOM_SERVICE,
+      deliveries: section.counts.HOTEL_DELIVERY,
       total: section.total,
     });
   }
@@ -332,7 +334,7 @@ export async function buildOperationalReportWorkbook(
     { header: 'Từ hạng phòng', key: 'from', width: 18 },
     { header: 'Tới hạng phòng', key: 'to', width: 18 },
     { header: 'Số đêm', key: 'nights', width: 10 },
-    { header: 'Giá tiền', key: 'price', width: 16 },
+    { header: ROOM_SERVICE_PRICE_LABEL, key: 'price', width: 18 },
     { header: 'Ghi chú', key: 'note', width: 32 },
     { header: 'Nhân viên', key: 'staff', width: 20 },
     { header: 'Ca', key: 'shift', width: 8 },
@@ -373,6 +375,49 @@ export async function buildOperationalReportWorkbook(
     });
   }
   moneyColumns(services, ['price']);
+
+  /* --------------------- 7. Giao nhận hàng hóa --------------------- */
+  const deliveries = wb.addWorksheet(CATEGORY_LABELS.HOTEL_DELIVERY);
+  deliveries.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Ngày ca', key: 'shiftDay', width: 12 },
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Bộ phận', key: 'department', width: 14 },
+    { header: 'Tên hàng hóa', key: 'item', width: 34 },
+    // A real number, like every other quantity in the workbook.
+    { header: 'Số lượng', key: 'quantity', width: 10 },
+    { header: 'Ghi chú', key: 'note', width: 32 },
+    { header: 'Trạng thái', key: 'status', width: 14 },
+    { header: 'Hoàn thành lúc', key: 'completedAt', width: 18 },
+    { header: 'Nhân viên', key: 'staff', width: 20 },
+    { header: 'Ca', key: 'shift', width: 8 },
+    { header: 'Thời gian', key: 'at', width: 18 },
+    { header: 'Tình trạng bản ghi', key: 'state', width: 14 },
+    { header: 'Lịch sử chỉnh sửa', key: 'edits', width: 40 },
+  ];
+  headerRow(deliveries);
+
+  for (const section of data.branches) {
+    section.byCategory.HOTEL_DELIVERY.forEach((row, i) => {
+      const d = row.delivery;
+      deliveries.addRow({
+        branch: branchLabel(section),
+        shiftDay: hcmDayLabel(row.shiftDate),
+        stt: i + 1,
+        department: d?.departmentLabel ?? '',
+        item: d?.itemName ?? '',
+        quantity: d?.quantity ?? null,
+        note: d?.note ?? '',
+        status: d?.statusLabel ?? '',
+        completedAt: d ? when(d.completedAt) : '',
+        staff: row.createdByName,
+        shift: row.shiftName ?? '',
+        at: when(row.createdAt),
+        state: voidState(row),
+        edits: editHistory(row),
+      });
+    });
+  }
 
   const out = await wb.xlsx.writeBuffer();
   return Buffer.from(out);

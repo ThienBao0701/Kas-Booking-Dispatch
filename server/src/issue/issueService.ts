@@ -1,5 +1,6 @@
 import type {
   IssueAreaCategory,
+  IssueAreaSubtype,
   IssueCategory,
   IssueStatus,
   Prisma,
@@ -16,7 +17,14 @@ import {
   saveIssuePhoto,
   sniffImageMime,
 } from './issueStorage';
-import { AREA_FIELDS, describeLocation, normaliseArea, type AreaInput } from './issueArea';
+import {
+  AREA_FIELDS,
+  ISSUE_AREA_LABELS,
+  ISSUE_AREA_SUBTYPE_LABELS,
+  describeLocation,
+  normaliseArea,
+  type AreaInput,
+} from './issueArea';
 
 /** The partial unique index that makes "one open attempt per incident" a fact. */
 const ONE_OPEN_ATTEMPT = 'TechnicalRepairAttempt_one_open_per_issue';
@@ -60,6 +68,8 @@ export const ISSUE_INCLUDE = {
   completedBy: true,
   /// Oldest first: "Lần 1" really is the first attempt anybody made.
   attempts: { orderBy: { acceptedAt: 'asc' } },
+  /// Oldest first: what a receptionist corrected after the report was filed.
+  edits: { orderBy: { createdAt: 'asc' } },
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true } },
 } satisfies Prisma.HotelIssueInclude;
 
@@ -113,6 +123,40 @@ export function serializeAttempt(attempt: RepairAttemptRow, now: Date) {
 }
 
 export type SerializedAttempt = ReturnType<typeof serializeAttempt>;
+
+/** The words for an edited column, so the screen never prints a raw column name. */
+const EDIT_FIELD_LABELS: Record<string, string> = {
+  description: 'Mô tả sự cố',
+  areaCategory: 'Khu vực',
+  roomNumber: 'Số phòng',
+  floorNumber: 'Số tầng',
+  areaSubtype: 'Loại vị trí',
+  locationDetail: 'Vị trí cụ thể',
+  category: 'Loại sự cố',
+};
+
+/** An enum-valued column's old/new value, as a person reads it. */
+function editValueLabel(field: string, value: string | null): string | null {
+  if (value === null) return null;
+  if (field === 'areaCategory') return ISSUE_AREA_LABELS[value as keyof typeof ISSUE_AREA_LABELS] ?? value;
+  if (field === 'areaSubtype') {
+    return ISSUE_AREA_SUBTYPE_LABELS[value as keyof typeof ISSUE_AREA_SUBTYPE_LABELS] ?? value;
+  }
+  if (field === 'category') return ISSUE_CATEGORY_LABELS[value as IssueCategory] ?? value;
+  return value;
+}
+
+export function serializeIssueEdit(edit: IssueDetail['edits'][number]) {
+  return {
+    id: edit.id,
+    field: edit.field,
+    fieldLabel: EDIT_FIELD_LABELS[edit.field] ?? edit.field,
+    oldValue: editValueLabel(edit.field, edit.oldValue),
+    newValue: editValueLabel(edit.field, edit.newValue),
+    actorName: edit.actorNameSnapshot,
+    createdAt: edit.createdAt.toISOString(),
+  };
+}
 
 export function serializeIssue(issue: IssueDetail, now: Date = getClock().now()) {
   /*
@@ -170,6 +214,8 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
 
     /** Every attempt anybody has made, oldest first. Empty on legacy rows. */
     attempts: issue.attempts.map((a) => serializeAttempt(a, now)),
+    /** Every correction made after the report was filed, oldest first. */
+    edits: issue.edits.map(serializeIssueEdit),
     cannotRepairCount,
     /**
      * BACK IN THE QUEUE AFTER SOMEBODY TRIED.
@@ -314,43 +360,132 @@ async function notifyNewIssue(branchAddress: string, issue: IssueDetail): Promis
 }
 
 export interface UpdateIssueInput {
+  areaCategory?: IssueAreaCategory;
   roomNumber?: string | null;
-  category?: IssueCategory;
+  floorNumber?: string | null;
+  areaSubtype?: IssueAreaSubtype | null;
+  locationDetail?: string | null;
+  category?: IssueCategory | null;
   description?: string;
 }
 
+/** The columns a correction may touch — the fields the report form itself asks for. */
+const EDITABLE_ISSUE_FIELDS = [
+  'areaCategory',
+  'roomNumber',
+  'floorNumber',
+  'areaSubtype',
+  'locationDetail',
+  'category',
+  'description',
+] as const;
+
 /**
- * Edits a report. Only the reporting side (own branch) may edit, and only while
- * the issue is still NEW — once an Admin accepts it, edits are refused.
+ * "SỬA VẤN ĐỀ" — corrects what a report says, without touching how it has gone.
+ *
+ * WHO: the reception of the incident's own branch, and the Admin. Bộ phận kỹ
+ * thuật works incidents, it does not rewrite them, and no other role reports
+ * them at all.
+ *
+ * WHEN: while the incident is open — NEW or IN_PROGRESS, and after a "Không sửa
+ * được" too. A COMPLETED incident is a closed record and is refused.
+ *
+ * WHAT IT NEVER TOUCHES: `createdAt`, the status, the reporter, the shift, the
+ * technician, and every repair attempt. The words that were replaced are kept in
+ * `HotelIssueEdit` — one row per field, old value, new value, who and when — and
+ * are served with the incident, so a technician who is on the way with the old
+ * description can be shown that it changed, and what it said before.
+ *
+ * (This replaces an earlier rule that refused any edit once a technician had
+ * accepted the incident. That rule protected a description from being rewritten
+ * underneath a repair; the audit row now protects it without stopping the desk
+ * from correcting a wrong room number while the repair is under way.)
  */
-export async function updateIssue(id: string, input: UpdateIssueInput, actor: Actor): Promise<IssueDetail> {
+export async function updateIssue(
+  id: string,
+  input: UpdateIssueInput,
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  if (actor.role !== 'RECEPTIONIST' && actor.role !== 'ADMIN') {
+    throw ApiError.forbidden('Chỉ lễ tân hoặc Admin mới sửa được báo cáo sự cố.');
+  }
   const issue = await loadIssue(id);
   assertBranchAccess(issue, actor);
-  if (issue.status !== 'NEW') {
-    throw ApiError.conflict('Không thể sửa báo cáo sau khi Admin đã tiếp nhận.', { status: issue.status });
+  if (issue.status === 'COMPLETED') {
+    throw ApiError.conflict('Không thể sửa sự cố đã hoàn thành.', { status: issue.status });
   }
-  /*
-    AND NOT AFTER SOMEBODY HAS ALREADY WORKED IT.
 
-    A "Không sửa được" puts the incident back to NEW, which would otherwise
-    re-open the reporter's edit rights on a report a technician has already been
-    to — letting the description be rewritten underneath an attempt that was made
-    against the old one. Once there is history, the report is a record.
-  */
-  if (issue.attempts.length > 0) {
-    throw ApiError.conflict('Không thể sửa báo cáo đã có người tiếp nhận xử lý.', {
-      attempts: issue.attempts.length,
-    });
-  }
-  const data: Prisma.HotelIssueUpdateInput = {};
-  if (input.roomNumber !== undefined) data.roomNumber = input.roomNumber?.trim() ? input.roomNumber.trim() : null;
-  if (input.category !== undefined) data.category = input.category;
+  const supplied = (Object.keys(input) as (keyof UpdateIssueInput)[]).filter(
+    (key) => input[key] !== undefined,
+  );
+  if (supplied.length === 0) throw ApiError.validation('Cần ít nhất một trường để cập nhật.');
+  const touchesArea = supplied.some((key) => key !== 'description' && key !== 'category');
+
+  const next: Partial<Record<(typeof EDITABLE_ISSUE_FIELDS)[number], string | null>> = {};
+
   if (input.description !== undefined) {
     const d = input.description.trim();
     if (d.length === 0) throw ApiError.validation('Vui lòng nhập mô tả sự cố.');
-    data.description = d;
+    next.description = d;
   }
-  await prisma.hotelIssue.update({ where: { id }, data });
+
+  if (!issue.areaCategory && input.areaCategory === undefined) {
+    /*
+      A LEGACY REPORT (filed before the structured form) has no area and was
+      never asked for one; it is never given one by a partial edit. Only the
+      free-form room number and the fault type it always had can change.
+    */
+    if (touchesArea && input.roomNumber === undefined) {
+      throw ApiError.validation('Vui lòng chọn khu vực.');
+    }
+    if (input.roomNumber !== undefined) next.roomNumber = input.roomNumber?.trim() || null;
+    if (input.category !== undefined) next.category = input.category;
+  } else if (touchesArea || input.category !== undefined) {
+    // Merge over what is stored, then let the area table decide what is valid.
+    const area = normaliseArea({
+      areaCategory: input.areaCategory ?? issue.areaCategory!,
+      roomNumber: input.roomNumber !== undefined ? input.roomNumber : issue.roomNumber,
+      floorNumber: input.floorNumber !== undefined ? input.floorNumber : issue.floorNumber,
+      areaSubtype: input.areaSubtype !== undefined ? input.areaSubtype : issue.areaSubtype,
+      locationDetail: input.locationDetail !== undefined ? input.locationDetail : issue.locationDetail,
+    });
+    Object.assign(next, area);
+    next.category = AREA_FIELDS[area.areaCategory].category
+      ? input.category !== undefined
+        ? input.category
+        : issue.category
+      : null;
+  }
+
+  const changes: { field: string; oldValue: string | null; newValue: string | null }[] = [];
+  const data: Prisma.HotelIssueUpdateInput = {};
+  for (const field of EDITABLE_ISSUE_FIELDS) {
+    if (!(field in next)) continue;
+    const before = (issue[field] ?? null) as string | null;
+    const after = next[field] ?? null;
+    if (before === after) continue;
+    (data as Record<string, unknown>)[field] = after;
+    changes.push({ field, oldValue: before, newValue: after });
+  }
+  // Re-saving an untouched form is a no-op, not an audit row saying "x → x".
+  if (changes.length === 0) return issue;
+
+  const now = clock.now();
+  await prisma.$transaction([
+    prisma.hotelIssue.update({ where: { id }, data }),
+    prisma.hotelIssueEdit.createMany({
+      data: changes.map((c) => ({
+        issueId: id,
+        field: c.field,
+        oldValue: c.oldValue,
+        newValue: c.newValue,
+        actorUserId: actor.id,
+        actorNameSnapshot: actor.fullName,
+        createdAt: now,
+      })),
+    }),
+  ]);
   return loadIssue(id);
 }
 

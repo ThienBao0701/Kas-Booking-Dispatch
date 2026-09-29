@@ -72,7 +72,13 @@ export function assertChatAccess(actor: ChatActor): void {
  * between 403 and 404; this simply cannot return another user's row.
  */
 export function visibilityWhere(actor: ChatActor): Prisma.ChatConversationWhereInput {
-  if (actor.role === 'ADMIN') return {};
+  /*
+    BRANCH CHANNELS ARE NEVER QUESTION THREADS. The persistent branch
+    conversation behind the chat bubble lives in the same table, and without this
+    clause the old thread list would show it (and, for a receptionist who happened
+    to write the first message, treat it as their own). See `channelWhere`.
+  */
+  if (actor.role === 'ADMIN') return { branchChannel: false };
   /*
     `anonymous: false` IS THE WHOLE OF THE ANONYMITY RULE.
 
@@ -88,10 +94,28 @@ export function visibilityWhere(actor: ChatActor): Prisma.ChatConversationWhereI
     consequence — that an Admin reply cannot reach them — is real, and is why the
     Admin's verdict is recorded in `adminNote` on the thread instead.
   */
-  return { createdByUserId: actor.id, anonymous: false };
+  return { createdByUserId: actor.id, anonymous: false, branchChannel: false };
 }
 
-const MESSAGE_INCLUDE = {
+/**
+ * THE VISIBILITY RULE OF A BRANCH CHANNEL — the chat bubble's conversation.
+ *
+ * The opposite of the question threads above: what decides access is the
+ * BRANCH, not who wrote. Every Admin reads every channel; a receptionist reads
+ * the channel of the branch they are assigned to and no other (`?? -1` matches no
+ * branch, so an unassigned account reads nothing). Every other role is refused —
+ * Bộ phận đặt phòng, kỹ thuật and buồng phòng have no part in this conversation.
+ *
+ * A DATABASE FRAGMENT, applied to every channel read, list, message and
+ * attachment, for the same reason as `visibilityWhere`.
+ */
+export function channelWhere(actor: ChatActor): Prisma.ChatConversationWhereInput {
+  assertChatAccess(actor);
+  if (actor.role === 'ADMIN') return { branchChannel: true };
+  return { branchChannel: true, branchId: actor.branchId ?? -1 };
+}
+
+export const MESSAGE_INCLUDE = {
   sender: { select: { id: true, fullName: true, role: true } },
   attachments: {
     orderBy: { createdAt: 'asc' },
@@ -279,7 +303,7 @@ function serializeConversation(
   };
 }
 
-type MessageRow = {
+export type MessageRow = {
   id: string;
   conversationId: string;
   body: string;
@@ -308,7 +332,7 @@ type MessageRow = {
  * "bang-luong-thang-8-cua-Lan.png" identifies a person just as precisely as the
  * field this function is careful to drop.
  */
-function serializeMessage(
+export function serializeMessage(
   row: MessageRow,
   opts: { anonymous: boolean } = { anonymous: false },
 ): ChatMessageView {
@@ -642,7 +666,12 @@ export async function authorizeChatAttachment(
   const row = await client.chatAttachment.findFirst({
     where: {
       id: attachmentId,
-      message: { conversation: visibilityWhere(actor) },
+      // A question thread's attachment (owner-visible) OR a branch channel's
+      // (branch-visible) — two different rules, either of which may admit it.
+      OR: [
+        { message: { conversation: visibilityWhere(actor) } },
+        { message: { conversation: channelWhere(actor) } },
+      ],
     },
     select: { storedFileName: true, mimeType: true, originalFileName: true },
   });

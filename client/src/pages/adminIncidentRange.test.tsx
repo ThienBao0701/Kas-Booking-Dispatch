@@ -233,13 +233,15 @@ describe('the period summary', () => {
 });
 
 describe('the incident table', () => {
-  it('keeps the branch and export controls, and every branch’s unresolved count', async () => {
+  it('keeps the branch and export controls — the counts are in the selector', async () => {
     installMocks();
     await openIncidents();
 
     expect(await screen.findByTestId('branch-select')).toHaveValue('ALL');
     expect(screen.getByRole('button', { name: /Xuất báo cáo/ })).toBeInTheDocument();
-    expect(await screen.findByText('Sự cố chưa xử lý theo chi nhánh')).toBeInTheDocument();
+    // The separate "by branch" table is gone: the selector carries the numbers.
+    expect(screen.queryByText('Sự cố chưa xử lý theo chi nhánh')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('branch-incident-counts')).not.toBeInTheDocument();
   });
 
   it('shows how the latest repair attempt ended, and how long it took', async () => {

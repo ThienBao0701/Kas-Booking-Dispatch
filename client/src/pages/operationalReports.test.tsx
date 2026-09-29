@@ -63,11 +63,13 @@ const OPTIONS = {
     { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
+    { code: 'HOTEL_DELIVERY', label: 'Giao nhận hàng hóa' },
   ],
   paymentMethods: [
-    { code: 'CASH', label: 'Thu tiền mặt' },
+    { code: 'CASH', label: 'Tiền mặt' },
     { code: 'TRANSFER', label: 'Chuyển khoản' },
     { code: 'CARD', label: 'Cà thẻ' },
+    { code: 'DEBT', label: 'Công nợ' },
   ],
   roomServiceTypes: [
     { code: 'ROOM_SALE', label: 'Bán phòng' },
@@ -76,7 +78,14 @@ const OPTIONS = {
     { code: 'LAUNDRY', label: 'Giặt ủi' },
     { code: 'OTHER', label: 'Dịch vụ khác' },
   ],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác'],
+  deliveryDepartments: [
+    { code: 'RECEPTION', label: 'Lễ tân' },
+    { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
+    { code: 'TECHNICAL', label: 'Kỹ thuật' },
+  ],
+  deliveryTitle: 'Giao nhận hàng hóa của khách sạn',
+  deliveryArchiveHours: 12,
 };
 
 const EMPTY_COUNTS = {
@@ -85,6 +94,7 @@ const EMPTY_COUNTS = {
   FACILITY_ISSUE: 0,
   CUSTOMER_COMPLAINT: 0,
   ROOM_SERVICE: 0,
+  HOTEL_DELIVERY: 0,
 };
 
 const EMPTY_CASH = {
@@ -143,6 +153,7 @@ function report(over: Record<string, unknown> = {}) {
     facility: null,
     complaint: complaint(),
     roomService: null,
+    delivery: null,
     audits: [],
     ...over,
   };
@@ -168,6 +179,9 @@ function shellRoutes(
     'GET /api/reception/reports/options': () => ({ status: 200, body: OPTIONS }),
     'GET /api/reception/reports?shiftSessionId=s1': () => ({ status: 200, body: { reports: [], counts: EMPTY_COUNTS } }),
     'GET /api/reception/shifts/cash': () => ({ status: 200, body: { cash: EMPTY_CASH } }),
+    // The deliveries are branch-wide (not the shift's journal), so they are their own read.
+    'GET /api/hotel-deliveries?scope=active': () => ({ status: 200, body: { scope: 'active', deliveries: [] } }),
+    'GET /api/hotel-deliveries?scope=archived': () => ({ status: 200, body: { scope: 'archived', deliveries: [] } }),
     // The exact URL `issuesApi.list` builds: `query()` keeps insertion order,
     // and `outstanding` is appended after the rest.
     'GET /api/issues?pageSize=100&outstanding=true': () => ({
@@ -186,7 +200,14 @@ const FIVE_TITLES = [
   'Dịch vụ phòng, KPI',
 ];
 
-/** "Tổng" — the menu of the five categories. */
+/** The six categories, and after them the archive view — what "Tổng" now offers. */
+const MENU_TITLES = [
+  ...FIVE_TITLES,
+  'Giao nhận hàng hóa của khách sạn',
+  'Hoàn thành vấn đề',
+];
+
+/** "Tổng" — the menu of the categories. */
 async function openTotalMenu() {
   await userEvent.click(await screen.findByTestId('report-total'));
   return screen.findByTestId('category-menu');
@@ -491,11 +512,11 @@ describe('the overview', () => {
 });
 
 describe('the "Tổng" menu', () => {
-  it('offers exactly five, in the specified order and exact wording', async () => {
+  it('offers the six categories and "Hoàn thành vấn đề", in the specified order and exact wording', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
 
-    expect(await menuLabels()).toEqual(FIVE_TITLES);
+    expect(await menuLabels()).toEqual(MENU_TITLES);
   });
 
   it('never shows a separate KPI category', async () => {
@@ -504,7 +525,7 @@ describe('the "Tổng" menu', () => {
 
     // "KPI" appears ONLY as part of the room-service label, never alone.
     const labels = await menuLabels();
-    expect(labels).toHaveLength(5);
+    expect(labels).toHaveLength(7);
     expect(labels.filter((l) => l === 'KPI')).toHaveLength(0);
     expect(labels).toContain('Dịch vụ phòng, KPI');
   });
@@ -540,7 +561,8 @@ describe('the "Tổng" menu', () => {
     await userEvent.keyboard('{ArrowDown}');
     expect(items[1]).toHaveFocus();
     await userEvent.keyboard('{ArrowUp}{ArrowUp}');
-    expect(items[4]).toHaveFocus();
+    // Up from the first wraps to the last: "Hoàn thành vấn đề".
+    expect(items[6]).toHaveFocus();
     await userEvent.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByTestId('category-menu')).not.toBeInTheDocument());
     expect(screen.getByTestId('report-total')).toHaveFocus();
@@ -551,7 +573,7 @@ describe('the "Tổng" menu', () => {
     renderApp('/app/reports');
 
     const menu = await openTotalMenu();
-    expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(5);
+    expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(7);
     for (const form of [
       'payment-form',
       'guest-request-form',
@@ -1108,7 +1130,7 @@ describe('dịch vụ phòng, KPI', () => {
       'Mã EZ',
       'Hạng phòng',
       'Số đêm',
-      'Giá tiền',
+      'Tổng giá tiền',
       'Ghi chú',
       'Thời gian',
       'Thao tác',
@@ -1124,14 +1146,14 @@ describe('dịch vụ phòng, KPI', () => {
       'Từ hạng phòng',
       'Tới hạng phòng',
       'Số đêm',
-      'Giá tiền',
+      'Tổng giá tiền',
       'Ghi chú',
       'Thời gian',
       'Thao tác',
     ]);
 
     expect(within(laundryTable).getByText('Khách Giặt Ủi')).toBeInTheDocument();
-    expect(headersOf(laundryTable)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Giá tiền', 'Ghi chú', 'Thời gian', 'Thao tác']);
+    expect(headersOf(laundryTable)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Ghi chú', 'Thời gian', 'Thao tác']);
 
     // An empty service says so in one line rather than disappearing.
     expect(within(smokingTable).getByTestId('room-service-table-SMOKING-empty')).toBeInTheDocument();
@@ -1424,7 +1446,7 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(within(board).getByText('Cần xử lý lại')).toBeInTheDocument();
   });
 
-  it('offers no action on a row: no "Thao tác" column and no per-row button', async () => {
+  it('offers ONE action on a row — "Sửa vấn đề" — and none of the technician’s', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/issues?pageSize=100&outstanding=true': () => ({
@@ -1456,11 +1478,21 @@ describe('sự cố vật chất đang xử lý', () => {
     await openCategory('FACILITY_ISSUE');
     const board = await screen.findByTestId('facility-board');
     expect(await within(board).findByText('Máy lạnh không mát')).toBeInTheDocument();
-    expect(within(board).queryByText('Thao tác')).not.toBeInTheDocument();
     expect(within(board).queryByText('Người báo')).not.toBeInTheDocument();
     expect(within(board).queryByTestId('facility-log-i1')).not.toBeInTheDocument();
-    // Only the phone-only row expander is a button in the table body.
-    expect(within(board).queryAllByRole('button').filter((b) => b.dataset.testid !== 'row-toggle-i1')).toHaveLength(0);
+    // The one thing reception does to an incident: correct what the report says.
+    expect(within(board).getByText('Thao tác')).toBeInTheDocument();
+    expect(within(board).getByTestId('edit-issue-i1')).toHaveTextContent('Sửa vấn đề');
+    // Working the job — taking it, finishing it, giving it up — is Technical's alone.
+    for (const name of [/Tiếp nhận/, /Hoàn thành/, /Không sửa được/, /Nhật ký/]) {
+      expect(within(board).queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    // Everything else in the table body is the row expander.
+    expect(
+      within(board)
+        .queryAllByRole('button')
+        .filter((b) => !['row-toggle-i1', 'edit-issue-i1'].includes(b.dataset.testid ?? '')),
+    ).toHaveLength(0);
   });
 
   it('keeps an incident this shift recorded on the board after it is fixed, with its completion time', async () => {
@@ -1517,17 +1549,19 @@ describe('sự cố vật chất đang xử lý', () => {
     const board = await screen.findByTestId('facility-board');
     expect(await within(board).findByText('Vòi sen rò nước')).toBeInTheDocument();
     expect(within(board).getByText('Đã hoàn thành')).toBeInTheDocument();
-    // Read by column: "Lần sửa" is the attempts that exist, not a fabricated count.
+    // "Lần sửa" is not a reception column any more; the attempts are one click down.
     const headers = within(board).getAllByRole('columnheader').map((h) => h.textContent ?? '');
+    expect(headers).not.toContain('Lần sửa');
     const row = within(board).getByText('Vòi sen rò nước').closest('tr')!;
     const cells = within(row).getAllByRole('cell').map((c) => c.textContent ?? '');
     const cellAt = (header: string) => cells[headers.indexOf(header)];
-    expect(cellAt('Lần sửa')).toBe('1');
+    // A finished incident is a closed record: nothing left to correct.
+    expect(within(row).queryByText('Sửa vấn đề')).not.toBeInTheDocument();
     expect(cellAt('Thời gian hoàn thành')).toBe(formatDateTime('2026-09-19T04:30:00.000Z'));
     expect(cellAt('Kỹ thuật')).toContain('Bảo');
   });
 
-  it('keeps its row expander mobile-only', async () => {
+  it('keeps the repair history one click down at every width, now that "Lần sửa" is gone', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/issues?pageSize=100&outstanding=true': () => ({
@@ -1556,7 +1590,8 @@ describe('sự cố vật chất đang xử lý', () => {
 
     await openCategory('FACILITY_ISSUE');
     const cell = (await screen.findByTestId('row-toggle-i1')).closest('td');
-    expect(cell!.className).toMatch(/\bmd:hidden\b/);
+    // Not `md:hidden`: on a desktop the expander is the ONLY way to the history.
+    expect(cell!.className).not.toMatch(/\bmd:hidden\b/);
   });
 
   /**
@@ -1647,7 +1682,7 @@ describe('sự cố vật chất đang xử lý', () => {
     expect(await within(board).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
   });
 
-  it('lays the incidents out in exactly the eight specified columns, in order', async () => {
+  it('lays the incidents out in exactly the seven specified columns and one action, in order', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/issues?pageSize=100&outstanding=true': () => ({
@@ -1685,8 +1720,8 @@ describe('sự cố vật chất đang xử lý', () => {
       'Thời gian báo cáo',
       'Kỹ thuật',
       'Thời gian hoàn thành',
-      'Lần sửa',
       'Trạng thái',
+      'Thao tác',
     ]);
     // The reporter is no longer shown to reception.
     expect(within(board).queryByText('Nguyễn Văn A')).not.toBeInTheDocument();

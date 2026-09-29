@@ -15,7 +15,7 @@ export interface ManagedUser {
 }
 
 /** The roles this screen can create. An admin is bootstrapped, never minted here. */
-export type ManageableRole = 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL';
+export type ManageableRole = 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL' | 'HOUSEKEEPING';
 
 /**
  * The departments that are GLOBAL — no branch, by definition.

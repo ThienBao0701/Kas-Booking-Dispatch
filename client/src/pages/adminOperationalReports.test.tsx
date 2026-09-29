@@ -60,8 +60,11 @@ const OPTIONS = {
     { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
+    // The server's label is short (it also names an XLSX sheet); the Admin's own
+    // screen prints the full name, from `deliveryTitle`.
+    { code: 'HOTEL_DELIVERY', label: 'Giao nhận hàng hóa' },
   ],
-  paymentMethods: [{ code: 'CASH', label: 'Thu tiền mặt' }],
+  paymentMethods: [{ code: 'CASH', label: 'Tiền mặt' }],
   roomServiceTypes: [
     { code: 'ROOM_SALE', label: 'Bán phòng' },
     { code: 'UPGRADE', label: 'Upgrade' },
@@ -69,7 +72,14 @@ const OPTIONS = {
     { code: 'LAUNDRY', label: 'Giặt ủi' },
     { code: 'OTHER', label: 'Dịch vụ khác' },
   ],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác'],
+  deliveryDepartments: [
+    { code: 'RECEPTION', label: 'Lễ tân' },
+    { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
+    { code: 'TECHNICAL', label: 'Kỹ thuật' },
+  ],
+  deliveryTitle: 'Giao nhận hàng hóa của khách sạn',
+  deliveryArchiveHours: 12,
 };
 
 const BASE = {
@@ -98,6 +108,7 @@ const BASE = {
   facility: null,
   complaint: null,
   roomService: null,
+  delivery: null,
   audits: [],
 };
 
@@ -113,7 +124,7 @@ const PAYMENT = {
     guestName: 'Nguyễn Khách',
     roomNumber: '101',
     method: 'CASH',
-    methodLabel: 'Thu tiền mặt',
+    methodLabel: 'Tiền mặt',
     amount: 300000,
     receivable: 50000,
     expense: 100000,
@@ -121,6 +132,7 @@ const PAYMENT = {
     cash: 300000,
     transfer: 0,
     card: 0,
+    debt: 0,
   },
   audits: [
     {
@@ -301,7 +313,33 @@ const LAUNDRY = {
   },
 };
 
-const ALL = [PAYMENT, REQUEST, FACILITY, COMPLAINT, SERVICE];
+/** A delivery, active and archived, as the server serves them (the SAME journal rows). */
+const DELIVERY = {
+  ...BASE,
+  id: 'd1',
+  category: 'HOTEL_DELIVERY',
+  categoryLabel: 'Giao nhận hàng hóa',
+  summary: 'Buồng phòng · Khăn tắm · SL 24',
+  delivery: {
+    department: 'HOUSEKEEPING',
+    departmentLabel: 'Buồng phòng',
+    itemName: 'Khăn tắm',
+    quantity: 24,
+    note: 'Giao lúc 8h',
+    status: 'COMPLETED',
+    statusLabel: 'Đã hoàn thành',
+    completedAt: '2026-09-19T01:00:00.000Z',
+    archived: false,
+    title: 'Giao nhận hàng hóa của khách sạn',
+  },
+};
+const ARCHIVED_DELIVERY = {
+  ...DELIVERY,
+  id: 'd2',
+  delivery: { ...DELIVERY.delivery, itemName: 'Ga giường', quantity: 8, archived: true },
+};
+
+const ALL = [PAYMENT, REQUEST, FACILITY, COMPLAINT, SERVICE, DELIVERY];
 
 const CASH = {
   openingCash: 7570000,
@@ -326,6 +364,7 @@ const COUNTS = {
   FACILITY_ISSUE: 1,
   CUSTOMER_COMPLAINT: 1,
   ROOM_SERVICE: 2,
+  HOTEL_DELIVERY: 1,
 };
 
 function body(reports: unknown[], over: Record<string, unknown> = {}) {
@@ -379,6 +418,10 @@ function shellRoutes(
     [`GET /api/admin/reports/operational?branchId=11&category=ROOM_SERVICE&${PERIOD}`]: () => ({
       status: 200,
       body: body([SERVICE, LAUNDRY]),
+    }),
+    [`GET /api/admin/reports/operational?branchId=11&category=HOTEL_DELIVERY&${PERIOD}`]: () => ({
+      status: 200,
+      body: body([DELIVERY, ARCHIVED_DELIVERY]),
     }),
     ...extra,
   };
@@ -489,14 +532,14 @@ describe('choosing a branch', () => {
     );
   });
 
-  it('shows the five categories with their counts, in the server’s words', async () => {
+  it('shows the six categories with their counts, in the server’s words', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
 
     await chooseBranch();
     const menu = await screen.findByTestId('admin-category-menu');
-    // "Tất cả" plus the five.
-    expect(within(menu).getAllByRole('button')).toHaveLength(6);
+    // "Tất cả" plus the six.
+    expect(within(menu).getAllByRole('button')).toHaveLength(7);
     expect(within(menu).getAllByRole('button').map((b) => b.textContent)).toEqual([
       'Tất cả',
       'Theo dõi thanh toán1',
@@ -506,6 +549,8 @@ describe('choosing a branch', () => {
       'Sự cố vật chất đang xử lý',
       'Vấn đề về chất lượng và dịch vụ1',
       'Dịch vụ phòng, KPI2',
+      // The sixth category, printed in full on this screen.
+      'Giao nhận hàng hóa của khách sạn1',
     ]);
   });
 
@@ -518,6 +563,39 @@ describe('choosing a branch', () => {
     const labels = within(menu).getAllByRole('button').map((b) => b.textContent);
     expect(labels.filter((l) => l === 'KPI')).toHaveLength(0);
     expect(labels.some((l) => l?.startsWith('Dịch vụ phòng, KPI'))).toBe(true);
+  });
+});
+
+describe('Giao nhận hàng hóa của khách sạn, for the Admin', () => {
+  it('reads the shared delivery records: Bộ phận, Tên hàng hóa, Số lượng, Trạng thái', async () => {
+    installApiMock(shellRoutes());
+    renderApp('/app/reports');
+    await chooseBranch();
+    await openCategory('HOTEL_DELIVERY');
+
+    const table = await screen.findByTestId('admin-table-HOTEL_DELIVERY');
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.slice(1, 5)).toEqual(['STT', 'Bộ phận', 'Tên hàng hóa', 'Số lượng']);
+    expect(headers).toContain('Trạng thái');
+
+    const row = within(table).getByTestId('row-d1');
+    expect(within(row).getByText('Buồng phòng')).toBeInTheDocument();
+    expect(within(row).getByText('Khăn tắm')).toBeInTheDocument();
+    expect(within(row).getByText('24')).toBeInTheDocument();
+    expect(within(row).getByText('Đã hoàn thành')).toBeInTheDocument();
+    // Which side of the 12-hour rule the record is on, said on the record.
+    expect(within(row).queryByText('Hoàn thành vấn đề')).not.toBeInTheDocument();
+    expect(within(within(table).getByTestId('row-d2')).getByText('Hoàn thành vấn đề')).toBeInTheDocument();
+  });
+
+  it('is read-only for the Admin: the reception desk owns its own corrections', async () => {
+    installApiMock(shellRoutes());
+    renderApp('/app/reports');
+    await chooseBranch();
+    await openCategory('HOTEL_DELIVERY');
+    const table = await screen.findByTestId('admin-table-HOTEL_DELIVERY');
+    expect(within(table).queryByRole('button', { name: /Sửa|Hủy/ })).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Thao tác' })).not.toBeInTheDocument();
   });
 });
 
@@ -547,12 +625,14 @@ describe('each category is a table', () => {
       'Nguồn',
       'Phương thức',
       // The headline figure, kept primary so a phone still shows an amount.
-      'Số tiền',
+      'Thu tiền',
       'Tiền mặt',
       'Thu CK',
       'Cà thẻ',
       'Công nợ',
       'Chi',
+      // Typed at the till; the Admin reads it beside the money.
+      'Ghi chú',
       // Reception no longer asks for a room; the Admin still shows an older one.
       'Phòng',
       'Thời gian',
@@ -751,7 +831,7 @@ describe('each category is a table', () => {
       'Từ hạng phòng',
       'Tới hạng phòng',
       'Số đêm',
-      'Giá tiền',
+      'Tổng giá tiền',
       'Thời gian',
       'Ghi chú',
       'Trạng thái',
@@ -762,7 +842,7 @@ describe('each category is a table', () => {
 
     const laundry = screen.getByTestId('admin-table-ROOM_SERVICE-LAUNDRY');
     const laundryHeaders = within(laundry).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái']);
+    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái']);
     expect(within(laundry).getByText('Phạm Giặt')).toBeInTheDocument();
     // The room an older laundry row recorded is not a column; it is in the full record.
     await userEvent.click(within(laundry).getByTestId('row-toggle-v2'));

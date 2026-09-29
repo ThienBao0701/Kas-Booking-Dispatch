@@ -200,8 +200,61 @@ export interface Issue {
    * "Cần xử lý lại".
    */
   needsRework: boolean;
+  /** What the desk corrected after filing ("Sửa vấn đề"), oldest first. */
+  edits: IssueEdit[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** One corrected field: the words that were there, the words that replaced them, who and when. */
+export interface IssueEdit {
+  id: string;
+  field: string;
+  fieldLabel: string;
+  oldValue: string | null;
+  newValue: string | null;
+  actorName: string;
+  createdAt: string;
+}
+
+/** Every field "Sửa vấn đề" may change; anything not sent is left alone. */
+export interface UpdateIssueInput {
+  areaCategory?: IssueAreaCategory;
+  roomNumber?: string | null;
+  floorNumber?: string | null;
+  areaSubtype?: IssueAreaSubtype | null;
+  locationDetail?: string | null;
+  category?: IssueCategory | null;
+  description?: string;
+}
+
+/** Technical's "Thống kê" — counts over the incidents that exist, nothing else. */
+export interface IncidentStatistics {
+  period: { days: number; from: string; to: string };
+  totals: { total: number; newCount: number; inProgressCount: number; completedCount: number; needsReworkCount: number };
+  outstanding: { total: number; newCount: number; inProgressCount: number };
+  byStatus: { status: IssueStatus; label: string; count: number }[];
+  byArea: { key: string; label: string; count: number }[];
+  byCategory: { key: string; label: string; count: number }[];
+  byBranch: {
+    branchId: number;
+    branchNumber: number;
+    address: string;
+    hotelName: string;
+    total: number;
+    open: number;
+    completed: number;
+  }[];
+  workload: {
+    attempts: number;
+    completedAttempts: number;
+    cannotRepairAttempts: number;
+    openAttempts: number;
+    averageSeconds: number | null;
+    averageLabel: string | null;
+    byTechnician: { name: string; attempts: number; completed: number; cannotRepair: number }[];
+  };
+  trend: { date: string; reported: number; completed: number }[];
 }
 
 /** The fault type, or an em dash for the areas that are not asked for one. */
@@ -305,6 +358,12 @@ export const issuesApi = {
     if (input.photo) form.append('image', input.photo);
     return api.postForm<{ issue: Issue }>('/issues', form);
   },
+
+  /** "Sửa vấn đề" — corrects an open incident; the server keeps the old words. */
+  update: (id: string, input: UpdateIssueInput) => api.put<{ issue: Issue }>(`/issues/${id}`, input),
+
+  statistics: (params: { days?: number; branchId?: number } = {}) =>
+    api.get<{ statistics: IncidentStatistics }>(`/issues/statistics${query(params)}`),
 
   accept: (id: string, input: AcceptIssueInput) =>
     api.post<{ issue: Issue }>(`/issues/${id}/accept`, input),

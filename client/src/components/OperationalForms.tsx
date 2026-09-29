@@ -18,6 +18,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import {
   reportsApi,
+  type DeliveryDepartment,
   type NewReportInput,
   type ReportOptions,
   type RoomServiceType,
@@ -28,11 +29,20 @@ import { Input } from './Input';
 import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { parseVnd } from '../lib/money';
+import { parseQuantity } from '../lib/quantity';
 import {
   ROOM_SERVICE_FALLBACK_LABELS,
   ROOM_SERVICE_ORDER,
+  ROOM_SERVICE_PRICE_LABEL,
   roomServiceFields,
 } from '../lib/roomServiceFields';
+
+/** The selector's words before the server has spoken; the server refuses anything else. */
+const DELIVERY_DEPARTMENT_FALLBACK: { code: DeliveryDepartment; label: string }[] = [
+  { code: 'RECEPTION', label: 'Lễ tân' },
+  { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
+  { code: 'TECHNICAL', label: 'Kỹ thuật' },
+];
 
 interface FormShellProps {
   title: string;
@@ -416,7 +426,7 @@ export function RoomServiceForm({
           ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <MoneyInput label="Giá tiền" required value={price} onChange={setPrice} data-testid="room-service-price" />
+            <MoneyInput label={ROOM_SERVICE_PRICE_LABEL} required value={price} onChange={setPrice} data-testid="room-service-price" />
             <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
           </div>
         </>
@@ -425,6 +435,109 @@ export function RoomServiceForm({
           Chọn dịch vụ để nhập thông tin.
         </p>
       )}
+    </FormShell>
+  );
+}
+
+/* ------------------- Giao nhận hàng hóa của khách sạn ------------------- */
+
+/**
+ * BỘ PHẬN, TÊN HÀNG HÓA, SỐ LƯỢNG — and an optional note.
+ *
+ * "Số lượng" is a NUMBER input, not a text box: the box refuses letters, and
+ * `parseQuantity` (like the server's own check) refuses zero, a fraction and a
+ * negative, so a quantity is never free text. There is no status field to fill
+ * in: submitting is the hand-over, and the record is stored as "Đã hoàn thành" —
+ * the form says so rather than asking.
+ */
+export function DeliveryForm({
+  options,
+  onCreated,
+  bare,
+  onCancel,
+}: {
+  options?: ReportOptions;
+  onCreated: () => void | Promise<void>;
+  bare?: boolean;
+  onCancel?: () => void;
+}) {
+  const departments = options?.deliveryDepartments ?? DELIVERY_DEPARTMENT_FALLBACK;
+  const [department, setDepartment] = useState<DeliveryDepartment | ''>('');
+  const [itemName, setItemName] = useState('');
+  const [quantity, setQuantity] = useState('');
+  const [note, setNote] = useState('');
+  const { mutation, error } = useCreateReport(async () => {
+    setDepartment('');
+    setItemName('');
+    setQuantity('');
+    setNote('');
+    await onCreated();
+  });
+
+  const parsed = parseQuantity(quantity);
+  return (
+    <FormShell
+      title="Giao nhận hàng hóa của khách sạn"
+      testId="delivery-form"
+      bare={bare}
+      onCancel={onCancel}
+      ready={department !== '' && itemName.trim().length > 0 && parsed !== null}
+      pending={mutation.isPending}
+      error={error}
+      onSubmit={() =>
+        department !== '' && parsed !== null
+          ? mutation.mutate({
+              category: 'HOTEL_DELIVERY',
+              delivery: {
+                department,
+                itemName: itemName.trim(),
+                quantity: parsed,
+                note: note.trim() || undefined,
+              },
+            })
+          : undefined
+      }
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+          Bộ phận
+          <select
+            value={department}
+            onChange={(e) => setDepartment(e.target.value as DeliveryDepartment | '')}
+            data-testid="delivery-department"
+            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+          >
+            <option value="">— Chọn bộ phận —</option>
+            {departments.map((d) => (
+              <option key={d.code} value={d.code}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Input
+          label="Số lượng"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          step={1}
+          value={quantity}
+          onChange={(e) => setQuantity(e.target.value)}
+          data-testid="delivery-quantity"
+          error={quantity !== '' && parsed === null ? 'Số lượng phải là số nguyên từ 1 trở lên.' : undefined}
+        />
+      </div>
+      <Input
+        label="Tên hàng hóa"
+        value={itemName}
+        onChange={(e) => setItemName(e.target.value)}
+        data-testid="delivery-item"
+      />
+      <TextArea label="Ghi chú (không bắt buộc)" value={note} onChange={setNote} testId="delivery-note" maxLength={2000} />
+      <p className="text-xs text-slate-500" data-testid="delivery-status-hint">
+        Trạng thái: <span className="font-medium text-emerald-700">Đã hoàn thành</span> — bản ghi được lưu ở
+        trạng thái này ngay khi gửi.
+      </p>
     </FormShell>
   );
 }

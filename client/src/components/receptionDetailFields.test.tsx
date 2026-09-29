@@ -185,22 +185,28 @@ describe('the main information card', () => {
     expect(screen.queryByText('Check-out')).toBeNull();
   });
 
-  it('keeps every one of them for an ADMIN', () => {
-    // The simplification is reception's. An Admin's card is unchanged: branch,
-    // payment and both dates, exactly as before.
+  it('keeps the branch and the payment for an ADMIN, and states each date once', () => {
+    // The Admin's card keeps the branch and the payment terms. The two dates are
+    // NOT repeated in it any more: they are in the header stay line, where they
+    // are read on every booking, and a second copy was the same value twice.
     mount(booking(), true);
     expect(screen.getByText('Thanh toán')).toBeInTheDocument();
-    expect(screen.getByText('Check-in')).toBeInTheDocument();
-    expect(screen.getByText('Check-out')).toBeInTheDocument();
     expect(screen.getByText('Chi nhánh')).toBeInTheDocument();
-    expect(screen.getByText('05 Trương Định')).toBeInTheDocument();
+    expect(screen.getAllByText('05 Trương Định').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Check-in')).toBeNull();
+    expect(screen.queryByText('Check-out')).toBeNull();
+    const header = screen.getByTestId('booking-sticky-header');
+    expect(within(header).getByText('Nhận phòng :')).toBeInTheDocument();
+    expect(within(header).getByText('Trả phòng :')).toBeInTheDocument();
+    // The hotel is part of who the booking is, so it is in the header too.
+    expect(within(header).getByTestId('booking-header-branch')).toHaveTextContent('05 Trương Định');
   });
 
-  it('gives an Admin the real dates in those fields', () => {
+  it('gives an Admin the real dates, once each, in the header', () => {
     mount(booking({ checkInDate: '2027-01-03', checkOutDate: '2027-01-09' }), true);
-    // Twice each: once in the header stay line, once in the supporting field.
-    expect(screen.getAllByText('03/01/2027')).toHaveLength(2);
-    expect(screen.getAllByText('09/01/2027')).toHaveLength(2);
+    expect(screen.getAllByText('03/01/2027')).toHaveLength(1);
+    expect(screen.getAllByText('09/01/2027')).toHaveLength(1);
+    expect(within(screen.getByTestId('booking-sticky-header')).getByText('03/01/2027')).toBeInTheDocument();
   });
 
   it('leaves no empty supporting row for a receptionist', () => {

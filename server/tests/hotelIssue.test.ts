@@ -224,7 +224,12 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
 });
 
 describe('receptionist edit rules', () => {
-  it('lets the reporter edit while NEW but not after technical accepts', async () => {
+  /*
+    "Sửa vấn đề": an OPEN incident can be corrected by the desk that reported it,
+    including while a technician is on it (the old description is kept in
+    HotelIssueEdit). Only a COMPLETED incident is a closed record.
+  */
+  it('lets the reporter edit while the incident is open, and refuses once completed', async () => {
     const id = (await createBody(ownAgent)).body.issue.id;
 
     const edited = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Cập nhật mô tả' });
@@ -235,8 +240,13 @@ describe('receptionist edit rules', () => {
       .post(`/api/issues/${id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
-    const afterAccept = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa sau khi tiếp nhận' });
-    expect(afterAccept.status).toBe(409);
+    const whileWorked = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa khi đang xử lý' });
+    expect(whileWorked.status).toBe(200);
+    expect(whileWorked.body.issue.status).toBe('IN_PROGRESS');
+
+    await techAgent.post(`/api/issues/${id}/complete`).send({});
+    const afterComplete = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa sau khi xong' });
+    expect(afterComplete.status).toBe(409);
   });
 
   it("forbids editing another branch's issue", async () => {

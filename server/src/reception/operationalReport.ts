@@ -93,6 +93,7 @@ function emptyCounts(): Record<OperationalReportCategory, number> {
     FACILITY_ISSUE: 0,
     CUSTOMER_COMPLAINT: 0,
     ROOM_SERVICE: 0,
+    HOTEL_DELIVERY: 0,
   };
 }
 
@@ -103,6 +104,7 @@ function emptyGroups(): Record<OperationalReportCategory, SerializedReport[]> {
     FACILITY_ISSUE: [],
     CUSTOMER_COMPLAINT: [],
     ROOM_SERVICE: [],
+    HOTEL_DELIVERY: [],
   };
 }
 

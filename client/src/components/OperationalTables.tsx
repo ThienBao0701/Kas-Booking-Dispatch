@@ -19,6 +19,7 @@ import { useState } from 'react';
 import { CheckCircle2, Pencil, Trash2 } from 'lucide-react';
 import { type OperationalReport, type RoomServiceType } from '../api/receptionReports';
 import { DataTable, RowAction, type DataColumn } from './DataTable';
+import { Actions } from './RecordRowActions';
 import { ReportSection, type SectionFrame } from './ReportSection';
 import {
   CompleteRecordDialog,
@@ -29,7 +30,7 @@ import {
 } from './RecordDialogs';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
-import { roomServiceFields } from '../lib/roomServiceFields';
+import { ROOM_SERVICE_PRICE_LABEL, roomServiceFields } from '../lib/roomServiceFields';
 
 interface TableProps {
   rows: OperationalReport[];
@@ -93,32 +94,6 @@ function useRowActions(onChanged: () => Promise<void>, onToast: (m: string) => v
       />
     ) : null,
   };
-}
-
-function Actions({
-  row,
-  canEdit,
-  onEdit,
-  onVoid,
-}: {
-  row: OperationalReport;
-  canEdit: boolean;
-  onEdit: () => void;
-  onVoid: () => void;
-}) {
-  if (!canEdit || row.voided) return <span className="text-xs text-slate-300">—</span>;
-  return (
-    <>
-      <RowAction onClick={onEdit} testId={`edit-${row.id}`}>
-        <Pencil className="h-3 w-3" aria-hidden="true" />
-        Sửa
-      </RowAction>
-      <RowAction onClick={onVoid} tone="danger" testId={`void-${row.id}`}>
-        <Trash2 className="h-3 w-3" aria-hidden="true" />
-        Hủy
-      </RowAction>
-    </>
-  );
 }
 
 /* -------------- Vấn đề khách yêu cầu thực hiện (Request) -------------- */
@@ -483,7 +458,7 @@ function roomServiceEditFields(type: RoomServiceType): EditField[] {
         ] as EditField[])
       : []),
     ...(needs.nights ? [{ name: 'nights', label: 'Số đêm', kind: 'integer', required: true } as EditField] : []),
-    { name: 'price', label: 'Giá tiền', kind: 'money', required: true },
+    { name: 'price', label: ROOM_SERVICE_PRICE_LABEL, kind: 'money', required: true },
     { name: 'note', label: 'Ghi chú', kind: 'textarea' },
   ];
 }
@@ -491,9 +466,9 @@ function roomServiceEditFields(type: RoomServiceType): EditField[] {
 /**
  * ONE SERVICE'S TABLE, COLUMNS CHOSEN BY THE SERVICE.
  *
- *   Bán phòng    STT · Tên khách · Mã EZ · Hạng phòng · Số đêm · Giá tiền · Ghi chú · Thời gian
- *   Upgrade      STT · Tên khách · Mã EZ · Từ / Tới hạng phòng · Số đêm · Giá tiền · Ghi chú · Thời gian
- *   the rest     STT · Tên khách · Mã EZ · Giá tiền · Ghi chú · Thời gian
+ *   Bán phòng    STT · Tên khách · Mã EZ · Hạng phòng · Số đêm · Tổng giá tiền · Ghi chú · Thời gian
+ *   Upgrade      STT · Tên khách · Mã EZ · Từ / Tới hạng phòng · Số đêm · Tổng giá tiền · Ghi chú · Thời gian
+ *   the rest     STT · Tên khách · Mã EZ · Tổng giá tiền · Ghi chú · Thời gian
  *
  * What differs is decided by `roomServiceFields`, the same table the entry form
  * reads. "Thời gian" is the server's creation stamp, shown on every width.
@@ -562,7 +537,7 @@ export function RoomServiceTable({
       : []),
     {
       key: 'price',
-      header: 'Giá tiền',
+      header: ROOM_SERVICE_PRICE_LABEL,
       align: 'right',
       className: 'whitespace-nowrap font-medium text-slate-800',
       render: (r) => formatVnd(r.roomService?.price ?? null),

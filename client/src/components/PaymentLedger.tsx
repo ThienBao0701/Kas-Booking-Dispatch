@@ -6,7 +6,8 @@
  *   SUMMARY STRIP     tiền đầu ca (editable), số giao dịch, thu tiền mặt, chi,
  *                     và tiền cuối ca nổi bật — the drawer's figures only
  *   DANH SÁCH GIAO DỊCH TRONG CA   every transaction this shift, immediately:
- *                     Tên khách, Mã EZ, Nguồn, Tiền mặt, Cà thẻ, Công nợ, Chi
+ *                     Tên khách, Mã EZ, Nguồn, Tiền mặt, Chuyển khoản, Cà thẻ,
+ *                     Công nợ, Chi, Ghi chú
  *
  * The entry form is NOT on the page: "+ Thêm giao dịch" in the category header
  * opens it in a dialog, and it closes itself on save. A permanent form pushed
@@ -57,7 +58,18 @@ import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import { PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
 import { useShiftCash } from '../hooks/useShiftCash';
 
-const METHODS: PaymentMethod[] = ['CASH', 'TRANSFER', 'CARD'];
+/**
+ * The selector's words before the server has spoken — a fallback copy of its
+ * `PAYMENT_METHOD_LABELS`, for the same reason as `PAYMENT_SOURCE_FALLBACK`. The
+ * METHOD decides where the amount belongs: only Tiền mặt moves the drawer, and
+ * Công nợ is recorded as owed and never as cash.
+ */
+const METHOD_FALLBACK: { code: PaymentMethod; label: string }[] = [
+  { code: 'CASH', label: 'Tiền mặt' },
+  { code: 'TRANSFER', label: 'Chuyển khoản' },
+  { code: 'CARD', label: 'Cà thẻ' },
+  { code: 'DEBT', label: 'Công nợ' },
+];
 
 interface Props {
   rows: OperationalReport[];
@@ -430,8 +442,8 @@ const EMPTY_FORM = {
   guestName: '',
   method: 'CASH' as PaymentMethod,
   amount: '',
-  receivable: '',
   expense: '',
+  note: '',
 };
 
 const selectClass =
@@ -502,8 +514,8 @@ function NewPaymentForm({
           method: form.method,
           // Parsed at the boundary: the grouped display never leaves the field.
           amount: parseVnd(form.amount) ?? 0,
-          receivable: parseVndOrZero(form.receivable),
           expense: parseVndOrZero(form.expense),
+          note: form.note.trim() || undefined,
         },
       }),
     onSuccess: async () => {
@@ -528,10 +540,11 @@ function NewPaymentForm({
       {bare ? null : <p className="text-sm font-semibold text-slate-800">Thêm giao dịch</p>}
 
       {/*
-        TWO ROWS: the booking, then the money. Mã EZ, Nguồn and Tên khách; then
-        Phương thức, Số tiền, Công nợ and Chi tiền. No room and no note — the
-        booking reference finds the room, and a note is not something the desk
-        needs at the till.
+        THREE ROWS: the booking, the money, then a note. Mã EZ, Nguồn and Tên
+        khách; then Phương thức, Thu tiền and Chi tiền; then Ghi chú. There is NO
+        separate Công nợ box: Công nợ is a payment METHOD, and the amount typed in
+        "Thu tiền" belongs wherever the chosen method says it does. No room — the
+        booking reference finds it.
 
         "NHÂN VIÊN" IS NOT A FIELD. It is whoever is on the open shift, decided by
         the server — so it is shown, not asked for.
@@ -557,7 +570,7 @@ function NewPaymentForm({
         <Input label="Tên khách" value={form.guestName} onChange={(e) => set('guestName', e.target.value)} data-testid="payment-guest" />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4" data-testid="payment-row-money">
+      <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-money">
         <div className="space-y-1.5">
           <label htmlFor="payment-method" className="block whitespace-nowrap text-sm font-medium text-slate-700">
             Phương thức thanh toán
@@ -569,7 +582,7 @@ function NewPaymentForm({
             data-testid="payment-method"
             className={selectClass}
           >
-            {(methods ?? METHODS.map((code) => ({ code, label: code }))).map((m) => (
+            {(methods ?? METHOD_FALLBACK).map((m) => (
               <option key={m.code} value={m.code}>
                 {m.label}
               </option>
@@ -577,17 +590,11 @@ function NewPaymentForm({
           </select>
         </div>
         <MoneyInput
-          label="Số tiền"
+          label="Thu tiền"
           required
           value={form.amount}
           onChange={(v) => set('amount', v)}
           data-testid="payment-amount"
-        />
-        <MoneyInput
-          label="Công nợ"
-          value={form.receivable}
-          onChange={(v) => set('receivable', v)}
-          data-testid="payment-receivable"
         />
         <MoneyInput
           label="Chi tiền"
@@ -596,6 +603,18 @@ function NewPaymentForm({
           data-testid="payment-expense"
         />
       </div>
+
+      <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+        Ghi chú
+        <textarea
+          value={form.note}
+          onChange={(e) => set('note', e.target.value)}
+          rows={2}
+          maxLength={2000}
+          data-testid="payment-note"
+          className="block w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-600"
+        />
+      </label>
 
       {error ? <ErrorAlert>{error}</ErrorAlert> : null}
 
@@ -687,10 +706,11 @@ function PaymentTable({
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm" data-testid="payment-table">
             {/*
-              EIGHT COLUMNS AND ONE COMPACT "THAO TÁC". Staff, room, transfer and
-              note are not the desk's questions at the till: the shift says who,
-              the booking says where, and a transfer never reaches the drawer.
-              The Admin's table keeps all of them.
+              ONE COLUMN PER PAYMENT METHOD — Tiền mặt, Chuyển khoản, Cà thẻ, Công
+              nợ — plus Chi and the Ghi chú typed at the till, and one compact
+              "THAO TÁC". Staff and room are not the desk's questions: the shift
+              says who and the booking says where. The Admin's table keeps all of
+              them.
             */}
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
@@ -699,9 +719,11 @@ function PaymentTable({
                 <th className="px-3 py-2 text-left font-medium">Mã EZ</th>
                 <th className="px-3 py-2 text-left font-medium">Nguồn</th>
                 <th className="px-3 py-2 text-right font-medium">Tiền mặt</th>
+                <th className="px-3 py-2 text-right font-medium">Chuyển khoản</th>
                 <th className="px-3 py-2 text-right font-medium">Cà thẻ</th>
                 <th className="px-3 py-2 text-right font-medium">Công nợ</th>
                 <th className="px-3 py-2 text-right font-medium">Chi</th>
+                <th className="px-3 py-2 text-left font-medium">Ghi chú</th>
                 <th className="w-[1%] whitespace-nowrap px-3 py-2 text-right font-medium">Thao tác</th>
               </tr>
             </thead>
@@ -784,9 +806,17 @@ function ReadRow({
       <td className="whitespace-nowrap px-3 py-2.5 align-top">{p.ezCode ?? '—'}</td>
       <td className="whitespace-nowrap px-3 py-2.5 align-top">{p.source ?? '—'}</td>
       <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.cash ? formatVnd(p.cash) : '—'}</td>
+      <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.transfer ? formatVnd(p.transfer) : '—'}</td>
       <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.card ? formatVnd(p.card) : '—'}</td>
       <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.receivable ? formatVnd(p.receivable) : '—'}</td>
       <td className="px-3 py-2.5 text-right align-top tabular-nums whitespace-nowrap">{p.expense ? formatVnd(p.expense) : '—'}</td>
+      {/* The note the desk typed at the till, where the money is. */}
+      <td
+        data-testid={`payment-note-${row.id}`}
+        className="min-w-[8rem] max-w-[16rem] whitespace-pre-wrap break-words px-3 py-2.5 align-top text-slate-600"
+      >
+        {p.note?.trim() ? p.note : '—'}
+      </td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right align-top">
         {row.voided ? (
           <span className="text-xs text-slate-300">—</span>
@@ -831,16 +861,17 @@ function EditRow({
   onSaved: () => void | Promise<void>;
 }) {
   const p = row.payment!;
-  // Room and note are not correctable here any more: they are not asked for,
-  // and an older row keeps whatever it recorded — they are simply not sent.
+  // The room is not correctable here any more: it is not asked for, and an older
+  // row keeps whatever it recorded — it is simply not sent. The legacy `receivable`
+  // column is not sent either, so correcting an older row never rewrites its debt.
   const [draft, setDraft] = useState({
     ezCode: p.ezCode ?? '',
     source: p.source ?? '',
     guestName: p.guestName ?? '',
     method: p.method,
     amount: groupDigits(String(p.amount)),
-    receivable: groupDigits(String(p.receivable)),
     expense: groupDigits(String(p.expense)),
+    note: p.note ?? '',
   });
   const [error, setError] = useState<string | null>(null);
 
@@ -853,8 +884,8 @@ function EditRow({
           guestName: draft.guestName.trim(),
           method: draft.method,
           amount: parseVnd(draft.amount) ?? 0,
-          receivable: parseVndOrZero(draft.receivable),
           expense: parseVndOrZero(draft.expense),
+          note: draft.note.trim(),
         },
       }),
     onSuccess: async () => {
@@ -886,11 +917,11 @@ function EditRow({
         />
       </td>
       {/*
-        ONE AMOUNT AND ONE METHOD, across the two amount columns — not an amount
+        ONE AMOUNT AND ONE METHOD, across the four amount columns — not an amount
         box per column. The columns are a RENDERING of (method, amount); a box
         each would let a row be both cash and card at once.
       */}
-      <td className="px-2 py-2 align-top" colSpan={2}>
+      <td className="px-2 py-2 align-top" colSpan={4}>
         <div className="flex gap-1">
           <select
             className={cell}
@@ -898,9 +929,11 @@ function EditRow({
             data-testid={`payment-edit-method-${row.id}`}
             onChange={(e) => setDraft({ ...draft, method: e.target.value as PaymentMethod })}
           >
-            <option value="CASH">Thu tiền mặt</option>
-            <option value="TRANSFER">Chuyển khoản</option>
-            <option value="CARD">Cà thẻ</option>
+            {METHOD_FALLBACK.map((m) => (
+              <option key={m.code} value={m.code}>
+                {m.label}
+              </option>
+            ))}
           </select>
           <input
             className={`${cell} text-right tabular-nums`}
@@ -915,17 +948,18 @@ function EditRow({
         <input
           className={`${cell} text-right tabular-nums`}
           inputMode="numeric"
-          value={draft.receivable}
-          onChange={(e) => setDraft({ ...draft, receivable: groupDigits(e.target.value) })}
+          value={draft.expense}
+          data-testid={`payment-edit-expense-${row.id}`}
+          onChange={(e) => setDraft({ ...draft, expense: groupDigits(e.target.value) })}
         />
       </td>
       <td className="px-2 py-2 align-top">
         <input
-          className={`${cell} text-right tabular-nums`}
-          inputMode="numeric"
-          value={draft.expense}
-          data-testid={`payment-edit-expense-${row.id}`}
-          onChange={(e) => setDraft({ ...draft, expense: groupDigits(e.target.value) })}
+          className={cell}
+          value={draft.note}
+          maxLength={2000}
+          data-testid={`payment-edit-note-${row.id}`}
+          onChange={(e) => setDraft({ ...draft, note: e.target.value })}
         />
       </td>
       <td className="whitespace-nowrap px-3 py-2 align-top text-right">

@@ -53,8 +53,24 @@ export async function resetIssueData(): Promise<void> {
   // removed. So the journal goes first or `hotelIssue.deleteMany()` throws P2003
   // the moment any "Sự cố cơ sở vật chất" report exists.
   await resetReportData();
+  // "Sửa vấn đề" history: cascades from the incident, but holds a RESTRICT
+  // reference to User, so it is named here to keep the reset working if the
+  // cascade is ever relaxed.
+  await testPrisma.hotelIssueEdit.deleteMany();
   await testPrisma.technicalRepairAttempt.deleteMany();
   await testPrisma.hotelIssue.deleteMany();
+}
+
+/**
+ * Clears Bộ phận buồng phòng's tables — collection events and collections
+ * first, then the issues, then the inspections. Every one of them holds a
+ * RESTRICT reference to Branch or User, so `resetAll` calls this before either.
+ */
+export async function resetHousekeepingData(): Promise<void> {
+  await testPrisma.roomIssueCollectionEvent.deleteMany();
+  await testPrisma.roomIssueCollection.deleteMany();
+  await testPrisma.roomInspectionIssue.deleteMany();
+  await testPrisma.roomInspection.deleteMany();
 }
 
 /**
@@ -74,6 +90,7 @@ export async function resetReportData(): Promise<void> {
   await testPrisma.facilityIssueReport.deleteMany();
   await testPrisma.customerComplaintReport.deleteMany();
   await testPrisma.roomServiceReport.deleteMany();
+  await testPrisma.hotelDeliveryReport.deleteMany();
   await testPrisma.receptionOperationalReport.deleteMany();
 }
 
@@ -108,6 +125,7 @@ export async function resetAll(): Promise<void> {
   // HotelIssue holds RESTRICT FKs to User/Branch, so it must be cleared first —
   // and its repair attempts before it.
   await resetIssueData();
+  await resetHousekeepingData();
   // Chat box holds a RESTRICT FK from ChatConversation.createdByUserId and
   // ChatMessage.senderUserId to User — a thread must not vanish because an
   // account was removed. Children first, then the thread.
@@ -117,6 +135,7 @@ export async function resetAll(): Promise<void> {
   // began failing here the moment the suite could run again. Any future model
   // holding a RESTRICT reference to User or Branch must be added to this list.
   await testPrisma.chatAttachment.deleteMany();
+  await testPrisma.chatReadState.deleteMany();
   await testPrisma.chatMessage.deleteMany();
   await testPrisma.chatConversation.deleteMany();
   // Reminder holds RESTRICT FKs to User for BOTH sender and recipient.

@@ -18,6 +18,8 @@ import { createAdminReportsRouter } from './adminReports';
 import { createNotificationsRouter } from './notifications';
 import { createNavBadgesRouter } from './navBadges';
 import { createIssuesRouter } from './issues';
+import { createHotelDeliveriesRouter } from './hotelDeliveries';
+import { createHousekeepingRouter } from './housekeeping';
 import { createReceptionShiftsRouter } from './receptionShifts';
 import { createReceptionReportsRouter } from './receptionReports';
 import { createDevTestRouter } from './devTest';
@@ -56,6 +58,8 @@ export function createApiRouter(): Router {
   router.use(createReceptionShiftsRouter());
   router.use(createReceptionReportsRouter());
   router.use(createIssuesRouter());
+  router.use(createHotelDeliveriesRouter());
+  router.use(createHousekeepingRouter());
   router.use(createDevTestRouter());
 
   return router;

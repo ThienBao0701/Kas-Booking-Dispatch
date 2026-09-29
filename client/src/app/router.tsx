@@ -7,6 +7,11 @@ import type { UserRole } from '../auth/types';
 import { AppShell } from '../layout/AppShell';
 import { ChargeDocumentsPage } from '../pages/ChargeDocumentsPage';
 import { ChatBoxPage } from '../pages/ChatBoxPage';
+import { AdminHousekeepingPage } from '../pages/AdminHousekeepingPage';
+import { DepartmentDeliveriesPage } from '../pages/DepartmentDeliveriesPage';
+import { HousekeepingInspectionPage } from '../pages/HousekeepingInspectionPage';
+import { RoomCollectionsPage } from '../pages/RoomCollectionsPage';
+import { TechnicalStatisticsPage } from '../pages/TechnicalStatisticsPage';
 import { ChatConversationPage } from '../pages/ChatConversationPage';
 import { ResendOrdersPage } from '../pages/ResendOrdersPage';
 import { RemindersPage } from '../pages/RemindersPage';
@@ -21,11 +26,12 @@ const CHARGE_ROLES: readonly UserRole[] = ['ADMIN', 'BOOKING_DEPARTMENT'];
  * renders a forbidden page; the server is the security boundary.
  */
 const CHAT_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
+/** The two departments that read the deliveries addressed to them. */
+const DELIVERY_READER_ROLES: readonly UserRole[] = ['TECHNICAL', 'HOUSEKEEPING'];
 import { DashboardPage } from '../pages/DashboardPage';
 import { DispatchPage } from '../pages/DispatchPage';
 import { NewBookingsPage } from '../pages/NewBookingsPage';
 import { PendingReviewPage, RejectedPage } from '../pages/VerificationBookingsPage';
-import { CompletedBookingsPage } from '../pages/CompletedBookingsPage';
 import { HistoryPage } from '../pages/HistoryPage';
 import { OperationalReportsPage } from '../pages/OperationalReportsPage';
 import { TechnicalPage } from '../pages/TechnicalPage';
@@ -52,6 +58,7 @@ function RoleLanding() {
   // screen they have no branch for, so it was permanently empty.
   if (user?.role === 'TECHNICAL') return <Navigate to="/app/technical/new" replace />;
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
+  if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
   return <Navigate to="/app/new" replace />;
 }
 
@@ -90,7 +97,13 @@ export function AppRoutes() {
           <Route path="new" element={<RequireRole role={BOOKING_ROLES}><NewBookingsPage /></RequireRole>} />
           <Route path="pending-review" element={<RequireRole role={BOOKING_ROLES}><PendingReviewPage /></RequireRole>} />
           <Route path="rejected" element={<RequireRole role={BOOKING_ROLES}><RejectedPage /></RequireRole>} />
-          <Route path="completed" element={<RequireRole role={BOOKING_ROLES}><CompletedBookingsPage /></RequireRole>} />
+          {/*
+            "Đã xác nhận đúng" is no longer a screen. The address stays as a
+            redirect so a bookmark or an old link lands somewhere that works; the
+            confirmed orders themselves are unchanged and are listed, with every
+            other status, in "Lịch sử".
+          */}
+          <Route path="completed" element={<Navigate to="/app/history" replace />} />
           <Route path="history" element={<RequireRole role={BOOKING_ROLES}><HistoryPage /></RequireRole>} />
           <Route path="booking/:id" element={<RequireRole role={BOOKING_ROLES}><BookingDetailPage /></RequireRole>} />
           {/*
@@ -121,6 +134,14 @@ export function AppRoutes() {
           <Route
             path="technical"
             element={<Navigate to="/app/technical/new" replace />}
+          />
+          <Route
+            path="technical/statistics"
+            element={
+              <RequireRole role="TECHNICAL">
+                <TechnicalStatisticsPage />
+              </RequireRole>
+            }
           />
           <Route
             path="technical/:queue"
@@ -171,6 +192,24 @@ export function AppRoutes() {
             element={
               <RequireRole role={CHAT_ROLES}>
                 <ChatConversationPage />
+              </RequireRole>
+            }
+          />
+          {/*
+            Buồng phòng. Three audiences, three addresses, one data set: the
+            department records (`inspections`), Reception collects
+            (`room-collections`), the Admin reads and reports (`housekeeping`).
+            The server is the boundary; these gates only render a forbidden page.
+          */}
+          <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
+          <Route path="room-collections" element={<RequireRole role="RECEPTIONIST"><RoomCollectionsPage /></RequireRole>} />
+          <Route path="housekeeping" element={<RequireRole role="ADMIN"><AdminHousekeepingPage /></RequireRole>} />
+          {/* "Giao nhận hàng hóa" as Technical and Housekeeping see it — their own department's. */}
+          <Route
+            path="deliveries"
+            element={
+              <RequireRole role={DELIVERY_READER_ROLES}>
+                <DepartmentDeliveriesPage />
               </RequireRole>
             }
           />

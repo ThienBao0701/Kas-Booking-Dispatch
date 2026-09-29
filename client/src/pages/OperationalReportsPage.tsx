@@ -45,12 +45,15 @@ import { Toast } from '../components/Toast';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { PaymentLedger, PaymentOverview } from '../components/PaymentLedger';
-import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
+import { CASH_KEY, DELIVERIES_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import {
+  DeliveryForm,
   GuestRequestForm,
   RoomServiceForm,
   ServiceQualityForm,
 } from '../components/OperationalForms';
+import { CompletedIssuesView, DeliveryTable } from '../components/HotelDelivery';
+import { useDeliveries } from '../hooks/useDeliveries';
 import { FacilityIssueBoard } from '../components/FacilityIssueBoard';
 import {
   GuestRequestTable,
@@ -66,6 +69,7 @@ import {
   CATEGORY_FALLBACK_LABELS,
   CATEGORY_MARKERS,
   CATEGORY_ORDER,
+  COMPLETED_ISSUES_TITLE,
   RECEPTION_CATEGORY_TITLES,
 } from '../lib/reportCategories';
 
@@ -92,6 +96,8 @@ function ReceptionJournal() {
   });
   /** Which category's "+ Thêm" dialog is open. One at a time, by construction. */
   const [adding, setAdding] = useState(false);
+  /** "Hoàn thành vấn đề" — a view beside the categories, not a sixth-and-a-half category. */
+  const [completedView, setCompletedView] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const options = useQuery({
@@ -117,16 +123,26 @@ function ReceptionJournal() {
     refetchOnWindowFocus: true,
   });
 
+  /*
+    THE DELIVERY LISTS ARE BRANCH-WIDE, not shift-scoped (an item outlives the
+    shift that recorded it), so they have their own query and their own key.
+  */
+  const deliveries = useDeliveries('active');
+
   const refresh = async () => {
     // Prefix match: the key carries the session id, and both must move together
     // or a table and its totals drift apart.
     await queryClient.invalidateQueries({ queryKey: REPORTS_KEY });
     await queryClient.invalidateQueries({ queryKey: CASH_KEY });
+    await queryClient.invalidateQueries({ queryKey: DELIVERIES_KEY });
   };
 
   const label = (c: ReportCategory) =>
     options.data?.categories.find((x) => x.code === c)?.label ?? CATEGORY_FALLBACK_LABELS[c];
-  const title = (c: ReportCategory) => RECEPTION_CATEGORY_TITLES[c] ?? label(c);
+  const title = (c: ReportCategory) =>
+    c === 'HOTEL_DELIVERY' && options.data?.deliveryTitle
+      ? options.data.deliveryTitle
+      : (RECEPTION_CATEGORY_TITLES[c] ?? label(c));
   const roomServiceLabel = (t: RoomServiceType) =>
     options.data?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
 
@@ -143,26 +159,53 @@ function ReceptionJournal() {
   /** Straight to a category, from anywhere — never through the overview. */
   const openCategory = (c: ReportCategory) => {
     setCategory(c);
+    setCompletedView(false);
     setAdding(false);
   };
   const openOverview = () => {
     setCategory(null);
+    setCompletedView(false);
     setAdding(false);
+  };
+  const openCompleted = () => {
+    setCategory(null);
+    setCompletedView(true);
+    setAdding(false);
+  };
+  const deliveryState = {
+    rows: deliveries.data?.deliveries ?? [],
+    options: options.data,
+    isLoading: deliveries.isLoading,
+    isError: deliveries.isError,
+    error: deliveries.error,
+    onRetry: () => void deliveries.refetch(),
   };
 
   return (
     <div>
       <ReportHeader
         category={category}
+        completedView={completedView}
         labelOf={title}
         onPick={openCategory}
         onOverview={openOverview}
-        refreshing={list.isFetching}
-        onRefresh={() => void list.refetch()}
+        onCompleted={openCompleted}
+        refreshing={list.isFetching || deliveries.isFetching}
+        onRefresh={() => {
+          void list.refetch();
+          void deliveries.refetch();
+        }}
         action={category ? { label: ADD_LABELS[category], onClick: () => setAdding(true) } : null}
       />
 
-      {category === null ? (
+      {completedView ? (
+        <CategoryShell
+          title={COMPLETED_ISSUES_TITLE}
+          description="Các mục đã hoàn thành và đã qua thời hạn theo dõi."
+        >
+          <CompletedIssuesView hours={options.data?.deliveryArchiveHours ?? 12} />
+        </CategoryShell>
+      ) : category === null ? (
         <section data-testid="report-overview" aria-labelledby="report-overview-heading" className="space-y-4">
           <div className="flex items-center gap-3">
             <h2 id="report-overview-heading" className="text-xs font-bold tracking-[0.12em] text-slate-700">
@@ -208,6 +251,13 @@ function ReceptionJournal() {
             marker={CATEGORY_MARKERS.ROOM_SERVICE}
             isLoading={tableState.isLoading}
             isError={tableState.isError}
+          />
+          {/* Still-active deliveries; after twelve hours they move to "Hoàn thành vấn đề". */}
+          <DeliveryTable
+            {...deliveryState}
+            title={title('HOTEL_DELIVERY')}
+            compact
+            section={{ marker: CATEGORY_MARKERS.HOTEL_DELIVERY }}
           />
         </section>
       ) : (
@@ -320,6 +370,32 @@ function ReceptionJournal() {
             </>
           ) : null}
 
+          {category === 'HOTEL_DELIVERY' ? (
+            <>
+              {adding ? (
+                <Modal open title={title('HOTEL_DELIVERY')} onClose={() => setAdding(false)}>
+                  <DeliveryForm
+                    bare
+                    options={options.data}
+                    onCancel={() => setAdding(false)}
+                    onCreated={async () => {
+                      await refresh();
+                      setAdding(false);
+                      setToast('Đã ghi nhận giao nhận hàng hóa.');
+                    }}
+                  />
+                </Modal>
+              ) : null}
+              <DeliveryTable
+                {...deliveryState}
+                canEdit
+                onChanged={refresh}
+                onToast={setToast}
+                title="Danh sách giao nhận đang theo dõi"
+              />
+            </>
+          ) : null}
+
           {/*
             THE SHIFT JOURNAL — secondary, cross-category, collapsed by default.
 
@@ -357,17 +433,21 @@ function ReceptionJournal() {
  */
 function ReportHeader({
   category,
+  completedView,
   labelOf,
   onPick,
   onOverview,
+  onCompleted,
   refreshing,
   onRefresh,
   action,
 }: {
   category: ReportCategory | null;
+  completedView: boolean;
   labelOf: (c: ReportCategory) => string;
   onPick: (c: ReportCategory) => void;
   onOverview: () => void;
+  onCompleted: () => void;
   refreshing: boolean;
   onRefresh: () => void;
   action: { label: string; onClick: () => void } | null;
@@ -384,7 +464,14 @@ function ReportHeader({
         </Button>
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2" data-testid="report-header-nav-row">
-        <TotalMenu current={category} labelOf={labelOf} onPick={onPick} onOverview={onOverview} />
+        <TotalMenu
+          current={category}
+          completedView={completedView}
+          labelOf={labelOf}
+          onPick={onPick}
+          onOverview={onOverview}
+          onCompleted={onCompleted}
+        />
         {action ? (
           <Button onClick={action.onClick} data-testid="category-add" className="shadow-sm">
             <Plus className="h-4 w-4" aria-hidden="true" />
@@ -411,25 +498,32 @@ function ReportHeader({
  */
 function TotalMenu({
   current,
+  completedView,
   labelOf,
   onPick,
   onOverview,
+  onCompleted,
 }: {
   current: ReportCategory | null;
+  completedView: boolean;
   labelOf: (c: ReportCategory) => string;
   onPick: (c: ReportCategory) => void;
   onOverview: () => void;
+  onCompleted: () => void;
 }) {
+  // Either a category or "Hoàn thành vấn đề" is a screen of its own, one step
+  // away from the overview.
+  const away = current !== null || completedView;
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   useEffect(() => {
     if (!open) return;
-    // Focus the open category, or the first one.
-    const index = current ? CATEGORY_ORDER.indexOf(current) : 0;
+    // Focus the open category (or "Hoàn thành vấn đề", the item after them), or the first one.
+    const index = completedView ? CATEGORY_ORDER.length : current ? CATEGORY_ORDER.indexOf(current) : 0;
     itemRefs.current[index >= 0 ? index : 0]?.focus();
-  }, [open, current]);
+  }, [open, current, completedView]);
 
   const close = () => {
     setOpen(false);
@@ -483,7 +577,7 @@ function TotalMenu({
 
   return (
     <div className="relative">
-      {current === null ? (
+      {!away ? (
         <button {...menuButtonProps} className={`${segment} gap-0 rounded-xl shadow-sm`}>
           <span className="px-4">Tổng</span>
           <span className="flex h-full items-center border-l border-white/30 px-2.5">{caret}</span>
@@ -548,6 +642,27 @@ function TotalMenu({
                 </button>
               );
             })}
+            {/* Not a journal category: the archive of what has been completed for a while. */}
+            <span role="separator" className="mx-2 my-1 block h-px bg-slate-200" />
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={completedView}
+              ref={(el) => {
+                itemRefs.current[CATEGORY_ORDER.length] = el;
+              }}
+              onClick={() => {
+                setOpen(false);
+                onCompleted();
+              }}
+              data-testid="category-COMPLETED"
+              className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-brand-50 hover:text-brand-800 focus:bg-brand-50 focus:text-brand-800 focus:outline-none ${
+                completedView ? 'bg-brand-50 font-semibold text-brand-800' : 'font-medium text-slate-700'
+              }`}
+            >
+              <span>{COMPLETED_ISSUES_TITLE}</span>
+              {completedView ? <Check className="h-4 w-4 shrink-0 text-brand-700" aria-hidden="true" /> : null}
+            </button>
           </div>
         </>
       ) : null}
@@ -562,6 +677,8 @@ const CATEGORY_HINTS: Record<ReportCategory, string> = {
   FACILITY_ISSUE: 'Sự cố cơ sở vật chất đang chờ hoặc đang được kỹ thuật xử lý.',
   CUSTOMER_COMPLAINT: 'Phản ánh của khách về chất lượng và dịch vụ.',
   ROOM_SERVICE: 'Bán phòng, upgrade, hút thuốc, giặt ủi và các dịch vụ khác.',
+  HOTEL_DELIVERY:
+    'Hàng hóa giao nhận giữa các bộ phận của khách sạn. Mục đã hoàn thành sau 12 giờ được chuyển sang "Hoàn thành vấn đề".',
 };
 
 /** The one primary action of each category, in the header's lower-right. */
@@ -572,6 +689,7 @@ const ADD_LABELS: Record<ReportCategory, string> = {
   FACILITY_ISSUE: 'Báo cáo sự cố',
   CUSTOMER_COMPLAINT: 'Báo cáo vấn đề',
   ROOM_SERVICE: 'Thêm dịch vụ',
+  HOTEL_DELIVERY: 'Thêm giao nhận',
 };
 
 /**

@@ -16,6 +16,7 @@ import { CircleAlert, History } from 'lucide-react';
 import type { OperationalReport } from '../api/receptionReports';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
+import { ROOM_SERVICE_PRICE_LABEL } from '../lib/roomServiceFields';
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -117,12 +118,12 @@ export function OperationalRecordDetail({
             <Field label="Mã EZ">{row.payment.ezCode}</Field>
             <Field label="Nguồn">{row.payment.source}</Field>
             <Field label="Phương thức">{row.payment.methodLabel}</Field>
-            <Field label="Số tiền">{formatVnd(row.payment.amount)}</Field>
+            <Field label="Thu tiền">{formatVnd(row.payment.amount)}</Field>
             <Field label="Công nợ">{formatVnd(row.payment.receivable)}</Field>
             <Field label="Chi tiền">{formatVnd(row.payment.expense)}</Field>
             {/* Recorded before the form stopped asking for them; kept, not shown empty. */}
+            <Field label="Ghi chú">{row.payment.note}</Field>
             <Legacy label="Số phòng" value={row.payment.roomNumber} />
-            <Legacy label="Ghi chú" value={row.payment.note} />
           </>
         ) : null}
 
@@ -192,11 +193,25 @@ export function OperationalRecordDetail({
             {row.roomService.serviceType === 'ROOM_SALE' || row.roomService.serviceType === 'UPGRADE' ? (
               <Field label="Số đêm">{row.roomService.nights ? String(row.roomService.nights) : null}</Field>
             ) : null}
-            <Field label="Giá tiền">{formatVnd(row.roomService.price)}</Field>
+            <Field label={ROOM_SERVICE_PRICE_LABEL}>{formatVnd(row.roomService.price)}</Field>
             <Field label="Ghi chú">{row.roomService.note}</Field>
             <Legacy label="SĐT" value={row.roomService.phone} />
             <Legacy label="Số phòng" value={row.roomService.roomNumber} />
             <Legacy label="Loại hình dịch vụ" value={row.roomService.serviceName} />
+          </>
+        ) : null}
+
+        {row.delivery ? (
+          <>
+            <Field label="Bộ phận">{row.delivery.departmentLabel}</Field>
+            <Field label="Tên hàng hóa">{row.delivery.itemName}</Field>
+            <Field label="Số lượng">{String(row.delivery.quantity)}</Field>
+            <Field label="Trạng thái">{row.delivery.statusLabel}</Field>
+            <Field label="Hoàn thành lúc">{formatDateTime(row.delivery.completedAt)}</Field>
+            <Field label="Nhóm">{row.delivery.archived ? 'Hoàn thành vấn đề' : 'Đang theo dõi'}</Field>
+            <div className="sm:col-span-2">
+              <Field label="Ghi chú">{row.delivery.note}</Field>
+            </div>
           </>
         ) : null}
       </dl>

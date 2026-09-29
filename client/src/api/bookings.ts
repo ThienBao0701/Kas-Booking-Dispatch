@@ -306,26 +306,6 @@ export interface NewListItem extends ClaimFields {
   reviewedAt: string | null;
 }
 
-export interface CompletedListItem {
-  id: string;
-  customerName: string | null;
-  bookingCode: string | null;
-  branch: Branch | null;
-  sourcePlatform: BookingSource;
-  businessType: BusinessType;
-  verificationStatus: VerificationStatus;
-  checkInDate: string | null;
-  roomSummary: string;
-  totalAmount: number | null;
-  currency: string;
-  isLastMinute: boolean;
-  completedAt: string | null;
-  completedBy: Actor | null;
-  completionNote: string | null;
-  reviewedBy: Actor | null;
-  reviewedAt: string | null;
-}
-
 export interface HistoryListItem {
   id: string;
   bookingCode: string | null;
@@ -597,8 +577,6 @@ export const bookingsApi = {
     api.get<ListResponse<NewListItem>>(`/bookings/pending-review${query(params)}`),
   listRejected: (params: { branchId?: number; page?: number; pageSize?: number } = {}) =>
     api.get<ListResponse<NewListItem>>(`/bookings/rejected${query(params)}`),
-  listCompleted: (params: { branchId?: number; page?: number; pageSize?: number } = {}) =>
-    api.get<ListResponse<CompletedListItem>>(`/bookings/completed${query(params)}`),
   history: (params: Record<string, string | number | boolean | undefined>) =>
     api.get<ListResponse<HistoryListItem>>(`/bookings/history${query(params)}`),
 

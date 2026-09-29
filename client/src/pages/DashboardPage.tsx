@@ -140,9 +140,8 @@ export function DashboardPage() {
           <Link to="/app/waiting" className="focus-visible:outline-none">
             <StatCard label="Chờ chi nhánh tạo" value={totals?.waiting ?? 0} icon={Clock} tone="amber" />
           </Link>
-          <Link to="/app/completed" className="focus-visible:outline-none">
-            <StatCard label="Đã xác nhận" value={totals?.confirmedToday ?? 0} icon={CheckCircle2} tone="green" />
-          </Link>
+          {/* A figure, not a doorway: "Đã xác nhận đúng" is no longer a screen of its own. */}
+          <StatCard label="Đã xác nhận" value={totals?.confirmedToday ?? 0} icon={CheckCircle2} tone="green" />
           <StatCard label="LAST MINUTE" value={totals?.lastMinute ?? 0} icon={Flame} tone="red" />
           <StatCard label="Tổng đơn gửi" value={totals?.sentToday ?? 0} icon={CalendarClock} />
 
@@ -196,12 +195,9 @@ export function DashboardPage() {
                     >
                       <strong>{waiting}</strong> chờ tạo
                     </Link>
-                    <Link
-                      to={`/app/completed?branchId=${branch.id}`}
-                      className="text-green-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-600"
-                    >
+                    <span className="text-green-700">
                       <strong>{confirmedToday}</strong> đã xác nhận
-                    </Link>
+                    </span>
                     {lastMinute > 0 ? (
                       <Link
                         to={`/app/waiting?branchId=${branch.id}`}

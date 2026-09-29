@@ -27,6 +27,34 @@ async function loadSessionUser(req: Request): Promise<UserWithBranch | null> {
   return prisma.user.findUnique({ where: { id: userId }, include: { branch: true } });
 }
 
+/**
+ * WHAT BỘ PHẬN BUỒNG PHÒNG MAY REACH — the only routes `requireAuth` lets a
+ * HOUSEKEEPING account through.
+ *
+ * DEFAULT DENY, AT THE ONE GATE EVERY PROTECTED ROUTE ALREADY PASSES. A
+ * housekeeping account is bound to a branch like a receptionist, and a good
+ * many routes decide "who is not an admin" by comparing `user.branchId` — the
+ * booking lists, the incident list, the reports. Left to those routes the role
+ * would silently read its own hotel's bookings and incidents. Listing what it
+ * MAY reach is one short list that cannot be forgotten by the next route added;
+ * listing what it may not would be every route in the application.
+ *
+ * `/auth` is here so it can sign in, read its own profile and change its
+ * password; `/nav-badges` and `/notifications` are per-user and empty for it.
+ */
+const HOUSEKEEPING_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/hotel-deliveries(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+];
+
+function housekeepingMayReach(req: Request): boolean {
+  const path = req.originalUrl.split('?')[0] ?? '';
+  return HOUSEKEEPING_ROUTES.some((route) => route.test(path));
+}
+
 export const requireAuth: RequestHandler = (req: Request, _res: Response, next: NextFunction) => {
   loadSessionUser(req)
     .then(async (user) => {
@@ -37,6 +65,10 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
       if (!user.active) {
         // A session that outlived the account being disabled must stop working.
         next(ApiError.accountDisabled());
+        return;
+      }
+      if (user.role === 'HOUSEKEEPING' && !housekeepingMayReach(req)) {
+        next(ApiError.forbidden());
         return;
       }
       await applyTestBranchOverride(req, user);

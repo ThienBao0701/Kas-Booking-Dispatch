@@ -32,6 +32,7 @@ import {
   CATEGORIES,
   CATEGORY_LABELS,
   CATEGORY_NUMERALS,
+  ROOM_SERVICE_PRICE_LABEL,
   formatVnd,
   formatVndPlain,
 } from '../reception/reportTypes';
@@ -107,7 +108,7 @@ const WIDEST = {
   'Cà thẻ (₫)': MONEY_SAMPLE,
   'Công nợ (₫)': MONEY_SAMPLE,
   'Chi (₫)': MONEY_SAMPLE,
-  'Giá tiền (₫)': MONEY_SAMPLE,
+  [`${ROOM_SERVICE_PRICE_LABEL} (₫)`]: MONEY_SAMPLE,
   'Mã EZ': 'EZ100000',
   Nguồn: 'Booking.com',
   'Thời gian': DATE_SAMPLE,
@@ -330,8 +331,22 @@ const ROOM_SERVICE_COLUMNS = checked<Numbered<SerializedReport>>('operational ro
   { header: 'Tên khách', width: 110, value: (r) => r.roomService?.guestName ?? '' },
   { header: 'Mã EZ', width: 50, value: (r) => r.roomService?.ezCode ?? '' },
   { header: 'Chi tiết', width: 236, value: serviceDetail },
-  { header: 'Giá tiền (₫)', width: MONEY_COLUMN_WIDTH, align: 'right', value: (r) => formatVndPlain(r.roomService?.price ?? null) },
+  { header: `${ROOM_SERVICE_PRICE_LABEL} (₫)`, width: MONEY_COLUMN_WIDTH, align: 'right', value: (r) => formatVndPlain(r.roomService?.price ?? null) },
   { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
+  { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
+  { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
+]);
+
+/* ------------------- VI. Giao nhận hàng hóa của khách sạn ------------------- */
+
+const HOTEL_DELIVERY_COLUMNS = checked<Numbered<SerializedReport>>('operational hotel deliveries', [
+  { header: 'STT', width: 26, value: (r) => String(r.stt) },
+  { header: 'Bộ phận', width: 70, value: (r) => r.delivery?.departmentLabel ?? '' },
+  { header: 'Tên hàng hóa', width: 180, value: (r) => withVoid(r, r.delivery?.itemName) },
+  { header: 'Số lượng', width: 56, align: 'right', value: (r) => String(r.delivery?.quantity ?? '') },
+  { header: 'Ghi chú', width: 150, value: (r) => r.delivery?.note ?? '' },
+  { header: 'Trạng thái', width: 70, value: (r) => r.delivery?.statusLabel ?? '' },
+  { header: 'Nhân viên', width: 70, value: (r) => r.createdByName },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
 ]);
@@ -344,6 +359,7 @@ const COLUMNS_BY_CATEGORY: Record<OperationalReportCategory, Column<Numbered<Ser
   FACILITY_ISSUE: FACILITY_COLUMNS,
   CUSTOMER_COMPLAINT: COMPLAINT_COLUMNS,
   ROOM_SERVICE: ROOM_SERVICE_COLUMNS,
+  HOTEL_DELIVERY: HOTEL_DELIVERY_COLUMNS,
 };
 
 /** "2026-09-22" -> "22/09/2026". */
@@ -454,7 +470,14 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
         if (!row.shiftSessionId) continue;
         let bucket = rowsOf.get(row.shiftSessionId);
         if (!bucket) {
-          bucket = { PAYMENT: [], GUEST_REQUEST: [], FACILITY_ISSUE: [], CUSTOMER_COMPLAINT: [], ROOM_SERVICE: [] };
+          bucket = {
+            PAYMENT: [],
+            GUEST_REQUEST: [],
+            FACILITY_ISSUE: [],
+            CUSTOMER_COMPLAINT: [],
+            ROOM_SERVICE: [],
+            HOTEL_DELIVERY: [],
+          };
           rowsOf.set(row.shiftSessionId, bucket);
         }
         bucket[category].push(row);

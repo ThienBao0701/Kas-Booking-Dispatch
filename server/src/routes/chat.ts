@@ -35,6 +35,12 @@ import {
   type ChatActor,
   type NewAttachment,
 } from '../chat/chatService';
+import {
+  listChannelMessages,
+  listChannels,
+  markChannelRead,
+  sendChannelMessage,
+} from '../chat/channelService';
 import { generateChatFileName, readChatFile, saveChatFile, sniffChatMime } from '../chat/chatStorage';
 
 function actorOf(req: Request): ChatActor {
@@ -126,6 +132,56 @@ export function createChatRouter(): Router {
 
   // ONE gate for the whole module.
   router.use('/chat', requireAuth, requirePasswordChanged, requireRole('ADMIN', 'RECEPTIONIST'));
+
+  /*
+    THE CHAT BUBBLE — branch channels. The list is the branch table (see
+    `channelService.ts`), so a branch added later appears without a change here.
+  */
+  const branchIdOf = (raw: string | undefined): number => {
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0) throw ApiError.notFound('Không tìm thấy chi nhánh.');
+    return id;
+  };
+
+  // GET /api/chat/channels — one entry per branch the caller may open, with unread counts.
+  router.get('/chat/channels', (req, res, next) => {
+    (async () => {
+      res.json({ channels: await listChannels(actorOf(req)) });
+    })().catch(next);
+  });
+
+  // GET /api/chat/channels/:branchId/messages — the newest messages, oldest first.
+  router.get('/chat/channels/:branchId/messages', (req, res, next) => {
+    (async () => {
+      res.json({ messages: await listChannelMessages(branchIdOf(req.params.branchId), actorOf(req)) });
+    })().catch(next);
+  });
+
+  // POST /api/chat/channels/:branchId/messages — write to the branch (multipart).
+  router.post('/chat/channels/:branchId/messages', chatUpload(), (req, res, next) => {
+    (async () => {
+      const actor = actorOf(req);
+      const branchId = branchIdOf(req.params.branchId);
+      // Confirms the caller may open this branch BEFORE any file is written.
+      await listChannelMessages(branchId, actor);
+      const input = messageSchema.parse(req.body ?? {});
+      const attachments = await persistUploads(req, `channel-${branchId}`);
+      const message = await sendChannelMessage(
+        branchId,
+        { body: input.body, attachments },
+        { ...actor, fullName: req.currentUser?.fullName },
+      );
+      res.status(201).json({ message });
+    })().catch(next);
+  });
+
+  // POST /api/chat/channels/:branchId/read — clears this reader's unread count.
+  router.post('/chat/channels/:branchId/read', (req, res, next) => {
+    (async () => {
+      await markChannelRead(branchIdOf(req.params.branchId), actorOf(req));
+      res.json({ ok: true });
+    })().catch(next);
+  });
 
   // GET /api/chat/conversations — the caller's visible threads, newest first.
   router.get('/chat/conversations', (req, res, next) => {

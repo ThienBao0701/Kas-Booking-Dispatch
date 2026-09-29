@@ -38,6 +38,22 @@ export const TECHNICAL_USER: AuthUser = {
   mustChangePassword: false,
 };
 
+/** Bộ phận buồng phòng: bound to ONE branch like a receptionist, but with its own two screens. */
+export const HOUSEKEEPING_USER: AuthUser = {
+  id: 5,
+  username: 'buongphong',
+  fullName: 'Buồng phòng Một',
+  role: 'HOUSEKEEPING',
+  branch: {
+    id: 1,
+    code: 'TRUONG_DINH_05',
+    hotelName: 'Saigon Hotel & Ben Thanh',
+    address: '05 Trương Định',
+  },
+  active: true,
+  mustChangePassword: false,
+};
+
 export const RECEPTIONIST_USER: AuthUser = {
   id: 2,
   username: 'letan',

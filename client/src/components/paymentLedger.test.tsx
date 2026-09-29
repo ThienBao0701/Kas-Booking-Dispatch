@@ -46,14 +46,23 @@ const OPTIONS = {
     { code: 'FACILITY_ISSUE', label: 'Sự cố vật chất đang xử lý' },
     { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
     { code: 'ROOM_SERVICE', label: 'Dịch vụ phòng, KPI' },
+    { code: 'HOTEL_DELIVERY', label: 'Giao nhận hàng hóa' },
   ],
   paymentMethods: [
-    { code: 'CASH', label: 'Thu tiền mặt' },
+    { code: 'CASH', label: 'Tiền mặt' },
     { code: 'TRANSFER', label: 'Chuyển khoản' },
     { code: 'CARD', label: 'Cà thẻ' },
+    { code: 'DEBT', label: 'Công nợ' },
   ],
   roomServiceTypes: [],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác'],
+  deliveryDepartments: [
+    { code: 'RECEPTION', label: 'Lễ tân' },
+    { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
+    { code: 'TECHNICAL', label: 'Kỹ thuật' },
+  ],
+  deliveryTitle: 'Giao nhận hàng hóa của khách sạn',
+  deliveryArchiveHours: 12,
 };
 
 const EMPTY_COUNTS = {
@@ -62,6 +71,7 @@ const EMPTY_COUNTS = {
   FACILITY_ISSUE: 0,
   CUSTOMER_COMPLAINT: 0,
   ROOM_SERVICE: 0,
+  HOTEL_DELIVERY: 0,
 };
 
 function cash(over: Record<string, unknown> = {}) {
@@ -190,11 +200,12 @@ describe('the sheet', () => {
     expect(within(row).getByText('Booking')).toBeInTheDocument();
     expect(within(row).getByText('Khách A')).toBeInTheDocument();
     expect(within(row).getByText('300.000 ₫')).toBeInTheDocument();
-    // Staff, room and note are not the desk's columns any more — the data stays
-    // on the record (the Admin shows it), it is just not in this table.
+    // Staff and room are not the desk's columns — the data stays on the record
+    // (the Admin shows it). The note IS: it is typed at the till, so it reads
+    // beside the money.
     expect(within(row).queryByText('Nguyễn Văn A')).not.toBeInTheDocument();
     expect(within(row).queryByText('101')).not.toBeInTheDocument();
-    expect(within(row).queryByText('Đêm đầu')).not.toBeInTheDocument();
+    expect(within(row).getByTestId('payment-note-p1')).toHaveTextContent('Đêm đầu');
   });
 
   it('shows the specified columns', async () => {
@@ -210,10 +221,14 @@ describe('the sheet', () => {
       'Tên khách',
       'Mã EZ',
       'Nguồn',
+      // One column per payment METHOD — Tiền mặt, Chuyển khoản, Cà thẻ, Công nợ —
+      // then Chi and the note.
       'Tiền mặt',
+      'Chuyển khoản',
       'Cà thẻ',
       'Công nợ',
       'Chi',
+      'Ghi chú',
       'Thao tác',
     ]);
     // ONE action column, holding both row actions.
@@ -225,7 +240,7 @@ describe('the sheet', () => {
     expect(cells).toHaveLength(headers.length);
   });
 
-  it('shows a card payment under "Cà thẻ" and a debt under "Công nợ"', async () => {
+  it('shows a card payment under "Cà thẻ" and a debt under "Công nợ", and none under "Chuyển khoản"', async () => {
     installApiMock(
       shellRoutes({
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
@@ -243,8 +258,8 @@ describe('the sheet', () => {
 
     const row = await screen.findByTestId('payment-row-p1');
     const cells = within(row).getAllByRole('cell').map((c) => c.textContent);
-    // STT, Tên khách, Mã EZ, Nguồn, Tiền mặt, Cà thẻ, Công nợ, Chi, Thao tác.
-    expect(cells.slice(4, 8)).toEqual(['—', '500.000 ₫', '200.000 ₫', '—']);
+    // STT, Tên khách, Mã EZ, Nguồn, Tiền mặt, Chuyển khoản, Cà thẻ, Công nợ, Chi, Ghi chú, Thao tác.
+    expect(cells.slice(4, 9)).toEqual(['—', '—', '500.000 ₫', '200.000 ₫', '—']);
   });
 
   it('says so plainly when the shift has no transactions', async () => {
@@ -674,7 +689,7 @@ describe('the opening-cash reminder', () => {
 });
 
 describe('"Nguồn" is a controlled select', () => {
-  it('offers exactly the five channels, and sends the one chosen', async () => {
+  it('offers exactly the seven channels, and sends the one chosen', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       shellRoutes({
@@ -692,7 +707,7 @@ describe('"Nguồn" is a controlled select', () => {
       .getAllByRole('option')
       .map((o) => o.textContent)
       .filter((t) => !t?.startsWith('—'));
-    expect(options).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia']);
+    expect(options).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác']);
 
     await userEvent.selectOptions(source, 'Agoda');
     await userEvent.type(screen.getByTestId('payment-amount'), '100000');
@@ -701,7 +716,8 @@ describe('"Nguồn" is a controlled select', () => {
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       category: 'PAYMENT',
-      payment: { source: 'Agoda', method: 'CASH', amount: 100000, receivable: 0, expense: 0 },
+      // No `receivable`: Công nợ is a payment METHOD now, not a second amount box.
+      payment: { source: 'Agoda', method: 'CASH', amount: 100000, expense: 0 },
     });
   });
 
@@ -730,9 +746,66 @@ describe('"Nguồn" is a controlled select', () => {
     await waitFor(() => expect(patched).toHaveLength(1));
     const body = patched[0] as { payment: Record<string, unknown> };
     expect(body.payment.source).toBe('agoda.com');
-    // Legacy fields are not part of a correction any more.
+    // The room is not part of a correction any more, and neither is the legacy
+    // second debt column — correcting a row never rewrites its old debt. The note
+    // IS a field of the form, so it travels with the correction.
     expect(body.payment).not.toHaveProperty('roomNumber');
-    expect(body.payment).not.toHaveProperty('note');
+    expect(body.payment).not.toHaveProperty('receivable');
+    expect(body.payment.note).toBe('Đêm đầu');
+  });
+});
+
+describe('Công nợ is a method, and the note travels with the payment', () => {
+  it('sends the amount under the chosen method, with the note, and no separate debt', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: payment() } };
+        },
+      }),
+    );
+    await openPaymentForm();
+
+    await userEvent.selectOptions(await screen.findByTestId('payment-method'), 'DEBT');
+    await userEvent.type(screen.getByTestId('payment-amount'), '750000');
+    await userEvent.type(screen.getByTestId('payment-note'), 'Công ty chuyển khoản cuối tháng');
+    await userEvent.click(screen.getByTestId('payment-add'));
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      category: 'PAYMENT',
+      payment: { method: 'DEBT', amount: 750000, expense: 0, note: 'Công ty chuyển khoản cuối tháng' },
+    });
+  });
+
+  it('will not add a transaction with no "Thu tiền"', async () => {
+    installApiMock(shellRoutes());
+    await openPaymentForm();
+    expect(await screen.findByTestId('payment-add')).toBeDisabled();
+    await userEvent.type(screen.getByTestId('payment-amount'), '1000');
+    expect(screen.getByTestId('payment-add')).toBeEnabled();
+  });
+
+  it('shows the note typed at the till in the ledger, and "—" when there is none', async () => {
+    installApiMock(
+      shellRoutes({
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: {
+            reports: [
+              payment({ id: 'p1' }, { note: 'Khách trả trước' }),
+              payment({ id: 'p2' }, { note: null }),
+            ],
+            counts: { ...EMPTY_COUNTS, PAYMENT: 2 },
+          },
+        }),
+      }),
+    );
+    await openPayment();
+    expect(await screen.findByTestId('payment-note-p1')).toHaveTextContent('Khách trả trước');
+    expect(screen.getByTestId('payment-note-p2')).toHaveTextContent('—');
   });
 });
 
@@ -778,17 +851,25 @@ describe('the "Thêm giao dịch" dialog', () => {
     for (const id of inWho) expect(within(who).getByTestId(id)).toBeInTheDocument();
     expect(who.className).toMatch(/\bsm:grid-cols-3\b/);
 
-    // Row 2: Phương thức | Số tiền | Công nợ | Chi tiền.
+    // Row 2: Phương thức | Thu tiền | Chi tiền — and NO separate Công nợ box:
+    // Công nợ is one of the four payment methods.
     const money = within(dialog).getByTestId('payment-row-money');
-    const inMoney = ['payment-method', 'payment-amount', 'payment-receivable', 'payment-expense'];
+    const inMoney = ['payment-method', 'payment-amount', 'payment-expense'];
     for (const id of inMoney) expect(within(money).getByTestId(id)).toBeInTheDocument();
-    expect(money.className).toMatch(/\bmd:grid-cols-4\b/);
+    expect(money.className).toMatch(/\bsm:grid-cols-3\b/);
+    expect(within(dialog).queryByTestId('payment-receivable')).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Thu tiền/)).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Số tiền')).not.toBeInTheDocument();
+    const methods = within(within(money).getByTestId('payment-method'))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(methods).toEqual(['Tiền mặt', 'Chuyển khoản', 'Cà thẻ', 'Công nợ']);
 
-    // No room and no note any more.
+    // Row 3: Ghi chú. Still no room.
+    expect(within(dialog).getByTestId('payment-note')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Ghi chú')).toBeInTheDocument();
     expect(within(dialog).queryByTestId('payment-room')).not.toBeInTheDocument();
-    expect(within(dialog).queryByTestId('payment-note')).not.toBeInTheDocument();
     expect(within(dialog).queryByText('Số phòng')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('Ghi chú')).not.toBeInTheDocument();
 
     // Footer: Hủy, then Thêm.
     const cancel = within(dialog).getByTestId('payment-cancel');

@@ -96,13 +96,14 @@ export function SettingsPage() {
  * The departments, in the order an Admin manages them. These are the system's
  * own roles — nothing here invents a department that has no accounts behind it.
  */
-const DEPARTMENTS: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'BOOKING_DEPARTMENT', 'ADMIN'];
+const DEPARTMENTS: UserRole[] = ['RECEPTIONIST', 'HOUSEKEEPING', 'TECHNICAL', 'BOOKING_DEPARTMENT', 'ADMIN'];
 
 /** Sections shown even when empty — the departments every property has. */
 const ALWAYS_SHOWN: UserRole[] = ['RECEPTIONIST', 'TECHNICAL', 'ADMIN'];
 
 const DEPARTMENT_TITLE: Record<UserRole, string> = {
   RECEPTIONIST: 'Lễ tân',
+  HOUSEKEEPING: 'Buồng phòng',
   TECHNICAL: 'Kỹ thuật',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   ADMIN: 'Admin / Quản trị',
@@ -258,10 +259,12 @@ function CreateUserModal({
             <option value="RECEPTIONIST">Lễ tân</option>
             <option value="BOOKING_DEPARTMENT">Bộ phận đặt phòng</option>
             <option value="TECHNICAL">Bộ phận kỹ thuật</option>
+            <option value="HOUSEKEEPING">Bộ phận buồng phòng</option>
           </select>
         </label>
         {/*
-          A branch belongs to a receptionist alone. A global department works
+          A branch belongs to a receptionist and to Bộ phận buồng phòng, whose
+          room inspections are made in one hotel. A global department works
           across every branch, so offering the field would imply a scope the
           account does not have.
         */}

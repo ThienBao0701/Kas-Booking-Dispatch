@@ -50,6 +50,7 @@ import { QueryState } from '../components/PageState';
 import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
 import {
   AdminAllCategoriesTable,
+  AdminDeliveryTable,
   AdminGuestRequestTable,
   AdminPaymentTable,
   AdminRoomServiceTable,
@@ -59,7 +60,8 @@ import { RoomServiceTotals } from '../components/OperationalTables';
 import { formatVnd } from '../lib/money';
 import { formatDate, formatViWeekdayDate, hcmToday } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
-import { CATEGORY_FALLBACK_LABELS, CATEGORY_ORDER } from '../lib/reportCategories';
+import { CATEGORY_FALLBACK_LABELS, CATEGORY_ORDER, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
+import { branchOptionLabel } from '../lib/branchTone';
 import { daysBefore, groupByBranch, type ShiftGroup } from '../lib/shiftGroups';
 import { issuesApi } from '../api/issues';
 import { IncidentExportModal, IncidentRangeSummary, IncidentTable } from '../components/IncidentReporting';
@@ -118,8 +120,24 @@ export function AdminOperationalReportsPage() {
     enabled: branch !== null && rangeValid,
   });
 
+  /*
+    THE BRANCH SELECTOR IS ALSO THE INCIDENT COUNTER. The number beside each
+    branch is its unresolved incidents from `/api/issues/summary` — the very
+    source the sidebar badge reads — keyed by branch id, so there is no second
+    count and no separate table of counts. A branch the summary has no row for
+    (it cannot happen for an active branch) reads 0.
+  */
+  const issueSummary = useIssueSummary();
+  const unresolvedByBranch = new Map(
+    (issueSummary.data?.summary.byBranch ?? []).map((b) => [b.branchId, b.totalUnresolved]),
+  );
+
+  // The sixth category is printed in full here; the server's own label is short
+  // because it also names an XLSX sheet.
   const label = (c: ReportCategory) =>
-    options.data?.categories.find((x) => x.code === c)?.label ?? CATEGORY_FALLBACK_LABELS[c];
+    c === 'HOTEL_DELIVERY'
+      ? (options.data?.deliveryTitle ?? HOTEL_DELIVERY_TITLE)
+      : (options.data?.categories.find((x) => x.code === c)?.label ?? CATEGORY_FALLBACK_LABELS[c]);
   const serviceLabel = (t: RoomServiceType) =>
     options.data?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
 
@@ -238,10 +256,11 @@ export function AdminOperationalReportsPage() {
                 <option value="ALL">Tất cả chi nhánh</option>
                 {(branches.data?.branches ?? []).map((b) => (
                   <option key={b.id} value={b.id}>
-                    {b.address} · Chi nhánh {b.branchNumber}
+                    {branchOptionLabel(b)} ({unresolvedByBranch.get(b.id) ?? 0})
                   </option>
                 ))}
               </select>
+              <p className="mt-1 text-[11px] text-slate-500">Số trong ngoặc: sự cố chưa xử lý của chi nhánh.</p>
             </div>
           </div>
         </section>
@@ -314,7 +333,7 @@ export function AdminOperationalReportsPage() {
           ) : null}
 
           {category === 'FACILITY_ISSUE' ? (
-            <AdminIncidentView branchId={filters.branchId} range={range} onPickBranch={setBranch} />
+            <AdminIncidentView branchId={filters.branchId} range={range} />
           ) : (
             <CategoryView
               category={category}
@@ -446,6 +465,7 @@ function CategoryTable({
   if (category === 'PAYMENT') return <AdminPaymentTable {...props} />;
   if (category === 'GUEST_REQUEST') return <AdminGuestRequestTable {...props} />;
   if (category === 'CUSTOMER_COMPLAINT') return <AdminServiceQualityTable {...props} />;
+  if (category === 'HOTEL_DELIVERY') return <AdminDeliveryTable {...props} />;
   if (category === 'ROOM_SERVICE') {
     const present = ROOM_SERVICE_ORDER.filter((t) => rows.some((r) => r.roomService?.serviceType === t));
     if (present.length === 0) {
@@ -643,16 +663,7 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
  * report date — plus the period's counts and, when asked, every incident still
  * open whatever day it was reported. Nothing here is a second incident system.
  */
-function AdminIncidentView({
-  branchId,
-  range,
-  onPickBranch,
-}: {
-  branchId?: number;
-  range: DateRangeValue;
-  /** A branch's count is also the way into that branch. */
-  onPickBranch: (branchId: number) => void;
-}) {
+function AdminIncidentView({ branchId, range }: { branchId?: number; range: DateRangeValue }) {
   const [outstanding, setOutstanding] = useState(false);
   const list = useQuery({
     queryKey: ['issues', { admin: true, branchId, range, outstanding }],
@@ -672,7 +683,6 @@ function AdminIncidentView({
 
   return (
     <div className="space-y-3" data-testid="admin-incident-view">
-      {branchId === undefined ? <BranchIncidentCounts onPick={onPickBranch} /> : null}
       {outstanding ? null : <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />}
       <label
         className={`inline-flex min-h-[2.75rem] cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm transition-colors ${
@@ -710,54 +720,6 @@ function AdminIncidentView({
           để xem đầy đủ.
         </p>
       ) : null}
-    </div>
-  );
-}
-
-/**
- * EVERY BRANCH'S UNRESOLVED INCIDENTS, AT A GLANCE — what the old "Sự cố
- * khách sạn" screen opened on, kept so the merge loses nothing. Counted by the
- * server (`/api/issues/summary`), whatever the period: an unresolved incident
- * matters whichever day it was reported. Choosing one narrows the page to that
- * branch through the page's own branch filter — there is only one.
- */
-function BranchIncidentCounts({ onPick }: { onPick: (branchId: number) => void }) {
-  const summary = useIssueSummary();
-  const branches = summary.data?.summary.byBranch ?? [];
-  if (branches.length === 0) return null;
-  return (
-    <div data-testid="branch-incident-counts">
-      <h2 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Sự cố chưa xử lý theo chi nhánh
-      </h2>
-      <div className="flex flex-wrap gap-1.5">
-        {branches.map((b) => {
-          const open = b.totalUnresolved > 0;
-          return (
-            <button
-              key={b.branchId}
-              type="button"
-              onClick={() => onPick(b.branchId)}
-              aria-label={`${b.totalUnresolved} sự cố chưa xử lý tại ${b.address}`}
-              className={`inline-flex items-center gap-2 rounded-lg border bg-white px-2.5 py-1.5 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
-                open ? 'border-red-200 hover:border-red-300' : 'border-slate-200 hover:border-slate-300'
-              }`}
-            >
-              <span className="font-medium text-slate-800">{b.address}</span>
-              <span
-                className={`inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 font-bold leading-none ${
-                  open ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'
-                }`}
-              >
-                {b.totalUnresolved}
-              </span>
-              <span className="text-slate-500">
-                Mới: {b.newCount} · Đang sửa: {b.inProgressCount}
-              </span>
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }

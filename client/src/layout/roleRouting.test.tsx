@@ -25,7 +25,7 @@ function mockShell(user: unknown, extra: Record<string, () => { status: number; 
 }
 
 describe('role-based shell and routing', () => {
-  it('shows the full admin menu (14 items)', async () => {
+  it('shows the full admin menu (13 items)', async () => {
     mockShell(ADMIN_USER);
     renderApp('/app/new');
 
@@ -37,12 +37,11 @@ describe('role-based shell and routing', () => {
       'Chờ chi nhánh tạo',
       'Chờ kiểm tra',
       'Cần tạo lại',
-      'Đã xác nhận đúng',
       'Lịch sử',
       'Báo cáo vấn đề',
+      'Buồng phòng',
       'Gửi lại đơn',
       'Chứng từ',
-      'Chat box',
       'Nhắc nhở',
       'Khách sạn & chi nhánh',
       'Quản lý tài khoản',
@@ -54,6 +53,13 @@ describe('role-based shell and routing', () => {
     */
     expect(within(nav).queryByRole('link', { name: 'Sự cố khách sạn' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Bàn giao ca' })).not.toBeInTheDocument();
+    /*
+      "Đã xác nhận đúng" and "Chat box" are gone from the menu. The chat is the
+      bubble in the corner of every page (below); confirmed orders are listed,
+      with every other status, in "Lịch sử".
+    */
+    expect(within(nav).queryByRole('link', { name: 'Đã xác nhận đúng' })).not.toBeInTheDocument();
+    expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
   });
 
   it('shows only the four receptionist items', async () => {
@@ -62,7 +68,8 @@ describe('role-based shell and routing', () => {
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
-    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Chat box', 'Nhắc nhở']);
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Thu tiền buồng phòng', 'Nhắc nhở']);
+    expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
     /*
       Removed from the MENU only. Their routes, records and APIs are untouched;
       "Báo cáo sự cố" is a category inside "Báo cáo vấn đề".
@@ -137,7 +144,8 @@ describe('the retired addresses', () => {
   });
 
   it.each([
-    ['/app/completed', 'Đã xác nhận đúng'],
+    // "Đã xác nhận đúng" is not a screen any more: its address is a redirect.
+    ['/app/completed', 'Lịch sử'],
     ['/app/history', 'Lịch sử'],
   ])('still serves %s to a receptionist who has the address', async (path, heading) => {
     mockShell(RECEPTIONIST_USER);
@@ -145,5 +153,61 @@ describe('the retired addresses', () => {
 
     expect((await screen.findAllByRole('heading', { name: heading })).length).toBeGreaterThan(0);
     expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
+  });
+
+  it('sends an Admin from the removed "Đã xác nhận đúng" to "Lịch sử"', async () => {
+    mockShell(ADMIN_USER);
+    renderApp('/app/completed');
+    expect((await screen.findAllByRole('heading', { name: 'Lịch sử' })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('heading', { name: 'Đã xác nhận đúng' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the old chat pages reachable by address, with no menu entry', async () => {
+    mockShell(RECEPTIONIST_USER, {
+      'GET /api/chat/conversations': () => ({ status: 200, body: { conversations: [] } }),
+      'GET /api/chat/channels': () => ({ status: 200, body: { channels: [] } }),
+    });
+    renderApp('/app/chat');
+    expect((await screen.findAllByRole('heading', { name: /Chat box/ })).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
+  });
+});
+
+describe('the chat bubble', () => {
+  const CHANNELS = {
+    'GET /api/chat/channels': () => ({
+      status: 200,
+      body: {
+        channels: [
+          {
+            branchId: 1,
+            branchNumber: 1,
+            address: '05 Trương Định',
+            hotelName: 'KAS',
+            conversationId: null,
+            lastMessage: null,
+            unreadCount: 3,
+          },
+        ],
+      },
+    }),
+  };
+
+  it.each([
+    ['an Admin', ADMIN_USER],
+    ['a receptionist', RECEPTIONIST_USER],
+  ])('is on the page for %s, whatever page it is', async (_who, user) => {
+    mockShell(user, CHANNELS);
+    renderApp('/app/reminders');
+    expect(await screen.findByTestId('chat-bubble')).toBeInTheDocument();
+    // The badge is the server's unread count, not something remembered here.
+    expect(await screen.findByTestId('chat-bubble-unread')).toHaveTextContent('3');
+  });
+
+  it('is not offered to a department with no part in the chat', async () => {
+    mockShell({ ...RECEPTIONIST_USER, role: 'TECHNICAL', branch: null }, CHANNELS);
+    renderApp('/app/technical/new');
+    expect(await screen.findByRole('navigation', { name: 'Điều hướng chính' })).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-bubble')).not.toBeInTheDocument();
   });
 });

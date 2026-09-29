@@ -36,7 +36,7 @@ import { OperationalRecordDetail } from './OperationalRecord';
 import type { SectionFrame } from './ReportSection';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
-import { roomServiceFields } from '../lib/roomServiceFields';
+import { ROOM_SERVICE_PRICE_LABEL, roomServiceFields } from '../lib/roomServiceFields';
 
 export interface AdminTableProps {
   rows: OperationalReport[];
@@ -218,7 +218,7 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
     */
     {
       key: 'amount',
-      header: 'Số tiền',
+      header: 'Thu tiền',
       align: 'right',
       className: 'whitespace-nowrap font-medium text-slate-800',
       render: (r) => money(r.payment?.amount),
@@ -228,6 +228,8 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
     { key: 'card', header: 'Cà thẻ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.card) },
     { key: 'receivable', header: 'Công nợ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.receivable) },
     { key: 'expense', header: 'Chi', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.expense) },
+    // "Ghi chú" — typed at the till, so it reads beside the money.
+    { key: 'note', header: 'Ghi chú', secondary: true, className: 'min-w-[8rem] max-w-[16rem]', render: (r) => clamped(r.payment?.note) },
     // Reception no longer asks for a room; older rows carry one.
     { key: 'room', header: 'Phòng', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.roomNumber) },
     when('createdAt', 'Thời gian', (r) => r.createdAt),
@@ -245,6 +247,77 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
       rows={rows}
       emptyTitle="Không có giao dịch"
       emptyMessage="Chi nhánh này chưa ghi nhận giao dịch nào trong kỳ đang xem."
+    />
+  );
+}
+
+/* ------------------- Giao nhận hàng hóa của khách sạn ------------------- */
+
+/**
+ * THE SHARED DELIVERY RECORD, READ BY THE ADMIN. The columns are the ones
+ * Reception's overview shows — Bộ phận, Tên hàng hóa, Số lượng, Trạng thái — with
+ * the Admin's own traceability after them. There is one row per delivery and no
+ * Admin copy: this is the reception journal's record, read across branches.
+ * "Nhóm" says which side of the 12-hour rule the record is on.
+ */
+export function AdminDeliveryTable({ rows, title, grouped, ...state }: AdminTableProps) {
+  const columns: DataColumn<OperationalReport>[] = [
+    stt(),
+    {
+      key: 'department',
+      header: 'Bộ phận',
+      className: 'whitespace-nowrap',
+      render: (r) => text(r.delivery?.departmentLabel),
+    },
+    {
+      key: 'item',
+      header: 'Tên hàng hóa',
+      className: 'min-w-[10rem] font-medium text-slate-800',
+      render: (r) => text(r.delivery?.itemName),
+    },
+    {
+      key: 'quantity',
+      header: 'Số lượng',
+      align: 'right',
+      className: 'whitespace-nowrap',
+      render: (r) => (r.delivery ? String(r.delivery.quantity) : '—'),
+    },
+    {
+      key: 'lifecycle',
+      header: 'Trạng thái',
+      className: 'whitespace-nowrap',
+      render: (r) =>
+        r.delivery ? (
+          <>
+            <span className="inline-flex whitespace-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
+              {r.delivery.statusLabel}
+            </span>
+            {r.delivery.archived ? (
+              <span className="mt-0.5 block text-xs text-slate-400">Hoàn thành vấn đề</span>
+            ) : null}
+          </>
+        ) : (
+          text(null)
+        ),
+    },
+    { key: 'note', header: 'Ghi chú', secondary: true, className: 'min-w-[8rem] max-w-[16rem]', render: (r) => clamped(r.delivery?.note) },
+    staff('Người tạo'),
+    shift(),
+    when('createdAt', 'Thời gian', (r) => r.createdAt),
+    status('Bản ghi'),
+  ];
+
+  return (
+    <DataTable
+      {...SHARED}
+      {...state}
+      testId="admin-table-HOTEL_DELIVERY"
+      title={title}
+      badge={rows.length}
+      columns={inContext(columns, grouped)}
+      rows={rows}
+      emptyTitle="Không có giao nhận hàng hóa"
+      emptyMessage="Chi nhánh này chưa ghi nhận giao nhận hàng hóa nào trong kỳ đang xem."
     />
   );
 }
@@ -471,7 +544,7 @@ export function AdminRoomServiceTable({
       : []),
     {
       key: 'price',
-      header: 'Giá tiền',
+      header: ROOM_SERVICE_PRICE_LABEL,
       align: 'right',
       className: 'whitespace-nowrap font-medium text-slate-800',
       render: (r) => money(r.roomService?.price),

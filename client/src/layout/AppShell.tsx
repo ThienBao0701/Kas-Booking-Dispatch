@@ -5,9 +5,14 @@ import { Topbar } from './Topbar';
 import { DevToolsBar } from './DevToolsBar';
 import { OfflineIndicator } from '../components/OfflineIndicator';
 import { ShiftGate } from '../components/ShiftGate';
+import { ChatBubble } from '../components/ChatBubble';
+import { useAuth } from '../auth/AuthProvider';
 
 export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { user } = useAuth();
+  // The chat is Admin↔Reception correspondence; no other role has a part in it.
+  const hasChat = user?.role === 'ADMIN' || user?.role === 'RECEPTIONIST';
 
   return (
     <div className="flex min-h-screen bg-slate-100">
@@ -46,6 +51,12 @@ export function AppShell() {
           </div>
         </main>
       </div>
+      {/*
+        THE CHAT BUBBLE, once, for every page of both roles. Rendered by the
+        shell — not by a page — so it is never unmounted by navigating, and it
+        keeps the open branch, the draft and the scroll position.
+      */}
+      {hasChat ? <ChatBubble /> : null}
     </div>
   );
 }

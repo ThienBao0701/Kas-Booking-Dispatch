@@ -423,21 +423,29 @@ describe('the incident row after a failed attempt', () => {
   });
 
   /**
-   * A REPORT THAT HAS BEEN WORKED IS A RECORD, NOT A DRAFT.
+   * A REPORT THAT HAS BEEN WORKED CAN STILL BE CORRECTED — BUT NOT SILENTLY.
    *
-   * "Không sửa được" returns the incident to NEW, which would otherwise re-open
-   * the reporter's edit rights — letting the description be rewritten underneath
-   * an attempt that was made against the old one.
+   * "Không sửa được" returns the incident to NEW. The desk may correct what the
+   * report says ("Sửa vấn đề"), and the repair history, the attempt and the
+   * original wording all survive: the words that were replaced are kept in
+   * HotelIssueEdit, so a technician who went against the old description can
+   * always be shown it.
    */
-  it('cannot be edited by the reporter any more', async () => {
+  it('can still be corrected by the reporter, keeping the attempt and the old words', async () => {
     const id = await reportIssue('Nhà vệ sinh tắc');
     await accept(tech, id, 'Bao', '0369852177');
     await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'Không có linh kiện' });
 
     const res = await letan.put(`/api/issues/${id}`).send({ description: 'Đổi mô tả' });
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(200);
+    expect(res.body.issue.status).toBe('NEW');
+    expect(res.body.issue.attempts).toHaveLength(1);
+    expect(res.body.issue.edits).toEqual([
+      expect.objectContaining({ field: 'description', oldValue: 'Nhà vệ sinh tắc', newValue: 'Đổi mô tả' }),
+    ]);
     const issue = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
-    expect(issue.description).toBe('Nhà vệ sinh tắc');
+    expect(issue.description).toBe('Đổi mô tả');
+    expect(await testPrisma.technicalRepairAttempt.count({ where: { issueId: id } })).toBe(1);
   });
 
   it('notifies the reporter that it came back, and why', async () => {
@@ -445,8 +453,10 @@ describe('the incident row after a failed attempt', () => {
     await accept(tech, id, 'Bao', '0369852177');
     await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'Không có linh kiện' });
 
+    // Newest first: earlier tests in this file leave the same-titled row behind.
     const notification = await testPrisma.notification.findFirstOrThrow({
       where: { title: 'Sự cố chưa sửa được, đang chờ xử lý lại' },
+      orderBy: { createdAt: 'desc' },
     });
     expect(notification.body).toContain('Không có linh kiện');
   });

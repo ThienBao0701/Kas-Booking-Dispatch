@@ -13,6 +13,7 @@ function row(over: Partial<OperationalReport> & { id: string }): OperationalRepo
     category: 'CUSTOMER_COMPLAINT',
     categoryLabel: 'Vấn đề về chất lượng dịch vụ',
     branchId: 1,
+    delivery: null,
     branch: { id: 1, code: 'X', hotelName: 'KAS', address: '05 Trương Định', branchNumber: 1 },
     shiftSessionId: 's1',
     shiftType: 'A',

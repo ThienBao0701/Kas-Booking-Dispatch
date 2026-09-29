@@ -133,9 +133,11 @@ describe('Issue counters — dashboard card', () => {
 /*
   The per-branch unresolved counts the old "Sự cố khách sạn" screen opened on.
   That screen became the "Sự cố vật chất đang xử lý" category of "Báo cáo vấn
-  đề"; the counts came with it, shown while every branch is on screen.
+  đề", and the counts live in the page's ONE branch selector — beside each
+  branch, from the same summary the sidebar badge reads. There is no second table
+  of counts.
 */
-describe('Issue counters — admin per-branch counts in the incident category', () => {
+describe('Issue counters — the branch selector carries them', () => {
   const TODAY = hcmToday();
   const BRANCHES = BY_BRANCH.map((b, i) => ({
     id: b.branchId,
@@ -146,48 +148,81 @@ describe('Issue counters — admin per-branch counts in the incident category', 
     active: true,
   }));
 
-  function installAdminIssues() {
+  function installAdminIssues(branches = BRANCHES, summary = ADMIN_SUMMARY) {
     return installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
-      'GET /api/issues/summary': () => ({ status: 200, body: { summary: ADMIN_SUMMARY } }),
-      'GET /api/admin/branches': () => ({ status: 200, body: { branches: BRANCHES } }),
+      'GET /api/issues/summary': () => ({ status: 200, body: { summary } }),
+      'GET /api/admin/branches': () => ({ status: 200, body: { branches } }),
       [`GET /api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`]: () => listBody([issue({ id: 'all' })]),
       [`GET /api/issues?branchId=1&from=${TODAY}&to=${TODAY}&pageSize=100`]: () =>
         listBody([issue({ id: 'b1', description: 'Chỉ chi nhánh 1' })]),
     });
   }
 
-  it('renders all eight branches, a branch with three shows 3 and a zero branch shows 0', async () => {
+  it('lists every branch with its unresolved count — a branch with three shows 3, a quiet one 0', async () => {
     installAdminIssues();
     // The old address, which now lands here.
     renderApp('/app/issues');
-    const b1 = await screen.findByLabelText(/3 sự cố chưa xử lý tại 05 Trương Định/);
-    expect(within(b1).getByText('3')).toBeInTheDocument();
-    expect(within(b1).getByText('Mới: 2 · Đang sửa: 1')).toBeInTheDocument();
-    // A zero-count branch is still shown.
-    const zero = await screen.findByLabelText(/0 sự cố chưa xử lý tại 191 Lê Thánh Tôn/);
-    expect(within(zero).getByText('0')).toBeInTheDocument();
-    expect(within(screen.getByTestId('branch-incident-counts')).getAllByRole('button')).toHaveLength(8);
+    const select = await screen.findByTestId('branch-select');
+    await screen.findByRole('option', { name: '05 Trương Định - Chi nhánh 01 (3)' });
+    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toEqual([
+      '— Chọn chi nhánh —',
+      'Tất cả chi nhánh',
+      '05 Trương Định - Chi nhánh 01 (3)',
+      '260 Lý Tự Trọng - Chi nhánh 02 (0)',
+      '47A Nguyễn Trãi - Chi nhánh 03 (0)',
+      '170 Nguyễn Thái Bình - Chi nhánh 04 (0)',
+      '278 Lê Thánh Tôn - Chi nhánh 05 (0)',
+      '40 Bùi Thị Xuân - Chi nhánh 06 (0)',
+      '13 Bùi Thị Xuân - Chi nhánh 07 (0)',
+      '191 Lê Thánh Tôn - Chi nhánh 08 (0)',
+    ]);
   });
 
-  it('choosing a branch narrows the page to it, and "Tất cả chi nhánh" widens it again', async () => {
+  it('has no second table of counts any more', async () => {
+    installAdminIssues();
+    renderApp('/app/issues');
+    await screen.findByTestId('admin-incident-view');
+    expect(screen.queryByTestId('branch-incident-counts')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sự cố chưa xử lý theo chi nhánh')).not.toBeInTheDocument();
+  });
+
+  it('gives a branch added later its own entry, with its count', async () => {
+    const ninth = { id: 9, code: 'B9', hotelName: 'Hotel 9', address: '99 Đường Mới', branchNumber: 9, active: true };
+    installAdminIssues([...BRANCHES, ninth], {
+      ...ADMIN_SUMMARY,
+      totalUnresolved: 5,
+      byBranch: [...BY_BRANCH, branch(9, '99 Đường Mới', 2, 0)],
+    });
+    renderApp('/app/issues');
+    expect(await screen.findByRole('option', { name: '99 Đường Mới - Chi nhánh 09 (2)' })).toBeInTheDocument();
+  });
+
+  it('reads 0 for a branch the summary has no row for, rather than hiding it', async () => {
+    const ninth = { id: 9, code: 'B9', hotelName: 'Hotel 9', address: '99 Đường Mới', branchNumber: 9, active: true };
+    installAdminIssues([...BRANCHES, ninth]);
+    renderApp('/app/issues');
+    expect(await screen.findByRole('option', { name: '99 Đường Mới - Chi nhánh 09 (0)' })).toBeInTheDocument();
+  });
+
+  it('choosing a branch from the selector narrows the page to it, and "Tất cả chi nhánh" widens it again', async () => {
     installAdminIssues();
     const user = userEvent.setup();
     renderApp('/app/issues');
 
-    await user.click(await screen.findByLabelText(/3 sự cố chưa xử lý tại 05 Trương Định/));
-    // The page's one branch filter now says so, and the list follows it.
+    await screen.findByRole('option', { name: '05 Trương Định - Chi nhánh 01 (3)' });
+    await user.selectOptions(screen.getByTestId('branch-select'), '1');
+    // The list follows the selector.
+    await user.click(await screen.findByTestId('admin-category-FACILITY_ISSUE'));
     expect(await screen.findByText('Chỉ chi nhánh 1')).toBeInTheDocument();
     expect(screen.getByTestId('branch-select')).toHaveValue('1');
-    // One branch on screen: its own count strip is not repeated.
-    expect(screen.queryByTestId('branch-incident-counts')).not.toBeInTheDocument();
 
-    // Changing branch returns the page to "Tất cả" — the existing behaviour of
-    // the branch filter — so the incident category is chosen again.
     await user.selectOptions(screen.getByTestId('branch-select'), 'ALL');
     await user.click(await screen.findByTestId('admin-category-FACILITY_ISSUE'));
-    expect(await screen.findByTestId('branch-incident-counts')).toBeInTheDocument();
+    expect(await screen.findByTestId('admin-incident-view')).toBeInTheDocument();
+    expect(screen.getByTestId('branch-select')).toHaveValue('ALL');
   });
 });
 

@@ -56,12 +56,17 @@ export function createNavBadgesRouter(): Router {
         Departments with no part in the booking workflow get zeros.
 
         Bộ phận đặt phòng has a one-item menu; Bộ phận kỹ thuật works incident
-        queues and no booking screen at all. Both are branchless, so without this
+        queues and no booking screen at all; Bộ phận buồng phòng inspects rooms.
+        The first two are branchless, so without this
         they fall through to the branch filter below, where `branchId === null`
         widens to EVERY branch — handing a role that cannot open a single one of
         those screens a count of every order on all eight.
       */
-      if (user.role === 'BOOKING_DEPARTMENT' || user.role === 'TECHNICAL') {
+      if (
+        user.role === 'BOOKING_DEPARTMENT' ||
+        user.role === 'TECHNICAL' ||
+        user.role === 'HOUSEKEEPING'
+      ) {
         res.json({ counts: EMPTY, serverNow: now.toISOString() });
         return;
       }
@@ -115,7 +120,7 @@ export function createNavBadgesRouter(): Router {
         */
         chat: await tx.chatConversation.count({
           where: isAdmin
-            ? { status: 'WAITING_ADMIN' }
+            ? { status: 'WAITING_ADMIN', branchChannel: false }
             : {
                 ...visibilityWhere({ id: user.id, role: user.role, branchId: user.branchId }),
                 status: 'ANSWERED',

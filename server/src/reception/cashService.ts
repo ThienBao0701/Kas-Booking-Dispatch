@@ -108,9 +108,17 @@ export function accumulatePayments(
 ): Omit<CashSummary, 'openingCash' | 'endingCash'> {
   const totals = { ...EMPTY, voidedCount, paymentCount: rows.length };
   for (const row of rows) {
+    /*
+      EVERY METHOD IS NAMED. This used to end in a bare `else` that meant "card",
+      which would have filed a Công nợ row under Cà thẻ the day the method
+      existed. Only CASH reaches the drawer; DEBT is reported as receivable and,
+      like transfer and card, never as cash.
+    */
     if (row.method === 'CASH') totals.cashCollected += row.amount;
     else if (row.method === 'TRANSFER') totals.transferCollected += row.amount;
-    else totals.cardCollected += row.amount;
+    else if (row.method === 'CARD') totals.cardCollected += row.amount;
+    else totals.receivable += row.amount;
+    // The legacy column: an older row carried a debt beside its own amount.
     totals.receivable += row.receivable;
     // Always cash, whatever `method` says — see the module comment.
     totals.cashExpense += row.expense;

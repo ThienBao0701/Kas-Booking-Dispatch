@@ -4,6 +4,11 @@
  * the Chứng từ module and nothing else that is admin-only.
  */
 /**
+ * HOUSEKEEPING ("Bộ phận buồng phòng") is bound to ONE branch, like a receptionist,
+ * but reaches only its own screens: room inspections and the deliveries addressed
+ * to it. The server confines it to those routes; nothing here grants more.
+ */
+/**
  * TECHNICAL ("Bộ phận kỹ thuật") is GLOBAL too: one maintenance team serves all
  * eight properties, so it has no branch and works incidents from every one. It is
  * the ONLY role that may move an incident through its workflow — an Admin sees
@@ -13,7 +18,7 @@
  * adding a role to the schema does not update it. `ROLE_LABEL` below is the one
  * place that fails to compile when the two drift — keep it exhaustive.
  */
-export type UserRole = 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL';
+export type UserRole = 'ADMIN' | 'RECEPTIONIST' | 'BOOKING_DEPARTMENT' | 'TECHNICAL' | 'HOUSEKEEPING';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -21,6 +26,7 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   RECEPTIONIST: 'Lễ tân',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   TECHNICAL: 'Bộ phận kỹ thuật',
+  HOUSEKEEPING: 'Bộ phận buồng phòng',
 };
 
 export interface Branch {

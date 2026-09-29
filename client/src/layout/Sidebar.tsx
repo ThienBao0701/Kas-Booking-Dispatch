@@ -51,7 +51,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { user } = useAuth();
   const nav = navForRole(user?.role);
   // Unresolved-issue badge on the "Sự cố khách sạn" / "Báo cáo sự cố" menu item.
-  const summary = useIssueSummary(!!user);
+  // Bộ phận buồng phòng has no incident screen, and the server would refuse it.
+  const summary = useIssueSummary(!!user && user.role !== 'HOUSEKEEPING');
   const unresolved = summary.data?.summary.totalUnresolved ?? 0;
 
   /*
@@ -91,8 +92,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         return counts.rejected;
       case '/app/resend-orders':
         return counts.resendOrders;
-      case '/app/chat':
-        return counts.chat;
       case '/app/reminders':
         return counts.reminders;
       default:

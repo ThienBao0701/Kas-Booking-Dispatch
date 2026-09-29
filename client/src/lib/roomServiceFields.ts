@@ -18,6 +18,17 @@
  */
 import type { RoomServiceType } from '../api/receptionReports';
 
+/**
+ * THE PRICE FIELD'S NAME, ON EVERY SERVICE TYPE.
+ *
+ * "Tổng giá tiền" — the total for the stay or the service, not a unit price. It
+ * is one constant read by the entry form, the correction dialog, the reception
+ * tables, the Admin's, and the record detail, so the five subtypes cannot be
+ * renamed one at a time and left disagreeing (which is how "Giá tiền" survived
+ * on Giặt ủi while Bán phòng had moved on).
+ */
+export const ROOM_SERVICE_PRICE_LABEL = 'Tổng giá tiền';
+
 export interface RoomServiceFieldRules {
   /** "Hạng phòng" — only "Bán phòng". */
   roomClass: boolean;
