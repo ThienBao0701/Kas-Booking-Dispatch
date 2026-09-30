@@ -28,6 +28,8 @@ import type { BranchOperationalReport, OperationalReportData } from '../receptio
 import type { CashSummary } from '../reception/cashService';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import type { SerializedReport } from '../reception/reportService';
+import type { SerializedRoomIssue } from '../housekeeping/roomIssueService';
+import { shiftDefinition } from '../shift/shiftTypes';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
@@ -126,7 +128,7 @@ function checked<T>(label: string, columns: Column<T>[]): Column<T>[] {
 /** Rows carry their own sequence number so "STT" survives a page break. */
 type Numbered<T> = T & { stt: number };
 
-function numbered(rows: SerializedReport[]): Numbered<SerializedReport>[] {
+function numbered<T>(rows: T[]): Numbered<T>[] {
   return rows.map((row, i) => ({ ...row, stt: i + 1 }));
 }
 
@@ -140,6 +142,14 @@ function withVoid(row: SerializedReport, text: string | null | undefined): strin
   const body = (text ?? '').trim();
   if (!mark) return body;
   return body ? `${body}\n[${mark}]` : `[${mark}]`;
+}
+
+/**
+ * Who entered the record — and "(Admin tạo)" beneath the name when a supervisor
+ * did, so the file says what the screen says, in words rather than colour.
+ */
+function creator(r: SerializedReport): string {
+  return r.sourceLabel ? `${r.createdByName}\n(${r.sourceLabel})` : r.createdByName;
 }
 
 /* --------------------------- I. Thu tiền thanh toán --------------------------- */
@@ -172,7 +182,7 @@ function withVoid(row: SerializedReport, text: string | null | undefined): strin
 */
 const PAYMENT_COLUMNS = checked<Numbered<SerializedReport>>('operational payments', [
   { header: 'STT', width: 26, value: (r) => String(r.stt) },
-  { header: 'Nhân viên', width: 48, value: (r) => r.createdByName },
+  { header: 'Nhân viên', width: 48, value: creator },
   { header: 'Mã EZ', width: 50, value: (r) => r.payment?.ezCode ?? '' },
   { header: 'Nguồn', width: 62, value: (r) => r.payment?.source ?? '' },
   { header: 'Tên khách', width: 56, value: (r) => r.payment?.guestName ?? '' },
@@ -217,7 +227,7 @@ const GUEST_REQUEST_COLUMNS = checked<Numbered<SerializedReport>>('operational g
         ),
       ),
   },
-  { header: 'Người nhập', width: 66, value: (r) => r.createdByName },
+  { header: 'Người nhập', width: 66, value: creator },
   { header: 'Ca nhập', width: 40, value: (r) => r.shiftName ?? '' },
   { header: 'Giờ nhập', width: 72, value: (r) => hcmDateTime(new Date(r.createdAt)) },
   {
@@ -246,7 +256,27 @@ function issueStatus(r: SerializedReport): string {
   const judged =
     issue.inspectionEnabled &&
     (issue.stage === 'AWAITING_INSPECTION' || issue.stage === 'COMPLETED' || issue.inspectionState === 'FAILED');
-  return judged ? `${issue.stageLabel}\nNghiệm thu: ${issue.inspectionLabel}` : issue.stageLabel;
+  // A waiting incident says where the ASSIGNMENT stands: nobody yet, given to
+  // someone, or back after "Không sửa được" waiting to be given again.
+  const base = issue.status === 'NEW' ? issue.assignmentStateLabel : issue.stageLabel;
+  const lines = [judged ? `${base}\nNghiệm thu: ${issue.inspectionLabel}` : base];
+  if (issue.repeatOf) lines.push('Báo lại sau lần hoàn thành trước');
+  return lines.join('\n');
+}
+
+/**
+ * THE TECHNICIANS ON THE JOB: who holds it now, who did the latest repair, and
+ * how many times it was moved — the responsibility trail in one cell.
+ */
+function technicianCell(r: SerializedReport): string {
+  const issue = r.facility?.issue;
+  if (!issue) return '';
+  const lines: string[] = [];
+  if (issue.assignedTechnician) lines.push(`Giao: ${issue.assignedTechnician.name}`);
+  if (issue.repairerName) lines.push(`Sửa: ${issue.repairerName}`);
+  const reassigned = issue.assignments.filter((a) => a.reassigned).length;
+  if (reassigned > 0) lines.push(`Giao lại ${reassigned} lần`);
+  return lines.join('\n');
 }
 
 const FACILITY_COLUMNS = checked<Numbered<SerializedReport>>('operational facilities', [
@@ -256,13 +286,13 @@ const FACILITY_COLUMNS = checked<Numbered<SerializedReport>>('operational facili
   { header: 'Nguyên nhân', width: 100, value: (r) => r.facility?.issue.cause ?? '' },
   { header: 'Trạng thái', width: 88, value: issueStatus },
   {
-    header: 'Người sửa',
+    header: 'Kỹ thuật',
     width: 80,
-    // From the attempts — the person who did the latest repair, not whoever
-    // happens to be on the incident's current-assignment columns.
-    value: (r) => r.facility?.issue.repairerName ?? '',
+    // The current assignment AND the latest repairer (from the attempts), plus
+    // how often the job was moved — responsibility, as recorded.
+    value: technicianCell,
   },
-  { header: 'Người báo', width: 70, value: (r) => r.createdByName },
+  { header: 'Người báo', width: 70, value: creator },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
   {
@@ -294,7 +324,7 @@ const COMPLAINT_COLUMNS = checked<Numbered<SerializedReport>>('operational compl
   },
   { header: 'Trạng thái', width: 72, value: complaintStatus },
   { header: 'Hướng xử lý (nếu có)', width: 120, value: (r) => r.complaint?.resolution ?? '' },
-  { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
+  { header: 'Nhân viên', width: 80, value: creator },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
 ]);
@@ -344,7 +374,7 @@ const ROOM_SERVICE_COLUMNS = checked<Numbered<SerializedReport>>('operational ro
     // A review is a count, not a sale — no price is printed for it.
     value: (r) => formatVndPlain(r.roomService?.countsAsRevenue === false ? null : (r.roomService?.price ?? null)),
   },
-  { header: 'Nhân viên', width: 80, value: (r) => r.createdByName },
+  { header: 'Nhân viên', width: 80, value: creator },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
 ]);
@@ -358,12 +388,37 @@ const HOTEL_DELIVERY_COLUMNS = checked<Numbered<SerializedReport>>('operational 
   { header: 'Số lượng', width: 56, align: 'right', value: (r) => String(r.delivery?.quantity ?? '') },
   { header: 'Ghi chú', width: 150, value: (r) => r.delivery?.note ?? '' },
   { header: 'Trạng thái', width: 70, value: (r) => r.delivery?.statusLabel ?? '' },
-  { header: 'Nhân viên', width: 70, value: (r) => r.createdByName },
+  { header: 'Nhân viên', width: 70, value: creator },
   { header: 'Ca', width: 30, value: (r) => r.shiftName ?? '' },
   { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
 ]);
 
 /* ------------------------------ Assembly ------------------------------ */
+
+/* ------------------------------ Buồng phòng ------------------------------ */
+
+/** What was found in a room, and — for the reader of this report — what came of the money. */
+function roomCollection(i: SerializedRoomIssue): string {
+  if (i.voided) return `ĐÃ HỦY — ${i.voidReason ?? ''}`.trim();
+  const c = i.collection;
+  if (!c) return i.collectionStatusLabel ?? '';
+  const parts = [i.collectionStatusLabel ?? ''];
+  if (c.amount) parts.push(formatVndPlain(c.amount));
+  if (c.methodLabel) parts.push(c.methodLabel);
+  if (c.reason) parts.push(c.reason);
+  return parts.filter(Boolean).join(' · ');
+}
+
+const HOUSEKEEPING_COLUMNS = checked<Numbered<SerializedRoomIssue>>('operational housekeeping', [
+  { header: 'STT', width: 26, value: (r) => String(r.stt) },
+  { header: 'Phòng', width: 44, value: (r) => r.roomNumber },
+  { header: 'Tình trạng', width: 110, value: (r) => r.typeLabel },
+  { header: 'Mô tả', width: 180, value: (r) => r.note ?? '' },
+  { header: 'Người kiểm tra', width: 80, value: (r) => r.staffName },
+  { header: 'Ghi nhận bởi', width: 80, value: (r) => r.recordedByName },
+  { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.createdAt)) },
+  { header: 'Thu tiền', width: 150, value: roomCollection },
+]);
 
 const COLUMNS_BY_CATEGORY: Record<OperationalReportCategory, Column<Numbered<SerializedReport>>[]> = {
   PAYMENT: PAYMENT_COLUMNS,
@@ -459,16 +514,16 @@ function openShiftBlock(doc: PdfDoc, section: BranchOperationalReport): void {
   doc.moveDown(0.3);
 }
 
-/** Plain ASCII for a filename: the Vietnamese marks dropped, and đ → d (NFD leaves đ alone). */
+/** Plain ASCII for a filename: the Vietnamese marks dropped, and đ -> d (NFD leaves đ alone). */
 function asciiFold(text: string): string {
   return text
     .replace(/đ/g, 'd')
     .replace(/Đ/g, 'D')
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '');
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
-/** "2027-01-07" → "07-01-2027": the business date as it is read, with no "/". */
+/** "2027-01-07" -> "07-01-2027": the business date as it is read, with no "/". */
 function fileDate(iso: string): string {
   const [y, m, d] = iso.split('-');
   return `${d}-${m}-${y}`;
@@ -501,7 +556,7 @@ export function operationalPdfFileName(
   let who = 'Tat ca chi nhanh';
   if (branch) {
     const address = asciiFold(branch.address).replace(/\s+/g, ' ').trim();
-    // "05 Truong Dinh" → "05" + "Truong Dinh"; an address without a leading
+    // "05 Truong Dinh" -> "05" + "Truong Dinh"; an address without a leading
     // number falls back to the branch number the system gave it.
     const split = /^(\d\S*)\s+(.+)$/.exec(address);
     who = split ? `${split[1]}_${split[2]}` : `${branch.branchNumber}_${address}`;
@@ -523,7 +578,14 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     generatedAt: hcmDateTime(data.generatedAt),
     // The category is NAMED when the file is scoped to one, so a PDF of
     // payments alone cannot be read as "nothing else happened".
-    scope: data.category ? `${branchScope} · Danh mục: ${CATEGORY_LABELS[data.category]}` : branchScope,
+    scope: [
+      branchScope,
+      data.category ? `Danh mục: ${CATEGORY_LABELS[data.category]}` : null,
+      // A one-shift file says so, like a one-category file.
+      data.shiftType ? `Ca: ${shiftDefinition(data.shiftType).name}` : null,
+    ]
+      .filter(Boolean)
+      .join(' · '),
   });
 
   if (data.branches.length === 0) {
@@ -555,9 +617,15 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     doc.moveDown(0.3);
     openShiftBlock(doc, section);
 
+    // Records a SUPERVISOR entered while no shift was open — they belong to no
+    // shift, and are printed in their own block below rather than dropped.
+    const unshifted = CATEGORIES.map((category) => ({
+      category,
+      rows: section.byCategory[category].filter((row) => !row.shiftSessionId),
+    })).filter((g) => g.rows.length > 0);
+
     if (section.shifts.length === 0) {
       note(doc, 'Không có ca nào đã kết thúc trong kỳ.');
-      return;
     }
 
     // The branch's rows, by the shift that wrote them.
@@ -625,6 +693,37 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
         }
         doc.moveDown(0.4);
       }
+    }
+
+    /* NGOÀI CA — entered by the Admin or a reception manager with no shift open. */
+    if (unshifted.length > 0) {
+      sectionTitle(doc, 'NGOÀI CA — ADMIN / QUẢN LÝ LỄ TÂN NHẬP');
+      for (const { category, rows } of unshifted) {
+        doc.x = doc.page.margins.left;
+        const columns = COLUMNS_BY_CATEGORY[category];
+        const table = numbered(rows);
+        ensureSpace(doc, BAND_HEIGHT + tableLeadHeight(doc, columns, table));
+        categoryBand(
+          doc,
+          `${CATEGORY_NUMERALS[category]}. ${CATEGORY_LABELS[category]} (${rows.length})`,
+          columns.reduce((sum, c) => sum + c.width, 0),
+        );
+        drawTable(doc, columns, table, { frame: true });
+        doc.moveDown(0.8);
+      }
+    }
+
+    /* BUỒNG PHÒNG — what housekeeping found in the period, and the collection. */
+    if (section.housekeeping.length > 0) {
+      sectionTitle(doc, `BUỒNG PHÒNG — ${section.housekeeping.length} vấn đề phòng`);
+      if (section.housekeepingTruncated) {
+        note(doc, 'CHÚ Ý: danh sách buồng phòng chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+      }
+      doc.x = doc.page.margins.left;
+      const table = numbered(section.housekeeping);
+      ensureSpace(doc, tableLeadHeight(doc, HOUSEKEEPING_COLUMNS, table));
+      drawTable(doc, HOUSEKEEPING_COLUMNS, table, { frame: true });
+      doc.moveDown(0.8);
     }
 
     /* THE BRANCH SUBTOTAL, immediately below its own records. */

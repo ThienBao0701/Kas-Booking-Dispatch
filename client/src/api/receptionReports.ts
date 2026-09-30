@@ -189,6 +189,10 @@ export interface OperationalReport {
   createdBy: { id: number; fullName: string } | null;
   /** The name the SHIFT recorded — never the account's current one. */
   createdByName: string;
+  /** The creator's role at creation; null on older rows (all Reception). */
+  createdByRole?: string | null;
+  /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor entered it; null for the desk's own. */
+  sourceLabel?: string | null;
   createdAt: string;
   updatedAt: string;
   summary: string;
@@ -345,7 +349,12 @@ export const reportsApi = {
   archive: (params: { from?: string; to?: string } = {}) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
-  create: (input: NewReportInput) =>
+  /**
+   * One record. `branchId` is read ONLY for a supervisor (Admin, Quản lý lễ tân,
+   * Tổng quản lý lễ tân), who must name exactly one branch of its scope; a
+   * receptionist's branch is its open shift's.
+   */
+  create: (input: NewReportInput & { branchId?: number }) =>
     api.post<{ report: OperationalReport }>('/reception/reports', input),
 
   update: (id: string, patch: UpdateReportInput) =>
@@ -419,7 +428,15 @@ export interface OpenShiftNotice {
 }
 
 export const adminReportsApi = {
-  operational: (params: { branchId?: number; category?: ReportCategory; from?: string; to?: string }) =>
+  operational: (params: {
+    branchId?: number;
+    /** Several branches, "1,2,3". */
+    branchIds?: string;
+    shiftType?: string;
+    category?: ReportCategory;
+    from?: string;
+    to?: string;
+  }) =>
     api.get<AdminOperationalResponse>(`/admin/reports/operational${query(params)}`),
 };
 
@@ -438,6 +455,10 @@ export interface OperationalExportScope {
   from: string;
   to: string;
   branchId?: number;
+  /** Several branches at once, "1,2,3" — the server checks each against the reader's scope. */
+  branchIds?: string;
+  /** One shift type ('A', 'B', 'C', 'A4', 'C4'); every shift when absent. */
+  shiftType?: string;
   category?: ReportCategory;
 }
 

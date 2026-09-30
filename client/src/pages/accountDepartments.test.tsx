@@ -247,6 +247,58 @@ describe('locking and unlocking, from every section', () => {
     expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', branchId: 1, username: 'buongphong1' });
   });
 
+  it('creates a Quản lý lễ tân only with at least one ticked branch, and sends the set', async () => {
+    const posted: Record<string, unknown>[] = [];
+    mount({
+      'POST /api/admin/users': (init) => {
+        posted.push(JSON.parse(String(init.body)));
+        return { status: 201, body: { user: user(9, 'RECEPTION_MANAGER', { managedBranches: [BRANCH] }) } };
+      },
+    });
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByRole('button', { name: /Thêm bộ phận/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Thêm tài khoản' });
+    await userEvent.type(within(dialog).getByLabelText('Tên đăng nhập'), 'quanly1');
+    await userEvent.type(within(dialog).getByLabelText('Họ tên'), 'Quản lý Một');
+    await userEvent.type(within(dialog).getByLabelText(/Mật khẩu tạm/), 'Matkhau123');
+    await userEvent.selectOptions(within(dialog).getByLabelText('Vai trò'), 'RECEPTION_MANAGER');
+
+    const create = within(dialog).getByRole('button', { name: 'Tạo' });
+    expect(create).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('manager-branch-1'));
+    expect(create).toBeEnabled();
+    await userEvent.click(create);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ role: 'RECEPTION_MANAGER', branchIds: [1], username: 'quanly1' });
+  });
+
+  it('changes a Quản lý lễ tân’s branches on the same account — no new account', async () => {
+    const BRANCH_2 = { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 };
+    const put: Record<string, unknown>[] = [];
+    mount(
+      {
+        'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH_2] } }),
+        'PUT /api/admin/users/7': (init) => {
+          put.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { user: user(7, 'RECEPTION_MANAGER', { managedBranches: [BRANCH, BRANCH_2] }) } };
+        },
+      },
+      [...USERS, user(7, 'RECEPTION_MANAGER', { managedBranches: [BRANCH] })],
+    );
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByTestId('edit-branches-7'));
+    const dialog = await screen.findByRole('dialog', { name: /Chi nhánh quản lý/ });
+    expect(within(dialog).getByTestId('manager-branch-1')).toBeChecked();
+    await userEvent.click(within(dialog).getByTestId('manager-branch-2'));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Lưu' }));
+
+    await waitFor(() => expect(put).toHaveLength(1));
+    expect(put[0]).toEqual({ branchIds: [1, 2] });
+  });
+
   it('still creates accounts from the same dialog', async () => {
     mount();
     renderApp('/app/settings');

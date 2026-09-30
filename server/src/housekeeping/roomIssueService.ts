@@ -34,6 +34,8 @@ import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { captureShiftContext, type ShiftActor } from '../shift/shiftService';
 import { assertMoney } from '../reception/reportService';
+import { isReceptionSupervisor, scopedBranchFilter } from '../auth/branchScope';
+import { catalogRoom } from '../room/branchRooms';
 import {
   ROOM_COLLECTION_METHODS,
   ROOM_COLLECTION_METHOD_LABELS,
@@ -43,7 +45,13 @@ import {
   ROOM_ISSUE_TYPE_LABELS,
 } from './roomIssueTypes';
 
-export type HousekeepingActor = { id: number; role: UserRole; branchId: number | null; fullName: string };
+export type HousekeepingActor = {
+  id: number;
+  role: UserRole;
+  branchId: number | null;
+  fullName: string;
+  managedBranchIds?: readonly number[];
+};
 
 const MAX_ISSUES_PER_INSPECTION = 20;
 const LIST_CAP = 500;
@@ -92,8 +100,13 @@ export function serializeRoomIssue(row: IssueRow, opts: { money: boolean }) {
     voidedAt: row.voidedAt ? row.voidedAt.toISOString() : null,
     voidedByName: row.voidedByNameSnapshot,
     voidReason: row.voidReason,
-    collectionStatus: status,
-    collectionStatusLabel: ROOM_COLLECTION_STATUS_LABELS[status],
+    /*
+      THE COLLECTION STATE IS NOT HOUSEKEEPING'S. "Đã thu / Chưa thu / Không thu
+      được" is the front desk's business; Bộ phận buồng phòng reports the room's
+      condition and is sent nothing about the money — not even the state.
+    */
+    collectionStatus: opts.money ? status : null,
+    collectionStatusLabel: opts.money ? ROOM_COLLECTION_STATUS_LABELS[status] : null,
     collection:
       opts.money && collection
         ? {
@@ -151,9 +164,13 @@ export async function createInspection(
   if (actor.branchId === null) {
     throw ApiError.validation('Tài khoản buồng phòng chưa được gán chi nhánh.');
   }
-  const roomNumber = trimmed(input.roomNumber);
-  if (!roomNumber) throw ApiError.validation('Vui lòng nhập số phòng.');
-  if (roomNumber.length > 50) throw ApiError.validation('Số phòng quá dài.');
+  const typedRoom = trimmed(input.roomNumber);
+  if (!typedRoom) throw ApiError.validation('Vui lòng nhập số phòng.');
+  if (typedRoom.length > 50) throw ApiError.validation('Số phòng quá dài.');
+  // One of THIS branch's rooms (the shared room catalog), when it has one.
+  const ownBranch = await client.branch.findUnique({ where: { id: actor.branchId }, select: { code: true } });
+  if (!ownBranch) throw ApiError.validation('Chi nhánh không hợp lệ.');
+  const roomNumber = catalogRoom(ownBranch.code, typedRoom)!;
   const staffName = trimmed(input.staffName);
   if (!staffName) throw ApiError.validation('Vui lòng nhập tên người dọn phòng.');
   if (staffName.length > 100) throw ApiError.validation('Tên người dọn phòng quá dài.');
@@ -227,6 +244,9 @@ export type CollectionFilterStatus = RoomCollectionStatus;
 export interface ListRoomIssuesFilter {
   branchId?: number;
   type?: RoomIssueType;
+  /** One room of the branch. */
+  roomNumber?: string;
+  /** Collection state — never applied for Housekeeping, which does not see it. */
   status?: RoomCollectionStatus;
   /** Half-open [from, to) over when the inspection was recorded. */
   from?: Date;
@@ -239,6 +259,8 @@ export function roomIssueWhere(
   filter: ListRoomIssuesFilter = {},
 ): Prisma.RoomInspectionIssueWhereInput {
   const where: Prisma.RoomInspectionIssueWhereInput = {};
+  /** The inspection-side filter, built once: its recorder and/or its room. */
+  const inspection: Prisma.RoomInspectionWhereInput = {};
   if (actor.role === 'RECEPTIONIST') {
     // `?? -1` matches no branch; the key is never left out, which would widen it.
     where.branchId = actor.branchId ?? -1;
@@ -246,19 +268,24 @@ export function roomIssueWhere(
   } else if (actor.role === 'HOUSEKEEPING') {
     where.branchId = actor.branchId ?? -1;
     where.voidedAt = null;
-    where.inspection = { is: { createdByUserId: actor.id } };
-  } else if (actor.role === 'ADMIN') {
-    if (filter.branchId !== undefined) where.branchId = filter.branchId;
+    inspection.createdByUserId = actor.id;
+  } else if (isReceptionSupervisor(actor.role)) {
+    // Admin: every branch; a Quản lý lễ tân: its branches; the general manager: all.
+    Object.assign(where, scopedBranchFilter(actor, filter.branchId));
   } else {
     throw ApiError.forbidden('Bạn không có quyền xem kiểm tra phòng.');
   }
   if (filter.type) where.type = filter.type;
+  if (filter.roomNumber) inspection.roomNumber = filter.roomNumber;
+  if (Object.keys(inspection).length > 0) where.inspection = { is: inspection };
   if (filter.from || filter.to) {
     where.createdAt = {
       ...(filter.from ? { gte: filter.from } : {}),
       ...(filter.to ? { lt: filter.to } : {}),
     };
   }
+  // Housekeeping never filters by the money state it is not shown.
+  if (actor.role === 'HOUSEKEEPING') return where;
   if (filter.status === 'PENDING') {
     // No collection row at all reads as "Chưa thu" too.
     where.OR = [{ collection: { is: null } }, { collection: { is: { status: 'PENDING' } } }];
@@ -266,6 +293,51 @@ export function roomIssueWhere(
     where.collection = { is: { status: filter.status } };
   }
   return where;
+}
+
+/**
+ * WHAT BỘ PHẬN BUỒNG PHÒNG HAS RECORDED — the facts of its own inspections, and
+ * NOTHING about money. Counted over every matching row (not the capped page),
+ * voided findings excluded like every other figure.
+ */
+export interface InspectionSummary {
+  /** Inspections with at least one finding in the period. */
+  inspections: number;
+  /** Findings recorded. */
+  issues: number;
+  /** Distinct rooms with at least one finding. */
+  rooms: number;
+  byType: { type: RoomIssueType; label: string; count: number }[];
+}
+
+export async function summariseInspections(
+  actor: HousekeepingActor,
+  filter: ListRoomIssuesFilter = {},
+  client: PrismaClient = defaultPrisma,
+): Promise<InspectionSummary> {
+  const live: Prisma.RoomInspectionIssueWhereInput = {
+    ...roomIssueWhere(actor, { ...filter, status: undefined }),
+    voidedAt: null,
+  };
+  const [byType, rows] = await client.$transaction([
+    client.roomInspectionIssue.groupBy({ by: ['type'], where: live, _count: { _all: true }, orderBy: { type: 'asc' } }),
+    client.roomInspectionIssue.findMany({
+      where: live,
+      select: { inspectionId: true, inspection: { select: { roomNumber: true } } },
+    }),
+  ]);
+  return {
+    inspections: new Set(rows.map((r) => r.inspectionId)).size,
+    issues: rows.length,
+    rooms: new Set(rows.map((r) => r.inspection.roomNumber)).size,
+    byType: byType
+      .map((g) => ({
+        type: g.type,
+        label: ROOM_ISSUE_TYPE_LABELS[g.type],
+        count: typeof g._count === 'object' && g._count ? (g._count._all ?? 0) : 0,
+      }))
+      .sort((a, b) => b.count - a.count),
+  };
 }
 
 export interface RoomIssueSummary {
@@ -316,7 +388,7 @@ export async function summariseRoomIssues(
   filter: ListRoomIssuesFilter = {},
   client: PrismaClient = defaultPrisma,
 ): Promise<RoomIssueSummary> {
-  if (actor.role !== 'ADMIN' && actor.role !== 'RECEPTIONIST') {
+  if (actor.role !== 'RECEPTIONIST' && !isReceptionSupervisor(actor.role)) {
     throw ApiError.forbidden('Bạn không có quyền xem tổng hợp thu tiền phòng.');
   }
   const base = roomIssueWhere(actor, { ...filter, status: undefined });

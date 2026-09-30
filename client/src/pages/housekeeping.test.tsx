@@ -25,6 +25,11 @@ import {
   installApiMock,
   renderApp,
 } from '../test/utils';
+import { hcmToday } from '../lib/format';
+import { daysBefore } from '../lib/shiftGroups';
+
+/** The workspace's default history request: the last seven days, ending today. */
+const LAST_7_DAYS = `GET /api/housekeeping/issues?from=${daysBefore(hcmToday(), 6)}&to=${hcmToday()}`;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -107,12 +112,44 @@ describe('Bộ phận buồng phòng — the inspection form', () => {
       ...extra,
     });
 
-  it('lands on the inspection page, with its two menu entries', async () => {
+  it('lands on the "Buồng phòng" workspace — its one menu entry, and no deliveries', async () => {
     installApiMock(routes());
     renderApp('/app');
     expect(await screen.findByTestId('inspection-form')).toBeInTheDocument();
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Kiểm tra phòng', 'Giao nhận hàng hóa']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng']);
+  });
+
+  it('picks the room from the branch catalog, and states the server’s facts for the period', async () => {
+    installApiMock(
+      routes({
+        'GET /api/branches/1/rooms': () => ({ status: 200, body: { branchId: 1, rooms: ['101', '302'] } }),
+        [LAST_7_DAYS]: () => ({
+          status: 200,
+          body: {
+            issues: [],
+            total: 0,
+            truncated: false,
+            summary: null,
+            inspectionSummary: {
+              inspections: 5,
+              issues: 7,
+              rooms: 3,
+              byType: [{ type: 'SMOKING', label: 'Hút thuốc', count: 4 }],
+            },
+          },
+        }),
+      }),
+    );
+    renderApp('/app/inspections');
+    const room = await screen.findByRole('combobox', { name: 'Số phòng' });
+    await waitFor(() => expect(within(room).getAllByRole('option').map((o) => o.textContent)).toEqual(['— Chọn phòng —', '101', '302']));
+    const facts = await screen.findByTestId('inspection-facts');
+    await waitFor(() => expect(facts).toHaveTextContent('5'));
+    expect(facts).toHaveTextContent('Lượt kiểm tra');
+    expect(facts).toHaveTextContent('7');
+    expect(facts).toHaveTextContent('Nhiều nhất: Hút thuốc');
+    expect(facts).not.toHaveTextContent(/₫|Đã thu|Chưa thu/);
   });
 
   it('offers the six conditions, in the specified words', async () => {
@@ -200,13 +237,14 @@ describe('Bộ phận buồng phòng — the inspection form', () => {
     expect(screen.getByTestId('inspection-room')).toHaveValue('302');
   });
 
-  it('shows its history with the status of each issue — and never the money', async () => {
+  it('shows its history — and never the money, nor whether it was collected', async () => {
     installApiMock(
       routes({
-        'GET /api/housekeeping/issues': () => ({
+        [LAST_7_DAYS]: () => ({
           status: 200,
           body: {
-            issues: [roomIssue('a', { collectionStatus: 'COLLECTED', collectionStatusLabel: 'Đã thu', collection: null })],
+            // What the server sends this role: the collection state is null.
+            issues: [roomIssue('a', { collectionStatus: null, collectionStatusLabel: null, collection: null })],
             total: 1,
             truncated: false,
             summary: null,
@@ -217,7 +255,7 @@ describe('Bộ phận buồng phòng — the inspection form', () => {
     renderApp('/app/inspections');
     const table = await screen.findByTestId('room-issue-table');
     expect(await within(table).findByText('Hút thuốc')).toBeInTheDocument();
-    expect(within(table).getByText('Đã thu')).toBeInTheDocument();
+    expect(within(table).queryByText(/Đã thu|Chưa thu/)).not.toBeInTheDocument();
     expect(within(table).getByText('302')).toBeInTheDocument();
     expect(within(table).queryByText(/₫/)).not.toBeInTheDocument();
     expect(within(table).queryByRole('button', { name: /Thu tiền|Cập nhật/ })).not.toBeInTheDocument();
@@ -263,7 +301,7 @@ describe('Reception — thu tiền buồng phòng', () => {
     installApiMock(routes([]));
     renderApp('/app/room-collections');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getByRole('link', { name: 'Thu tiền buồng phòng' })).toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Buồng phòng' })).toBeInTheDocument();
   });
 
   async function openDialog(issues = [roomIssue('a')], extra: Record<string, Handler> = {}) {

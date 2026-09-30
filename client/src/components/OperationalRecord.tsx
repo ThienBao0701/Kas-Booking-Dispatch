@@ -12,6 +12,7 @@
  * actions rather than decided here.
  */
 import type { ReactNode } from 'react';
+import { SourceTag } from './SourceTag';
 import { CircleAlert, History } from 'lucide-react';
 import type { OperationalReport } from '../api/receptionReports';
 import { formatVnd } from '../lib/money';
@@ -32,7 +33,10 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function ShiftContext({ row }: { row: OperationalReport }) {
   return (
     <>
-      <Field label="Nhân viên">{row.createdByName}</Field>
+      <Field label="Nhân viên">
+        {row.createdByName}
+        <SourceTag label={row.sourceLabel} />
+      </Field>
       <Field label="Ca">{row.shiftName ?? '—'}</Field>
       <Field label="Thời gian">{formatDateTime(row.createdAt)}</Field>
       {row.branch ? <Field label="Chi nhánh">{row.branch.address}</Field> : null}

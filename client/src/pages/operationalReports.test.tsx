@@ -223,7 +223,7 @@ function baseRoutes(user: unknown, extra: Record<string, Handler>): Record<strin
 
 const FIVE_TITLES = [
   'Theo dõi thanh toán',
-  'Vấn đề khách yêu cầu thực hiện (Request)',
+  'Vấn đề khách yêu cầu thực hiện (Request)- Các ghi chú, vấn đề cần theo dõi',
   'Sự cố cơ sở vật chất đang xử lý',
   'Vấn đề về chất lượng và dịch vụ',
   'Dịch vụ phòng, KPI',

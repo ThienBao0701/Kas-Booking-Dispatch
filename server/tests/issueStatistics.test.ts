@@ -13,6 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -57,7 +58,8 @@ afterAll(async () => {
   await resetAll();
 });
 
-const stats = async (agent: Agent = tech, query = '') => {
+/** The Admin's view is the global one; a technician's is their own work (below). */
+const stats = async (agent: Agent = admin, query = '') => {
   const res = await agent.get(`/api/issues/statistics${query}`);
   expect(res.status).toBe(200);
   return res.body.statistics;
@@ -104,6 +106,7 @@ describe('with incidents', () => {
     await report('2026-09-19T09:00', { category: 'DOOR' });
     await report('2026-09-19T10:00', { areaCategory: 'HALLWAY' });
     setClock({ now: () => hcm('2026-09-20', '09:00') });
+    await assignTo(admin, a, tech);
     await tech.post(`/api/issues/${a}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
     setClock({ now: () => hcm('2026-09-20', '09:30') });
     await tech.post(`/api/issues/${a}/complete`).send({});
@@ -127,6 +130,7 @@ describe('with incidents', () => {
 
   it('counts a "Không sửa được" as workload and as needing rework', async () => {
     const id = await report('2026-09-19T09:00');
+    await assignTo(admin, id, tech);
     const accepted = await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
     expect(accepted.status).toBe(200);
     const failed = await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'Thiếu linh kiện' });
@@ -151,6 +155,51 @@ describe('with incidents', () => {
     expect((await stats(tech, '?days=7')).trend).toHaveLength(7);
     expect((await stats(tech, '?days=90')).trend).toHaveLength(90);
     expect((await tech.get('/api/issues/statistics?days=13')).status).toBe(422);
+  });
+});
+
+describe('a technician reads their own work', () => {
+  it('counts only what was given to them, with their personal figures', async () => {
+    const mine = await report('2026-09-18T08:00', { category: 'DOOR' });
+    await report('2026-09-19T09:00', { category: 'DOOR' }); // nobody's yet
+    setClock({ now: () => hcm('2026-09-20', '09:00') });
+    await assignTo(admin, mine, tech);
+    await tech.post(`/api/issues/${mine}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
+    await tech.post(`/api/issues/${mine}/complete`).send({});
+
+    const s = await stats(tech);
+    expect(s.totals).toMatchObject({ total: 1, completedCount: 1 });
+    expect(s.outstanding.total).toBe(0);
+    // Every branch is still listed — with this technician's zeros where they did nothing.
+    expect(s.byBranch).toHaveLength(8);
+    expect(s.technician).toMatchObject({ name: 'Kỹ thuật', assignedNow: 0, inProgressNow: 0, completed: 1, cannotRepair: 0 });
+    // The Admin still sees both.
+    expect((await stats(admin)).totals.total).toBe(2);
+    expect((await stats(admin)).technician).toBeNull();
+  });
+
+  it('counts a job moved to someone else as "đã chuyển", and a repeat as "báo lại"', async () => {
+    const done = await report('2026-09-15T08:00', { category: 'DOOR' });
+    setClock({ now: () => hcm('2026-09-15', '09:00') });
+    await assignTo(admin, done, tech);
+    await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
+    await tech.post(`/api/issues/${done}/complete`).send({});
+
+    // The same room, the same fault, days later: a repeat, stored at creation.
+    const again = await report('2026-09-19T09:00', { category: 'DOOR' });
+    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id: again } });
+    expect(stored.repeatOfIssueId).toBe(done);
+    setClock({ now: () => hcm('2026-09-19', '10:00') });
+    await assignTo(admin, again, tech);
+
+    // …then moved to another technician before it was taken.
+    const other = await testPrisma.user.create({
+      data: { username: 'kythuat2', passwordHash: 'x', fullName: 'Kỹ thuật 2', role: 'TECHNICAL', mustChangePassword: false },
+    });
+    expect((await admin.post(`/api/issues/${again}/assign`).send({ technicianUserId: other.id })).status).toBe(200);
+
+    const s = await stats(tech);
+    expect(s.technician).toMatchObject({ assignedNow: 0, reassignedAway: 1, reopened: 1 });
   });
 });
 

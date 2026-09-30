@@ -28,7 +28,9 @@ export type UserRole =
   | 'BOOKING_DEPARTMENT'
   | 'TECHNICAL'
   | 'TECHNICAL_MANAGER'
-  | 'HOUSEKEEPING';
+  | 'HOUSEKEEPING'
+  | 'RECEPTION_MANAGER'
+  | 'RECEPTION_GENERAL_MANAGER';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -38,7 +40,24 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   TECHNICAL: 'Bộ phận kỹ thuật',
   TECHNICAL_MANAGER: 'Quản lý kỹ thuật',
   HOUSEKEEPING: 'Bộ phận buồng phòng',
+  RECEPTION_MANAGER: 'Quản lý lễ tân',
+  RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
 };
+
+/**
+ * THE RECEPTION SUPERVISORS — Admin, Quản lý lễ tân (its assigned branches) and
+ * Tổng quản lý lễ tân (every branch). They share the supervision screens; the
+ * SERVER scopes every read and write by branch, these screens only follow it.
+ */
+export const RECEPTION_SUPERVISOR_ROLES: readonly UserRole[] = [
+  'ADMIN',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+];
+
+export function isReceptionSupervisor(role: UserRole | undefined): boolean {
+  return role !== undefined && RECEPTION_SUPERVISOR_ROLES.includes(role);
+}
 
 export interface Branch {
   id: number;
@@ -68,6 +87,8 @@ export interface AuthUser {
   branch: Branch | null;
   active: boolean;
   mustChangePassword: boolean;
+  /** Quản lý lễ tân only: the branches it supervises. */
+  managedBranchIds?: number[];
 }
 
 export interface LoginInput {

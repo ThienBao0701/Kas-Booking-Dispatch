@@ -7,12 +7,15 @@ import { readIssuePhoto } from '../issue/issueStorage';
 import { hcmRange } from '../booking/recreationReport';
 import {
   acceptIssue,
+  assignIssue,
   authorizeIssuePhoto,
   cannotRepairIssue,
   completeIssue,
   createIssue,
+  findSimilarIssues,
   getIssue,
   inspectIssue,
+  listAssignableTechnicians,
   listIssues,
   serializeIssue,
   updateIssue,
@@ -104,6 +107,8 @@ const listSchema = z
     // Technical's "Đã hoàn thành" — by the day the repair was FINISHED.
     completedFrom: isoDay.optional(),
     completedTo: isoDay.optional(),
+    // The supervisors' to-do list: waiting incidents nobody holds.
+    assignment: z.enum(['UNASSIGNED']).optional(),
     page: z.coerce.number().int().positive().default(1),
     pageSize: z.coerce.number().int().positive().max(100).default(50),
   })
@@ -169,8 +174,14 @@ const inspectSchema = z.object({
   note: z.string().trim().max(1000).nullable().optional(),
 });
 
-function actor(user: UserWithBranch) {
-  return { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
+  return {
+    id: user.id,
+    role: user.role,
+    branchId: user.branchId,
+    fullName: user.fullName,
+    managedBranchIds: user.managedBranchIds,
+  };
 }
 
 /** Only Bộ phận kỹ thuật works the queue. Admin monitors, and is refused here. */
@@ -185,7 +196,21 @@ const requireInspector = requireRole('TECHNICAL_MANAGER');
  * branchless department (Bộ phận kỹ thuật, Quản lý kỹ thuật, Bộ phận đặt phòng)
  * cannot file or rewrite a report at a branch it has no desk at.
  */
-const requireReporter = requireRole('RECEPTIONIST', 'ADMIN');
+const requireReporter = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
+
+/**
+ * Who GIVES an incident to a technician: the Admin and the reception supervisors,
+ * each within its branch scope (checked against the incident by the service).
+ */
+const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
+
+const assignSchema = z.object({ technicianUserId: z.number().int().positive() });
+
+const similarSchema = z.object({
+  branchId: z.coerce.number().int().positive().optional(),
+  roomNumber: z.string().trim().min(1).max(50),
+  category: CATEGORY.optional(),
+});
 
 /** Reception reports hotel incidents; Bộ phận kỹ thuật works them. */
 export function createIssuesRouter(): Router {
@@ -202,8 +227,9 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
-  // GET /api/issues — list (newest first; receptionist limited to own branch,
-  // Technical and Admin see all eight).
+  // GET /api/issues — list, newest first, through `issueVisibilityWhere`: a
+  // receptionist its branch, a supervisor its scope, a technician ONLY its own
+  // assigned work and history, the technical manager everything.
   router.get('/issues', requireAuth, requirePasswordChanged, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
@@ -225,6 +251,7 @@ export function createIssuesRouter(): Router {
         scope: q.scope,
         completedFrom: completed?.start,
         completedTo: completed?.end,
+        assignment: q.assignment,
         now,
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
@@ -283,16 +310,58 @@ export function createIssuesRouter(): Router {
               })
               .default(30),
             branchId: z.coerce.number().int().positive().optional(),
+            // Admin only: one technician's view. A technician's own id comes
+            // from the session below and is never read from the request.
+            technicianUserId: z.coerce.number().int().positive().optional(),
           })
           .parse(req.query);
+        const user = req.currentUser!;
         const statistics = await computeIncidentStatistics({
           days: q.days as (typeof STATISTICS_PERIOD_DAYS)[number],
           branchId: q.branchId,
+          technicianUserId: user.role === 'TECHNICAL' ? user.id : q.technicianUserId,
         });
         res.json({ statistics });
       })().catch(next);
     },
   );
+
+  // GET /api/issues/technicians — the active technicians, by full name, for the
+  // "Giao kỹ thuật" picker. Declared before "/issues/:id".
+  router.get('/issues/technicians', requireAuth, requirePasswordChanged, requireAssigner, (_req, res, next) => {
+    (async () => {
+      res.json({ technicians: await listAssignableTechnicians() });
+    })().catch(next);
+  });
+
+  /*
+    GET /api/issues/similar — "Có thể đã được báo": open incidents at the same
+    room (likely duplicates) and ones finished recently (a new report would be a
+    repeat). A WARNING for the form, never a block — a genuine new occurrence is
+    still reported. Read through the caller's own visibility.
+  */
+  router.get('/issues/similar', requireAuth, requirePasswordChanged, requireReporter, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const q = similarSchema.parse(req.query);
+      const now = getClock().now();
+      const { open, recent } = await findSimilarIssues(actor(user), q);
+      res.json({
+        open: open.map((i) => serializeIssue(i, now)),
+        recent: recent.map((i) => serializeIssue(i, now)),
+      });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/assign — give the incident to a technician, or move it.
+  router.post('/issues/:id/assign', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = assignSchema.parse(req.body ?? {});
+      const issue = await assignIssue(req.params.id!, input, actor(user), getClock());
+      res.json({ issue: serializeIssue(issue) });
+    })().catch(next);
+  });
 
   // GET /api/issues/:id — detail (branch-isolated).
   router.get('/issues/:id', requireAuth, requirePasswordChanged, (req, res, next) => {

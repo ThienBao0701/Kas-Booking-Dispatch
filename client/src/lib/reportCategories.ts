@@ -72,7 +72,20 @@ export const PAYMENT_SOURCE_FALLBACK = [
   'Expedia',
   'Walking',
   'Khác',
+  'Chi tiền',
 ];
+
+/**
+ * "Chi tiền" as a SOURCE: the row is a pure cash payout — no "Thu tiền", method
+ * always cash. The server's `EXPENSE_SOURCE`; the rule is enforced there.
+ */
+export const EXPENSE_SOURCE = 'Chi tiền';
+
+/**
+ * The Request category's full name on every screen that has room for it — the
+ * operator's own words, exactly.
+ */
+export const GUEST_REQUEST_TITLE = 'Vấn đề khách yêu cầu thực hiện (Request)- Các ghi chú, vấn đề cần theo dõi';
 
 /**
  * Each category's number in the official report — the same I–V the exported PDF
@@ -96,6 +109,6 @@ export const CATEGORY_MARKERS: Record<ReportCategory, string> = {
  * a sheet name over 31 characters — and heads the export sections.
  */
 export const RECEPTION_CATEGORY_TITLES: Partial<Record<ReportCategory, string>> = {
-  GUEST_REQUEST: 'Vấn đề khách yêu cầu thực hiện (Request)',
+  GUEST_REQUEST: GUEST_REQUEST_TITLE,
   HOTEL_DELIVERY: HOTEL_DELIVERY_TITLE,
 };

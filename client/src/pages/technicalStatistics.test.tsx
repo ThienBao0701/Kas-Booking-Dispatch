@@ -158,6 +158,29 @@ describe('Technical — Thống kê', () => {
     expect(row).toHaveTextContent('3');
   });
 
+  it('heads a technician’s page with their own work, from the server’s figures', async () => {
+    const mine: IncidentStatistics = {
+      ...BUSY,
+      technician: { id: 4, name: 'Kỹ thuật viên trực', assignedNow: 2, inProgressNow: 1, completed: 7, cannotRepair: 1, reassignedAway: 3, reopened: 4 },
+    };
+    installApiMock(routes({ 30: mine }));
+    renderApp('/app/technical/statistics');
+    const block = await screen.findByTestId('stats-mine');
+    expect(block).toHaveTextContent('Thống kê của tôi — Kỹ thuật viên trực');
+    const figure = (label: string) => within(block).getByText(label).parentElement!;
+    expect(figure('Đang được giao')).toHaveTextContent('2');
+    expect(figure('Hoàn thành trong kỳ')).toHaveTextContent('7');
+    expect(figure('Đã chuyển người khác')).toHaveTextContent('3');
+    expect(figure('Báo lại sau hoàn thành')).toHaveTextContent('4');
+  });
+
+  it('has no personal block when the figures are not one technician’s', async () => {
+    installApiMock(routes({ 30: BUSY }));
+    renderApp('/app/technical/statistics');
+    await screen.findByTestId('stats-tiles');
+    expect(screen.queryByTestId('stats-mine')).not.toBeInTheDocument();
+  });
+
   it('asks the server again when the period changes', async () => {
     const fetchMock = installApiMock(routes({ 30: BASE, 7: BUSY }));
     renderApp('/app/technical/statistics');

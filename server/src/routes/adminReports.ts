@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { getClock } from '../lib/clock';
-import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware/auth';
+import { requireAuth, requireAdmin, requirePasswordChanged, requireRole } from '../middleware/auth';
+import { branchScopeOf, scopeIncludes } from '../auth/branchScope';
 import {
   buildRecreationReport,
   hcmRange,
@@ -105,7 +106,19 @@ const reportCategory = z.enum([
  * "Theo dõi thanh toán" contained every category — a file that disagreed with
  * the screen it was exported from.
  */
-const operationalExportQuery = rangeQuery.and(z.object({ category: reportCategory.optional() }));
+/** `branchIds=1,2,3` — several branches in one report (`Chi nhánh 1 + 2 + 3`). */
+const branchIdList = z
+  .string()
+  .regex(/^\d+(,\d+)*$/, 'Danh sách chi nhánh không hợp lệ.')
+  .transform((s) => [...new Set(s.split(',').map(Number))])
+  .optional();
+
+/** One shift type ('Ca A'); every shift when absent. */
+const shiftTypeQuery = z.enum(['A', 'B', 'C', 'A4', 'C4']).optional();
+
+const operationalExportQuery = rangeQuery.and(
+  z.object({ category: reportCategory.optional(), branchIds: branchIdList, shiftType: shiftTypeQuery }),
+);
 
 /**
  * The Admin drill-down: khoảng thời gian · chi nhánh · danh mục → bản ghi.
@@ -118,6 +131,8 @@ const operationalExportQuery = rangeQuery.and(z.object({ category: reportCategor
 const drillDownQuery = z
   .object({
     branchId: z.coerce.number().int().positive().optional(),
+    branchIds: branchIdList,
+    shiftType: shiftTypeQuery,
     category: reportCategory.optional(),
     from: isoDay.optional(),
     to: isoDay.optional(),
@@ -205,6 +220,27 @@ async function loadChat(q: {
   });
 }
 
+/**
+ * The reader of "Báo cáo vấn đề" — Admin, Quản lý lễ tân or Tổng quản lý lễ
+ * tân — WITH its branch scope, so every read below is narrowed by
+ * `auth/branchScope.ts` in the service, never by this router.
+ */
+function supervisorOf(user: {
+  id: number;
+  role: UserRole;
+  branchId: number | null;
+  fullName: string;
+  managedBranchIds?: number[];
+}) {
+  return {
+    id: user.id,
+    role: user.role,
+    branchId: user.branchId,
+    fullName: user.fullName,
+    managedBranchIds: user.managedBranchIds,
+  };
+}
+
 async function scopeLabel(branchId: number | undefined): Promise<string> {
   if (branchId === undefined) return 'Tất cả chi nhánh';
   const branch = await prisma.branch.findUnique({ where: { id: branchId } });
@@ -222,7 +258,22 @@ async function scopeLabel(branchId: number | undefined): Promise<string> {
 export function createAdminReportsRouter(): Router {
   const router = Router();
 
-  router.use('/admin/reports', requireAuth, requirePasswordChanged, requireAdmin);
+  /*
+    THE OPERATIONAL REPORT IS SHARED; EVERYTHING ELSE HERE STAYS THE ADMIN'S.
+
+    The reception supervisors (Quản lý lễ tân, Tổng quản lý lễ tân) read and
+    export "Báo cáo vấn đề" for their scope — the same endpoints, the same
+    output — while the recreation, incident, handover and chat reports remain
+    Admin-only. One gate on the prefix, one exception by path.
+  */
+  router.use(
+    '/admin/reports',
+    requireAuth,
+    requirePasswordChanged,
+    requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
+    (req, res, next) =>
+      /^\/operational(\.pdf|\.xlsx)?$/.test(req.path) ? next() : requireAdmin(req, res, next),
+  );
 
   // GET /api/admin/reports/recreations — JSON for the screen.
   router.get('/admin/reports/recreations', (req, res, next) => {
@@ -380,7 +431,11 @@ export function createAdminReportsRouter(): Router {
       const user = req.currentUser!;
       const q = drillDownQuery.parse(req.query);
       const now = getClock().now();
-      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+      const admin = supervisorOf(user);
+      // Several branches ("1 + 2 + 3") read as one filter; one branch as before.
+      const branchIds = q.branchIds && q.branchIds.length > 1 ? q.branchIds : undefined;
+      const oneBranch = q.branchIds?.length === 1 ? q.branchIds[0] : q.branchId;
+      const scope = branchScopeOf(admin);
 
       /*
         THE PERIOD IS A RANGE OF BUSINESS DATES, resolved to the SHIFTS that
@@ -393,14 +448,36 @@ export function createAdminReportsRouter(): Router {
       */
       const today = hcmDateOnly(now);
       const period = q.from && q.to ? { from: q.from, to: q.to } : null;
-      const sessions = await sessionsForBusinessDates({
-        ...(period ?? { from: today, to: today }),
-        branchId: q.branchId,
-      });
+      const sessions = (
+        await sessionsForBusinessDates({
+          ...(period ?? { from: today, to: today }),
+          branchId: oneBranch,
+        })
+      ).filter(
+        // Only the actor's branches (a manager never sees another branch's open
+        // shift named), the chosen set, and the chosen shift type.
+        (s) =>
+          scopeIncludes(scope, s.branchId) &&
+          (!branchIds || branchIds.includes(s.branchId)) &&
+          (!q.shiftType || s.shiftType === q.shiftType),
+      );
       const sessionIds = sessions.map((s) => s.id);
-      // No period chosen: every record, as before; the drawer is still bounded to today.
-      const scope = period ? { shiftSessionIds: sessionIds } : {};
-      const filter = { branchId: q.branchId, category: q.category, ...scope };
+      const window = period ? hcmRange(period.from, period.to) : null;
+      /*
+        No period chosen: every record, as before (a shift filter still narrows
+        it); the drawer is still bounded to today. With a period, the period's
+        shifts — plus, unless one shift was asked for, the records supervisors
+        entered while no shift was open, by their own HCM day.
+      */
+      const periodScope = period
+        ? {
+            shiftSessionIds: sessionIds,
+            ...(q.shiftType || !window ? {} : { unshiftedWindow: { from: window.start, to: window.end } }),
+          }
+        : q.shiftType
+          ? { shiftSessionIds: sessionIds }
+          : {};
+      const filter = { branchId: oneBranch, branchIds, category: q.category, ...periodScope };
 
       const [reports, counts, total] = await Promise.all([
         listReports(admin, filter),
@@ -409,7 +486,7 @@ export function createAdminReportsRouter(): Router {
           the five category buttons, and selecting one must not zero the other
           four. They describe the branch and the period, not the selection.
         */
-        countByCategory(admin, { branchId: filter.branchId, ...scope }),
+        countByCategory(admin, { branchId: oneBranch, branchIds, ...periodScope }),
         countReports(admin, filter),
       ]);
 
@@ -435,8 +512,8 @@ export function createAdminReportsRouter(): Router {
         /* Cash is per BRANCH by definition — a drawer belongs to one desk — so
            an all-branch view answers null rather than adding eight drawers
            together into a number that describes nowhere. */
-        cash: q.branchId === undefined ? null : await sessionsCashSummary(sessionIds),
-        cashPeriod: q.branchId === undefined ? null : cashPeriod,
+        cash: oneBranch === undefined ? null : await sessionsCashSummary(sessionIds),
+        cashPeriod: oneBranch === undefined ? null : cashPeriod,
         /*
           THE SHIFTS OF THIS PERIOD THAT HAVE NOT PRESSED "KẾT THÚC CA". They are
           on screen, but not in the official export — and the screen says so
@@ -453,15 +530,17 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const q = operationalExportQuery.parse(req.query);
-      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
-      const data = await operationalReport(admin, {
+      const data = await operationalReport(supervisorOf(user), {
         from: q.from,
         to: q.to,
         branchId: q.branchId,
+        branchIds: q.branchIds,
         category: q.category,
+        shiftType: q.shiftType,
       });
       // "05_Truong Dinh_07-01-2027.pdf" — the branch and the business date.
-      sendPdf(res, await buildOperationalReportPdf(data), operationalPdfFileName(data, q.branchId !== undefined));
+      const single = q.branchIds ? q.branchIds.length === 1 : q.branchId !== undefined;
+      sendPdf(res, await buildOperationalReportPdf(data), operationalPdfFileName(data, single));
     })().catch(next);
   });
 
@@ -470,12 +549,13 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const q = operationalExportQuery.parse(req.query);
-      const admin = { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
-      const data = await operationalReport(admin, {
+      const data = await operationalReport(supervisorOf(user), {
         from: q.from,
         to: q.to,
         branchId: q.branchId,
+        branchIds: q.branchIds,
         category: q.category,
+        shiftType: q.shiftType,
       });
       const workbook = await buildOperationalReportWorkbook(data);
       res.setHeader(

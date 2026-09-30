@@ -54,6 +54,14 @@ const BOOKING_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
 /** The technical screens: the technician works them, the manager inspects from them. */
 const TECHNICAL_ROLES: readonly UserRole[] = ['TECHNICAL', 'TECHNICAL_MANAGER'];
 
+/**
+ * "Báo cáo vấn đề" and "Buồng phòng" as the reception SUPERVISORS see them —
+ * the Admin, a Quản lý lễ tân (its branches) and a Tổng quản lý lễ tân (all).
+ * The server scopes every row; this gate only renders a forbidden page.
+ */
+const SUPERVISION_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'];
+const REPORT_ROLES: readonly UserRole[] = ['RECEPTIONIST', ...SUPERVISION_ROLES];
+
 /** Sends each role to its natural landing page. */
 function RoleLanding() {
   const { user } = useAuth();
@@ -65,6 +73,10 @@ function RoleLanding() {
   if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/technical/awaiting-inspection" replace />;
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
+  // The supervision layer opens on its reports.
+  if (user?.role === 'RECEPTION_MANAGER' || user?.role === 'RECEPTION_GENERAL_MANAGER') {
+    return <Navigate to="/app/reports" replace />;
+  }
   return <Navigate to="/app/new" replace />;
 }
 
@@ -132,7 +144,7 @@ export function AppRoutes() {
             from anyone who is not a receptionist on an open shift, and refuses
             the Admin endpoints to everyone else.
           */}
-          <Route path="reports" element={<RequireRole role={BOOKING_ROLES}><OperationalReportsPage /></RequireRole>} />
+          <Route path="reports" element={<RequireRole role={REPORT_ROLES}><OperationalReportsPage /></RequireRole>} />
           {/* Reception's 12-hour completion archive — a query over the same records. */}
           <Route path="completed-issues" element={<RequireRole role="RECEPTIONIST"><CompletedIssuesPage /></RequireRole>} />
           {/*
@@ -211,7 +223,7 @@ export function AppRoutes() {
           */}
           <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
           <Route path="room-collections" element={<RequireRole role="RECEPTIONIST"><RoomCollectionsPage /></RequireRole>} />
-          <Route path="housekeeping" element={<RequireRole role="ADMIN"><AdminHousekeepingPage /></RequireRole>} />
+          <Route path="housekeeping" element={<RequireRole role={SUPERVISION_ROLES}><AdminHousekeepingPage /></RequireRole>} />
           {/* "Giao nhận hàng hóa" as Technical and Housekeeping see it — their own department's. */}
           <Route
             path="deliveries"

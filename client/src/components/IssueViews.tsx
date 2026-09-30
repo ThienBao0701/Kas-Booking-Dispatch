@@ -521,7 +521,67 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
         ) : null}
       </div>
 
+      <IssueRepeatNote issue={issue} />
+      <IssueAssignmentHistory issue={issue} />
       <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
     </div>
+  );
+}
+
+/**
+ * "Báo lại sau lần hoàn thành trước" — the same room and the same kind of fault
+ * was finished before. A FACT with its dates, worded neutrally: nobody is being
+ * blamed, and nothing is blocked. Renders nothing when there is no earlier one.
+ */
+export function IssueRepeatNote({ issue }: { issue: Pick<Issue, 'repeatOf' | 'createdAt'> }) {
+  const prev = issue.repeatOf;
+  if (!prev) return null;
+  return (
+    <p
+      data-testid="issue-repeat"
+      className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900"
+    >
+      <span className="font-semibold">Báo lại sau lần hoàn thành trước</span> — lần trước: {prev.description}
+      {' · hoàn thành '}
+      {prev.completedAt ? formatDateTime(prev.completedAt) : '—'}
+      {prev.technicianName ? ` · ${prev.technicianName}` : ''}. Lần này báo {formatDateTime(issue.createdAt)}.
+    </p>
+  );
+}
+
+/**
+ * Who was given the job, by whom, and when — every assignment and reassignment,
+ * oldest first, above what each technician did with it. Renders nothing for an
+ * incident nobody has assigned yet (the state label says "Chưa giao" elsewhere).
+ */
+export function IssueAssignmentHistory({
+  issue,
+}: {
+  issue: Pick<Issue, 'assignments' | 'assignmentStateLabel' | 'assignedTechnician'>;
+}) {
+  const rows = issue.assignments ?? [];
+  if (rows.length === 0) return null;
+  return (
+    <section data-testid="issue-assignments">
+      <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Giao việc</h4>
+      {issue.assignmentStateLabel ? (
+        <p className="mb-1 text-xs font-medium text-slate-800">
+          {issue.assignmentStateLabel}
+          {issue.assignedTechnician ? ` · ${issue.assignedTechnician.name}` : ''}
+        </p>
+      ) : null}
+      <ul className="space-y-0.5">
+        {rows.map((a) => (
+          <li key={a.id} className="text-xs text-slate-600">
+            {formatDateTime(a.createdAt)} ·{' '}
+            {a.reassigned
+              ? `Giao lại: ${a.previousTechnicianName ?? '—'} → ${a.technicianName}`
+              : `Giao cho ${a.technicianName}`}
+            {' · bởi '}
+            {a.assignedByName}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

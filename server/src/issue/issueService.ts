@@ -28,6 +28,15 @@ import {
 } from './issueArea';
 import { activeIssueWhere, archivedIssueWhere } from '../reception/completionArchive';
 import {
+  assertBranchInScope,
+  branchScopeOf,
+  isReceptionSupervisor,
+  scopeIncludes,
+  scopedBranchFilter,
+  supervisorSourceLabel,
+} from '../auth/branchScope';
+import { catalogRoom } from '../room/branchRooms';
+import {
   INSPECTION_RESULT_LABELS,
   inspectionEnabled,
   issueLifecycle,
@@ -40,7 +49,57 @@ import {
 const ONE_OPEN_ATTEMPT = 'TechnicalRepairAttempt_one_open_per_issue';
 
 // The full role enum — see issueSummary.ts. Access is decided at runtime.
-type Actor = { id: number; role: UserRole; branchId: number | null; fullName: string };
+// `managedBranchIds` is a Quản lý lễ tân's scope (see auth/branchScope.ts).
+type Actor = {
+  id: number;
+  role: UserRole;
+  branchId: number | null;
+  fullName: string;
+  managedBranchIds?: readonly number[];
+};
+
+/**
+ * WHO SEES WHICH INCIDENTS — one predicate, applied IN THE DATABASE by every read.
+ *
+ *   RECEPTIONIST        its own branch.
+ *   ADMIN, TỔNG QUẢN LÝ every branch (optionally narrowed by the request).
+ *   QUẢN LÝ LỄ TÂN      its assigned branches only.
+ *   TECHNICAL_MANAGER   every branch — it inspects the whole team's work.
+ *   TECHNICAL           ONLY its own work: incidents assigned to it now, and the
+ *                       ones it accepted, attempted or was ever assigned — its
+ *                       personal history. NOT inferred from branch visibility.
+ *   anyone else         refused.
+ */
+export function issueVisibilityWhere(actor: Actor, requestedBranchId?: number): Prisma.HotelIssueWhereInput {
+  switch (actor.role) {
+    case 'RECEPTIONIST':
+      return { branchId: actor.branchId ?? -1 };
+    case 'ADMIN':
+    case 'RECEPTION_GENERAL_MANAGER':
+    case 'RECEPTION_MANAGER':
+      return scopedBranchFilter(actor, requestedBranchId);
+    case 'TECHNICAL_MANAGER':
+      return requestedBranchId !== undefined ? { branchId: requestedBranchId } : {};
+    case 'TECHNICAL':
+      return {
+        ...(requestedBranchId !== undefined ? { branchId: requestedBranchId } : {}),
+        OR: technicianHistoryWhere(actor.id),
+      };
+    default:
+      throw ApiError.forbidden('Bạn không có quyền xem sự cố.');
+  }
+}
+
+/** Everything a technician has touched: assigned now, accepted, attempted, or ever assigned. */
+export function technicianHistoryWhere(userId: number): Prisma.HotelIssueWhereInput[] {
+  return [
+    { assignedTechnicianUserId: userId },
+    { acceptedByUserId: userId },
+    { completedByUserId: userId },
+    { attempts: { some: { technicianUserId: userId } } },
+    { assignments: { some: { technicianUserId: userId } } },
+  ];
+}
 
 export interface UploadedPhoto {
   buffer: Buffer;
@@ -81,6 +140,24 @@ export const ISSUE_INCLUDE = {
   /// Oldest first: what a receptionist corrected after the report was filed.
   edits: { orderBy: { createdAt: 'asc' } },
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true } },
+  /// Oldest first: every assignment and reassignment.
+  assignments: { orderBy: { createdAt: 'asc' } },
+  /// The likely-repeat link: the earlier completed incident and who finished it.
+  repeatOf: {
+    select: {
+      id: true,
+      description: true,
+      createdAt: true,
+      completedAt: true,
+      completedByNameSnapshot: true,
+      attempts: {
+        where: { outcome: 'COMPLETED' },
+        orderBy: { attemptNumber: 'desc' },
+        take: 1,
+        select: { technicianNameSnapshot: true, outcomeAt: true },
+      },
+    },
+  },
 } satisfies Prisma.HotelIssueInclude;
 
 export type IssueDetail = Prisma.HotelIssueGetPayload<{ include: typeof ISSUE_INCLUDE }>;
@@ -273,9 +350,81 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
      */
     needsRework: lifecycle.stage === 'REWORK',
 
+    /** Who holds the job NOW (null: unassigned, or waiting to be reassigned). */
+    assignedTechnician: issue.assignedTechnicianUserId
+      ? { id: issue.assignedTechnicianUserId, name: issue.assignedTechnicianNameSnapshot ?? '—' }
+      : null,
+    assignedAt: issue.assignedAt ? issue.assignedAt.toISOString() : null,
+    assignedByName: issue.assignedByNameSnapshot,
+    /** Every assignment, oldest first — reassignments name who had it before. */
+    assignments: issue.assignments.map((a) => ({
+      id: a.id,
+      technicianId: a.technicianUserId,
+      technicianName: a.technicianNameSnapshot,
+      previousTechnicianName: a.previousTechnicianNameSnapshot,
+      reassigned: a.previousTechnicianUserId !== null,
+      assignedByName: a.assignedByNameSnapshot,
+      assignedByRole: a.assignedByRole,
+      createdAt: a.createdAt.toISOString(),
+    })),
+    ...assignmentState(issue, cannotRepairCount),
+    /** The reporter's role, and "Admin tạo" when a supervisor filed it. */
+    reportedByRole: issue.reportedByRole,
+    sourceLabel: supervisorSourceLabel(issue.reportedByRole),
+    /**
+     * "Báo lại sau lần hoàn thành trước" — the earlier completed incident at the
+     * same room with the same fault, when there is one. A neutral fact.
+     */
+    repeatOf: issue.repeatOf
+      ? {
+          id: issue.repeatOf.id,
+          description: issue.repeatOf.description,
+          reportedAt: issue.repeatOf.createdAt.toISOString(),
+          completedAt: issue.repeatOf.completedAt ? issue.repeatOf.completedAt.toISOString() : null,
+          technicianName:
+            issue.repeatOf.attempts[0]?.technicianNameSnapshot ?? issue.repeatOf.completedByNameSnapshot ?? null,
+        }
+      : null,
+
     createdAt: issue.createdAt.toISOString(),
     updatedAt: issue.updatedAt.toISOString(),
   };
+}
+
+/**
+ * WHERE THE JOB STANDS, in the assignment model's own words — one state, so no
+ * screen assembles it from four columns and gets it slightly wrong.
+ */
+export type AssignmentState =
+  | 'UNASSIGNED'
+  | 'ASSIGNED'
+  | 'IN_PROGRESS'
+  | 'AWAITING_REASSIGNMENT'
+  | 'AWAITING_INSPECTION'
+  | 'COMPLETED';
+
+export const ASSIGNMENT_STATE_LABELS: Record<AssignmentState, string> = {
+  UNASSIGNED: 'Chưa giao kỹ thuật',
+  ASSIGNED: 'Đã giao — chờ tiếp nhận',
+  IN_PROGRESS: 'Đang sửa',
+  AWAITING_REASSIGNMENT: 'Không sửa được — chờ giao lại',
+  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  COMPLETED: 'Đã hoàn thành',
+};
+
+function assignmentState(
+  issue: Pick<IssueDetail, 'status' | 'assignedTechnicianUserId' | 'attempts'>,
+  cannotRepairCount: number,
+): { assignmentState: AssignmentState; assignmentStateLabel: string } {
+  let state: AssignmentState;
+  if (issue.status === 'COMPLETED') state = 'COMPLETED';
+  else if (issue.status === 'AWAITING_INSPECTION') state = 'AWAITING_INSPECTION';
+  else if (issue.status === 'IN_PROGRESS') state = 'IN_PROGRESS';
+  else if (issue.assignedTechnicianUserId !== null) state = 'ASSIGNED';
+  else if (cannotRepairCount > 0 && issue.attempts.at(-1)?.outcome === 'CANNOT_REPAIR') {
+    state = 'AWAITING_REASSIGNMENT';
+  } else state = 'UNASSIGNED';
+  return { assignmentState: state, assignmentStateLabel: ASSIGNMENT_STATE_LABELS[state] };
 }
 
 async function loadIssue(id: string): Promise<IssueDetail> {
@@ -285,13 +434,35 @@ async function loadIssue(id: string): Promise<IssueDetail> {
 }
 
 /**
- * Branch isolation, unchanged for Reception and deliberately absent for the
- * other roles: ADMIN watches every branch, and TECHNICAL and TECHNICAL_MANAGER
- * work every branch, because one maintenance team serves all eight properties.
+ * ONE INCIDENT, through the same predicate every list uses (`issueVisibilityWhere`).
+ *
+ * Evaluated in the database, so a technician asking for an incident that was
+ * never theirs is refused exactly as a receptionist asking for another branch's —
+ * the two can never drift into two different rules.
  */
-function assertBranchAccess(issue: IssueDetail, actor: Actor): void {
-  if (actor.role === 'RECEPTIONIST' && issue.branchId !== actor.branchId) {
-    throw ApiError.branchAccessDenied();
+async function assertVisible(issue: IssueDetail, actor: Actor): Promise<void> {
+  const visible = await prisma.hotelIssue.count({
+    where: { AND: [{ id: issue.id }, issueVisibilityWhere(actor)] },
+  });
+  if (visible === 0) throw ApiError.branchAccessDenied();
+}
+
+/**
+ * THE TECHNICIAN WORKS ONLY ITS OWN JOB. Assigned to it (to accept), or accepted
+ * by it (to finish, record a cause, or give it back) — nothing inferred from a
+ * branch, and nothing another technician holds.
+ */
+function assertOwnJob(issue: IssueDetail, actor: Actor, phase: 'accept' | 'work'): void {
+  const mine =
+    phase === 'accept'
+      ? issue.assignedTechnicianUserId === actor.id
+      : issue.acceptedByUserId === actor.id || issue.assignedTechnicianUserId === actor.id;
+  if (!mine) {
+    throw ApiError.forbidden(
+      phase === 'accept'
+        ? 'Sự cố này chưa được giao cho bạn.'
+        : 'Sự cố này không do bạn phụ trách.',
+    );
   }
 }
 
@@ -337,7 +508,15 @@ export interface CreateIssueInput extends AreaInput {
  * Admin is notified.
  */
 export async function createIssue(input: CreateIssueInput, actor: Actor): Promise<IssueDetail> {
-  const branchId = actor.role === 'RECEPTIONIST' ? actor.branchId : input.branchId ?? null;
+  let branchId: number | null;
+  if (actor.role === 'RECEPTIONIST') {
+    branchId = actor.branchId;
+  } else if (isReceptionSupervisor(actor.role)) {
+    // A supervisor names ONE branch of its scope — never "all", never another's.
+    branchId = assertBranchInScope(actor, input.branchId);
+  } else {
+    throw ApiError.forbidden('Bạn không có quyền báo cáo sự cố.');
+  }
   if (branchId == null) {
     throw ApiError.validation('Thiếu chi nhánh cho báo cáo sự cố.');
   }
@@ -348,8 +527,15 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
   const description = input.description.trim();
   if (description.length === 0) throw ApiError.validation('Vui lòng nhập mô tả sự cố.');
 
-  // The area decides which location columns are required, and drops the rest.
+  // The area decides which location columns are required, and drops the rest;
+  // a room must then be one of THIS branch's rooms (the room catalog).
   const area = normaliseArea(input);
+  if (area.roomNumber) area.roomNumber = catalogRoom(branch.code, area.roomNumber);
+  const category = AREA_FIELDS[area.areaCategory].category ? input.category ?? null : null;
+  const repeatOf =
+    area.areaCategory === 'ROOM' && area.roomNumber && category
+      ? await findRecentCompletion(branchId, area.roomNumber, category)
+      : null;
 
   // Optional single photo: the declared MIME is never trusted — sniff the bytes.
   const mime = input.photo ? sniffImageMime(input.photo.buffer) : null;
@@ -376,7 +562,7 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
       ...area,
       // Only some areas ask for a fault type; the rest store none rather than a
       // default nobody chose.
-      category: AREA_FIELDS[area.areaCategory].category ? input.category ?? null : null,
+      category,
       description,
       // Kept exactly as reported. A technician's later determination is stored
       // on their attempt, never written over this.
@@ -384,6 +570,8 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
       status: 'NEW',
       reportedByUserId: actor.id,
       reportedByNameSnapshot: actor.fullName,
+      reportedByRole: actor.role,
+      repeatOfIssueId: repeatOf?.id ?? null,
       shiftSessionId: shift.shiftSessionId,
       shiftType: shift.shiftType,
     },
@@ -405,15 +593,87 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
   return created;
 }
 
+/** How far back a completed repair counts as "the previous time" for a repeat. */
+export const REPEAT_WINDOW_DAYS = 90;
+
 /**
- * A new incident notifies both the people who need to know: every active Admin
- * (who monitors) and every active TECHNICAL user (who will do the work). Before
- * the technical department existed only Admins were told, because only an Admin
- * could act on it.
+ * The most recent completed incident at this room with this fault — the
+ * deterministic repeat rule: same branch, same catalog room, same fault type,
+ * finished within `REPEAT_WINDOW_DAYS`. No text matching, no scoring.
+ */
+async function findRecentCompletion(
+  branchId: number,
+  roomNumber: string,
+  category: IssueCategory,
+  now: Date = getClock().now(),
+): Promise<{ id: string } | null> {
+  const since = new Date(now.getTime() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  return prisma.hotelIssue.findFirst({
+    where: {
+      branchId,
+      roomNumber,
+      category,
+      status: { in: ['COMPLETED', 'AWAITING_INSPECTION'] },
+      completedAt: { gte: since },
+    },
+    orderBy: { completedAt: 'desc' },
+    select: { id: true },
+  });
+}
+
+/**
+ * "IS THIS ALREADY REPORTED?" — for the report form's warning, never a block.
+ *
+ * `open`: incidents at the same room (and fault type, when given) that nobody
+ * has finished — the likely duplicates. `recent`: the ones finished within the
+ * repeat window — a new report would be a repeat of these. Read through the
+ * caller's own visibility, so a supervisor sees only its branches.
+ */
+export async function findSimilarIssues(
+  actor: Actor,
+  q: { branchId?: number; roomNumber: string; category?: IssueCategory },
+): Promise<{ open: IssueDetail[]; recent: IssueDetail[] }> {
+  const branchId = actor.role === 'RECEPTIONIST' ? actor.branchId ?? -1 : q.branchId;
+  if (branchId === undefined) throw ApiError.validation('Vui lòng chọn chi nhánh.');
+  const base: Prisma.HotelIssueWhereInput = {
+    AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : branchId)],
+    branchId,
+    roomNumber: q.roomNumber.trim(),
+    ...(q.category ? { category: q.category } : {}),
+  };
+  const since = new Date(getClock().now().getTime() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const [open, recent] = await Promise.all([
+    prisma.hotelIssue.findMany({
+      where: { ...base, status: { in: outstandingStatuses() } },
+      include: ISSUE_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    }),
+    prisma.hotelIssue.findMany({
+      where: { ...base, status: { in: ['COMPLETED', 'AWAITING_INSPECTION'] }, completedAt: { gte: since } },
+      include: ISSUE_INCLUDE,
+      orderBy: { completedAt: 'desc' },
+      take: 3,
+    }),
+  ]);
+  return { open, recent };
+}
+
+/**
+ * A new incident notifies the people who DECIDE who repairs it: every active
+ * Admin and Tổng quản lý lễ tân, and the Quản lý lễ tân of that branch.
+ * Technicians are NOT told of every report any more — a technician sees only
+ * what is assigned to them, and is told at assignment (`assignIssue`).
  */
 async function notifyNewIssue(branchAddress: string, issue: IssueDetail): Promise<void> {
   const recipients = await prisma.user.findMany({
-    where: { role: { in: ['ADMIN', 'TECHNICAL'] }, active: true },
+    where: {
+      active: true,
+      OR: [
+        { role: { in: ['ADMIN', 'RECEPTION_GENERAL_MANAGER'] } },
+        { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
+      ],
+    },
     select: { id: true },
   });
   if (recipients.length === 0) return;
@@ -478,11 +738,11 @@ export async function updateIssue(
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
-  if (actor.role !== 'RECEPTIONIST' && actor.role !== 'ADMIN') {
-    throw ApiError.forbidden('Chỉ lễ tân hoặc Admin mới sửa được báo cáo sự cố.');
+  if (actor.role !== 'RECEPTIONIST' && !isReceptionSupervisor(actor.role)) {
+    throw ApiError.forbidden('Chỉ lễ tân hoặc quản lý mới sửa được báo cáo sự cố.');
   }
   const issue = await loadIssue(id);
-  assertBranchAccess(issue, actor);
+  await assertVisible(issue, actor);
   // Only an incident somebody can still act on is corrected: once the technician
   // has finished it (awaiting inspection included) the record is what was signed off.
   if (issue.status !== 'NEW' && issue.status !== 'IN_PROGRESS') {
@@ -531,6 +791,12 @@ export async function updateIssue(
       : null;
   }
 
+  // A CHANGED room must be one of the branch's rooms; an untouched legacy room
+  // (typed before the catalog existed) is never re-judged by a correction.
+  if (next.roomNumber && next.roomNumber !== issue.roomNumber) {
+    next.roomNumber = catalogRoom(issue.branch.code, next.roomNumber);
+  }
+
   const changes: { field: string; oldValue: string | null; newValue: string | null }[] = [];
   const data: Prisma.HotelIssueUpdateInput = {};
   for (const field of EDITABLE_ISSUE_FIELDS) {
@@ -560,6 +826,109 @@ export async function updateIssue(
     }),
   ]);
   return loadIssue(id);
+}
+
+/**
+ * "GIAO KỸ THUẬT" — give an incident to one technician, or move it to another.
+ *
+ * WHO: the Admin (every branch), a Tổng quản lý lễ tân (every branch) and a Quản
+ * lý lễ tân (its branches) — checked against the incident's branch, not taken
+ * from the request.
+ *
+ * WHEN: while the incident waits (NEW) — unassigned, assigned but not yet
+ * accepted, or back after "Không sửa được". A job a technician has already
+ * accepted is theirs until they finish it or give it back; reassigning it
+ * underneath them would leave an open repair attempt with nobody on it.
+ *
+ * NOTHING IS OVERWRITTEN THAT MATTERS: the incident's `assigned…` columns are
+ * the current assignment, and a `HotelIssueAssignment` row keeps this one —
+ * with the previous technician when it is a reassignment — permanently.
+ */
+export async function assignIssue(
+  id: string,
+  input: { technicianUserId: number },
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  if (!isReceptionSupervisor(actor.role)) {
+    throw ApiError.forbidden('Chỉ Admin hoặc quản lý lễ tân mới giao được kỹ thuật.');
+  }
+  const issue = await loadIssue(id);
+  if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
+  if (issue.status !== 'NEW') {
+    throw ApiError.conflict(
+      issue.status === 'IN_PROGRESS'
+        ? 'Kỹ thuật đang sửa sự cố này, không thể giao lại.'
+        : 'Sự cố đã hoàn thành, không thể giao kỹ thuật.',
+      { status: issue.status },
+    );
+  }
+  const technician = await prisma.user.findFirst({
+    where: { id: input.technicianUserId, role: 'TECHNICAL', active: true },
+    select: { id: true, fullName: true },
+  });
+  if (!technician) throw ApiError.validation('Kỹ thuật viên không hợp lệ hoặc đã ngừng hoạt động.');
+  if (issue.assignedTechnicianUserId === technician.id) {
+    throw ApiError.conflict('Sự cố đã được giao cho kỹ thuật viên này.');
+  }
+
+  const now = clock.now();
+  await prisma.$transaction(async (tx) => {
+    // Guarded on the state that was judged above: a technician accepting at the
+    // same instant, or another manager reassigning, wins cleanly or loses with a 409.
+    const { count } = await tx.hotelIssue.updateMany({
+      where: { id, status: 'NEW', assignedTechnicianUserId: issue.assignedTechnicianUserId },
+      data: {
+        assignedTechnicianUserId: technician.id,
+        assignedTechnicianNameSnapshot: technician.fullName,
+        assignedAt: now,
+        assignedByUserId: actor.id,
+        assignedByNameSnapshot: actor.fullName,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await tx.hotelIssueAssignment.create({
+      data: {
+        issueId: id,
+        technicianUserId: technician.id,
+        technicianNameSnapshot: technician.fullName,
+        previousTechnicianUserId: issue.assignedTechnicianUserId,
+        previousTechnicianNameSnapshot: issue.assignedTechnicianNameSnapshot,
+        assignedByUserId: actor.id,
+        assignedByNameSnapshot: actor.fullName,
+        assignedByRole: actor.role,
+        createdAt: now,
+      },
+    });
+  });
+
+  const updated = await loadIssue(id);
+  await notifyAssigned(updated, technician.id, actor.fullName);
+  return updated;
+}
+
+/**
+ * "Bạn được giao xử lý sự cố TV tại Phòng 302 — 260 Lý Tự Trọng (giao bởi …)".
+ * The existing notification table, one row, to the one technician.
+ */
+async function notifyAssigned(issue: IssueDetail, technicianUserId: number, assignedBy: string): Promise<void> {
+  const what = issue.category ? ISSUE_CATEGORY_LABELS[issue.category] : 'sự cố';
+  await prisma.notification.create({
+    data: {
+      userId: technicianUserId,
+      title: 'Bạn được giao xử lý sự cố',
+      body: `Sự cố ${what} tại ${describeLocation(issue)} — ${issue.branch.address}. Giao bởi ${assignedBy}.`,
+    },
+  });
+}
+
+/** The active technicians an incident can be given to — full names, never usernames. */
+export async function listAssignableTechnicians(): Promise<{ id: number; fullName: string }[]> {
+  return prisma.user.findMany({
+    where: { role: 'TECHNICAL', active: true },
+    select: { id: true, fullName: true },
+    orderBy: { fullName: 'asc' },
+  });
 }
 
 export interface AcceptIssueInput {
@@ -593,6 +962,8 @@ export async function acceptIssue(
   if (!technicianPhone) throw ApiError.validation('Vui lòng nhập số điện thoại người sửa.');
 
   const issue = await loadIssue(id);
+  // Only the job assigned to THIS technician can be accepted by them.
+  assertOwnJob(issue, actor, 'accept');
   const now = clock.now();
 
   /*
@@ -607,7 +978,9 @@ export async function acceptIssue(
   try {
     await prisma.$transaction(async (tx) => {
       const { count } = await tx.hotelIssue.updateMany({
-        where: { id, status: 'NEW' },
+        // Still NEW, and still assigned to this technician — a reassignment that
+        // landed a moment ago wins, and this acceptance gets the 409.
+        where: { id, status: 'NEW', assignedTechnicianUserId: actor.id },
         data: {
           status: 'IN_PROGRESS',
           acceptedByUserId: actor.id,
@@ -700,6 +1073,7 @@ export async function completeIssue(
   const cause = optionalText(input.cause);
 
   const issue = await loadIssue(id);
+  assertOwnJob(issue, actor, 'work');
   const now = clock.now();
 
   /*
@@ -762,6 +1136,7 @@ export async function updateRepairCause(
   if (!cause) throw ApiError.validation('Vui lòng nhập nguyên nhân.');
 
   const issue = await loadIssue(id);
+  assertOwnJob(issue, actor, 'work');
   const { count } = await prisma.technicalRepairAttempt.updateMany({
     where: { issueId: id, outcomeAt: null, issue: { status: 'IN_PROGRESS' } },
     data: { cause },
@@ -1060,6 +1435,7 @@ export async function cannotRepairIssue(
   if (!reason) throw ApiError.validation('Vui lòng nhập lý do không sửa được.');
 
   const issue = await loadIssue(id);
+  assertOwnJob(issue, actor, 'work');
   const now = clock.now();
 
   await prisma.$transaction(async (tx) => {
@@ -1087,6 +1463,17 @@ export async function cannotRepairIssue(
         acceptedAt: null,
         technicianName: null,
         technicianPhone: null,
+        /*
+          THE ASSIGNMENT IS RELEASED: the incident now waits for an Admin or a
+          Quản lý lễ tân to give it to someone ("Không sửa được — chờ giao lại").
+          Who tried and why stays on the attempt row; who had it stays in
+          `HotelIssueAssignment`. Nothing about the failed attempt is lost.
+        */
+        assignedTechnicianUserId: null,
+        assignedTechnicianNameSnapshot: null,
+        assignedAt: null,
+        assignedByUserId: null,
+        assignedByNameSnapshot: null,
       },
     });
     if (count === 0) {
@@ -1105,7 +1492,30 @@ export async function cannotRepairIssue(
 
   const updated = await loadIssue(id);
   await notifyReporterCannotRepair(updated, reason);
+  await notifySupervisorsReassign(updated, reason);
   return updated;
+}
+
+/** The people who can give the job to someone else are told it came back. */
+async function notifySupervisorsReassign(issue: IssueDetail, reason: string): Promise<void> {
+  const recipients = await prisma.user.findMany({
+    where: {
+      active: true,
+      OR: [
+        { role: { in: ['ADMIN', 'RECEPTION_GENERAL_MANAGER'] } },
+        { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (recipients.length === 0) return;
+  await prisma.notification.createMany({
+    data: recipients.map((r) => ({
+      userId: r.id,
+      title: 'Sự cố không sửa được — cần giao lại',
+      body: `${describeLocation(issue)} — ${issue.branch.address}: ${reason}`,
+    })),
+  });
 }
 
 /**
@@ -1164,10 +1574,15 @@ async function notifyInspectors(issue: IssueDetail): Promise<void> {
   });
 }
 
-/** A failed inspection is work for Bộ phận kỹ thuật again — with the reason. */
+/**
+ * A failed inspection is work again — for the technician it is still ASSIGNED to
+ * (the assignment is kept on a fail), or, when nobody holds it, for nobody here:
+ * the supervisors see it waiting in their own lists.
+ */
 async function notifyTechniciansRework(issue: IssueDetail, reason: string): Promise<void> {
+  if (issue.assignedTechnicianUserId === null) return;
   const technicians = await prisma.user.findMany({
-    where: { role: 'TECHNICAL', active: true },
+    where: { id: issue.assignedTechnicianUserId, role: 'TECHNICAL', active: true },
     select: { id: true },
   });
   if (technicians.length === 0) return;
@@ -1219,27 +1634,50 @@ export interface ListIssuesFilter {
    */
   completedFrom?: Date;
   completedTo?: Date;
+  /** 'UNASSIGNED': waiting incidents nobody holds — the supervisors' to-do list. */
+  assignment?: 'UNASSIGNED';
   now?: Date;
   skip: number;
   take: number;
 }
 
 /**
+ * A TECHNICIAN'S QUEUES ARE THEIR OWN. Within the visibility above, each stage
+ * narrows to the technician's part in it: waiting = assigned to them, in progress
+ * = accepted by them, finished = finished by them. Without a stage the list is
+ * their whole personal history (assigned, attempted, reassigned away).
+ */
+export function technicianStageWhere(userId: number, stage: IssueStage | undefined): Prisma.HotelIssueWhereInput {
+  switch (stage) {
+    case 'WAITING':
+    case 'REWORK':
+      return { assignedTechnicianUserId: userId };
+    case 'IN_PROGRESS':
+      return { acceptedByUserId: userId };
+    case 'AWAITING_INSPECTION':
+    case 'COMPLETED':
+      return { completedByUserId: userId };
+    default:
+      return {};
+  }
+}
+
+/**
  * Lists issues newest-first.
  *
- * VISIBILITY, BY ROLE:
- *   RECEPTIONIST       their own branch only, and a client-sent branchId is
- *                      IGNORED rather than refused — the scope is not theirs.
- *   TECHNICAL          all eight branches, optionally narrowed by `branchId`.
- *   TECHNICAL_MANAGER  all eight branches, optionally narrowed by `branchId`.
- *   ADMIN              all eight branches, optionally narrowed by `branchId`.
+ * VISIBILITY, BY ROLE: `issueVisibilityWhere` — a receptionist its branch (a
+ * client-sent branchId is IGNORED, the scope is not theirs), a supervisor its
+ * scope, a technician only its own work, the technical manager everything.
  */
 export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promise<{ issues: IssueDetail[]; total: number }> {
-  let where: Prisma.HotelIssueWhereInput = {};
-  if (actor.role === 'RECEPTIONIST') {
-    where.branchId = actor.branchId ?? -1; // -1 never matches → an unassigned receptionist sees nothing
-  } else if (filter.branchId !== undefined) {
-    where.branchId = filter.branchId;
+  let where: Prisma.HotelIssueWhereInput = {
+    AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : filter.branchId)],
+  };
+  if (actor.role === 'TECHNICAL') {
+    (where.AND as Prisma.HotelIssueWhereInput[]).push(technicianStageWhere(actor.id, filter.stage));
+  }
+  if (filter.assignment === 'UNASSIGNED') {
+    (where.AND as Prisma.HotelIssueWhereInput[]).push({ status: 'NEW', assignedTechnicianUserId: null });
   }
   if (filter.status) where.status = filter.status;
   if (filter.stage) where = { ...where, ...stageWhere(filter.stage) };
@@ -1249,7 +1687,15 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
     const now = filter.now ?? getClock().now();
     delete where.status;
     delete where.attempts;
-    where = { ...where, AND: [filter.scope === 'active' ? activeIssueWhere(now) : archivedIssueWhere(now)] };
+    // APPENDED to AND, never assigned over it: AND already carries the visibility
+    // clause, and replacing it would widen the list to every branch.
+    where = {
+      ...where,
+      AND: [
+        ...(where.AND as Prisma.HotelIssueWhereInput[]),
+        filter.scope === 'active' ? activeIssueWhere(now) : archivedIssueWhere(now),
+      ],
+    };
     /*
       A PERIOD NARROWS THE SCOPE, it never replaces it: "Hoàn thành vấn đề" by
       the days the incidents were REPORTED on. The 12-hour rule above still
@@ -1289,7 +1735,7 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
 
 export async function getIssue(id: string, actor: Actor): Promise<IssueDetail> {
   const issue = await loadIssue(id);
-  assertBranchAccess(issue, actor);
+  await assertVisible(issue, actor);
   return issue;
 }
 
@@ -1300,6 +1746,8 @@ export async function authorizeIssuePhoto(id: string, actor: Actor): Promise<{ s
     select: { photoStoredName: true, photoMimeType: true, branchId: true },
   });
   if (!issue || !issue.photoStoredName) throw ApiError.notFound('Không tìm thấy ảnh.');
-  if (actor.role === 'RECEPTIONIST' && issue.branchId !== actor.branchId) throw ApiError.branchAccessDenied();
+  // The same visibility as the incident itself — a technician sees its own jobs' photos.
+  const visible = await prisma.hotelIssue.count({ where: { AND: [{ id }, issueVisibilityWhere(actor)] } });
+  if (visible === 0) throw ApiError.branchAccessDenied();
   return { storedFileName: issue.photoStoredName, mimeType: issue.photoMimeType ?? 'image/jpeg' };
 }

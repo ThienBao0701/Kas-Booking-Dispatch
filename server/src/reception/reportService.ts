@@ -27,11 +27,11 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { HotelDeliveryDepartment, Prisma, PrismaClient, ShiftType } from '@prisma/client';
+import type { HotelDeliveryDepartment, Prisma, PrismaClient, ShiftType, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
-import { requireOpenSession, type ShiftActor, type ShiftSessionRow } from '../shift/shiftService';
+import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
 import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
@@ -48,6 +48,7 @@ import {
   DELIVERY_DEPARTMENTS,
   DELIVERY_DEPARTMENT_LABELS,
   HOTEL_DELIVERY_TITLE,
+  EXPENSE_SOURCE,
   MAX_REVIEW_COUNT,
   PAYMENT_METHOD_LABELS,
   PAYMENT_SOURCES,
@@ -57,8 +58,58 @@ import {
   isRevenueService,
 } from './reportTypes';
 import { isArchived } from './deliveryLifecycle';
+import {
+  assertBranchInScope,
+  branchScopeOf,
+  isReceptionSupervisor,
+  scopeIncludes,
+  scopedBranchFilter,
+  supervisorSourceLabel,
+} from '../auth/branchScope';
 
-export type ReportActor = ShiftActor;
+/**
+ * The journal's actor: a receptionist on shift, or a reception SUPERVISOR
+ * (Admin, Quản lý lễ tân, Tổng quản lý lễ tân) acting on a branch in its scope.
+ */
+export type ReportActor = ShiftActor & { managedBranchIds?: readonly number[] };
+
+/**
+ * WHO IS WRITING, AND ON WHICH SHIFT — resolved on the server, never read from
+ * the request.
+ *
+ * A receptionist writes on their OPEN shift, exactly as before. A supervisor has
+ * no shift of their own: a record they CREATE joins the branch's open shift when
+ * there is one (so the desk sees it in its journal, marked "Admin tạo"), and is
+ * shift-less otherwise; a CORRECTION they make carries no shift at all. Either
+ * way the row names them and their role, so the audit never confuses the two.
+ */
+interface WriterContext {
+  shiftSessionId: string | null;
+  shiftType: ShiftType | null;
+  name: string;
+}
+
+async function receptionistWriter(
+  actor: ReportActor,
+  client: PrismaClient | Prisma.TransactionClient,
+): Promise<WriterContext & { branchId: number }> {
+  const session = await requireOpenSession(actor, client);
+  return {
+    branchId: session.branchId,
+    shiftSessionId: session.id,
+    shiftType: session.shiftType,
+    name: session.receptionistName,
+  };
+}
+
+/** The writer of a correction, void or completion on an existing record. */
+async function correctionWriter(
+  actor: ReportActor,
+  client: PrismaClient | Prisma.TransactionClient,
+): Promise<WriterContext> {
+  if (actor.role === 'RECEPTIONIST') return receptionistWriter(actor, client);
+  return { shiftSessionId: null, shiftType: null, name: actor.fullName };
+}
 
 /* ------------------------------------------------------------------ *
  * Reading
@@ -198,6 +249,13 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
     createdBy: person(row.createdBy),
     /** The name the SHIFT recorded — not the account's current one. */
     createdByName: row.createdByNameSnapshot,
+    /** The creator's role at creation; null on older rows (all Reception). */
+    createdByRole: row.createdByRole,
+    /**
+     * "Admin tạo" / "Quản lý lễ tân tạo" — set when a supervisor entered the
+     * record, null for the desk's own. Text, so it never relies on a colour.
+     */
+    sourceLabel: supervisorSourceLabel(row.createdByRole),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     summary: reportSummary(row),
@@ -353,19 +411,22 @@ export type SerializedReport = ReturnType<typeof serializeReport>;
  * the handover-notes route shipped with, which is why it is written this way
  * here from the start.
  *
- * ADMIN IS NAMED EXPLICITLY, and everyone else is refused rather than falling
- * through. Bộ phận kỹ thuật works incidents across all eight branches, which
- * makes "not a receptionist" a dangerously close neighbour of "sees everything".
+ * THE SUPERVISORS ARE NAMED EXPLICITLY, and everyone else is refused rather
+ * than falling through. Bộ phận kỹ thuật works incidents across all eight
+ * branches, which makes "not a receptionist" a dangerously close neighbour of
+ * "sees everything". A supervisor sees its `branchScope` — every branch for the
+ * Admin and the Tổng quản lý lễ tân, the assigned ones for a Quản lý lễ tân —
+ * narrowed to what the request asked for, and a branch outside it is refused.
  */
 export function reportVisibilityWhere(
   actor: ReportActor,
-  filter: { branchId?: number } = {},
+  filter: { branchId?: number; branchIds?: readonly number[] } = {},
 ): Prisma.ReceptionOperationalReportWhereInput {
   if (actor.role === 'RECEPTIONIST') {
     return { branchId: actor.branchId ?? -1 };
   }
-  if (actor.role === 'ADMIN') {
-    return filter.branchId !== undefined ? { branchId: filter.branchId } : {};
+  if (isReceptionSupervisor(actor.role)) {
+    return scopedBranchFilter(actor, filter.branchIds ?? filter.branchId);
   }
   throw ApiError.forbidden('Bạn không có quyền xem báo cáo vận hành lễ tân.');
 }
@@ -448,6 +509,48 @@ function assertSource(value: string | undefined | null): string {
     throw ApiError.validation(`Nguồn không hợp lệ. Chọn một trong: ${PAYMENT_SOURCES.join(', ')}.`);
   }
   return source;
+}
+
+/**
+ * "CHI TIỀN" AS A SOURCE — a pure cash outflow, and nothing else.
+ *
+ * The row records money PAID OUT at the desk: `expense` carries it (the column
+ * the drawer already subtracts, always cash), and there is no "Thu tiền" — a
+ * payout that also claimed to collect money would be the ambiguous mixed state
+ * this rule exists to refuse. So: amount 0, no legacy debt, method CASH (the
+ * drawer is the only place an expense can come from), expense above zero.
+ * The accounting itself is unchanged — `cashService` already sums `expense`.
+ */
+function assertExpenseRow(row: { method: string; amount: number; receivable: number; expense: number }): void {
+  if (row.expense <= 0) throw ApiError.validation('Vui lòng nhập số tiền chi.');
+  if (row.amount !== 0 || row.receivable !== 0) {
+    throw ApiError.validation('Giao dịch "Chi tiền" chỉ ghi số tiền chi, không ghi số tiền thu.');
+  }
+  if (row.method !== 'CASH') {
+    throw ApiError.validation('Giao dịch "Chi tiền" luôn là tiền mặt.');
+  }
+}
+
+/** A new payment's money fields, with the "Chi tiền" rule applied. */
+function paymentMoney(p: PaymentInput) {
+  const source = assertSource(p.source);
+  if (source === EXPENSE_SOURCE) {
+    const row = {
+      method: 'CASH' as const,
+      amount: assertMoney(p.amount ?? 0, 'Thu tiền'),
+      receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
+      expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
+    };
+    assertExpenseRow(row);
+    return { source, ...row };
+  }
+  return {
+    source,
+    method: p.method,
+    amount: assertMoney(p.amount, 'Thu tiền'),
+    receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
+    expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
+  };
 }
 
 /** The longest stay one "Bán phòng" or "Upgrade" row may record. */
@@ -635,33 +738,49 @@ export type CreateReportInput =
  * clock decides `createdAt`. What the caller supplies is only the content.
  */
 export async function createReport(
-  input: CreateReportInput,
+  input: CreateReportInput & {
+    /**
+     * The TARGET BRANCH — read only for a supervisor, who must name exactly one
+     * branch of its scope ("Tất cả" is never a target). A receptionist's branch
+     * is its open shift's, and anything sent here is ignored.
+     */
+    branchId?: number;
+  },
   actor: ReportActor,
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ReportDetail> {
-  if (actor.role !== 'RECEPTIONIST') {
-    throw ApiError.forbidden('Chỉ lễ tân mới ghi được báo cáo vận hành.');
+  let writer: WriterContext & { branchId: number };
+  if (actor.role === 'RECEPTIONIST') {
+    writer = await receptionistWriter(actor, client);
+  } else if (isReceptionSupervisor(actor.role)) {
+    const branchId = assertBranchInScope(actor, input.branchId);
+    const branch = await client.branch.findFirst({ where: { id: branchId, active: true }, select: { id: true } });
+    if (!branch) throw ApiError.validation('Chi nhánh không hợp lệ hoặc đã ngừng hoạt động.');
+    // The desk's open shift, if any: the record appears in its journal, marked.
+    const open = await client.receptionShiftSession.findFirst({
+      where: { branchId, closedAt: null },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, shiftType: true },
+    });
+    writer = { branchId, shiftSessionId: open?.id ?? null, shiftType: open?.shiftType ?? null, name: actor.fullName };
+  } else {
+    throw ApiError.forbidden('Bạn không có quyền ghi báo cáo vận hành.');
   }
-  const session = await requireOpenSession(actor, client);
   const now = clock.now();
 
   const base = {
-    branchId: session.branchId,
-    shiftSessionId: session.id,
-    shiftType: session.shiftType,
+    branchId: writer.branchId,
+    shiftSessionId: writer.shiftSessionId,
+    shiftType: writer.shiftType,
     createdByUserId: actor.id,
-    createdByNameSnapshot: session.receptionistName,
+    createdByNameSnapshot: writer.name,
+    createdByRole: actor.role,
     category: input.category,
     createdAt: now,
   };
 
-  const data: Prisma.ReceptionOperationalReportCreateInput = await buildCreateData(
-    input,
-    base,
-    session,
-    client,
-  );
+  const data: Prisma.ReceptionOperationalReportCreateInput = await buildCreateData(input, base, client);
 
   const created = await client.receptionOperationalReport.create({
     data,
@@ -674,22 +793,23 @@ async function buildCreateData(
   input: CreateReportInput,
   base: {
     branchId: number;
-    shiftSessionId: string;
-    shiftType: ShiftType;
+    shiftSessionId: string | null;
+    shiftType: ShiftType | null;
     createdByUserId: number;
     createdByNameSnapshot: string;
+    createdByRole: UserRole;
     category: CreateReportInput['category'];
     createdAt: Date;
   },
-  session: ShiftSessionRow,
   client: PrismaClient,
 ): Promise<Prisma.ReceptionOperationalReportCreateInput> {
   const scalars = {
     branch: { connect: { id: base.branchId } },
-    shiftSession: { connect: { id: base.shiftSessionId } },
+    ...(base.shiftSessionId ? { shiftSession: { connect: { id: base.shiftSessionId } } } : {}),
     shiftType: base.shiftType,
     createdBy: { connect: { id: base.createdByUserId } },
     createdByNameSnapshot: base.createdByNameSnapshot,
+    createdByRole: base.createdByRole,
     category: base.category,
     createdAt: base.createdAt,
   } satisfies Omit<Prisma.ReceptionOperationalReportCreateInput, 'category'> & {
@@ -705,12 +825,8 @@ async function buildCreateData(
           // Số phòng is no longer asked for; new rows leave it null. Ghi chú is.
           create: {
             ezCode: optional(p.ezCode),
-            source: assertSource(p.source),
             guestName: optional(p.guestName),
-            method: p.method,
-            amount: assertMoney(p.amount, 'Thu tiền'),
-            receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
-            expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
+            ...paymentMoney(p),
             note: optional(p.note),
           },
         },
@@ -744,7 +860,7 @@ async function buildCreateData(
         select: { id: true, branchId: true },
       });
       if (!issue) throw ApiError.validation('Không tìm thấy sự cố được tham chiếu.');
-      if (issue.branchId !== session.branchId) {
+      if (issue.branchId !== base.branchId) {
         throw ApiError.branchAccessDenied('Sự cố không thuộc chi nhánh của bạn.');
       }
       return { ...scalars, facility: { create: { issue: { connect: { id: issue.id } } } } };
@@ -790,6 +906,8 @@ async function buildCreateData(
 
 export interface ListReportsFilter {
   branchId?: number;
+  /** Several branches at once (a supervisor's multi-branch report). */
+  branchIds?: readonly number[];
   category?: CreateReportInput['category'];
   shiftSessionId?: string;
   /**
@@ -799,6 +917,13 @@ export interface ListReportsFilter {
    * empty list matches nothing — a day with no shifts has no records.
    */
   shiftSessionIds?: string[];
+  /**
+   * Also include records with NO shift created inside this half-open window —
+   * the supervisor-entered records made while no shift was open. They belong to
+   * no shift, so the business date is their own HCM day; without this they
+   * would be missing from every period report and export.
+   */
+  unshiftedWindow?: { from: Date; to: Date };
   /** Half-open [from, to) instants, already resolved from HCM calendar days. */
   from?: Date;
   to?: Date;
@@ -814,7 +939,15 @@ export function reportWhere(
   const where: Prisma.ReceptionOperationalReportWhereInput = reportVisibilityWhere(actor, filter);
   if (filter.category) where.category = filter.category;
   if (filter.shiftSessionId) where.shiftSessionId = filter.shiftSessionId;
-  else if (filter.shiftSessionIds) where.shiftSessionId = { in: filter.shiftSessionIds };
+  else if (filter.shiftSessionIds && filter.unshiftedWindow) {
+    where.OR = [
+      { shiftSessionId: { in: filter.shiftSessionIds } },
+      {
+        shiftSessionId: null,
+        createdAt: { gte: filter.unshiftedWindow.from, lt: filter.unshiftedWindow.to },
+      },
+    ];
+  } else if (filter.shiftSessionIds) where.shiftSessionId = { in: filter.shiftSessionIds };
   if (filter.from || filter.to) {
     where.createdAt = {
       ...(filter.from ? { gte: filter.from } : {}),
@@ -959,15 +1092,21 @@ async function loadOwn(
     return row;
   }
   /*
-    ADMIN IS REFUSED A WRITE HERE, DELIBERATELY.
+    A SUPERVISOR CORRECTS WITHIN ITS SCOPE — the same record, never a copy.
 
-    The specification is explicit that "Admin does NOT need operational Reception
-    editing", and an Admin silently correcting a branch's cash row would break
-    the one guarantee that makes this journal worth keeping: that each record
-    says which receptionist entered it and who, if anyone, changed it afterwards.
-    Admin reads everything; the desk owns its own corrections.
+    The Admin was once refused here, to keep "who changed what" clean. That
+    guarantee is kept by a different means now: every correction writes an audit
+    row naming the actor (and a supervisor's carries no shift, so it can never be
+    mistaken for the desk's own), and the record keeps its original creator,
+    shift and instant untouched.
   */
-  throw ApiError.forbidden('Chỉ lễ tân của chi nhánh mới sửa được báo cáo.');
+  if (isReceptionSupervisor(actor.role)) {
+    if (!scopeIncludes(branchScopeOf(actor), row.branchId)) {
+      throw ApiError.branchAccessDenied('Báo cáo không thuộc phạm vi chi nhánh của bạn.');
+    }
+    return row;
+  }
+  throw ApiError.forbidden('Bạn không có quyền sửa báo cáo này.');
 }
 
 /** The fields each category allows a correction to touch. */
@@ -1064,7 +1203,7 @@ export async function updateReport(
     throw ApiError.conflict('Báo cáo đã bị hủy, không thể sửa.');
   }
 
-  const session = await requireOpenSession(actor, client);
+  const writer = await correctionWriter(actor, client);
   const allowed = editableFields(current);
   if (allowed.length === 0) {
     throw ApiError.validation('Báo cáo này không có nội dung để sửa.');
@@ -1174,6 +1313,20 @@ export async function updateReport(
     if (changes.length === 0) return fresh.id;
 
     /*
+      "CHI TIỀN" STAYS A PURE PAYOUT after the correction, and a row cannot drift
+      into it half-way. Judged on the row AS IT WILL BE (stored values merged with
+      the change), so moving a payment to "Chi tiền" must also zero its amount.
+    */
+    if (current.category === 'PAYMENT') {
+      const stored = detail as { source: string | null; method: string; amount: number; receivable: number; expense: number };
+      const after = { ...stored, ...(data as Partial<typeof stored>) };
+      if (after.source === EXPENSE_SOURCE) {
+        assertExpenseRow(after);
+        for (const f of ['source', 'method', 'amount', 'receivable', 'expense'] as const) guard[f] = stored[f];
+      }
+    }
+
+    /*
       A REVIEW KEEPS AT LEAST ONE REVIEW. The same rule as on creation: after
       the correction, Tripadvisor + Google must still be above zero — a Review
       row reporting no review at all is not a review record. The PAIR is judged,
@@ -1221,15 +1374,15 @@ export async function updateReport(
       data: changes.map((c) => ({
         branchId: current.branchId,
         reportId: id,
-        shiftSessionId: session.id,
+        shiftSessionId: writer.shiftSessionId,
         action: 'EDIT' as const,
         field: c.field,
         oldValue: c.oldValue,
         newValue: c.newValue,
         reason,
         actorUserId: actor.id,
-        actorNameSnapshot: session.receptionistName,
-        actorShiftType: session.shiftType,
+        actorNameSnapshot: writer.name,
+        actorShiftType: writer.shiftType,
         createdAt: now,
       })),
     });
@@ -1338,7 +1491,7 @@ export async function voidReport(
   const now = clock.now();
   const current = await loadOwn(id, actor, client);
   if (current.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy trước đó.');
-  const session = await requireOpenSession(actor, client);
+  const writer = await correctionWriter(actor, client);
 
   return client.$transaction(async (tx) => {
     /*
@@ -1351,7 +1504,7 @@ export async function voidReport(
       data: {
         voidedAt: now,
         voidedByUserId: actor.id,
-        voidedByNameSnapshot: session.receptionistName,
+        voidedByNameSnapshot: writer.name,
         voidReason: trimmed,
       },
     });
@@ -1361,12 +1514,12 @@ export async function voidReport(
       data: {
         branchId: current.branchId,
         reportId: id,
-        shiftSessionId: session.id,
+        shiftSessionId: writer.shiftSessionId,
         action: 'VOID',
         reason: trimmed,
         actorUserId: actor.id,
-        actorNameSnapshot: session.receptionistName,
-        actorShiftType: session.shiftType,
+        actorNameSnapshot: writer.name,
+        actorShiftType: writer.shiftType,
         createdAt: now,
       },
     });
@@ -1418,15 +1571,15 @@ export async function completeReport(
   }
   if (current.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy.');
   if (detail.completedAt) throw ApiError.conflict('Bản ghi này đã được hoàn thành.');
-  const session = await requireOpenSession(actor, client);
+  const writer = await correctionWriter(actor, client);
 
   const where = { reportId: id, completedAt: null, report: { is: { voidedAt: null } } };
   const data = {
     completedByUserId: actor.id,
-    completedByNameSnapshot: session.receptionistName,
+    completedByNameSnapshot: writer.name,
     completedAt: now,
-    completedShiftSessionId: session.id,
-    completedShiftType: session.shiftType,
+    completedShiftSessionId: writer.shiftSessionId,
+    completedShiftType: writer.shiftType,
     resolution: handled,
   };
   const { count } =

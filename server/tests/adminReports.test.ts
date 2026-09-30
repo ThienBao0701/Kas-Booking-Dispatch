@@ -15,6 +15,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetBookingData, resetIssueData, resetShiftData, testPrisma, utcDate } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -255,6 +256,7 @@ describe('the hotel incident report', () => {
     expect(created.status).toBe(201);
 
     const id = created.body.issue.id;
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn Bảo', technicianPhone: '0901234567' });
     await tech.post(`/api/issues/${id}/complete`).send({});
   }

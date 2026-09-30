@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -98,6 +99,7 @@ async function reportAt(agent: Agent, day: string, hhmm: string, room: string): 
 }
 
 async function failOnce(id: string, at: string, reason = 'Không có linh kiện'): Promise<void> {
+  await assignTo(admin, id, tech);
   await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
   setClock({ now: () => hcm('2026-09-17', at) });
   const res = await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason });
@@ -113,7 +115,7 @@ describe('the incident list narrows by a HCM date range', () => {
     await reportAt(letan, '2026-09-16', '23:30', '101'); // the day before
     await reportAt(letan, '2026-09-17', '00:05', '102'); // just after midnight
     await reportAt(letan, '2026-09-17', '23:55', '103'); // just before midnight
-    await reportAt(letan, '2026-09-18', '00:05', '104'); // the day after
+    await reportAt(letan, '2026-09-18', '00:05', '201'); // the day after
     setClock({ now: () => hcm('2026-09-18', '10:00') });
   });
 
@@ -163,6 +165,7 @@ describe('date, branch and status compose in the database', () => {
     await reportAt(letan2, '2026-09-17', '09:00', '201');
     const done = await reportAt(letan, '2026-09-17', '10:00', '102');
     setClock({ now: () => hcm('2026-09-17', '11:00') });
+    await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`);
   });
@@ -209,6 +212,7 @@ describe('the outstanding view ignores the period, deliberately', () => {
     await reportAt(letan, '2026-09-17', '08:00', '102');
     const done = await reportAt(letan, '2026-09-17', '09:00', '103');
     setClock({ now: () => hcm('2026-09-17', '10:00') });
+    await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`);
 
@@ -241,10 +245,12 @@ describe('the range summary', () => {
     await reportAt(letan, '2026-09-17', '08:00', '101');
     const working = await reportAt(letan, '2026-09-17', '08:30', '102');
     const done = await reportAt(letan, '2026-09-17', '09:00', '103');
-    await reportAt(letan, '2026-09-16', '09:00', '999'); // outside the period
+    await reportAt(letan, '2026-09-16', '09:00', '202'); // outside the period
 
     setClock({ now: () => hcm('2026-09-17', '10:00') });
+    await assignTo(admin, working, tech);
     await tech.post(`/api/issues/${working}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
+    await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`);
 
@@ -275,6 +281,7 @@ describe('the range summary', () => {
     await failOnce(b, '14:00');
     // …and then somebody picks B up again, so it is no longer waiting.
     setClock({ now: () => hcm('2026-09-17', '15:00') });
+    await assignTo(admin, b, tech);
     await tech.post(`/api/issues/${b}/accept`).send({ technicianName: 'Minh', technicianPhone: '0911222333' });
 
     const res = await admin.get('/api/admin/reports/incidents/summary?from=2026-09-17&to=2026-09-17');
@@ -353,6 +360,7 @@ describe('the incident export', () => {
     // Reported on the 17th…
     const id = await reportAt(letan, '2026-09-17', '10:00', '101');
     // …and failed on the 20th.
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     setClock({ now: () => hcm('2026-09-20', '09:00') });
     expect(
@@ -402,6 +410,7 @@ describe('the incident export', () => {
   it('still carries the acceptance and completion instants', async () => {
     const id = await reportAt(letan, '2026-09-17', '08:00', '101');
     setClock({ now: () => hcm('2026-09-17', '09:00') });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     setClock({ now: () => hcm('2026-09-17', '09:05') });
     await tech.post(`/api/issues/${id}/complete`);

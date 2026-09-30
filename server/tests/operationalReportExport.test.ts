@@ -624,7 +624,7 @@ describe('the exports', () => {
     expect((one.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
   });
 
-  it('produces an XLSX with seven sheets and real numbers', async () => {
+  it('produces an XLSX with eight sheets and real numbers', async () => {
     await seedFullDay(letan, 'Nguyễn Văn A');
 
     const res = await admin
@@ -653,6 +653,8 @@ describe('the exports', () => {
       // Short on purpose: Excel refuses a sheet name over 31 characters, and the
       // full name of the category ("Giao nhận hàng hóa của khách sạn") is 32.
       'Giao nhận hàng hóa',
+      // Housekeeping's findings and Reception's collections, in the same export.
+      'Buồng phòng',
     ]);
 
     const payments = wb.getWorksheet('Theo dõi thanh toán')!;

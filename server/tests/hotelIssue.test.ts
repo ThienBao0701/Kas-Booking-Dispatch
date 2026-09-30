@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -161,6 +162,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
   it('technical accepts (NEW → IN_PROGRESS) then completes (→ COMPLETED)', async () => {
     const id = await newIssue();
 
+    await assignTo(adminAgent, id, techAgent);
     const accepted = await techAgent.post(`/api/issues/${id}/accept`).send(ACCEPT);
     expect(accepted.status).toBe(200);
     expect(accepted.body.issue.status).toBe('IN_PROGRESS');
@@ -195,6 +197,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
 
     expect((await adminAgent.post(`/api/issues/${id}/accept`).send(ACCEPT)).status).toBe(403);
 
+    await assignTo(adminAgent, id, techAgent);
     await techAgent.post(`/api/issues/${id}/accept`).send(ACCEPT);
     expect((await adminAgent.post(`/api/issues/${id}/complete`).send({})).status).toBe(403);
 
@@ -215,6 +218,8 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
    */
   it('refuses to complete an incident nobody accepted', async () => {
     const id = await newIssue();
+    // Given to the technician, but not yet taken.
+    await assignTo(adminAgent, id, techAgent);
     const res = await techAgent.post(`/api/issues/${id}/complete`).send({});
     expect(res.status).toBe(409);
 
@@ -236,6 +241,7 @@ describe('receptionist edit rules', () => {
     expect(edited.status).toBe(200);
     expect(edited.body.issue.description).toBe('Cập nhật mô tả');
 
+    await assignTo(adminAgent, id, techAgent);
     await techAgent
       .post(`/api/issues/${id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });

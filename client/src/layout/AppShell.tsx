@@ -6,13 +6,16 @@ import { DevToolsBar } from './DevToolsBar';
 import { OfflineIndicator } from '../components/OfflineIndicator';
 import { ShiftGate } from '../components/ShiftGate';
 import { ChatBubble } from '../components/ChatBubble';
+import { isReceptionSupervisor } from '../auth/types';
 import { useAuth } from '../auth/AuthProvider';
 
 export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { user } = useAuth();
   // The chat is Admin↔Reception correspondence; no other role has a part in it.
-  const hasChat = user?.role === 'ADMIN' || user?.role === 'RECEPTIONIST';
+  // The branch chat: Reception, the Admin and the reception supervisors — the
+  // server lists only the branches each may open (a manager: its own).
+  const hasChat = user?.role === 'RECEPTIONIST' || isReceptionSupervisor(user?.role);
 
   return (
     <div className="flex min-h-screen bg-slate-100">

@@ -22,6 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -227,6 +228,8 @@ describe('the six categories', () => {
       'Expedia',
       'Walking',
       'Khác',
+      // A pure cash outflow: no "Thu tiền", recorded in "Chi tiền" alone.
+      'Chi tiền',
     ]);
     expect(res.body.paymentMethods.map((m: { label: string }) => m.label)).toEqual([
       'Tiền mặt',
@@ -786,7 +789,7 @@ describe('sự cố cơ sở vật chất references the existing technical syst
   async function reportIncident(agent: Agent) {
     const res = await agent.post('/api/issues').send({
       areaCategory: 'ROOM',
-      roomNumber: '404',
+      roomNumber: '402',
       category: 'AIR_CONDITIONER',
       description: 'Máy lạnh không mát',
     });
@@ -821,6 +824,7 @@ describe('sự cố cơ sở vật chất references the existing technical syst
       .send({ category: 'FACILITY_ISSUE', facility: { issueId: issue.id } });
 
     setClock({ now: () => hcm('2026-09-19', '09:00') });
+    await assignTo(admin, issue.id, tech);
     const accept = await tech
       .post(`/api/issues/${issue.id}/accept`)
       .send({ technicianName: 'Bảo', technicianPhone: '0909000111' });
@@ -896,26 +900,45 @@ describe('branch isolation and roles', () => {
     }
   });
 
-  it('refuses an Admin a write, and gives them every branch on read', async () => {
+  it('lets an Admin write for ONE named branch, marked "Admin tạo" — never void — and read every branch', async () => {
     setClock({ now: () => hcm('2026-09-19', '08:00') });
     await checkIn(letan, 'A', 'Nguyễn A');
     const mine = await createComplaint(letan, { description: 'CN1' });
     await checkIn(letanCn2, 'A', 'Người CN2');
     await createComplaint(letanCn2, { description: 'CN2' });
 
-    // The reception write routes are receptionist-only.
-    expect((await admin.post('/api/reception/reports').send({})).status).toBe(403);
+    // "Tất cả" is not a place to write to: without a branch, nothing is written.
+    expect((await createComplaint(admin, { description: 'Không chi nhánh' })).status).toBe(422);
+    const created = await admin.post('/api/reception/reports').send({
+      branchId: cn2,
+      category: 'CUSTOMER_COMPLAINT',
+      complaint: { guestName: 'Khách Admin', description: 'Admin ghi nhận' },
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.report).toMatchObject({ branchId: cn2, sourceLabel: 'Admin tạo' });
+    const stored = await testPrisma.receptionOperationalReport.findUniqueOrThrow({ where: { id: created.body.report.id } });
+    expect(stored.createdByRole).toBe('ADMIN');
+    // It lands on the branch's open shift, so the shift's report carries it.
+    expect(stored.shiftSessionId).not.toBeNull();
+
+    // A correction by the Admin goes through, and is audited under the Admin's name.
+    const edited = await admin
+      .patch(`/api/reception/reports/${mine.body.report.id}`)
+      .send({ complaint: { description: 'CN1 — Admin sửa' } });
+    expect(edited.status).toBe(200);
+    const audit = await testPrisma.receptionReportAudit.findFirst({
+      where: { reportId: mine.body.report.id, action: 'EDIT' },
+    });
+    expect(audit?.actorUserId).not.toBeNull();
+
+    // Withdrawing and completing stay the desk's own.
     expect(
-      (await admin.patch(`/api/reception/reports/${mine.body.report.id}`).send({})).status,
-    ).toBe(403);
-    expect(
-      (await admin.post(`/api/reception/reports/${mine.body.report.id}/void`).send({ reason: 'x' }))
-        .status,
+      (await admin.post(`/api/reception/reports/${mine.body.report.id}/void`).send({ reason: 'x' })).status,
     ).toBe(403);
 
     const all = await admin.get('/api/admin/reports/operational');
     expect(all.status).toBe(200);
-    expect(all.body.reports).toHaveLength(2);
+    expect(all.body.reports).toHaveLength(3);
   });
 
   /*
@@ -964,6 +987,10 @@ describe('branch isolation and roles', () => {
       description: 'CN2',
     });
 
+    // A technician's queue is what was assigned to them — from every branch.
+    expect((await tech.get('/api/issues?status=NEW')).body.issues).toHaveLength(0);
+    const ids = (await admin.get('/api/issues?status=NEW')).body.issues.map((i: { id: string }) => i.id) as string[];
+    for (const id of ids) await assignTo(admin, id, tech);
     const queue = await tech.get('/api/issues?status=NEW');
     expect(queue.status).toBe(200);
     expect(queue.body.issues).toHaveLength(2);

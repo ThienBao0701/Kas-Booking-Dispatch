@@ -131,6 +131,7 @@ describe('recording an inspection', () => {
 
   it.each([
     ['no issues', { roomNumber: '101', staffName: 'X', issues: [] }],
+    ['a room that is not the branch’s', { roomNumber: '999', staffName: 'X', issues: [{ type: 'ODOR' }] }],
     ['no room', { roomNumber: '  ', staffName: 'X', issues: [{ type: 'ODOR' }] }],
     ['no person', { roomNumber: '101', staffName: '', issues: [{ type: 'ODOR' }] }],
     ['an unknown type', { roomNumber: '101', staffName: 'X', issues: [{ type: 'FIRE' }] }],
@@ -286,7 +287,7 @@ describe('who sees what', () => {
   beforeEach(async () => {
     const [smoking] = await threeIssues(hk1);
     await inspect({ roomNumber: '201', staffName: 'Chị Hoa', issues: [{ type: 'ODOR' }] }, hk1b);
-    await inspect({ roomNumber: '505', staffName: 'Anh Nam', issues: [{ type: 'DAMAGED_FACILITY', note: 'Vỡ đèn' }] }, hk2);
+    await inspect({ roomNumber: '503', staffName: 'Anh Nam', issues: [{ type: 'DAMAGED_FACILITY', note: 'Vỡ đèn' }] }, hk2);
     await collect(smoking!.id, { status: 'COLLECTED', amount: 500_000, method: 'TRANSFER' });
   });
 
@@ -298,7 +299,13 @@ describe('who sees what', () => {
       expect(issue.collection).toBeNull();
       expect(issue.history).toEqual([]);
     }
-    expect(res.body.issues.find((i: { type: string }) => i.type === 'SMOKING').collectionStatusLabel).toBe('Đã thu');
+    // Not even whether it was collected: the collection state is the front desk's.
+    for (const issue of res.body.issues) {
+      expect(issue.collectionStatus).toBeNull();
+      expect(issue.collectionStatusLabel).toBeNull();
+    }
+    // The facts of the inspections, counted by the server — nothing about money.
+    expect(res.body.inspectionSummary).toMatchObject({ inspections: 1, issues: 3, rooms: 1 });
     // A colleague on the same branch, and a branch that is not theirs, are not theirs to read.
     expect((await hk1b.get('/api/housekeeping/issues')).body.issues).toHaveLength(1);
     expect((await hk2.get('/api/housekeeping/issues')).body.issues).toHaveLength(1);

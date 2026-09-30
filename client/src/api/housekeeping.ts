@@ -67,9 +67,13 @@ export interface RoomIssue {
   voidedAt: string | null;
   voidedByName: string | null;
   voidReason: string | null;
-  collectionStatus: RoomCollectionStatus;
-  collectionStatusLabel: string;
-  /** Null for Bộ phận buồng phòng, which sees THAT an issue was settled, not the money. */
+  /**
+   * NULL FOR BỘ PHẬN BUỒNG PHÒNG: the collection state ("Đã thu / Chưa thu") is
+   * the front desk's, and the server does not send it to Housekeeping at all.
+   */
+  collectionStatus: RoomCollectionStatus | null;
+  collectionStatusLabel: string | null;
+  /** Null for Bộ phận buồng phòng, which is sent nothing about the money. */
   collection: RoomIssueCollection | null;
   history: {
     id: string;
@@ -100,6 +104,16 @@ export interface RoomIssueList {
   truncated: boolean;
   /** Null for Bộ phận buồng phòng. */
   summary: RoomIssueSummary | null;
+  /** The facts of the inspections — for every role, and nothing about money. */
+  inspectionSummary?: InspectionSummary;
+}
+
+/** Inspections, findings and rooms in the filter — never an amount or a collection state. */
+export interface InspectionSummary {
+  inspections: number;
+  issues: number;
+  rooms: number;
+  byType: { type: RoomIssueType; label: string; count: number }[];
 }
 
 export interface NewInspectionInput {
@@ -119,6 +133,8 @@ export interface CollectionInput {
 export interface RoomIssueFilter {
   branchId?: number;
   type?: RoomIssueType;
+  /** One room of the branch. */
+  roomNumber?: string;
   status?: RoomCollectionStatus;
   from?: string;
   to?: string;

@@ -25,6 +25,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { assignTo } from './helpers/issues';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -187,6 +188,27 @@ describe('the report form is enforced on the server', () => {
     expect(res.body.issue.roomNumber).toBeNull();
   });
 
+  it('refuses a room that is not one of the branch’s rooms, and trims one that is', async () => {
+    // CN1 (05 Trương Định) has no room 999, and 501 belongs to another branch's list only.
+    for (const room of ['999', '104']) {
+      const res = await letan1
+        .post('/api/issues')
+        .send({ areaCategory: 'ROOM', roomNumber: room, category: 'DOOR', description: 'Hỏng cửa' });
+      expect(res.status).toBe(422);
+    }
+    const ok = await letan1
+      .post('/api/issues')
+      .send({ areaCategory: 'ROOM', roomNumber: ' 301 ', category: 'DOOR', description: 'Hỏng cửa' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.issue.roomNumber).toBe('301');
+  });
+
+  it('serves the branch’s room list, ordered and without duplicates', async () => {
+    const res = await letan1.get(`/api/branches/${cn1}/rooms`);
+    expect(res.status).toBe(200);
+    expect(res.body.rooms).toEqual(['101', '102', '103', '201', '202', '301', '302', '401', '402', '501', '502', '601', '602', '701', '702']);
+  });
+
   it('the description is always required, and whitespace is not a description', async () => {
     const blank = await letan1
       .post('/api/issues')
@@ -226,12 +248,15 @@ describe('branch isolation for Reception is unchanged', () => {
   });
 });
 
-describe('Bộ phận kỹ thuật works every branch', () => {
-  it('sees incidents from all branches at once', async () => {
-    await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Sự cố CN1' });
-    await letan5
-      .post('/api/issues')
-      .send({ areaCategory: 'ROOM', roomNumber: '505', category: 'WIFI', description: 'Sự cố CN5' });
+describe('Bộ phận kỹ thuật works what it is given, in every branch', () => {
+  it('sees the incidents assigned to it from all branches — and none that are not', async () => {
+    const a = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Sự cố CN1' });
+    const b = (
+      await letan5.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '501', category: 'WIFI', description: 'Sự cố CN5' })
+    ).body.issue.id as string;
+    await report({ areaCategory: 'ROOM', roomNumber: '302', category: 'DOOR', description: 'Chưa giao' });
+    await assignTo(admin, a, tech);
+    await assignTo(admin, b, tech);
 
     const res = await tech.get('/api/issues');
     expect(res.status).toBe(200);
@@ -240,9 +265,19 @@ describe('Bộ phận kỹ thuật works every branch', () => {
     expect(branchIds).toEqual([cn1, cn5].sort());
   });
 
-  it('counts the three queues across every branch', async () => {
-    await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'A' });
-    await letan5.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '505', category: 'WIFI', description: 'B' });
+  it('cannot read an incident it was never given, by id', async () => {
+    const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Chưa giao' });
+    expect((await tech.get(`/api/issues/${id}`)).status).toBe(403);
+  });
+
+  it('counts its own queues across every branch', async () => {
+    const a = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'A' });
+    const b = (
+      await letan5.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '501', category: 'WIFI', description: 'B' })
+    ).body.issue.id as string;
+    await report({ areaCategory: 'ROOM', roomNumber: '302', category: 'DOOR', description: 'Chưa giao' });
+    await assignTo(admin, a, tech);
+    await assignTo(admin, b, tech);
 
     const res = await tech.get('/api/issues/counts');
     expect(res.status).toBe(200);
@@ -267,6 +302,7 @@ describe('Bộ phận kỹ thuật works every branch', () => {
 describe('NEW → IN_PROGRESS → COMPLETED', () => {
   it('accepting names the technician and stamps the moment', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
 
     const res = await tech
       .post(`/api/issues/${id}/accept`)
@@ -299,6 +335,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
 
   it('completes an accepted incident and records who finished it', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
     const res = await tech.post(`/api/issues/${id}/complete`).send({});
@@ -320,6 +357,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
    */
   it('refuses to complete an incident nobody accepted', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
 
     const res = await tech.post(`/api/issues/${id}/complete`).send({});
     expect(res.status).toBe(409);
@@ -332,6 +370,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
 
   it('refuses to accept an incident twice', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
     const second = await tech
@@ -346,6 +385,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
 
   it('refuses to complete an incident twice', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
     await tech.post(`/api/issues/${id}/complete`).send({});
 
@@ -356,6 +396,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
 
   it('a completed incident is kept, never deleted', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
     await tech.post(`/api/issues/${id}/complete`).send({});
 
@@ -392,6 +433,7 @@ describe('an Admin monitors and cannot perform technical transitions', () => {
 
   it('cannot complete an incident', async () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
     const res = await admin.post(`/api/issues/${id}/complete`).send({});
@@ -421,7 +463,7 @@ describe('an Admin monitors and cannot perform technical transitions', () => {
 
   it('still sees every branch and every status', async () => {
     await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Sự cố CN1' });
-    await letan5.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '505', category: 'WIFI', description: 'Sự cố CN5' });
+    await letan5.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '501', category: 'WIFI', description: 'Sự cố CN5' });
 
     const res = await admin.get('/api/issues');
     expect(res.status).toBe(200);
@@ -430,13 +472,18 @@ describe('an Admin monitors and cannot perform technical transitions', () => {
 });
 
 describe('a new incident reaches the people who act on it', () => {
-  it('notifies both the Admin and Bộ phận kỹ thuật', async () => {
-    await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'AIR_CONDITIONER', description: 'Máy lạnh hỏng' });
+  it('notifies the people who assign it — and the technician only once it is theirs', async () => {
+    const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'AIR_CONDITIONER', description: 'Máy lạnh hỏng' });
 
-    const notifications = await testPrisma.notification.findMany({ include: { user: true } });
-    const roles = notifications.map((n) => n.user.role).sort();
-    expect(roles).toEqual(['ADMIN', 'TECHNICAL']);
-    expect(notifications[0]!.title).toBe('Có báo cáo sự cố mới');
+    const onReport = await testPrisma.notification.findMany({ include: { user: true } });
+    expect(onReport.map((n) => n.user.role)).toEqual(['ADMIN']);
+    expect(onReport[0]!.title).toBe('Có báo cáo sự cố mới');
+
+    await assignTo(admin, id, tech);
+    const toTech = await testPrisma.notification.findMany({ where: { userId: techId } });
+    expect(toTech).toHaveLength(1);
+    expect(toTech[0]!.title).toBe('Bạn được giao xử lý sự cố');
+    expect(toTech[0]!.body).toContain('Giao bởi');
   });
 });
 

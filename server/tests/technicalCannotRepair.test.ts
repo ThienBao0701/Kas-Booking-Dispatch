@@ -26,6 +26,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { assignTo } from './helpers/issues';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -100,7 +101,9 @@ async function reportIssue(description = 'Hello'): Promise<string> {
   return res.body.issue.id as string;
 }
 
+/** The Admin gives the job to `agent`, who then takes it — the only way a job is taken. */
 async function accept(agent: Agent, id: string, name: string, phone: string): Promise<void> {
+  await assignTo(admin, id, agent);
   const res = await agent.post(`/api/issues/${id}/accept`).send({
     technicianName: name,
     technicianPhone: phone,
@@ -147,8 +150,12 @@ describe('IN_PROGRESS → NEW via "Không sửa được"', () => {
 
   it('refuses an incident nobody has accepted', async () => {
     const id = await reportIssue();
+    // Assigned to this technician but not yet taken: there is no repair to give up.
+    await assignTo(admin, id, tech);
     const res = await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'x' });
     expect(res.status).toBe(409);
+    // And a technician it was never given to is refused outright.
+    expect((await tech2.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'x' })).status).toBe(403);
   });
 
   it('refuses an incident that is already COMPLETED', async () => {
@@ -416,7 +423,8 @@ describe('the incident row after a failed attempt', () => {
     const id = await reportIssue();
     // Straight to IN_PROGRESS with no technician — a shape the API cannot
     // produce, forced here to prove the fallback is guarded.
-    await testPrisma.hotelIssue.update({ where: { id }, data: { status: 'IN_PROGRESS' } });
+    // (Assigned to the technician, so the job is theirs to close.)
+    await testPrisma.hotelIssue.update({ where: { id }, data: { status: 'IN_PROGRESS', assignedTechnicianUserId: techId } });
 
     expect((await tech.post(`/api/issues/${id}/complete`)).status).toBe(200);
     expect(await testPrisma.technicalRepairAttempt.count({ where: { issueId: id } })).toBe(0);
@@ -503,6 +511,7 @@ describe('only Bộ phận kỹ thuật may report "Không sửa được"', () 
   it('ignores a client-supplied acting account', async () => {
     await resetIssueData();
     const fresh = await reportIssue();
+    await assignTo(admin, fresh, tech2);
     await tech2.post(`/api/issues/${fresh}/accept`).send({
       technicianName: 'Minh',
       technicianPhone: '0911222333',

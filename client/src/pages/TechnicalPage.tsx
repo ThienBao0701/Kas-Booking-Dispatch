@@ -21,6 +21,10 @@
  * screen, and it makes the tab they are on part of the address rather than
  * hidden component state.
  *
+ * A TECHNICIAN SEES ONLY WHAT WAS GIVEN TO THEM. "Được giao", "Cần sửa lại" and
+ * "Đang sửa" are their own assignments; "Lịch sử" is everything they were ever
+ * given, took or finished. The server enforces it — this screen only names it.
+ *
  * THE COUNTS COME FROM THE SERVER
  *
  * Each tab's number is counted in the database over every branch, not derived
@@ -61,6 +65,7 @@ import {
   IssueInspectionBadge,
   IssueLifecycleDetail,
   IssueStageBadge,
+  IssueRepeatNote,
   IssueThumb,
   IssueWorkTrail,
 } from '../components/IssueViews';
@@ -76,15 +81,15 @@ const FIELD =
 const QUEUES = {
   new: {
     stage: 'WAITING' as IssueStage,
-    title: 'Sự cố khách sạn',
-    description: 'Sự cố lễ tân vừa báo, chưa có ai tiếp nhận.',
+    title: 'Được giao',
+    description: 'Sự cố được giao cho bạn, chưa tiếp nhận.',
     count: 'newCount' as keyof TechnicalCounts,
   },
   rework: {
     stage: 'REWORK' as IssueStage,
     title: 'Cần sửa lại',
-    description: 'Nghiệm thu không đạt hoặc chưa sửa được — cần kỹ thuật tiếp nhận lại.',
-    dormantDescription: 'Sự cố chưa sửa được — cần kỹ thuật tiếp nhận lại.',
+    description: 'Sự cố được giao lại sau lần nghiệm thu không đạt hoặc chưa sửa được.',
+    dormantDescription: 'Sự cố được giao lại sau lần chưa sửa được.',
     count: 'reworkCount' as keyof TechnicalCounts,
   },
   'in-progress': {
@@ -106,7 +111,19 @@ const QUEUES = {
     dormantDescription: 'Sự cố kỹ thuật đã sửa xong, và lịch sử sự cố đã xử lý.',
     count: 'completedCount' as keyof TechnicalCounts,
   },
+  history: {
+    // Every stage: the server narrows it to this technician's own history.
+    stage: undefined,
+    title: 'Lịch sử',
+    description: 'Mọi sự cố bạn từng được giao, đã tiếp nhận hoặc đã sửa.',
+    count: undefined,
+  },
 } as const;
+
+/** Quản lý kỹ thuật reads every waiting incident, not an assignment of their own. */
+function queueTitle(key: QueueKey, isManager: boolean): string {
+  return isManager && key === 'new' ? 'Sự cố khách sạn' : QUEUES[key].title;
+}
 
 type QueueKey = keyof typeof QUEUES;
 
@@ -214,12 +231,13 @@ export function TechnicalPage() {
     : inspectionOn
       ? ['new', 'rework', 'in-progress', 'awaiting-inspection', 'completed']
       : ['new', 'rework', 'in-progress', 'completed'];
+  if (isTechnician) order.push('history');
 
   return (
     <div>
       <PageHeader
-        title={config.title}
-        description={queueDescription(key, inspectionOn)}
+        title={queueTitle(key, isManager)}
+        description={isManager && key === 'new' ? 'Sự cố lễ tân vừa báo, chưa có ai tiếp nhận.' : queueDescription(key, inspectionOn)}
         actions={
           <div className="flex items-center gap-2">
             <select
@@ -262,10 +280,12 @@ export function TechnicalPage() {
               }`
             }
           >
-            {QUEUES[k].title}
-            <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold leading-none text-slate-700">
-              {counts.data?.counts[QUEUES[k].count] ?? 0}
-            </span>
+            {queueTitle(k, isManager)}
+            {QUEUES[k].count ? (
+              <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold leading-none text-slate-700">
+                {counts.data?.counts[QUEUES[k].count] ?? 0}
+              </span>
+            ) : null}
           </NavLink>
         ))}
       </nav>
@@ -309,11 +329,13 @@ export function TechnicalPage() {
             message={
               doneFiltered
                 ? 'Không có sự cố hoàn thành trong khoảng thời gian này.'
-                : `Không có sự cố nào ở trạng thái “${config.title}”.`
+                : key === 'history'
+                  ? 'Bạn chưa được giao sự cố nào.'
+                  : `Không có sự cố nào ở trạng thái “${queueTitle(key, isManager)}”.`
             }
           />
         ) : (
-          <ul className="space-y-3" aria-label={config.title}>
+          <ul className="space-y-3" aria-label={queueTitle(key, isManager)}>
             {issues.map((issue) => (
               <li key={issue.id}>
                 <article className="rounded-2xl border border-line bg-white p-4 shadow-sm">
@@ -352,6 +374,18 @@ export function TechnicalPage() {
                       <p className="mt-1.5 text-xs text-slate-600">
                         Người báo: {issue.reporterName ?? '—'} · {formatDateTime(issue.createdAt)}
                       </p>
+                      {/* ASSIGNMENT — who gave it, to whom, when; the server's own state label. */}
+                      <p className="mt-0.5 text-xs text-slate-600" data-testid={`assignment-${issue.id}`}>
+                        {issue.assignmentStateLabel ?? '—'}
+                        {issue.assignedTechnician ? ` · ${issue.assignedTechnician.name}` : ''}
+                        {issue.assignedByName ? ` · giao bởi ${issue.assignedByName}` : ''}
+                        {issue.assignedAt ? ` · ${formatDateTime(issue.assignedAt)}` : ''}
+                      </p>
+                      {issue.repeatOf ? (
+                        <div className="mt-2">
+                          <IssueRepeatNote issue={issue} />
+                        </div>
+                      ) : null}
 
                       {/* ASSIGNED + OUTCOME + the attempt history. */}
                       <IssueWorkTrail issue={issue} />
@@ -362,7 +396,7 @@ export function TechnicalPage() {
                       ) : null}
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col sm:flex-nowrap sm:items-end">
-                      {isTechnician && issue.status === 'NEW' ? (
+                      {isTechnician && issue.status === 'NEW' && issue.assignedTechnician?.id === user?.id ? (
                         <Button onClick={() => setAccepting(issue)} data-testid={`accept-${issue.id}`}>
                           Tiếp nhận
                         </Button>
@@ -439,6 +473,7 @@ export function TechnicalPage() {
       {accepting ? (
         <AcceptModal
           issue={accepting}
+          defaultName={user?.fullName ?? ''}
           onClose={() => setAccepting(null)}
           onAccepted={() => {
             setAccepting(null);
@@ -452,7 +487,7 @@ export function TechnicalPage() {
           onClose={() => setFailing(null)}
           onDone={() => {
             setFailing(null);
-            setToast('Đã trả sự cố về hàng đợi.');
+            setToast('Đã trả sự cố để giao lại.');
           }}
         />
       ) : null}
@@ -864,8 +899,8 @@ function CannotRepairModal({
         <IssueSummary issue={issue} />
 
         <p className="text-sm text-slate-600">
-          Sự cố sẽ quay lại “Cần sửa lại” để người khác tiếp nhận. Thông tin người sửa và thời
-          gian đã xử lý vẫn được lưu lại.
+          Sự cố được trả về để quản lý giao lại cho kỹ thuật viên khác. Thông tin người sửa, thời
+          gian đã xử lý và lịch sử giao việc vẫn được lưu lại.
         </p>
 
         <label className="block text-sm font-medium text-slate-600">
@@ -915,15 +950,18 @@ function CannotRepairModal({
  */
 function AcceptModal({
   issue,
+  defaultName,
   onClose,
   onAccepted,
 }: {
   issue: Issue;
+  /** The signed-in technician's full name — editable, since a colleague may do the job. */
+  defaultName: string;
   onClose: () => void;
   onAccepted: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [technicianName, setTechnicianName] = useState('');
+  const [technicianName, setTechnicianName] = useState(defaultName);
   const [technicianPhone, setTechnicianPhone] = useState('');
 
   const accept = useMutation({

@@ -626,14 +626,14 @@ describe('Giao nhận hàng hóa của khách sạn, for the Admin', () => {
     expect(within(within(table).getByTestId('row-d2')).getByText('Hoàn thành vấn đề')).toBeInTheDocument();
   });
 
-  it('is read-only for the Admin: the reception desk owns its own corrections', async () => {
+  it('lets the Admin correct a record through the shared edit — and never void it', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
     await openCategory('HOTEL_DELIVERY');
     const table = await screen.findByTestId('admin-table-HOTEL_DELIVERY');
-    expect(within(table).queryByRole('button', { name: /Sửa|Hủy/ })).not.toBeInTheDocument();
-    expect(within(table).queryByRole('columnheader', { name: 'Thao tác' })).not.toBeInTheDocument();
+    expect(within(table).getByTestId('admin-edit-d1')).toHaveTextContent('Sửa');
+    expect(within(table).queryByRole('button', { name: /^Hủy$/ })).not.toBeInTheDocument();
   });
 });
 
@@ -676,6 +676,7 @@ describe('each category is a table', () => {
       'Phòng',
       'Thời gian',
       'Trạng thái',
+      'Thao tác',
     ]);
 
     const row = within(table).getByTestId('row-p1');
@@ -708,6 +709,7 @@ describe('each category is a table', () => {
       'Cách xử lý (nếu có)',
       'Trạng thái',
       'Bản ghi',
+      'Thao tác',
     ]);
     // "Ký gửi" and "Số phòng" are not columns any more…
     expect(headers).not.toContain('Ký gửi');
@@ -812,7 +814,7 @@ describe('each category is a table', () => {
     await chooseBranch();
     await openCategory('FACILITY_ISSUE');
 
-    await userEvent.click(await screen.findByTestId('admin-incident-outstanding'));
+    await userEvent.click(await screen.findByTestId('admin-incident-view-outstanding'));
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) =>
@@ -860,6 +862,7 @@ describe('each category is a table', () => {
       'Hướng xử lý (nếu có)',
       'Thời gian',
       'Bản ghi',
+      'Thao tác',
     ]);
     expect(headers).not.toContain('Số phòng / Khác');
 
@@ -890,6 +893,7 @@ describe('each category is a table', () => {
       'Thời gian',
       'Ghi chú',
       'Trạng thái',
+      'Thao tác',
     ]);
     expect(within(upgrade).getByText('Standard')).toBeInTheDocument();
     expect(within(upgrade).getByText('Deluxe')).toBeInTheDocument();
@@ -897,7 +901,7 @@ describe('each category is a table', () => {
 
     const laundry = screen.getByTestId('admin-table-ROOM_SERVICE-LAUNDRY');
     const laundryHeaders = within(laundry).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái']);
+    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái', 'Thao tác']);
     expect(within(laundry).getByText('Phạm Giặt')).toBeInTheDocument();
     // The room an older laundry row recorded is not a column; it is in the full record.
     await userEvent.click(within(laundry).getByTestId('row-toggle-v2'));
@@ -948,7 +952,7 @@ describe('each category is a table', () => {
     await openCategory('ROOM_SERVICE');
     const table = await screen.findByTestId('admin-table-ROOM_SERVICE-REVIEW');
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(headers.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Thời gian', 'Trạng thái']);
+    expect(headers.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Thời gian', 'Trạng thái', 'Thao tác']);
     const row = within(table).getByTestId('row-v3');
     expect(within(row).getByText('Guest A')).toBeInTheDocument();
     expect(within(row).getByText('QA-REVIEW-01')).toBeInTheDocument();
@@ -1303,6 +1307,48 @@ describe('the row cap is declared, never silent', () => {
   });
 });
 
+describe('"+ Báo cáo vấn đề" — the Admin enters a record for ONE branch', () => {
+  it('never offers "Tất cả", keeps the branch in view, and writes to the branch chosen', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: PAYMENT } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+    await userEvent.click(await screen.findByTestId('supervisor-create-open'));
+    const dialog = await screen.findByTestId('supervisor-create');
+    const branch = within(dialog).getByTestId('create-branch') as HTMLSelectElement;
+
+    // Offered the branch the page is on; "Tất cả" is not a place to write to.
+    expect(branch.value).toBe('11');
+    const labels = within(branch).getAllByRole('option').map((o) => o.textContent ?? '');
+    expect(labels.some((l) => /Tất cả/.test(l))).toBe(false);
+
+    // No branch, no categories.
+    await userEvent.selectOptions(branch, '');
+    expect(within(dialog).getByTestId('create-branch-first')).toBeInTheDocument();
+    expect(within(dialog).queryByTestId('create-category-PAYMENT')).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(branch, '13');
+    expect(within(dialog).getByTestId('target-branch')).toHaveTextContent('47A Nguyễn Trãi');
+    for (const c of ['PAYMENT', 'GUEST_REQUEST', 'FACILITY_ISSUE', 'CUSTOMER_COMPLAINT', 'ROOM_SERVICE', 'HOTEL_DELIVERY']) {
+      expect(within(dialog).getByTestId(`create-category-${c}`)).toBeInTheDocument();
+    }
+    await userEvent.click(within(dialog).getByTestId('create-category-PAYMENT'));
+    await userEvent.selectOptions(await within(dialog).findByTestId('payment-source'), 'Booking');
+    await userEvent.type(within(dialog).getByTestId('payment-amount'), '500000');
+    await userEvent.click(within(dialog).getByTestId('payment-add'));
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ branchId: 13, category: 'PAYMENT', payment: { source: 'Booking', amount: 500000 } });
+  });
+});
+
 describe('deliberately few controls', () => {
   it('has no employee, status or source filter — the branch is the only select', async () => {
     installApiMock(shellRoutes());
@@ -1336,7 +1382,7 @@ describe('deliberately few controls', () => {
     ['FACILITY_ISSUE', ISSUE.id],
     ['CUSTOMER_COMPLAINT', 'c1'],
     ['ROOM_SERVICE', 'v1'],
-  ])('gives the Admin no writing controls in the %s view, open or closed', async (code, id) => {
+  ])('gives the Admin only the supervisor’s "Sửa" in the %s view, open or closed', async (code, id) => {
     installApiMock(shellRoutes(incidentRoutes()));
     renderApp('/app/reports');
     await chooseBranch();
@@ -1344,8 +1390,6 @@ describe('deliberately few controls', () => {
     await screen.findByTestId(`row-${id}`);
 
     const assertReadOnly = () => {
-      // No action column at all — not an empty one.
-      expect(screen.queryByRole('columnheader', { name: 'Thao tác' })).not.toBeInTheDocument();
       for (const testId of [
         'payment-form',
         'opening-cash-edit',
@@ -1360,7 +1404,7 @@ describe('deliberately few controls', () => {
       }
       // The reception and technician verbs, by name, anywhere on the page.
       for (const label of [
-        /^Sửa$/,
+        // "Sửa" is the supervisor's correction, through Reception's own dialog.
         /^Hủy$/,
         /^Xóa$/,
         /^Tiếp nhận$/,

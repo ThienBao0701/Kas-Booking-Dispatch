@@ -455,7 +455,12 @@ function Conversation({
   );
 }
 
-const ROLE_TAG: Record<string, string> = { ADMIN: 'Admin', RECEPTIONIST: 'Lễ tân' };
+const ROLE_TAG: Record<string, string> = {
+  ADMIN: 'Admin',
+  RECEPTIONIST: 'Lễ tân',
+  RECEPTION_MANAGER: 'Quản lý lễ tân',
+  RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
+};
 
 function Bubble({ message, mine }: { message: ChatMessageView; mine: boolean }) {
   return (

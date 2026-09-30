@@ -9,6 +9,7 @@
  * technical department works from. There is no second incident system.
  */
 import { useRef, useState, type ReactNode } from 'react';
+import { SourceTag } from './SourceTag';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, ImageUp, X } from 'lucide-react';
 import {
@@ -40,6 +41,8 @@ import {
   IssueStageBadge,
   IssueTimeline,
 } from './IssueViews';
+import { useAuth } from '../auth/AuthProvider';
+import { useBranchRooms } from '../hooks/useBranchRooms';
 import { reportsApi } from '../api/reports';
 import { formatDateTime, hcmToday } from '../lib/format';
 
@@ -104,9 +107,16 @@ function issueFormReady(v: IssueFormValue): boolean {
 function IssueFormFields({
   value,
   onChange,
+  rooms,
 }: {
   value: IssueFormValue;
   onChange: (patch: Partial<IssueFormValue>) => void;
+  /**
+   * The branch's room catalog. When there is one the room is CHOSEN from it —
+   * never typed — so "302" is one room to every report and every repeat check;
+   * null (no catalog, or still loading) keeps the typed field.
+   */
+  rooms?: string[] | null;
 }) {
   const fields = AREA_FIELDS[value.areaCategory];
   const detailRequired = requiresLocationDetail(value.areaCategory, value.areaSubtype);
@@ -139,16 +149,40 @@ function IssueFormFields({
       </label>
 
       {fields.roomNumber ? (
-        <label className="block text-sm font-medium text-slate-700">
-          Số phòng
-          <input
-            className={`${inputClass} mt-1`}
-            value={value.roomNumber}
-            onChange={(e) => onChange({ roomNumber: e.target.value })}
-            placeholder="Ví dụ: 301"
-            maxLength={50}
-          />
-        </label>
+        rooms && rooms.length > 0 ? (
+          <label className="block text-sm font-medium text-slate-700">
+            Số phòng
+            <select
+              className={`${inputClass} mt-1`}
+              value={value.roomNumber}
+              aria-label="Số phòng"
+              data-testid="issue-room-select"
+              onChange={(e) => onChange({ roomNumber: e.target.value })}
+            >
+              <option value="">— Chọn phòng —</option>
+              {/* A legacy room typed before the catalog stays selectable on its own report. */}
+              {value.roomNumber && !rooms.includes(value.roomNumber) ? (
+                <option value={value.roomNumber}>{value.roomNumber} (cũ)</option>
+              ) : null}
+              {rooms.map((room) => (
+                <option key={room} value={room}>
+                  {room}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="block text-sm font-medium text-slate-700">
+            Số phòng
+            <input
+              className={`${inputClass} mt-1`}
+              value={value.roomNumber}
+              onChange={(e) => onChange({ roomNumber: e.target.value })}
+              placeholder="Ví dụ: 301"
+              maxLength={50}
+            />
+          </label>
+        )
       ) : null}
 
       {fields.floorNumber ? (
@@ -233,14 +267,88 @@ function IssueFormFields({
   );
 }
 
+/**
+ * WHICH BRANCH THIS RECORD IS FOR — shown at the top of every supervisor-entered
+ * form, so nobody types a report for Chi nhánh 5 believing it is Chi nhánh 2.
+ */
+export function TargetBranchBanner({ label }: { label: string }) {
+  return (
+    <p
+      data-testid="target-branch"
+      className="flex items-center gap-2 rounded-xl border-rule border-brand-600 bg-brand-50 px-3 py-2 text-sm text-brand-800"
+    >
+      <span className="text-xs font-semibold uppercase tracking-wide text-brand-700">Chi nhánh</span>
+      <span className="font-semibold">{label}</span>
+    </p>
+  );
+}
+
+/**
+ * "CÓ THỂ ĐÃ ĐƯỢC BÁO" — what is already on file for this room, stated plainly.
+ * Amber, with words (not colour alone), and never a block.
+ */
+function SimilarIssuesNote({ open, recent }: { open: Issue[]; recent: Issue[] }) {
+  if (open.length === 0 && recent.length === 0) return null;
+  return (
+    <div
+      role="note"
+      data-testid="similar-issues"
+      className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900"
+    >
+      {open.length > 0 ? (
+        <>
+          <p className="font-semibold">Có thể đã được báo — sự cố đang xử lý tại phòng này:</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {open.map((i) => (
+              <li key={i.id}>
+                {i.description} · {formatDateTime(i.createdAt)} · {i.assignmentStateLabel ?? i.stageLabel}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {recent.length > 0 ? (
+        <>
+          <p className={`font-semibold ${open.length > 0 ? 'mt-2' : ''}`}>
+            Vấn đề tương tự đã từng được xử lý gần đây:
+          </p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {recent.map((i) => (
+              <li key={i.id}>
+                {i.description} · hoàn thành {i.completedAt ? formatDateTime(i.completedAt) : '—'}
+                {i.repairerName ? ` · ${i.repairerName}` : ''}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <p className="mt-1.5 text-xs text-amber-800">Nếu đây là lần xảy ra mới, vẫn gửi báo cáo bình thường.</p>
+    </div>
+  );
+}
+
 export function NewIssueModal({
   onClose,
   onCreated,
+  branchId,
+  branchLabel,
 }: {
   onClose: () => void;
   onCreated: (issue: Issue) => void;
+  /**
+   * A SUPERVISOR's target branch (Admin, Quản lý lễ tân, Tổng quản lý lễ tân).
+   * Omitted for Reception, whose branch is its own — the server decides it.
+   */
+  branchId?: number;
+  /** Shown at the top so the target branch stays unmistakable while typing. */
+  branchLabel?: string;
 }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  // The rooms of the branch this report is FOR: the supervisor's chosen branch,
+  // or the receptionist's own.
+  const roomBranchId = branchId ?? user?.branch?.id ?? null;
+  const { rooms } = useBranchRooms(roomBranchId);
   const inputRef = useRef<HTMLInputElement>(null);
   const [form, setForm] = useState<IssueFormValue>(EMPTY_ISSUE_FORM);
   // Optional: Reception often does not know why yet. The technician can fill
@@ -252,9 +360,29 @@ export function NewIssueModal({
 
   const fields = AREA_FIELDS[form.areaCategory];
 
+  /*
+    "CÓ THỂ ĐÃ ĐƯỢC BÁO" — a warning, never a block. Once a room (and fault type)
+    is chosen, the server lists open incidents there (likely duplicates) and ones
+    finished recently (this would be a repeat). The receptionist can still send:
+    a genuine new occurrence must always be reportable.
+  */
+  const similarRoom = fields.roomNumber ? form.roomNumber.trim() : '';
+  const similar = useQuery({
+    queryKey: ['issues', 'similar', roomBranchId, similarRoom, fields.category ? form.category : null],
+    queryFn: () =>
+      issuesApi.similar({
+        branchId: branchId,
+        roomNumber: similarRoom,
+        category: fields.category ? form.category : undefined,
+      }),
+    enabled: similarRoom.length > 0 && roomBranchId !== null,
+    staleTime: 30_000,
+  });
+
   const create = useMutation({
     mutationFn: () =>
       issuesApi.create({
+        branchId,
         areaCategory: form.areaCategory,
         description: form.description,
         cause: cause.trim() || undefined,
@@ -315,7 +443,10 @@ export function NewIssueModal({
       }
     >
       <div className="space-y-3">
-        <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
+        {branchLabel ? <TargetBranchBanner label={branchLabel} /> : null}
+        <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} rooms={rooms} />
+
+        <SimilarIssuesNote open={similar.data?.open ?? []} recent={similar.data?.recent ?? []} />
 
         <label className="block text-sm font-medium text-slate-700">
           Nguyên nhân <span className="font-normal text-slate-500">(không bắt buộc)</span>
@@ -402,6 +533,8 @@ export function EditIssueModal({
   };
   const [form, setForm] = useState<IssueFormValue>(initial);
   const fields = AREA_FIELDS[form.areaCategory];
+  // The incident's OWN branch's rooms — a correction can never move it elsewhere.
+  const { rooms } = useBranchRooms(issue.branchId);
 
   const save = useMutation({
     mutationFn: () =>
@@ -466,7 +599,7 @@ export function EditIssueModal({
             />
           </label>
         ) : (
-          <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
+          <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} rooms={rooms} />
         )}
         {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
@@ -852,7 +985,12 @@ export function IncidentTable({
           header: 'Người báo',
           secondary: true,
           className: 'whitespace-nowrap',
-          render: (i) => i.reporterName ?? muted('—'),
+          render: (i) => (
+            <>
+              {i.reporterName ?? muted('—')}
+              <SourceTag label={i.sourceLabel} />
+            </>
+          ),
         },
         ...(showBranch
           ? [

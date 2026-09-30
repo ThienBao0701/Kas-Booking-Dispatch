@@ -178,14 +178,14 @@ describe('the incident period controls', () => {
     await openIncidents();
 
     seen.length = 0;
-    await user.click(screen.getByTestId('admin-incident-outstanding'));
+    await user.click(screen.getByTestId('admin-incident-view-outstanding'));
 
     await waitFor(() => expect(seen.some((u) => u.includes('outstanding=true'))).toBe(true));
     // The two are mutually exclusive on the server — "tồn đọng" IS a status set,
     // so combining them would silently answer a different question.
     const outstandingCalls = seen.filter((u) => u.includes('outstanding=true'));
     expect(outstandingCalls.every((u) => !u.includes('from='))).toBe(true);
-    expect(screen.getByTestId('admin-incident-table')).toHaveTextContent('Sự cố còn tồn đọng');
+    expect(screen.getByTestId('admin-incident-table')).toHaveTextContent('Còn tồn đọng (mọi ngày báo)');
   });
 });
 
@@ -240,7 +240,7 @@ describe('the period summary', () => {
     await openIncidents();
 
     await screen.findByTestId('incident-range-summary');
-    await user.click(screen.getByTestId('admin-incident-outstanding'));
+    await user.click(screen.getByTestId('admin-incident-view-outstanding'));
     await waitFor(() => expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument());
   });
 

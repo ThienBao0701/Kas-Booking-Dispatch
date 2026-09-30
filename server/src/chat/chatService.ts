@@ -25,6 +25,7 @@ import type { ChatCategory, Prisma, PrismaClient, ShiftType, UserRole } from '@p
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { captureShiftContext, type ShiftActor } from '../shift/shiftService';
+import { scopedBranchFilter } from '../auth/branchScope';
 
 /**
  * What a submission is about. The closed list that replaced the typed title.
@@ -51,10 +52,21 @@ export interface ChatActor {
   id: number;
   role: UserRole;
   branchId: number | null;
+  /** Quản lý lễ tân only: the branches it supervises (see `auth/branchScope.ts`). */
+  managedBranchIds?: readonly number[];
 }
 
-/** The roles that may use Chat box at all. */
-export const CHAT_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
+/**
+ * The roles that may use Chat box at all. The two reception supervisors reach
+ * only the branch CHANNELS (their route allow-list omits the question threads),
+ * and only for the branches in their scope.
+ */
+export const CHAT_ROLES: readonly UserRole[] = [
+  'ADMIN',
+  'RECEPTIONIST',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+];
 
 export function assertChatAccess(actor: ChatActor): void {
   if (!CHAT_ROLES.includes(actor.role)) {
@@ -112,7 +124,9 @@ export function visibilityWhere(actor: ChatActor): Prisma.ChatConversationWhereI
 export function channelWhere(actor: ChatActor): Prisma.ChatConversationWhereInput {
   assertChatAccess(actor);
   if (actor.role === 'ADMIN') return { branchChannel: true };
-  return { branchChannel: true, branchId: actor.branchId ?? -1 };
+  // The shared scope: a receptionist's own branch, a manager's assigned ones,
+  // every branch for the general manager — the same answer every screen uses.
+  return { branchChannel: true, ...scopedBranchFilter(actor) };
 }
 
 export const MESSAGE_INCLUDE = {

@@ -46,7 +46,7 @@ import { generateChatFileName, readChatFile, saveChatFile, sniffChatMime } from 
 function actorOf(req: Request): ChatActor {
   const user = req.currentUser;
   if (!user) throw ApiError.authRequired();
-  return { id: user.id, role: user.role, branchId: user.branchId ?? null };
+  return { id: user.id, role: user.role, branchId: user.branchId ?? null, managedBranchIds: user.managedBranchIds };
 }
 
 function idOf(raw: string | undefined): string {
@@ -131,7 +131,13 @@ export function createChatRouter(): Router {
   const router = Router();
 
   // ONE gate for the whole module.
-  router.use('/chat', requireAuth, requirePasswordChanged, requireRole('ADMIN', 'RECEPTIONIST'));
+  // Managers reach only the branch channels (their route allow-list), scoped by branch.
+  router.use(
+    '/chat',
+    requireAuth,
+    requirePasswordChanged,
+    requireRole('ADMIN', 'RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
+  );
 
   /*
     THE CHAT BUBBLE — branch channels. The list is the branch table (see

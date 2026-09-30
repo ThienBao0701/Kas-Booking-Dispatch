@@ -55,7 +55,7 @@ import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
 import { formatVnd, groupDigits, parseVnd, parseVndOrZero } from '../lib/money';
 import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
-import { PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
+import { EXPENSE_SOURCE, PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
 import { useShiftCash } from '../hooks/useShiftCash';
 
 /**
@@ -496,18 +496,21 @@ function SourceSelect({
   );
 }
 
-function NewPaymentForm({
+export function NewPaymentForm({
   methods,
   sources,
   onCreated,
   onCancel,
   bare,
+  branchId,
 }: {
   methods?: ReportOptions['paymentMethods'];
   sources: string[];
   onCreated: () => void | Promise<void>;
   onCancel?: () => void;
   bare?: boolean;
+  /** A supervisor's target branch; omitted for Reception (its shift decides). */
+  branchId?: number;
 }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState<string | null>(null);
@@ -516,18 +519,25 @@ function NewPaymentForm({
   const [triedSubmit, setTriedSubmit] = useState(false);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
+  /*
+    "CHI TIỀN" AS A SOURCE: a pure cash payout. There is no "Thu tiền" and no
+    method to choose — it is cash leaving the drawer, recorded in "Chi tiền"
+    alone. The server enforces the same rule; the form just asks only for it.
+  */
+  const payout = form.source === EXPENSE_SOURCE;
 
   const create = useMutation({
     mutationFn: () =>
       reportsApi.create({
+        branchId,
         category: 'PAYMENT',
         payment: {
           ezCode: form.ezCode.trim() || undefined,
           source: form.source,
           guestName: form.guestName.trim() || undefined,
-          method: form.method,
+          method: payout ? 'CASH' : form.method,
           // Parsed at the boundary: the grouped display never leaves the field.
-          amount: parseVnd(form.amount) ?? 0,
+          amount: payout ? 0 : (parseVnd(form.amount) ?? 0),
           expense: parseVndOrZero(form.expense),
           note: form.note.trim() || undefined,
         },
@@ -543,7 +553,9 @@ function NewPaymentForm({
 
   // The server refuses a payment without a source; the form says so first.
   const missingSource = form.source === '';
-  const ready = parseVnd(form.amount) !== null && !missingSource;
+  // A payout needs its amount above zero; any other payment needs "Thu tiền".
+  const amountReady = payout ? parseVndOrZero(form.expense) > 0 : parseVnd(form.amount) !== null;
+  const ready = amountReady && !missingSource;
 
   return (
     <form
@@ -594,39 +606,54 @@ function NewPaymentForm({
         <Input label="Tên khách" value={form.guestName} onChange={(e) => set('guestName', e.target.value)} data-testid="payment-guest" />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-money">
-        <div className="space-y-1.5">
-          <label htmlFor="payment-method" className="block whitespace-nowrap text-sm font-medium text-slate-700">
-            Phương thức thanh toán
-          </label>
-          <select
-            id="payment-method"
-            value={form.method}
-            onChange={(e) => set('method', e.target.value as PaymentMethod)}
-            data-testid="payment-method"
-            className={selectClass}
-          >
-            {(methods ?? METHOD_FALLBACK).map((m) => (
-              <option key={m.code} value={m.code}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+      {payout ? (
+        <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-money">
+          <MoneyInput
+            label="Chi tiền"
+            required
+            value={form.expense}
+            onChange={(v) => set('expense', v)}
+            data-testid="payment-expense"
+          />
+          <p className="self-end pb-2.5 text-xs text-slate-600 sm:col-span-2" data-testid="payment-payout-hint">
+            Khoản chi tiền mặt tại quầy — không ghi số tiền thu.
+          </p>
         </div>
-        <MoneyInput
-          label="Thu tiền"
-          required
-          value={form.amount}
-          onChange={(v) => set('amount', v)}
-          data-testid="payment-amount"
-        />
-        <MoneyInput
-          label="Chi tiền"
-          value={form.expense}
-          onChange={(v) => set('expense', v)}
-          data-testid="payment-expense"
-        />
-      </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-money">
+          <div className="space-y-1.5">
+            <label htmlFor="payment-method" className="block whitespace-nowrap text-sm font-medium text-slate-700">
+              Phương thức thanh toán
+            </label>
+            <select
+              id="payment-method"
+              value={form.method}
+              onChange={(e) => set('method', e.target.value as PaymentMethod)}
+              data-testid="payment-method"
+              className={selectClass}
+            >
+              {(methods ?? METHOD_FALLBACK).map((m) => (
+                <option key={m.code} value={m.code}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <MoneyInput
+            label="Thu tiền"
+            required
+            value={form.amount}
+            onChange={(v) => set('amount', v)}
+            data-testid="payment-amount"
+          />
+          <MoneyInput
+            label="Chi tiền"
+            value={form.expense}
+            onChange={(v) => set('expense', v)}
+            data-testid="payment-expense"
+          />
+        </div>
+      )}
 
       <label className="block space-y-1.5 text-sm font-medium text-slate-700">
         Ghi chú
@@ -650,7 +677,7 @@ function NewPaymentForm({
         ) : null}
         <Button
           type="submit"
-          disabled={parseVnd(form.amount) === null}
+          disabled={!amountReady}
           loading={create.isPending}
           data-testid="payment-add"
         >
@@ -911,8 +938,9 @@ function EditRow({
           ezCode: draft.ezCode.trim(),
           source: draft.source,
           guestName: draft.guestName.trim(),
-          method: draft.method,
-          amount: parseVnd(draft.amount) ?? 0,
+          // A "Chi tiền" row is a pure cash payout: no amount collected, cash only.
+          method: draft.source === EXPENSE_SOURCE ? 'CASH' : draft.method,
+          amount: draft.source === EXPENSE_SOURCE ? 0 : (parseVnd(draft.amount) ?? 0),
           expense: parseVndOrZero(draft.expense),
           note: draft.note.trim(),
         },

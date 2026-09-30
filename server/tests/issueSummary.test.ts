@@ -3,6 +3,7 @@ import type { IssueStatus } from '@prisma/client';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -153,6 +154,7 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
     expect(before.newCount).toBe(1);
     expect(before.inProgressCount).toBe(0);
 
+    await assignTo(adminAgent, issue.id, techAgent);
     await techAgent
       .post(`/api/issues/${issue.id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
@@ -167,6 +169,7 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
     const before = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     // COMPLETED is reachable only from IN_PROGRESS, so the incident is accepted
     // first — the summary counts both of those as unresolved.
+    await assignTo(adminAgent, issue.id, techAgent);
     await techAgent
       .post(`/api/issues/${issue.id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });

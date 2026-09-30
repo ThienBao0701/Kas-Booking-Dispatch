@@ -15,6 +15,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -61,8 +62,10 @@ async function report(fields: Record<string, string> = {}) {
   return res.body.issue.id as string;
 }
 
-const accept = (id: string) =>
-  tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
+const accept = async (id: string) => {
+  await assignTo(admin, id, tech);
+  return tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
+};
 
 describe('what a correction may change', () => {
   it('changes the description, room and fault type, and says so in the audit', async () => {

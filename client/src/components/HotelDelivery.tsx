@@ -14,10 +14,12 @@
  * row's detail panel on a phone.
  */
 import { useState } from 'react';
+import { SourceTag } from './SourceTag';
+import { deliveryEditFields } from '../lib/recordEdit';
 import { type OperationalReport, type ReportOptions } from '../api/receptionReports';
 import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
-import { RecordEditDialog, VoidDialog, VoidedNote, type EditField } from './RecordDialogs';
+import { RecordEditDialog, VoidDialog, VoidedNote } from './RecordDialogs';
 import { Actions } from './RecordRowActions';
 import { formatDateTime } from '../lib/format';
 import { HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
@@ -65,23 +67,8 @@ export function DeliveryTable({
   const [editing, setEditing] = useState<OperationalReport | null>(null);
   const [voiding, setVoiding] = useState<string | null>(null);
 
-  const departments = options?.deliveryDepartments ?? [
-    { code: 'RECEPTION', label: 'Lễ tân' },
-    { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
-    { code: 'TECHNICAL', label: 'Kỹ thuật' },
-  ];
-  const editFields: EditField[] = [
-    {
-      name: 'department',
-      label: 'Bộ phận',
-      kind: 'select',
-      required: true,
-      options: departments.map((d) => ({ value: d.code, label: d.label })),
-    },
-    { name: 'itemName', label: 'Tên hàng hóa', required: true },
-    { name: 'quantity', label: 'Số lượng', kind: 'integer', required: true },
-    { name: 'note', label: 'Ghi chú', kind: 'textarea' },
-  ];
+  // The shared correction fields — the same list the supervisors' dialog uses.
+  const editFields = deliveryEditFields(options);
 
   const columns: DataColumn<OperationalReport>[] = [
     {
@@ -135,7 +122,12 @@ export function DeliveryTable({
       header: 'Hoàn thành lúc',
       secondary: true,
       className: 'whitespace-nowrap text-slate-500',
-      render: (r) => formatDateTime(r.delivery?.completedAt ?? r.createdAt),
+      render: (r) => (
+        <>
+          {formatDateTime(r.delivery?.completedAt ?? r.createdAt)}
+          <SourceTag label={r.sourceLabel} />
+        </>
+      ),
     },
   ];
 

@@ -638,6 +638,11 @@ export const LIFECYCLE_DESTRUCTIVE: LifecycleAction[] = ['CANCEL', 'NO_SHOW'];
 
 export const branchesApi = {
   list: () => api.get<{ branches: Branch[] }>('/branches'),
+  /**
+   * The branch's room catalog — the ONE list every room selector reads.
+   * `rooms: null` means the branch has no catalog: the form falls back to a typed room.
+   */
+  rooms: (branchId: number) => api.get<{ branchId: number; rooms: string[] | null }>(`/branches/${branchId}/rooms`),
 };
 
 export interface DashboardSummary {

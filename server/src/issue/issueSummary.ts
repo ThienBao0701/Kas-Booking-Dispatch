@@ -14,12 +14,20 @@
 import type { Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { seesAllBranches } from '../middleware/auth';
-import { inspectionEnabled, outstandingStatuses, stageWhere } from './issueLifecycle';
+import { inspectionEnabled, outstandingStatuses, stageWhere, type IssueStage } from './issueLifecycle';
+import { isReceptionSupervisor, scopedBranchRows } from '../auth/branchScope';
+import { issueVisibilityWhere, technicianStageWhere } from './issueService';
 
 // The full role enum, not a two-member union: a new role must not silently fail
 // to compile here. Which roles are ALLOWED is decided by the checks below and
 // by branch scoping, never by narrowing this type.
-type Actor = { id: number; role: UserRole; branchId: number | null; fullName: string };
+type Actor = {
+  id: number;
+  role: UserRole;
+  branchId: number | null;
+  fullName: string;
+  managedBranchIds?: readonly number[];
+};
 
 export interface BranchIssueSummary {
   branchId: number;
@@ -40,19 +48,28 @@ export interface IssueSummary {
   byBranch: BranchIssueSummary[];
 }
 
-/** Computes the unresolved-issue summary within the actor's branch scope. */
+/**
+ * Computes the unresolved-issue summary within the actor's scope.
+ *
+ * The COUNTS go through `issueVisibilityWhere`, the rule every incident read
+ * uses — so a Quản lý lễ tân counts its branches, and a technician counts only
+ * its own jobs (never the eight-branch totals). The branch ROWS are the scope's.
+ */
 export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
-  const isGlobal = seesAllBranches(actor.role);
-  // -1 never matches a real branch, so an unassigned receptionist sees nothing.
-  const scopedBranchId = actor.branchId ?? -1;
+  const branchRows: Prisma.BranchWhereInput = isReceptionSupervisor(actor.role)
+    ? scopedBranchRows(actor)
+    : seesAllBranches(actor.role)
+      ? { active: true }
+      : // -1 never matches a real branch, so an unassigned receptionist sees nothing.
+        { id: actor.branchId ?? -1 };
 
-  const branches = await prisma.branch.findMany({
-    where: isGlobal ? { active: true } : { id: scopedBranchId },
-    orderBy: { id: 'asc' },
-  });
+  const branches = await prisma.branch.findMany({ where: branchRows, orderBy: { id: 'asc' } });
 
-  const where: Prisma.HotelIssueWhereInput = { status: { in: outstandingStatuses() } };
-  if (!isGlobal) where.branchId = scopedBranchId;
+  const visibility =
+    actor.role === 'BOOKING_DEPARTMENT' || actor.role === 'HOUSEKEEPING'
+      ? { branchId: actor.branchId ?? -1 }
+      : issueVisibilityWhere(actor);
+  const where: Prisma.HotelIssueWhereInput = { AND: [visibility], status: { in: outstandingStatuses() } };
 
   const groups = await prisma.hotelIssue.groupBy({
     by: ['branchId', 'status'],
@@ -128,46 +145,41 @@ export async function computeTechnicalCounts(
   actor: Actor,
   branchId?: number,
 ): Promise<TechnicalCounts> {
-  const where: Prisma.HotelIssueWhereInput = {};
-  if (!seesAllBranches(actor.role)) {
-    where.branchId = actor.branchId ?? -1; // -1 never matches → unassigned sees nothing
-  } else if (branchId !== undefined) {
-    where.branchId = branchId;
-  }
+  // The same visibility as the lists: a technician counts its own work only.
+  const visibility = issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : branchId);
+  /** One queue's count, with a technician's own part in that stage applied. */
+  const inQueue = (stage: IssueStage, extra: Prisma.HotelIssueWhereInput) => ({
+    AND: [visibility, actor.role === 'TECHNICAL' ? technicianStageWhere(actor.id, stage) : {}, extra],
+  });
 
   /*
-    "Sự cố khách sạn" and "Cần sửa lại" are each COUNTED, never one derived by
-    subtracting the other: under READ COMMITTED every statement takes its own
-    snapshot, and "NEW minus rework" read across two of them went negative when
-    a failed inspection landed in between. REPEATABLE READ then gives the whole
-    set one snapshot, so the tabs also add up; a read-only transaction at that
-    level cannot hit a serialization failure.
+    EVERY TAB IS COUNTED ON ITS OWN, never one derived by subtracting another:
+    under READ COMMITTED every statement takes its own snapshot, and "NEW minus
+    rework" read across two of them went negative when a failed inspection
+    landed in between. REPEATABLE READ gives the whole set one snapshot, so the
+    tabs also add up; a read-only transaction at that level cannot hit a
+    serialization failure.
   */
-  const { groups, waitingCount, reworkCount } = await prisma.$transaction(
+  const counts = await prisma.$transaction(
     async (tx) => ({
-      groups: await tx.hotelIssue.groupBy({
-        by: ['status'],
-        where,
-        _count: { _all: true },
-      }),
-      waitingCount: await tx.hotelIssue.count({ where: { ...where, ...stageWhere('WAITING') } }),
-      reworkCount: await tx.hotelIssue.count({ where: { ...where, ...stageWhere('REWORK') } }),
+      waiting: await tx.hotelIssue.count({ where: inQueue('WAITING', stageWhere('WAITING')) }),
+      rework: await tx.hotelIssue.count({ where: inQueue('REWORK', stageWhere('REWORK')) }),
+      inProgress: await tx.hotelIssue.count({ where: inQueue('IN_PROGRESS', { status: 'IN_PROGRESS' }) }),
+      awaiting: await tx.hotelIssue.count({ where: inQueue('COMPLETED', { status: 'AWAITING_INSPECTION' }) }),
+      completed: await tx.hotelIssue.count({ where: inQueue('COMPLETED', { status: 'COMPLETED' }) }),
     }),
     { isolationLevel: 'RepeatableRead' },
   );
 
-  const of = (status: string): number =>
-    groups.find((g) => g.status === status)?._count._all ?? 0;
-
   const inspection = inspectionEnabled();
   return {
-    newCount: waitingCount,
-    reworkCount,
-    inProgressCount: of('IN_PROGRESS'),
+    newCount: counts.waiting,
+    reworkCount: counts.rework,
+    inProgressCount: counts.inProgress,
     // While inspection is dormant there is no such queue, and a row finished
     // during its trial counts as what it is: finished.
-    awaitingInspectionCount: inspection ? of('AWAITING_INSPECTION') : 0,
-    completedCount: of('COMPLETED') + (inspection ? 0 : of('AWAITING_INSPECTION')),
+    awaitingInspectionCount: inspection ? counts.awaiting : 0,
+    completedCount: counts.completed + (inspection ? 0 : counts.awaiting),
     inspectionEnabled: inspection,
   };
 }

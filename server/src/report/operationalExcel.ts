@@ -52,6 +52,11 @@ function voidState(row: SerializedReport): string {
   return row.voided ? 'Đã hủy' : '';
 }
 
+/** The creator, and "(Admin tạo)" when a supervisor entered the record. */
+function creator(row: SerializedReport): string {
+  return row.sourceLabel ? `${row.createdByName} (${row.sourceLabel})` : row.createdByName;
+}
+
 function when(iso: string | null): string {
   return iso ? hcmDateTime(new Date(iso)) : '';
 }
@@ -157,7 +162,7 @@ export async function buildOperationalReportWorkbook(
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
         stt: i + 1,
-        staff: row.createdByName,
+        staff: creator(row),
         shift: row.shiftName ?? '',
         ez: row.payment?.ezCode ?? '',
         source: row.payment?.source ?? '',
@@ -214,7 +219,7 @@ export async function buildOperationalReportWorkbook(
         ez: row.guestRequest?.ezCode ?? '',
         // The note alone: a legacy "Ký gửi" has its own column on this sheet.
         content: row.guestRequest?.note ?? '',
-        createdBy: row.createdByName,
+        createdBy: creator(row),
         createdShift: row.shiftName ?? '',
         createdAt: when(row.createdAt),
         completedBy: row.guestRequest?.completedByName ?? '',
@@ -242,6 +247,12 @@ export async function buildOperationalReportWorkbook(
     // The ONE canonical cause — the latest technician's, else the reported one.
     { header: 'Nguyên nhân', key: 'cause', width: 36 },
     { header: 'Trạng thái kỹ thuật', key: 'status', width: 18 },
+    // THE ASSIGNMENT MODEL: who holds it, where it stands, and every move.
+    { header: 'Tình trạng giao', key: 'assignmentState', width: 26 },
+    { header: 'Kỹ thuật được giao', key: 'assigned', width: 22 },
+    { header: 'Lịch sử giao kỹ thuật', key: 'assignments', width: 56 },
+    { header: 'Kết quả sửa chữa', key: 'result', width: 36 },
+    { header: 'Báo lại sau lần hoàn thành trước', key: 'repeat', width: 40 },
     { header: 'Người xử lý', key: 'technician', width: 20 },
     { header: 'SĐT kỹ thuật', key: 'phone', width: 16 },
     { header: 'Thời gian hoàn thành', key: 'completedAt', width: 20 },
@@ -286,6 +297,31 @@ export async function buildOperationalReportWorkbook(
         description: issue?.description ?? '',
         cause: issue?.cause ?? '',
         status: issue?.stageLabel ?? '',
+        assignmentState: issue?.assignmentStateLabel ?? '',
+        assigned: issue?.assignedTechnician?.name ?? '',
+        // "15/09 09:10 Nguyễn Văn A (giao bởi Admin); 16/09 08:00 Trần B, thay Nguyễn Văn A"
+        assignments: (issue?.assignments ?? [])
+          .map(
+            (a) =>
+              `${when(a.createdAt)} ${a.technicianName}` +
+              (a.previousTechnicianName ? `, thay ${a.previousTechnicianName}` : '') +
+              ` (giao bởi ${a.assignedByName})`,
+          )
+          .join('; '),
+        // Every attempt's outcome, oldest first — the repair history in one cell.
+        result: (issue?.attempts ?? [])
+          .filter((a) => a.outcome)
+          .map(
+            (a) =>
+              `Lần ${a.attemptNumber} ${a.technicianName}: ` +
+              (a.outcome === 'CANNOT_REPAIR' ? `không sửa được — ${a.reason ?? ''}` : a.result ?? 'hoàn thành'),
+          )
+          .join('; '),
+        repeat: issue?.repeatOf
+          ? `Lần trước: ${issue.repeatOf.technicianName ?? '—'}, hoàn thành ${
+              issue.repeatOf.completedAt ? when(issue.repeatOf.completedAt) : '—'
+            }`
+          : '',
         technician: issue?.repairerName ?? '',
         phone: issue?.technicianPhone ?? '',
         completedAt: issue?.completedAt ? when(issue.completedAt) : '',
@@ -295,7 +331,7 @@ export async function buildOperationalReportWorkbook(
         inspectionNote: judged?.inspection?.note ?? '',
         attempts: issue?.attempts.length ?? 0,
         cannotRepair: issue?.cannotRepairCount ?? 0,
-        createdBy: row.createdByName,
+        createdBy: creator(row),
         shift: row.shiftName ?? '',
         createdAt: when(row.createdAt),
       });
@@ -339,7 +375,7 @@ export async function buildOperationalReportWorkbook(
         resolution: c?.resolution ?? '',
         completedBy: c?.completedByName ?? '',
         completedAt: when(c?.completedAt ?? null),
-        staff: row.createdByName,
+        staff: creator(row),
         shift: row.shiftName ?? '',
         at: when(row.createdAt),
         state: voidState(row),
@@ -401,7 +437,7 @@ export async function buildOperationalReportWorkbook(
         tripadvisor: s?.tripadvisorCount ?? null,
         google: s?.googleCount ?? null,
         note: s?.note ?? '',
-        staff: row.createdByName,
+        staff: creator(row),
         shift: row.shiftName ?? '',
         at: when(row.createdAt),
         state: voidState(row),
@@ -444,11 +480,52 @@ export async function buildOperationalReportWorkbook(
         note: d?.note ?? '',
         status: d?.statusLabel ?? '',
         completedAt: d ? when(d.completedAt) : '',
-        staff: row.createdByName,
+        staff: creator(row),
         shift: row.shiftName ?? '',
         at: when(row.createdAt),
         state: voidState(row),
         edits: editHistory(row),
+      });
+    });
+  }
+
+  /* ------------- 8. Buồng phòng — room findings and their collection ------------- */
+  const rooms = wb.addWorksheet('Buồng phòng');
+  rooms.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Phòng', key: 'room', width: 10 },
+    { header: 'Tình trạng', key: 'type', width: 28 },
+    { header: 'Mô tả', key: 'note', width: 40 },
+    { header: 'Người kiểm tra', key: 'staff', width: 20 },
+    { header: 'Ghi nhận bởi', key: 'recordedBy', width: 20 },
+    { header: 'Thời gian', key: 'at', width: 18 },
+    { header: 'Thu tiền', key: 'status', width: 16 },
+    { header: 'Số tiền', key: 'amount', width: 16 },
+    { header: 'Phương thức', key: 'method', width: 16 },
+    { header: 'Lý do không thu được', key: 'reason', width: 30 },
+    { header: 'Người thu', key: 'collector', width: 20 },
+    { header: 'Bản ghi', key: 'state', width: 12 },
+  ];
+  headerRow(rooms);
+  moneyColumns(rooms, ['amount']);
+  for (const section of data.branches) {
+    section.housekeeping.forEach((issue, i) => {
+      rooms.addRow({
+        branch: branchLabel(section),
+        stt: i + 1,
+        room: issue.roomNumber,
+        type: issue.typeLabel,
+        note: issue.note ?? '',
+        staff: issue.staffName,
+        recordedBy: issue.recordedByName,
+        at: when(issue.createdAt),
+        status: issue.collectionStatusLabel ?? '',
+        amount: issue.collection?.amount ?? null,
+        method: issue.collection?.methodLabel ?? '',
+        reason: issue.collection?.reason ?? '',
+        collector: issue.collection?.recordedByName ?? '',
+        state: issue.voided ? `Đã hủy — ${issue.voidReason ?? ''}` : 'Hiệu lực',
       });
     });
   }

@@ -81,6 +81,29 @@ function Body({ s }: { s: IncidentStatistics }) {
   const empty = s.totals.total === 0;
   return (
     <div className="space-y-5" data-testid="stats-body">
+      {/* A technician's page is their own work — the server scoped every figure below to them. */}
+      {s.technician ? (
+        <Card className="p-4" data-testid="stats-mine">
+          <h2 className="text-sm font-semibold text-slate-900">Thống kê của tôi — {s.technician.name}</h2>
+          <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {(
+              [
+                ['Đang được giao', s.technician.assignedNow],
+                ['Đang sửa', s.technician.inProgressNow],
+                ['Hoàn thành trong kỳ', s.technician.completed],
+                ['Không sửa được trong kỳ', s.technician.cannotRepair],
+                ['Đã chuyển người khác', s.technician.reassignedAway],
+                ['Báo lại sau hoàn thành', s.technician.reopened],
+              ] as const
+            ).map(([label, value]) => (
+              <div key={label} className="rounded-xl bg-slate-50 px-3 py-2">
+                <dt className="text-xs text-slate-500">{label}</dt>
+                <dd className="text-xl font-semibold tabular-nums text-slate-900">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </Card>
+      ) : null}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" data-testid="stats-tiles">
         <StatCard label={`Sự cố trong kỳ (${s.period.days} ngày)`} value={s.totals.total} icon={ClipboardList} />
         <StatCard label="Đang tồn đọng (mọi ngày báo)" value={s.outstanding.total} icon={AlertTriangle} tone={s.outstanding.total > 0 ? 'red' : 'default'} />

@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { serializeBranch } from '../auth/serialize';
+import { branchScopeOf, scopeIncludes, scopedBranchRows } from '../auth/branchScope';
+import { roomsForBranchCode } from '../room/branchRooms';
 import {
   requireAuth,
   requirePasswordChanged,
@@ -28,6 +30,17 @@ export function createBranchesRouter(): Router {
         const branches = await prisma.branch.findMany({
           where: { active: true },
           orderBy: { id: 'asc' },
+        });
+        res.json({ branches: branches.map((b) => serializeBranch(b)) });
+        return;
+      }
+
+      // Quản lý lễ tân: the branches it supervises; Tổng quản lý lễ tân: all.
+      // The shared scope, so this list and every scoped query agree.
+      if (user.role === 'RECEPTION_MANAGER' || user.role === 'RECEPTION_GENERAL_MANAGER') {
+        const branches = await prisma.branch.findMany({
+          where: scopedBranchRows(user),
+          orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }],
         });
         res.json({ branches: branches.map((b) => serializeBranch(b)) });
         return;
@@ -65,6 +78,26 @@ export function createBranchesRouter(): Router {
       })().catch(next);
     },
   );
+
+  /*
+    GET /api/branches/:id/rooms — the branch's room catalog, for the room
+    selector. `rooms: null` means the branch has no catalog and the form falls
+    back to a typed room. Readable by anyone who may work that branch: the
+    global departments, a supervisor with it in scope, and its own staff.
+  */
+  router.get('/branches/:id/rooms', requireAuth, requirePasswordChanged, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) throw ApiError.notFound('Không tìm thấy chi nhánh.');
+      if (!seesAllBranches(user.role) && !scopeIncludes(branchScopeOf(user), id)) {
+        throw ApiError.branchAccessDenied();
+      }
+      const branch = await prisma.branch.findFirst({ where: { id, active: true } });
+      if (!branch) throw ApiError.notFound('Không tìm thấy chi nhánh.');
+      res.json({ branchId: branch.id, rooms: roomsForBranchCode(branch.code) });
+    })().catch(next);
+  });
 
   return router;
 }

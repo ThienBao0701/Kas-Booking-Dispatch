@@ -315,6 +315,15 @@ describe('the form will not submit an incomplete report', () => {
 /* The Technical queues                                                       */
 /* -------------------------------------------------------------------------- */
 
+/** Given to TECHNICAL_USER (id 4) by the Admin — what "Được giao" lists. */
+const MINE = {
+  assignedTechnician: { id: 4, name: 'Kỹ thuật viên trực' },
+  assignedAt: '2026-09-17T02:30:00.000Z',
+  assignedByName: 'Quản trị viên',
+  assignmentState: 'ASSIGNED',
+  assignmentStateLabel: 'Đã giao kỹ thuật',
+};
+
 /**
  * The technical screens' API. `inspection` is the server's
  * TECHNICAL_INSPECTION_ENABLED — off unless a test switches it on.
@@ -345,7 +354,7 @@ function technicalRoutes(
         },
       },
     }),
-    'GET /api/issues?stage=WAITING&pageSize=100': () => listBody([at()]),
+    'GET /api/issues?stage=WAITING&pageSize=100': () => listBody([at(MINE)]),
     'GET /api/issues?stage=REWORK&pageSize=100': () => listBody([]),
     'GET /api/issues?stage=IN_PROGRESS&pageSize=100': () =>
       listBody([at({ id: 'i2', status: 'IN_PROGRESS', technicianName: 'Trần Văn B', technicianPhone: '0901234567', acceptedAt: '2026-09-17T03:00:00.000Z', attempts: [ATTEMPT_OPEN] })]),
@@ -406,7 +415,7 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     renderApp('/app/technical/new');
 
     const tabNew = await screen.findByTestId('technical-tab-new');
-    expect(tabNew).toHaveTextContent('Sự cố khách sạn');
+    expect(tabNew).toHaveTextContent('Được giao');
     // The counts arrive from their own query, so the number is awaited.
     await waitFor(() => expect(tabNew).toHaveTextContent('2'));
     expect(screen.getByTestId('technical-tab-in-progress')).toHaveTextContent('Đang sửa');
@@ -420,12 +429,12 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     expect(screen.queryByTestId('technical-tab-awaiting-inspection')).not.toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Điều hướng chính' });
     expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual([
-      'Sự cố khách sạn',
+      'Được giao',
       'Cần sửa lại',
       'Đang sửa',
       'Đã hoàn thành',
+      'Lịch sử',
       'Thống kê',
-      'Giao nhận hàng hóa',
     ]);
     expect(screen.queryByText(/nghiệm thu/i)).not.toBeInTheDocument();
   });
@@ -443,7 +452,7 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     installApiMock(technicalRoutes());
     renderApp('/app/technical/awaiting-inspection');
 
-    expect(await screen.findByRole('list', { name: 'Sự cố khách sạn' })).toBeInTheDocument();
+    expect(await screen.findByRole('list', { name: 'Được giao' })).toBeInTheDocument();
     expect(screen.queryByRole('list', { name: 'Chờ nghiệm thu' })).not.toBeInTheDocument();
   });
 
@@ -452,7 +461,7 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     renderApp('/app/technical/new');
 
     // Scoped to the queue: the branch name also appears in the branch filter.
-    const queue = await screen.findByRole('list', { name: 'Sự cố khách sạn' });
+    const queue = await screen.findByRole('list', { name: 'Được giao' });
     expect(within(queue).getByText('Phòng · Phòng 301')).toBeInTheDocument();
     expect(within(queue).getByText('05 Trương Định')).toBeInTheDocument();
     expect(within(queue).getByText(/Lễ tân Một/)).toBeInTheDocument();
@@ -480,9 +489,13 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Tiếp nhận sự cố' });
     const confirm = within(dialog).getByTestId('accept-confirm');
 
-    expect(confirm).toBeDisabled();
-    await user.type(within(dialog).getByTestId('technician-name'), 'Trần Văn B');
+    // Prefilled with the signed-in technician's full name — editable for a colleague.
+    const name = within(dialog).getByTestId('technician-name');
+    expect(name).toHaveValue('Kỹ thuật viên trực');
     expect(confirm).toBeDisabled(); // a name but no phone
+    await user.clear(name);
+    await user.type(name, 'Trần Văn B');
+    expect(confirm).toBeDisabled();
     await user.type(within(dialog).getByTestId('technician-phone'), '0901234567');
     expect(confirm).toBeEnabled();
 
@@ -636,6 +649,56 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     await screen.findByRole('list', { name: 'Chờ nghiệm thu' });
     expect(screen.queryByTestId('inspect-i3')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Nghiệm thu/ })).not.toBeInTheDocument();
+  });
+
+  it('says who assigned the job and when, and notes a repeat neutrally', async () => {
+    installApiMock(
+      technicalRoutes({
+        'GET /api/issues?stage=WAITING&pageSize=100': () =>
+          listBody([
+            issue({
+              ...MINE,
+              repeatOf: {
+                id: 'old',
+                description: 'Máy lạnh chảy nước',
+                reportedAt: '2026-09-01T02:00:00.000Z',
+                completedAt: '2026-09-02T02:00:00.000Z',
+                technicianName: 'Bảo',
+              },
+            }),
+          ]),
+      }),
+    );
+    renderApp('/app/technical/new');
+    const queue = await screen.findByRole('list', { name: 'Được giao' });
+    expect(within(queue).getByTestId('assignment-i1')).toHaveTextContent('Đã giao kỹ thuật');
+    expect(within(queue).getByTestId('assignment-i1')).toHaveTextContent('giao bởi Quản trị viên');
+    const repeat = within(queue).getByTestId('issue-repeat');
+    expect(repeat).toHaveTextContent('Báo lại sau lần hoàn thành trước');
+    expect(repeat).toHaveTextContent('Máy lạnh chảy nước');
+    expect(repeat).toHaveTextContent('Bảo');
+    // A warning, never a block: the job can still be taken.
+    expect(within(queue).getByTestId('accept-i1')).toBeInTheDocument();
+  });
+
+  it('keeps "Lịch sử" — every stage, no count — and offers nothing on a job now held by someone else', async () => {
+    installApiMock(
+      technicalRoutes({
+        'GET /api/issues?pageSize=100': () =>
+          listBody([
+            issue({
+              assignedTechnician: { id: 9, name: 'Người khác' },
+              assignmentState: 'ASSIGNED',
+              assignmentStateLabel: 'Đã giao kỹ thuật',
+            }),
+          ]),
+      }),
+    );
+    renderApp('/app/technical/history');
+    const queue = await screen.findByRole('list', { name: 'Lịch sử' });
+    expect(within(queue).getByText('Phòng · Phòng 301')).toBeInTheDocument();
+    expect(screen.getByTestId('technical-tab-history')).toHaveTextContent(/^Lịch sử$/);
+    expect(screen.queryByTestId('accept-i1')).not.toBeInTheDocument();
   });
 
   it('offers no completion on an incident nobody accepted', async () => {
@@ -897,7 +960,7 @@ describe('Bộ phận kỹ thuật filters "Đã hoàn thành" by the day the re
   it('shows no completion filter on the other queues', async () => {
     installApiMock(technicalRoutes());
     renderApp('/app/technical/new');
-    await screen.findByRole('list', { name: 'Sự cố khách sạn' });
+    await screen.findByRole('list', { name: 'Được giao' });
     expect(screen.queryByTestId('done-filters')).not.toBeInTheDocument();
   });
 });

@@ -116,6 +116,9 @@ function routes(
   };
 }
 
+/** Held by TECHNICAL_USER (id 4): only the holder is offered "Tiếp nhận". */
+const MINE = { assignedTechnician: { id: 4, name: 'Kỹ thuật viên trực' }, assignmentState: 'ASSIGNED' };
+
 const QUEUE_PATH = { WAITING: 'new', REWORK: 'rework', IN_PROGRESS: 'in-progress', COMPLETED: 'completed' } as const;
 
 describe('the two outcomes of a repair', () => {
@@ -128,7 +131,7 @@ describe('the two outcomes of a repair', () => {
   });
 
   it('offers neither on an incident nobody has accepted', async () => {
-    installApiMock(routes('WAITING', [issue({ status: 'NEW', acceptedAt: null, technicianName: null })]));
+    installApiMock(routes('WAITING', [issue({ status: 'NEW', acceptedAt: null, technicianName: null, ...MINE })]));
     renderApp(`/app/technical/${QUEUE_PATH.WAITING}`);
 
     expect(await screen.findByTestId('accept-i1')).toBeInTheDocument();
@@ -209,7 +212,7 @@ describe('the two outcomes of a repair', () => {
     expect(sent).toBeNull();
     // And it says what will happen to the record, so the technician is not
     // guessing whether their four minutes are about to be thrown away.
-    expect(within(dialog).getByText(/Thông tin người sửa và thời gian đã xử lý vẫn được lưu lại/))
+    expect(within(dialog).getByText(/lịch sử giao việc vẫn được lưu lại/))
       .toBeInTheDocument();
 
     await user.click(within(dialog).getByTestId('cannot-repair-confirm'));
@@ -298,10 +301,17 @@ describe('an incident that came back', () => {
     expect(within(timeline).getByText('Lý do: Không có linh kiện')).toBeInTheDocument();
   });
 
-  it('can still be accepted again', async () => {
-    installApiMock(routes('REWORK', [returned]));
+  it('can be accepted again once it is reassigned to this technician', async () => {
+    installApiMock(routes('REWORK', [{ ...returned, ...MINE }]));
     renderApp(`/app/technical/${QUEUE_PATH.REWORK}`);
     expect(await screen.findByTestId('accept-i1')).toBeInTheDocument();
+  });
+
+  it('offers nothing while it waits to be reassigned — the supervisor decides who goes next', async () => {
+    installApiMock(routes('REWORK', [{ ...returned, assignedTechnician: null, assignmentState: 'AWAITING_REASSIGNMENT' }]));
+    renderApp(`/app/technical/${QUEUE_PATH.REWORK}`);
+    await screen.findByRole('list', { name: 'Cần sửa lại' });
+    expect(screen.queryByTestId('accept-i1')).not.toBeInTheDocument();
   });
 });
 

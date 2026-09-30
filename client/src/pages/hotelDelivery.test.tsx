@@ -426,16 +426,17 @@ describe('what Technical and Housekeeping see', () => {
     expect(screen.getByTestId('department-delivery-archived')).toBeInTheDocument();
     expect(within(active).queryByRole('button', { name: /Sửa|Hủy/ })).not.toBeInTheDocument();
     expect(screen.queryByTestId('category-add')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Giao nhận hàng hóa' })).toBeInTheDocument();
+    // Off the Technical menu; the page and its data stay reachable by address.
+    expect(screen.queryByRole('link', { name: 'Giao nhận hàng hóa' })).not.toBeInTheDocument();
     expect(seen).toEqual(expect.arrayContaining(['active', 'archived']));
   });
 
-  it('shows Housekeeping the same page, in its own menu', async () => {
+  it('shows Housekeeping the same page by address — no longer on its menu', async () => {
     installApiMock(departmentRoutes(HOUSEKEEPING_USER, []));
     renderApp('/app/deliveries');
     expect(await screen.findByTestId('department-delivery-active')).toBeInTheDocument();
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Kiểm tra phòng', 'Giao nhận hàng hóa']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng']);
   });
 
   it('refuses the page to Reception — it has the journal instead', async () => {

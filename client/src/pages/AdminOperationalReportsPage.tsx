@@ -29,8 +29,18 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Building2, Download } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, Building2, Download, Plus } from 'lucide-react';
+import { useAuth } from '../auth/AuthProvider';
+import { branchLabel, type Branch } from '../auth/types';
+import { branchesApi } from '../api/bookings';
+import { SupervisorCreateDialog } from '../components/SupervisorCreateDialog';
+import { AssignTechnicianDialog } from '../components/AssignTechnicianDialog';
+import { RecordEditDialog } from '../components/RecordDialogs';
+import { RowAction } from '../components/DataTable';
+import { Toast } from '../components/Toast';
+import { recordEditConfig } from '../lib/recordEdit';
+import type { Issue } from '../api/issues';
 import {
   adminReportsApi,
   operationalPdfUrl,
@@ -70,13 +80,26 @@ import { branchOptionLabel } from '../lib/branchTone';
 import { groupByBranch, type ShiftGroup } from '../lib/shiftGroups';
 import { PeriodQuickPicks } from '../components/PeriodQuickPicks';
 import { issuesApi } from '../api/issues';
-import { IncidentExportModal, IncidentRangeSummary, IncidentTable } from '../components/IncidentReporting';
+import {
+  EditIssueModal,
+  IncidentExportModal,
+  IncidentRangeSummary,
+  IncidentTable,
+  NewIssueModal,
+} from '../components/IncidentReporting';
 import { useIssueSummary } from '../hooks/useIssueSummary';
 
 /** Not chosen yet · every branch · one branch. */
 type BranchChoice = number | 'ALL' | null;
 
-type TableState = { isLoading: boolean; isError: boolean; error: unknown; onRetry: () => void };
+type TableState = {
+  isLoading: boolean;
+  isError: boolean;
+  error: unknown;
+  onRetry: () => void;
+  /** "Sửa" on each live record — the shared correction dialog. */
+  onEdit?: (row: OperationalReport) => void;
+};
 
 export function AdminOperationalReportsPage() {
   const today = hcmToday();
@@ -94,6 +117,16 @@ export function AdminOperationalReportsPage() {
   */
   const [range, setRange] = useState<DateRangeValue>({ from: today, to: today });
   const [exportOpen, setExportOpen] = useState(false);
+  /** "+ Báo cáo vấn đề": the branch → category → form dialog. */
+  const [creating, setCreating] = useState(false);
+  /** The branch an incident is being reported for (the shared incident dialog). */
+  const [facilityBranch, setFacilityBranch] = useState<number | null>(null);
+  /** The record being corrected through the shared dialog. */
+  const [editing, setEditing] = useState<OperationalReport | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN';
 
   const rangeValid = range.from !== '' && range.to !== '' && range.from <= range.to;
 
@@ -108,10 +141,23 @@ export function AdminOperationalReportsPage() {
     certainly not of eight ids: a ninth property opening, or one being renamed,
     must not need a code change here.
   */
+  /*
+    THE BRANCHES ARE THE READER'S SCOPE. The Admin keeps its full list (inactive
+    branches included, for history); a Quản lý lễ tân gets the branches it
+    supervises and a Tổng quản lý lễ tân every active one — from the server, which
+    also refuses any other branch on every request below.
+  */
   const branches = useQuery({
-    queryKey: ['admin', 'branches'],
-    queryFn: () => adminBranchesApi.list(),
+    queryKey: ['supervision', 'branches', isAdmin],
+    queryFn: async (): Promise<{ branches: Branch[] }> =>
+      isAdmin ? adminBranchesApi.list() : branchesApi.list(),
   });
+
+  /** After a create or a correction: every list, total and drawer moves together. */
+  const refreshAll = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['admin', 'operational-reports'] });
+    await queryClient.invalidateQueries({ queryKey: ['issues'] });
+  };
 
   const filters = {
     branchId: branch === 'ALL' || branch === null ? undefined : branch,
@@ -153,7 +199,11 @@ export function AdminOperationalReportsPage() {
     isError: data.isError,
     error: data.error,
     onRetry: () => void data.refetch(),
+    onEdit: setEditing,
   };
+  const branchList = branches.data?.branches ?? [];
+  const editConfig = editing ? recordEditConfig(editing, options.data) : null;
+  const facilityTarget = branchList.find((b) => b.id === facilityBranch) ?? null;
 
   return (
     <div>
@@ -164,16 +214,23 @@ export function AdminOperationalReportsPage() {
             Chọn khoảng thời gian, chi nhánh và danh mục. Bản ghi được xếp theo ngày, ca và nhân viên.
           </p>
         </div>
-        <Button
-          variant="secondary"
-          onClick={() => setExportOpen(true)}
-          disabled={branch === null || !rangeValid}
-          data-testid="operational-export-open"
-          className="ml-auto shadow-sm"
-        >
-          <Download className="h-4 w-4" aria-hidden="true" />
-          Xuất báo cáo
-        </Button>
+        <div className="ml-auto flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setExportOpen(true)}
+            disabled={branch === null || !rangeValid}
+            data-testid="operational-export-open"
+            className="shadow-sm"
+          >
+            <Download className="h-4 w-4" aria-hidden="true" />
+            Xuất báo cáo
+          </Button>
+          {/* Enter a record FOR ONE BRANCH — the dialog never offers "Tất cả". */}
+          <Button onClick={() => setCreating(true)} data-testid="supervisor-create-open" className="shadow-sm">
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            Báo cáo vấn đề
+          </Button>
+        </div>
       </div>
 
       <QueryState
@@ -301,7 +358,7 @@ export function AdminOperationalReportsPage() {
           ) : null}
 
           {category === 'FACILITY_ISSUE' ? (
-            <AdminIncidentView branchId={filters.branchId} range={range} />
+            <AdminIncidentView branchId={filters.branchId} range={range} isAdmin={isAdmin} onToast={setToast} />
           ) : (
             <CategoryView
               category={category}
@@ -315,9 +372,11 @@ export function AdminOperationalReportsPage() {
         </div>
       )}
 
-      {exportOpen && branch !== null && rangeValid && category === 'FACILITY_ISSUE' ? (
+      {exportOpen && branch !== null && rangeValid && category === 'FACILITY_ISSUE' && isAdmin ? (
         // The incident tab exports the incident report — the one the old
         // "Sự cố khách sạn" screen offered — for the same branch and period.
+        // (The Admin's own report; the managers export the operational report,
+        // category III, which carries the same incidents and their assignments.)
         <IncidentExportModal
           onClose={() => setExportOpen(false)}
           branchId={filters.branchId ?? null}
@@ -328,15 +387,62 @@ export function AdminOperationalReportsPage() {
           openShifts={data.data?.openShifts ?? []}
           openShiftWarning={data.data?.openShiftWarning ?? ''}
           filters={filters}
-          branchName={
-            branch === 'ALL'
-              ? 'Tất cả chi nhánh'
-              : (branches.data?.branches.find((b) => b.id === branch)?.address ?? '')
-          }
+          branches={branch === 'ALL' ? branchList : branchList.filter((b) => b.id === branch)}
           categoryName={category ? label(category) : 'Tất cả danh mục'}
           onClose={() => setExportOpen(false)}
         />
       ) : null}
+
+      {creating ? (
+        <SupervisorCreateDialog
+          branches={branchList.filter((b) => (b as { active?: boolean }).active !== false)}
+          options={options.data}
+          initialBranchId={typeof branch === 'number' ? branch : null}
+          labelOf={label}
+          onClose={() => setCreating(false)}
+          onFacility={(id) => {
+            setCreating(false);
+            setFacilityBranch(id);
+          }}
+          onCreated={async (message) => {
+            setCreating(false);
+            setToast(message);
+            await refreshAll();
+          }}
+        />
+      ) : null}
+
+      {facilityTarget ? (
+        <NewIssueModal
+          branchId={facilityTarget.id}
+          branchLabel={branchLabel(facilityTarget)}
+          onClose={() => setFacilityBranch(null)}
+          onCreated={(issue) => {
+            // The incident is filed; point the branch's journal at it, as Reception does.
+            void reportsApi
+              .create({ category: 'FACILITY_ISSUE', facility: { issueId: issue.id }, branchId: facilityTarget.id })
+              .then(() => setToast('Đã báo cáo sự cố cho chi nhánh.'))
+              .catch(() => setToast('Đã báo cáo sự cố; chưa ghi được vào nhật ký chi nhánh.'))
+              .finally(() => void refreshAll());
+          }}
+        />
+      ) : null}
+
+      {editing && editConfig ? (
+        <RecordEditDialog
+          report={editing}
+          block={editConfig.block}
+          fields={editConfig.fields}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            setToast('Đã lưu chỉnh sửa.');
+            await refreshAll();
+          }}
+        />
+      ) : null}
+
+      <Toast message={toast} onDone={() => setToast(null)} />
     </div>
   );
 }
@@ -712,17 +818,33 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
  * report date — plus the period's counts and, when asked, every incident still
  * open whatever day it was reported. Nothing here is a second incident system.
  */
-function AdminIncidentView({ branchId, range }: { branchId?: number; range: DateRangeValue }) {
-  const [outstanding, setOutstanding] = useState(false);
+function AdminIncidentView({
+  branchId,
+  range,
+  isAdmin,
+  onToast,
+}: {
+  branchId?: number;
+  range: DateRangeValue;
+  /** The period summary is the Admin's incident report; the managers do without it. */
+  isAdmin: boolean;
+  onToast: (message: string) => void;
+}) {
+  /** Every incident of the period · everything still open · only what nobody holds. */
+  const [view, setView] = useState<'period' | 'outstanding' | 'unassigned'>('period');
+  const outstanding = view === 'outstanding';
+  const [assigning, setAssigning] = useState<Issue | null>(null);
+  const [editingIssue, setEditingIssue] = useState<Issue | null>(null);
   const list = useQuery({
-    queryKey: ['issues', { admin: true, branchId, range, outstanding }],
+    queryKey: ['issues', { admin: true, branchId, range, view }],
     queryFn: () =>
       issuesApi.list({
         branchId,
-        // "Tồn đọng" is a status set with no date: the server refuses both at once.
-        from: outstanding ? undefined : range.from,
-        to: outstanding ? undefined : range.to,
+        // "Tồn đọng" and "Chưa giao" are states with no date: the server refuses a date with them.
+        from: view === 'period' ? range.from : undefined,
+        to: view === 'period' ? range.to : undefined,
         outstanding: outstanding || undefined,
+        assignment: view === 'unassigned' ? 'UNASSIGNED' : undefined,
         pageSize: 100,
       }),
     refetchInterval: 20_000,
@@ -730,28 +852,40 @@ function AdminIncidentView({ branchId, range }: { branchId?: number; range: Date
   const issues = list.data?.issues ?? [];
   const total = list.data?.pagination.total ?? 0;
 
+  const VIEWS = [
+    ['period', 'Sự cố báo trong kỳ'],
+    ['outstanding', 'Còn tồn đọng (mọi ngày báo)'],
+    ['unassigned', 'Chưa giao kỹ thuật'],
+  ] as const;
+
   return (
     <div className="space-y-3" data-testid="admin-incident-view">
-      {outstanding ? null : <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />}
-      <label
-        className={`inline-flex min-h-[2.75rem] cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm transition-colors ${
-          outstanding
-            ? 'border-brand-600 bg-brand-50 font-medium text-brand-700'
-            : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-        }`}
+      {view === 'period' && isAdmin ? (
+        <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />
+      ) : null}
+      <div
+        role="group"
+        aria-label="Phạm vi sự cố"
+        className="inline-flex flex-wrap overflow-hidden rounded-xl border border-line-strong bg-white"
       >
-        <input
-          type="checkbox"
-          checked={outstanding}
-          data-testid="admin-incident-outstanding"
-          onChange={(e) => setOutstanding(e.target.checked)}
-          className="h-4 w-4 accent-brand-600"
-        />
-        Chỉ xem sự cố còn tồn đọng (mọi ngày báo)
-      </label>
+        {VIEWS.map(([key, text], i) => (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={view === key}
+            data-testid={`admin-incident-view-${key}`}
+            onClick={() => setView(key)}
+            className={`min-h-[2.75rem] px-3.5 text-sm transition-colors focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
+              i > 0 ? 'border-l border-line-strong' : ''
+            } ${view === key ? 'bg-brand-50 font-semibold text-brand-700' : 'font-medium text-slate-600 hover:bg-slate-50'}`}
+          >
+            {text}
+          </button>
+        ))}
+      </div>
       <IncidentTable
         testId="admin-incident-table"
-        title={outstanding ? 'Sự cố còn tồn đọng' : 'Sự cố báo trong kỳ'}
+        title={VIEWS.find(([key]) => key === view)?.[1] ?? ''}
         rows={issues}
         showBranch={branchId === undefined}
         section={{}}
@@ -761,8 +895,52 @@ function AdminIncidentView({ branchId, range }: { branchId?: number; range: Date
         error={list.error}
         onRetry={() => void list.refetch()}
         emptyTitle="Không có sự cố"
-        emptyMessage={outstanding ? 'Không còn sự cố nào chưa xử lý.' : 'Không có sự cố nào được báo trong kỳ đang xem.'}
+        emptyMessage={
+          view === 'unassigned'
+            ? 'Mọi sự cố đang chờ đều đã được giao kỹ thuật.'
+            : outstanding
+              ? 'Không còn sự cố nào chưa xử lý.'
+              : 'Không có sự cố nào được báo trong kỳ đang xem.'
+        }
+        actions={(issue) =>
+          issue.status === 'NEW' || issue.status === 'IN_PROGRESS' ? (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {issue.status === 'NEW' ? (
+                <RowAction onClick={() => setAssigning(issue)} testId={`assign-${issue.id}`}>
+                  {issue.assignedTechnician ? 'Giao lại' : 'Giao kỹ thuật'}
+                </RowAction>
+              ) : null}
+              <RowAction onClick={() => setEditingIssue(issue)} testId={`admin-edit-issue-${issue.id}`}>
+                Sửa vấn đề
+              </RowAction>
+            </div>
+          ) : (
+            <span className="text-xs text-slate-300">—</span>
+          )
+        }
       />
+      {assigning ? (
+        <AssignTechnicianDialog
+          issue={assigning}
+          onClose={() => setAssigning(null)}
+          onAssigned={(updated) => {
+            setAssigning(null);
+            void list.refetch();
+            onToast(`Đã giao cho ${updated.assignedTechnician?.name ?? 'kỹ thuật viên'}.`);
+          }}
+        />
+      ) : null}
+      {editingIssue ? (
+        <EditIssueModal
+          issue={editingIssue}
+          onClose={() => setEditingIssue(null)}
+          onSaved={() => {
+            setEditingIssue(null);
+            void list.refetch();
+            onToast('Đã lưu chỉnh sửa sự cố.');
+          }}
+        />
+      ) : null}
       {issues.length > 0 && total > issues.length ? (
         <p className="text-xs text-slate-500" data-testid="admin-incident-truncated">
           Đang hiển thị {issues.length} trên tổng số {total} sự cố. Thu hẹp khoảng thời gian hoặc xuất báo cáo
@@ -858,16 +1036,27 @@ function CashStrip({
  * filters and only confirms them: the file an Admin downloads is the screen they
  * were reading, with nothing capped.
  */
+/** The shift types a report can be narrowed to — the server's closed list. */
+const SHIFT_CHOICES = [
+  ['', 'Tất cả ca'],
+  ['A', 'Ca A'],
+  ['B', 'Ca B'],
+  ['C', 'Ca C'],
+  ['A4', 'Ca A4'],
+  ['C4', 'Ca C4'],
+] as const;
+
 function ExportDialog({
   filters,
-  branchName,
+  branches,
   categoryName,
   openShifts,
   openShiftWarning,
   onClose,
 }: {
   filters: { from: string; to: string; branchId?: number; category?: ReportCategory };
-  branchName: string;
+  /** The branches on screen: one, or every branch of the reader's scope. */
+  branches: Branch[];
   categoryName: string;
   /** Shifts of the period still running — left out of the file, and named. */
   openShifts: OpenShiftNotice[];
@@ -878,6 +1067,27 @@ function ExportDialog({
     filters.from === filters.to
       ? formatDate(filters.from)
       : `${formatDate(filters.from)} – ${formatDate(filters.to)}`;
+  /*
+    BRANCHES AND SHIFT — the two choices a supervisor's export adds. With one
+    branch on screen that branch is the file; with "Tất cả" the reader may pick
+    a subset ("Chi nhánh 1 + 2 + 3"). The server checks every one against the
+    reader's scope, whatever this dialog sends.
+  */
+  const multi = filters.branchId === undefined && branches.length > 1;
+  const [picked, setPicked] = useState<number[]>(() => branches.map((b) => b.id));
+  const [shiftType, setShiftType] = useState<string>('');
+  const allPicked = picked.length === branches.length;
+  const url = operationalPdfUrl({
+    ...filters,
+    branchIds: multi && !allPicked ? picked.join(',') : undefined,
+    shiftType: shiftType || undefined,
+  });
+  const branchName =
+    filters.branchId !== undefined
+      ? (branches[0] ? branchLabel(branches[0]) : '')
+      : allPicked
+        ? 'Tất cả chi nhánh trong phạm vi'
+        : `${picked.length} chi nhánh đã chọn`;
   return (
     <Modal
       open
@@ -890,9 +1100,12 @@ function ExportDialog({
           </Button>
           {/* PDF only: the report is read and filed, not re-worked in a spreadsheet. */}
           <a
-            href={operationalPdfUrl(filters)}
+            href={picked.length === 0 && multi ? undefined : url}
+            aria-disabled={picked.length === 0 && multi ? true : undefined}
             data-testid="operational-export-pdf"
-            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+            className={`inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 ${
+              picked.length === 0 && multi ? 'pointer-events-none opacity-50' : ''
+            }`}
           >
             <Download className="h-4 w-4" aria-hidden="true" />
             Xuất PDF
@@ -908,6 +1121,53 @@ function ExportDialog({
         <dt className="text-slate-500">Danh mục</dt>
         <dd className="font-medium text-slate-800">{categoryName}</dd>
       </dl>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <label className="block text-sm font-medium text-slate-700">
+          Ca
+          <select
+            aria-label="Ca"
+            data-testid="export-shift"
+            value={shiftType}
+            onChange={(e) => setShiftType(e.target.value)}
+            className="mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+          >
+            {SHIFT_CHOICES.map(([value, text]) => (
+              <option key={value} value={value}>
+                {text}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {multi ? (
+        <fieldset className="mt-3">
+          <legend className="text-sm font-medium text-slate-700">Chi nhánh trong báo cáo</legend>
+          <div className="mt-1 grid gap-1.5 sm:grid-cols-2" data-testid="export-branches">
+            {branches.map((b) => {
+              const checked = picked.includes(b.id);
+              return (
+                <label
+                  key={b.id}
+                  className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+                    checked ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line bg-white text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-brand-600"
+                    checked={checked}
+                    data-testid={`export-branch-${b.id}`}
+                    onChange={() => setPicked(checked ? picked.filter((id) => id !== b.id) : [...picked, b.id])}
+                  />
+                  {branchLabel(b)}
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+      ) : null}
       {/* An unfinished day is never exported as though it were finished. */}
       {openShifts.length > 0 ? (
         <div className="mt-3">

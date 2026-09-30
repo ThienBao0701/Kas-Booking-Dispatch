@@ -14,6 +14,7 @@ import {
   createInspection,
   listRoomIssues,
   saveCollection,
+  summariseInspections,
   summariseRoomIssues,
   voidRoomIssue,
   type HousekeepingActor,
@@ -52,6 +53,7 @@ const listSchema = z
   .object({
     branchId: z.coerce.number().int().positive().optional(),
     type: TYPE.optional(),
+    roomNumber: z.string().trim().min(1).max(50).optional(),
     status: STATUS.optional(),
     from: isoDay.optional(),
     to: isoDay.optional(),
@@ -71,12 +73,22 @@ export function createHousekeepingRouter(): Router {
     '/housekeeping',
     requireAuth,
     requirePasswordChanged,
-    requireRole('ADMIN', 'RECEPTIONIST', 'HOUSEKEEPING'),
+    // The reception supervisors READ (their scope); only Reception and the
+    // Admin settle a collection, and only the Admin voids — per route below.
+    requireRole('ADMIN', 'RECEPTIONIST', 'HOUSEKEEPING', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
   );
 
-  const actorOf = (req: { currentUser?: { id: number; role: HousekeepingActor['role']; branchId: number | null; fullName: string } }): HousekeepingActor => {
+  const actorOf = (req: {
+    currentUser?: {
+      id: number;
+      role: HousekeepingActor['role'];
+      branchId: number | null;
+      fullName: string;
+      managedBranchIds?: number[];
+    };
+  }): HousekeepingActor => {
     const u = req.currentUser!;
-    return { id: u.id, role: u.role, branchId: u.branchId, fullName: u.fullName };
+    return { id: u.id, role: u.role, branchId: u.branchId, fullName: u.fullName, managedBranchIds: u.managedBranchIds };
   };
 
   // GET /api/housekeeping/options — the vocabulary, served once.
@@ -106,14 +118,17 @@ export function createHousekeepingRouter(): Router {
       const filter = {
         branchId: q.branchId,
         type: q.type as never,
+        roomNumber: q.roomNumber,
         status: q.status as never,
         from: range?.start,
         to: range?.end,
       };
       const list = await listRoomIssues(actor, filter);
-      // Totals are for the roles that see money; Housekeeping is sent none.
+      // Money totals for the roles that see money; Housekeeping gets its own
+      // facts (inspections, findings, rooms) and nothing about collection.
       const summary = actor.role === 'HOUSEKEEPING' ? null : await summariseRoomIssues(actor, filter);
-      res.json({ ...list, summary });
+      const inspectionSummary = await summariseInspections(actor, filter);
+      res.json({ ...list, summary, inspectionSummary });
     })().catch(next);
   });
 

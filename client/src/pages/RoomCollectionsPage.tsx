@@ -1,10 +1,13 @@
 /**
- * "THU TIỀN BUỒNG PHÒNG" — Reception settles what Bộ phận buồng phòng found.
+ * "BUỒNG PHÒNG" — Reception settles what Bộ phận buồng phòng found.
  *
  * Every issue of the branch, each settled on its OWN: how much, whether it was
  * collected, by which method, or why it could not be. This is deliberately not
  * part of "Theo dõi thanh toán": nothing here enters the drawer, and the two are
  * never summed. The branch is the receptionist's own, decided by the server.
+ *
+ * No date range by default: an old "Chưa thu" must never fall out of sight. The
+ * range (and "Hôm nay") narrows the list when the desk wants one day or one week.
  */
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -18,6 +21,9 @@ import {
   RoomIssueTable,
 } from '../components/RoomIssueViews';
 import { Toast } from '../components/Toast';
+import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
+import { PeriodQuickPicks } from '../components/PeriodQuickPicks';
+import { hcmToday } from '../lib/format';
 
 type Filter = RoomCollectionStatus | 'ALL';
 
@@ -32,10 +38,14 @@ export function RoomCollectionsPage() {
   const [filter, setFilter] = useState<Filter>('PENDING');
   const [collecting, setCollecting] = useState<RoomIssue | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const today = hcmToday();
+  const [range, setRange] = useState<DateRangeValue>({ from: '', to: '' });
+  // Half a range is no range: only a complete one narrows the list.
+  const dates = range.from && range.to ? { from: range.from, to: range.to } : {};
 
   const list = useQuery({
-    queryKey: [...ROOM_ISSUES_KEY, 'reception', filter],
-    queryFn: () => housekeepingApi.issues({ status: filter === 'ALL' ? undefined : filter }),
+    queryKey: [...ROOM_ISSUES_KEY, 'reception', filter, dates],
+    queryFn: () => housekeepingApi.issues({ status: filter === 'ALL' ? undefined : filter, ...dates }),
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });
@@ -44,7 +54,7 @@ export function RoomCollectionsPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="Thu tiền buồng phòng"
+        title="Buồng phòng"
         description="Xử lý thu tiền cho từng vấn đề Bộ phận buồng phòng ghi nhận. Khoản thu này tách riêng khỏi sổ thanh toán."
         actions={
           <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
@@ -53,6 +63,21 @@ export function RoomCollectionsPage() {
           </Button>
         }
       />
+
+      <section
+        aria-label="Lọc theo ngày"
+        className="flex flex-wrap items-end gap-x-4 gap-y-3 rounded-xl border-section border-line bg-white px-4 py-3 shadow-sm"
+      >
+        <div className="min-w-[17rem] max-w-full">
+          <DateRangeField legend="Ngày ghi nhận" value={range} onChange={setRange} max={today} testId="room-range" />
+        </div>
+        <PeriodQuickPicks value={range} onChange={setRange} today={today} testId="room-range" />
+        {range.from || range.to ? (
+          <Button variant="secondary" onClick={() => setRange({ from: '', to: '' })} data-testid="room-range-clear">
+            Mọi ngày
+          </Button>
+        ) : null}
+      </section>
 
       {summary ? <RoomIssueSummaryStrip summary={summary} /> : null}
 

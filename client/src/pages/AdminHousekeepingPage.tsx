@@ -8,7 +8,9 @@
  * issue, not just the rows on screen (the list itself is capped, and says so).
  *
  * The Admin may settle any issue, as Reception does, and is the only role that
- * can void a mistaken one (with a reason; it stays on file).
+ * can void a mistaken one (with a reason; it stays on file). Quản lý lễ tân and
+ * Tổng quản lý lễ tân READ the same page over their own branches — the server
+ * scopes the list and refuses them the collection and the void.
  */
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -23,6 +25,8 @@ import {
   type RoomIssueType,
 } from '../api/housekeeping';
 import { adminBranchesApi } from '../api/adminBranches';
+import { branchesApi } from '../api/bookings';
+import { useAuth } from '../auth/AuthProvider';
 import { Button } from '../components/Button';
 import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
 import { PageHeader } from '../components/PageState';
@@ -42,6 +46,7 @@ const selectClass =
 
 export function AdminHousekeepingPage() {
   const today = hcmToday();
+  const isAdmin = useAuth().user?.role === 'ADMIN';
   const [range, setRange] = useState<DateRangeValue>({ from: daysBefore(today, 29), to: today });
   const [branchId, setBranchId] = useState<number | ''>('');
   const [type, setType] = useState<RoomIssueType | ''>('');
@@ -53,7 +58,11 @@ export function AdminHousekeepingPage() {
   const rangeValid = range.from !== '' && range.to !== '' && range.from <= range.to;
 
   // The branches are the branch table, so a new hotel is a new option here too.
-  const branches = useQuery({ queryKey: ['admin', 'branches'], queryFn: () => adminBranchesApi.list() });
+  // A manager's list is their own branches, from the server's scope.
+  const branches = useQuery({
+    queryKey: isAdmin ? ['admin', 'branches'] : ['branches'],
+    queryFn: () => (isAdmin ? adminBranchesApi.list() : branchesApi.list()),
+  });
 
   const list = useQuery({
     queryKey: [...ROOM_ISSUES_KEY, 'admin', { range, branchId, type, status }],
@@ -75,7 +84,7 @@ export function AdminHousekeepingPage() {
     <div className="space-y-4">
       <PageHeader
         title="Buồng phòng — tình trạng sử dụng phòng & thu tiền"
-        description="Vấn đề Bộ phận buồng phòng ghi nhận và kết quả thu tiền của lễ tân, tất cả chi nhánh."
+        description={`Vấn đề Bộ phận buồng phòng ghi nhận và kết quả thu tiền của lễ tân, ${isAdmin ? 'tất cả chi nhánh' : 'các chi nhánh được phân công'}.`}
         actions={
           <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
             <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
@@ -159,8 +168,8 @@ export function AdminHousekeepingPage() {
             isError={list.isError}
             error={list.error}
             onRetry={() => void list.refetch()}
-            onCollect={setCollecting}
-            onVoid={setVoiding}
+            onCollect={isAdmin ? setCollecting : undefined}
+            onVoid={isAdmin ? setVoiding : undefined}
             emptyTitle="Không có vấn đề phòng"
             emptyMessage="Không có vấn đề nào khớp với bộ lọc đang chọn."
           />

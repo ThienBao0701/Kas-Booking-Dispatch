@@ -217,11 +217,12 @@ describe('one record, four views', () => {
     expect((await booking.get('/api/hotel-deliveries')).status).toBe(403);
   });
 
-  it('lets none of the reading departments write', async () => {
+  it('lets none of the reading departments write — and the Admin only for a named branch', async () => {
     const body = { category: 'HOTEL_DELIVERY', delivery: { department: 'TECHNICAL', itemName: 'X', quantity: 1 } };
     expect((await tech.post('/api/reception/reports').send(body)).status).toBe(403);
     expect((await housekeeping.post('/api/reception/reports').send(body)).status).toBe(403);
-    expect((await admin.post('/api/reception/reports').send(body)).status).toBe(403);
+    // The Admin enters a record for one specific branch, never "Tất cả".
+    expect((await admin.post('/api/reception/reports').send(body)).status).toBe(422);
   });
 
   it('appears in the Admin period report under its own category, counted', async () => {

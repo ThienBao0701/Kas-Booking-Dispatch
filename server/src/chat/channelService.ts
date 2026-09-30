@@ -20,6 +20,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
+import { branchScopeOf, scopeIncludes, scopedBranchRows } from '../auth/branchScope';
 import {
   MESSAGE_INCLUDE,
   assertBody,
@@ -56,7 +57,7 @@ export interface ChatChannelView {
 async function loadBranch(branchId: number, actor: ChatActor, client: PrismaClient) {
   const branch = await client.branch.findFirst({ where: { id: branchId, active: true } });
   // NOT FOUND for a branch the actor may not open: a 403 would confirm it exists.
-  if (!branch || (actor.role !== 'ADMIN' && actor.branchId !== branch.id)) {
+  if (!branch || !scopeIncludes(branchScopeOf(actor), branch.id)) {
     throw ApiError.notFound('Không tìm thấy chi nhánh.');
   }
   return branch;
@@ -67,9 +68,10 @@ export async function listChannels(
   client: PrismaClient = defaultPrisma,
 ): Promise<ChatChannelView[]> {
   const conversationScope = channelWhere(actor); // also refuses every other role
+  // The branch table, narrowed to the actor's scope — a manager moved from
+  // branches 1–3 to 4–6 sees 4–6 on the next request, with no copied list.
   const branches = await client.branch.findMany({
-    where:
-      actor.role === 'ADMIN' ? { active: true } : { active: true, id: actor.branchId ?? -1 },
+    where: scopedBranchRows(actor),
     orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }],
   });
   const conversations = await client.chatConversation.findMany({
@@ -212,7 +214,8 @@ export async function sendChannelMessage(
   });
   await client.chatConversation.update({
     where: { id: conversationId },
-    data: { lastMessageAt: now, status: actor.role === 'ADMIN' ? 'ANSWERED' : 'WAITING_ADMIN' },
+    // A supervisor's reply answers the desk the way an Admin's does.
+    data: { lastMessageAt: now, status: actor.role === 'RECEPTIONIST' ? 'WAITING_ADMIN' : 'ANSWERED' },
   });
   // Writing is reading: the sender's own message never counts as unread to them.
   await markRead(conversationId, actor.id, now, client);

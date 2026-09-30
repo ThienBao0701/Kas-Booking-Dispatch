@@ -25,6 +25,7 @@ import { Modal } from './Modal';
 import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { groupDigits, parseVnd } from '../lib/money';
+import { EXPENSE_SOURCE } from '../lib/reportCategories';
 
 /**
  * "Xóa" asks for a reason and says plainly what it is about to do.
@@ -220,7 +221,7 @@ export function RecordEditDialog({
 }: {
   report: OperationalReport;
   fields: EditField[];
-  block: 'guestRequest' | 'complaint' | 'roomService' | 'delivery';
+  block: 'payment' | 'guestRequest' | 'complaint' | 'roomService' | 'delivery';
   onClose: () => void;
   onSaved: () => void | Promise<void>;
 }) {
@@ -251,6 +252,11 @@ export function RecordEditDialog({
               : f.kind === 'count'
                 ? parseCount(value)
                 : value.trim();
+      }
+      // A payment moved to "Chi tiền" is a pure cash payout — the server's rule.
+      if (block === 'payment' && payload.source === EXPENSE_SOURCE) {
+        payload.amount = 0;
+        payload.method = 'CASH';
       }
       const patch = { [block]: payload, reason: reason.trim() || undefined } as UpdateReportInput;
       return reportsApi.update(report.id, patch);

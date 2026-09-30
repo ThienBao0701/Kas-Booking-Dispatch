@@ -55,7 +55,7 @@ const OPTIONS = {
     { code: 'DEBT', label: 'Công nợ' },
   ],
   roomServiceTypes: [],
-  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác'],
+  paymentSources: ['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác', 'Chi tiền'],
   deliveryDepartments: [
     { code: 'RECEPTION', label: 'Lễ tân' },
     { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
@@ -477,6 +477,33 @@ describe('adding a transaction', () => {
     expect(await screen.findByTestId('payment-table')).toBeInTheDocument();
   });
 
+  it('records "Chi tiền" as a pure cash payout — no "Thu tiền", no method', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: payment() } };
+        },
+      }),
+    );
+    await openPaymentForm();
+
+    await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Chi tiền');
+    expect(screen.queryByTestId('payment-amount')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('payment-method')).not.toBeInTheDocument();
+    expect(screen.getByTestId('payment-payout-hint')).toBeInTheDocument();
+    // A payout needs its amount above zero.
+    expect(screen.getByTestId('payment-add')).toBeDisabled();
+    await userEvent.type(screen.getByTestId('payment-expense'), '250000');
+    expect(screen.getByTestId('payment-add')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('payment-add'));
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    const body = posted[0] as { payment: Record<string, unknown> };
+    expect(body.payment).toMatchObject({ source: 'Chi tiền', method: 'CASH', amount: 0, expense: 250000 });
+  });
+
   it('will not submit without an amount', async () => {
     installApiMock(shellRoutes());
     await openPaymentForm();
@@ -716,7 +743,7 @@ describe('the opening-cash reminder', () => {
 });
 
 describe('"Nguồn" is a controlled select', () => {
-  it('offers exactly the seven channels, and sends the one chosen', async () => {
+  it('offers the seven channels and "Chi tiền", and sends the one chosen', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       shellRoutes({
@@ -734,7 +761,7 @@ describe('"Nguồn" is a controlled select', () => {
       .getAllByRole('option')
       .map((o) => o.textContent)
       .filter((t) => !t?.startsWith('—'));
-    expect(options).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác']);
+    expect(options).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác', 'Chi tiền']);
 
     await userEvent.selectOptions(source, 'Agoda');
     await userEvent.type(screen.getByTestId('payment-amount'), '100000');

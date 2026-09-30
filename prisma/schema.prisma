@@ -73,6 +73,12 @@ enum UserRole {
   /// department like TECHNICAL, but it cannot accept, repair or complete: it
   /// only passes or fails the work a technician has finished.
   TECHNICAL_MANAGER
+  /// "Quản lý lễ tân" — supervises the reception of the branches listed in
+  /// `UserBranchAssignment` for this account, and no others. `branchId` is null.
+  RECEPTION_MANAGER
+  /// "Tổng quản lý lễ tân" — the same supervision over every branch. No
+  /// assignment rows: the scope is all branches by definition.
+  RECEPTION_GENERAL_MANAGER
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -582,9 +588,33 @@ model User {
   roomIssuesVoided         RoomInspectionIssue[]         @relation("RoomIssueVoidedBy")
   roomCollectionsRecorded  RoomIssueCollection[]         @relation("RoomCollectionRecordedBy")
   roomCollectionEvents     RoomIssueCollectionEvent[]    @relation("RoomCollectionEventActor")
+  /// RECEPTION_MANAGER only: the branches this account supervises.
+  branchAssignments        UserBranchAssignment[]        @relation("UserBranchAssignmentUser")
+  issuesAssigned           HotelIssue[]                  @relation("IssueAssignedTechnician")
+  issueAssignmentsReceived HotelIssueAssignment[]        @relation("IssueAssignmentTechnician")
+  issueAssignmentsMade     HotelIssueAssignment[]        @relation("IssueAssignmentAssigner")
 
   @@index([branchId])
   @@index([role])
+}
+
+/// WHICH BRANCHES A "QUẢN LÝ LỄ TÂN" SUPERVISES — one row per (account, branch).
+///
+/// Read on EVERY request by `requireAuth`, never cached in the session, so an
+/// Admin moving a manager from branches 1–3 to 4–6 takes effect on that
+/// manager's very next request: their chat, reports and incident lists follow
+/// these rows and nothing else. Records the manager created stay where they are.
+model UserBranchAssignment {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  branchId  Int
+  createdAt DateTime @default(now())
+
+  user   User   @relation("UserBranchAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation("UserBranchAssignmentBranch", fields: [branchId], references: [id])
+
+  @@unique([userId, branchId])
+  @@index([branchId])
 }
 
 /// Server-side login session backing express-session.
@@ -677,6 +707,7 @@ model Branch {
   operationalReportAudits ReceptionReportAudit[]
   roomInspections         RoomInspection[]
   roomInspectionIssues    RoomInspectionIssue[]
+  managerAssignments      UserBranchAssignment[]       @relation("UserBranchAssignmentBranch")
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -1782,6 +1813,27 @@ model HotelIssue {
   completedByNameSnapshot String?
   completedAt             DateTime?
 
+  /// THE CURRENT ASSIGNMENT — which Bộ phận kỹ thuật account this incident is
+  /// given to. A technician sees ONLY incidents assigned to them (plus their own
+  /// history); unassigned incidents wait for an Admin or a Quản lý lễ tân. Null
+  /// again after "Không sửa được", when the incident waits for reassignment.
+  /// Every assignment ever made is kept in `HotelIssueAssignment`.
+  assignedTechnicianUserId       Int?
+  assignedTechnicianNameSnapshot String?
+  assignedAt                     DateTime?
+  assignedByUserId               Int?
+  assignedByNameSnapshot         String?
+
+  /// The reporter's ROLE at the moment of reporting — how Reception can tell an
+  /// incident an Admin or a manager filed ("Admin tạo"). Null on older rows.
+  reportedByRole UserRole?
+
+  /// A LIKELY REPEAT: the most recent COMPLETED incident at the same branch,
+  /// same room and same fault type, found deterministically when this one was
+  /// reported. A neutral fact for the technician ("Báo lại sau lần hoàn thành
+  /// trước"), never a score.
+  repeatOfIssueId String?
+
   /// The reporter's shift AT THE MOMENT OF REPORTING, when there was one.
   ///
   /// Captured, never required: reporting a broken door is not an accounting
@@ -1813,7 +1865,14 @@ model HotelIssue {
   operationalReports FacilityIssueReport[]    @relation("FacilityReportIssue")
   /// What a receptionist changed AFTER the report was filed — one row per field.
   edits              HotelIssueEdit[]         @relation("IssueEdits")
+  assignedTechnician User?                    @relation("IssueAssignedTechnician", fields: [assignedTechnicianUserId], references: [id])
+  /// Every assignment and reassignment, oldest first when read.
+  assignments        HotelIssueAssignment[]   @relation("IssueAssignments")
+  repeatOf           HotelIssue?              @relation("IssueRepeatOf", fields: [repeatOfIssueId], references: [id], onDelete: SetNull)
+  repeatedBy         HotelIssue[]             @relation("IssueRepeatOf")
 
+  @@index([assignedTechnicianUserId, status])
+  @@index([branchId, roomNumber])
   @@index([branchId, status])
   @@index([status])
   @@index([createdAt])
@@ -2471,6 +2530,11 @@ model ReceptionOperationalReport {
   /// The receptionist's name as the shift recorded it. Renaming an account must
   /// never rewrite who was at the desk.
   createdByNameSnapshot String
+  /// The creator's ROLE at creation. Null on rows written before it was
+  /// recorded — all of them by a receptionist on shift. ADMIN / RECEPTION_MANAGER
+  /// / RECEPTION_GENERAL_MANAGER mark a record entered from the supervision
+  /// screen ("Admin tạo"), which may carry no shift at all.
+  createdByRole         UserRole?
 
   category OperationalReportCategory
 
@@ -2777,6 +2841,35 @@ model ReceptionReportAudit {
   @@index([shiftSessionId])
   @@index([actorUserId])
   @@index([action])
+}
+
+/// EVERY ASSIGNMENT OF AN INCIDENT TO A TECHNICIAN — append-only.
+///
+/// The incident's `assigned…` columns are the CURRENT assignment; this table is
+/// the history they would otherwise overwrite: who was given the job, by whom,
+/// when, and who had it before (a reassignment). Outcomes are not repeated here —
+/// they live on `TechnicalRepairAttempt`, which already names the technician.
+model HotelIssueAssignment {
+  id                             String   @id @default(cuid())
+  issueId                        String
+  technicianUserId               Int
+  technicianNameSnapshot         String
+  /// Set on a REASSIGNMENT: the technician who held the job before.
+  previousTechnicianUserId       Int?
+  previousTechnicianNameSnapshot String?
+  assignedByUserId               Int
+  assignedByNameSnapshot         String
+  assignedByRole                 UserRole
+  /// Server time, from the business clock.
+  createdAt                      DateTime
+
+  issue      HotelIssue @relation("IssueAssignments", fields: [issueId], references: [id], onDelete: Cascade)
+  technician User       @relation("IssueAssignmentTechnician", fields: [technicianUserId], references: [id])
+  assignedBy User       @relation("IssueAssignmentAssigner", fields: [assignedByUserId], references: [id])
+
+  @@index([issueId, createdAt])
+  @@index([technicianUserId, createdAt])
+  @@index([previousTechnicianUserId])
 }
 
 /// WHAT WAS CHANGED ON A HOTEL INCIDENT AFTER IT WAS REPORTED — one row per field.

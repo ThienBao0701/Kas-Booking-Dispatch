@@ -12,7 +12,6 @@ import {
   History,
   Inbox,
   LayoutDashboard,
-  PackageCheck,
   RotateCcw,
   ScanSearch,
   Send,
@@ -87,8 +86,20 @@ export const RECEPTIONIST_NAV: NavItem[] = [
   // Collection on what Bộ phận buồng phòng found — its own screen, apart from
   // the payment ledger inside "Báo cáo vấn đề". "Chat box" is the bubble in the
   // corner of every page, not a menu entry.
-  { to: '/app/room-collections', label: 'Thu tiền buồng phòng', icon: BedDouble },
+  // "Buồng phòng": the collection screen's name at the desk (its address is kept).
+  { to: '/app/room-collections', label: 'Buồng phòng', icon: BedDouble },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
+];
+
+/**
+ * "Quản lý lễ tân" and "Tổng quản lý lễ tân" — the supervision layer over
+ * Reception. The same screens the Admin uses for Reception, scoped by the server
+ * to the manager's branches (all eight for the general manager). The chat is the
+ * bubble in the corner, listing the same branches.
+ */
+export const RECEPTION_MANAGER_NAV: NavItem[] = [
+  { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
+  { to: '/app/housekeeping', label: 'Buồng phòng', icon: BedDouble },
 ];
 
 /**
@@ -99,22 +110,24 @@ export const RECEPTIONIST_NAV: NavItem[] = [
  * booking screen appears here — this role has no branch and no part in dispatch.
  */
 export const TECHNICAL_NAV: NavItem[] = [
-  { to: '/app/technical/new', label: 'Sự cố khách sạn', icon: Wrench },
+  // Only incidents ASSIGNED to this technician — the server enforces it.
+  { to: '/app/technical/new', label: 'Được giao', icon: Wrench },
   { to: '/app/technical/rework', label: 'Cần sửa lại', icon: RotateCcw },
   { to: '/app/technical/in-progress', label: 'Đang sửa', icon: Hammer },
   { to: '/app/technical/completed', label: 'Đã hoàn thành', icon: CheckCircle2 },
+  // Everything this technician was ever given, tried or finished.
+  { to: '/app/technical/history', label: 'Lịch sử', icon: History },
   { to: '/app/technical/statistics', label: 'Thống kê', icon: BarChart3 },
-  { to: '/app/deliveries', label: 'Giao nhận hàng hóa', icon: PackageCheck },
+  // "Giao nhận hàng hóa" is not on this menu any more; its data is untouched.
 ];
 
 /**
- * Bộ phận buồng phòng: record a room's condition, and see the deliveries
- * addressed to it. Two entries, and the server confines the role to exactly the
- * routes behind them.
+ * Bộ phận buồng phòng: record a room's condition. One entry — the deliveries
+ * category is Reception's and the Admin's, not this department's (its records
+ * and screens are untouched). The server confines the role to its routes.
  */
 export const HOUSEKEEPING_NAV: NavItem[] = [
-  { to: '/app/inspections', label: 'Kiểm tra phòng', icon: ClipboardCheck },
-  { to: '/app/deliveries', label: 'Giao nhận hàng hóa', icon: PackageCheck },
+  { to: '/app/inspections', label: 'Buồng phòng', icon: ClipboardCheck },
 ];
 
 /**
@@ -133,6 +146,7 @@ export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'TECHNICAL') return TECHNICAL_NAV;
   if (role === 'TECHNICAL_MANAGER') return TECHNICAL_MANAGER_NAV;
   if (role === 'HOUSEKEEPING') return HOUSEKEEPING_NAV;
+  if (role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER') return RECEPTION_MANAGER_NAV;
   // Receptionist, and anything unrecognised: never the Chứng từ menu.
   return RECEPTIONIST_NAV;
 }
@@ -151,6 +165,7 @@ export function titleForPath(pathname: string): string {
     ...TECHNICAL_NAV,
     ...TECHNICAL_MANAGER_NAV,
     ...HOUSEKEEPING_NAV,
+    ...RECEPTION_MANAGER_NAV,
   ];
   const match = all
     .slice()

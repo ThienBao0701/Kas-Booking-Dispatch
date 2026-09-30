@@ -16,9 +16,10 @@
  * empty state, one loading state. An Admin comparing a payment ledger against a
  * service list should not have to re-learn the table between them.
  *
- * READ-ONLY, DELIBERATELY. There is no edit, no void and no accept here. An
- * Admin correcting reception's record from a monitoring screen is how a journal
- * stops being reception's account of the shift.
+ * EDITING IS THE SAME EDIT. The supervision screen may pass `onEdit`, which
+ * opens the very dialog Reception uses against the very same record; the
+ * server writes an audit row naming the supervisor, so the journal still says
+ * who changed what. There is still no void and no accept here.
  *
  * THE ROW IS A SUMMARY; THE RECORD IS UNDERNEATH. Every table expands a row into
  * `OperationalRecordDetail` — the same full-fidelity block reception sees,
@@ -26,12 +27,13 @@
  * nothing is dropped, it is one click down rather than eight lines tall.
  */
 import type { ReactNode } from 'react';
+import { SourceTag } from './SourceTag';
 import type {
   OperationalReport,
   ReportCategory,
   RoomServiceType,
 } from '../api/receptionReports';
-import { DataTable, type DataColumn } from './DataTable';
+import { DataTable, RowAction, type DataColumn } from './DataTable';
 import { OperationalRecordDetail } from './OperationalRecord';
 import { IssueStageBadge } from './IssueViews';
 import type { SectionFrame } from './ReportSection';
@@ -64,6 +66,11 @@ export interface AdminTableProps {
   section?: SectionFrame;
   /** A one-line empty state, for a category with nothing in it inside a shift. */
   compact?: boolean;
+  /**
+   * "Sửa" on each live row — the SAME correction dialog and endpoint Reception
+   * uses. Given by the supervision screen; absent, the table is read-only.
+   */
+  onEdit?: (row: OperationalReport) => void;
 }
 
 /** A voided row stays on screen, greyed — never removed, never hidden. */
@@ -93,8 +100,24 @@ const staff = (header = 'Nhân viên'): DataColumn<OperationalReport> => ({
   key: 'staff',
   header,
   className: 'whitespace-nowrap',
-  render: (r) => r.createdByName,
+  render: (r) => (
+    <>
+      {r.createdByName}
+      <SourceTag label={r.sourceLabel} />
+    </>
+  ),
 });
+
+/** The "Sửa" action, only on live rows and only where the screen allows it. */
+function editAction(onEdit: ((row: OperationalReport) => void) | undefined) {
+  if (!onEdit) return undefined;
+  return (r: OperationalReport) =>
+    r.voided || r.category === 'FACILITY_ISSUE' ? null : (
+      <RowAction onClick={() => onEdit(r)} testId={`admin-edit-${r.id}`}>
+        Sửa
+      </RowAction>
+    );
+}
 
 const shift = (): DataColumn<OperationalReport> => ({
   key: 'shift',
@@ -193,7 +216,7 @@ const SHARED = {
  * row recorded, the time and the record's integrity. Reception's table is a
  * subset of this one, never the other way round.
  */
-export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTableProps) {
+export function AdminPaymentTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     staff(),
@@ -243,6 +266,7 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-PAYMENT"
       title={title}
       badge={rows.length}
@@ -263,7 +287,7 @@ export function AdminPaymentTable({ rows, title, grouped, ...state }: AdminTable
  * Admin copy: this is the reception journal's record, read across branches.
  * "Nhóm" says which side of the 12-hour rule the record is on.
  */
-export function AdminDeliveryTable({ rows, title, grouped, ...state }: AdminTableProps) {
+export function AdminDeliveryTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
@@ -314,6 +338,7 @@ export function AdminDeliveryTable({ rows, title, grouped, ...state }: AdminTabl
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-HOTEL_DELIVERY"
       title={title}
       badge={rows.length}
@@ -374,7 +399,7 @@ const handling = (value: string | null | undefined): ReactNode => clamped(value)
  * columns: an older request's "Ký gửi" reads as part of its content, and both
  * legacy values are in the full record one click down.
  */
-export function AdminGuestRequestTable({ rows, title, grouped, ...state }: AdminTableProps) {
+export function AdminGuestRequestTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
@@ -421,6 +446,7 @@ export function AdminGuestRequestTable({ rows, title, grouped, ...state }: Admin
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-GUEST_REQUEST"
       title={title}
       badge={rows.length}
@@ -440,7 +466,7 @@ export function AdminGuestRequestTable({ rows, title, grouped, ...state }: Admin
  * who completed it and when, and the record's integrity. An older report's
  * "Số phòng / Khác" is in the full record one click down.
  */
-export function AdminServiceQualityTable({ rows, title, grouped, ...state }: AdminTableProps) {
+export function AdminServiceQualityTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
@@ -483,6 +509,7 @@ export function AdminServiceQualityTable({ rows, title, grouped, ...state }: Adm
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-CUSTOMER_COMPLAINT"
       title={title}
       badge={rows.length}
@@ -503,7 +530,7 @@ export function AdminServiceQualityTable({ rows, title, grouped, ...state }: Adm
  * entry says so without touching the incident. The incident's full history is
  * one click down, and in the category's own view.
  */
-export function AdminFacilityJournalTable({ rows, title, grouped, ...state }: AdminTableProps) {
+export function AdminFacilityJournalTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
   const columns: DataColumn<OperationalReport>[] = [
     stt(),
     {
@@ -545,6 +572,7 @@ export function AdminFacilityJournalTable({ rows, title, grouped, ...state }: Ad
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-FACILITY_ISSUE"
       title={title}
       badge={rows.length}
@@ -578,6 +606,7 @@ export function AdminRoomServiceTable({
   title,
   serviceType,
   grouped,
+  onEdit,
   ...state
 }: AdminTableProps & { serviceType: RoomServiceType }) {
   const needs = roomServiceFields(serviceType);
@@ -662,6 +691,7 @@ export function AdminRoomServiceTable({
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId={`admin-table-ROOM_SERVICE-${serviceType}`}
       title={title}
       badge={rows.length}
@@ -728,6 +758,7 @@ export function AdminAllCategoriesTable({
   title,
   labelOf,
   grouped,
+  onEdit,
   ...state
 }: AdminTableProps & { labelOf: (c: ReportCategory) => string }) {
   const columns: DataColumn<OperationalReport>[] = [
@@ -774,6 +805,7 @@ export function AdminAllCategoriesTable({
     <DataTable
       {...SHARED}
       {...state}
+      actions={editAction(onEdit)}
       testId="admin-table-ALL"
       title={title}
       badge={rows.length}

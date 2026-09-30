@@ -19,6 +19,8 @@ const MANAGEABLE_ROLES = [
   'TECHNICAL',
   'TECHNICAL_MANAGER',
   'HOUSEKEEPING',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
 ] as const;
 
 /**
@@ -27,7 +29,15 @@ const MANAGEABLE_ROLES = [
  * from being classified by a `!== 'BOOKING_DEPARTMENT'` test that happens to
  * mean "is a receptionist" today and something else tomorrow.
  */
-const GLOBAL_ROLES: readonly string[] = ['BOOKING_DEPARTMENT', 'TECHNICAL', 'TECHNICAL_MANAGER'];
+const GLOBAL_ROLES: readonly string[] = [
+  'BOOKING_DEPARTMENT',
+  'TECHNICAL',
+  'TECHNICAL_MANAGER',
+  // All branches by definition — no `branchId`, no assignment rows.
+  'RECEPTION_GENERAL_MANAGER',
+  // Several branches, through UserBranchAssignment — never one `branchId`.
+  'RECEPTION_MANAGER',
+];
 
 /** Vietnamese department names, for the messages this endpoint returns. */
 const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
@@ -36,6 +46,8 @@ const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   TECHNICAL: 'bộ phận kỹ thuật',
   TECHNICAL_MANAGER: 'quản lý kỹ thuật',
   HOUSEKEEPING: 'bộ phận buồng phòng',
+  RECEPTION_MANAGER: 'quản lý lễ tân',
+  RECEPTION_GENERAL_MANAGER: 'tổng quản lý lễ tân',
 };
 
 const createUserSchema = z
@@ -47,6 +59,8 @@ const createUserSchema = z
     // receptionist exactly as before.
     role: z.enum(MANAGEABLE_ROLES).default('RECEPTIONIST'),
     branchId: z.number().int().positive().optional(),
+    /** Quản lý lễ tân only: the branches it supervises (at least one). */
+    branchIds: z.array(z.number().int().positive()).max(100).optional(),
     active: z.boolean().optional(),
   })
   // A receptionist IS a branch; a global department must not carry one, or it
@@ -64,12 +78,22 @@ const createUserSchema = z
   .refine((v) => !GLOBAL_ROLES.includes(v.role) || v.branchId === undefined, {
     message: 'Tài khoản bộ phận không thuộc chi nhánh nào.',
     path: ['branchId'],
+  })
+  .refine((v) => v.role !== 'RECEPTION_MANAGER' || (v.branchIds?.length ?? 0) > 0, {
+    message: 'Quản lý lễ tân phải được gán ít nhất một chi nhánh.',
+    path: ['branchIds'],
+  })
+  .refine((v) => v.role === 'RECEPTION_MANAGER' || v.branchIds === undefined, {
+    message: 'Chỉ quản lý lễ tân mới được gán nhiều chi nhánh.',
+    path: ['branchIds'],
   });
 
 const updateUserSchema = z
   .object({
     fullName: z.string().trim().min(1).max(100).optional(),
     branchId: z.number().int().positive().optional(),
+    /** Quản lý lễ tân: REPLACES the whole set of supervised branches. */
+    branchIds: z.array(z.number().int().positive()).min(1, 'Chọn ít nhất một chi nhánh.').max(100).optional(),
     active: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
@@ -101,7 +125,7 @@ function parseUserId(raw: string | undefined): number {
 
 /** Loads a managed account and guarantees it is a receptionist. */
 async function loadReceptionist(id: number) {
-  const user = await prisma.user.findUnique({ where: { id }, include: { branch: true } });
+  const user = await prisma.user.findUnique({ where: { id }, include: USER_INCLUDE });
   if (!user) {
     throw ApiError.notFound('Không tìm thấy tài khoản.');
   }
@@ -111,6 +135,22 @@ async function loadReceptionist(id: number) {
     throw ApiError.forbidden('Chỉ có thể quản lý tài khoản lễ tân và các bộ phận.');
   }
   return user;
+}
+
+/** An account with its branch and — for a Quản lý lễ tân — its supervised branches. */
+const USER_INCLUDE = {
+  branch: true,
+  branchAssignments: { include: { branch: true }, orderBy: { branchId: 'asc' } },
+} satisfies Prisma.UserInclude;
+
+/** Every id must be an active branch; duplicates collapse to one. */
+async function usableBranchIds(ids: readonly number[]): Promise<number[]> {
+  const unique = [...new Set(ids)];
+  const found = await prisma.branch.count({ where: { id: { in: unique }, active: true } });
+  if (found !== unique.length) {
+    throw ApiError.validation('Có chi nhánh không hợp lệ hoặc đã ngừng hoạt động.');
+  }
+  return unique;
 }
 
 async function assertBranchUsable(branchId: number): Promise<void> {
@@ -125,7 +165,9 @@ export function createAdminUsersRouter(): Router {
 
   // Every account-management endpoint requires an authenticated admin who has
   // already satisfied any forced password change.
-  router.use('/admin', requireAuth, requirePasswordChanged, requireAdmin);
+  // Gated on ITS OWN prefix: every other /admin router gates its own, and the
+  // operational report is shared with the reception supervisors.
+  router.use('/admin/users', requireAuth, requirePasswordChanged, requireAdmin);
 
   // GET /api/admin/users — receptionist accounts, with optional filters.
   router.get('/admin/users', (req, res, next) => {
@@ -149,7 +191,7 @@ export function createAdminUsersRouter(): Router {
 
       const users = await prisma.user.findMany({
         where,
-        include: { branch: true },
+        include: USER_INCLUDE,
         orderBy: { id: 'asc' },
       });
       res.json({ users: users.map(serializeManagedUser) });
@@ -171,6 +213,8 @@ export function createAdminUsersRouter(): Router {
         throw ApiError.conflict('Tên đăng nhập đã tồn tại.');
       }
 
+      const managed = body.role === 'RECEPTION_MANAGER' ? await usableBranchIds(body.branchIds ?? []) : [];
+
       const created = await prisma.user.create({
         data: {
           username,
@@ -180,8 +224,11 @@ export function createAdminUsersRouter(): Router {
           branchId: body.branchId ?? null,
           active: body.active ?? true,
           mustChangePassword: true,
+          ...(managed.length > 0
+            ? { branchAssignments: { create: managed.map((branchId) => ({ branchId })) } }
+            : {}),
         },
-        include: { branch: true },
+        include: USER_INCLUDE,
       });
 
       res.status(201).json({ user: serializeManagedUser(created) });
@@ -206,7 +253,23 @@ export function createAdminUsersRouter(): Router {
         await assertBranchUsable(body.branchId);
       }
 
+      /*
+        A QUẢN LÝ LỄ TÂN'S BRANCHES ARE REPLACED AS A SET. Its chat, reports and
+        incident lists follow these rows on its very next request; the records it
+        created stay exactly where they are — only visibility moves.
+      */
+      let managed: number[] | null = null;
+      if (body.branchIds !== undefined) {
+        if (existing.role !== 'RECEPTION_MANAGER') {
+          throw ApiError.validation('Chỉ quản lý lễ tân mới được gán nhiều chi nhánh.');
+        }
+        managed = await usableBranchIds(body.branchIds);
+      }
+
       const data: Prisma.UserUpdateInput = {};
+      if (managed) {
+        data.branchAssignments = { deleteMany: {}, create: managed.map((branchId) => ({ branchId })) };
+      }
       if (body.fullName !== undefined) data.fullName = body.fullName;
       if (body.active !== undefined) data.active = body.active;
       if (body.branchId !== undefined) data.branch = { connect: { id: body.branchId } };
@@ -214,7 +277,7 @@ export function createAdminUsersRouter(): Router {
       const updated = await prisma.user.update({
         where: { id },
         data,
-        include: { branch: true },
+        include: USER_INCLUDE,
       });
 
       // If this update just disabled the account, drop its live sessions too.
@@ -256,7 +319,7 @@ export function createAdminUsersRouter(): Router {
       const updated = await prisma.user.update({
         where: { id },
         data: { active: true },
-        include: { branch: true },
+        include: USER_INCLUDE,
       });
       res.json({ user: serializeManagedUser(updated) });
     })().catch(next);
@@ -270,7 +333,7 @@ export function createAdminUsersRouter(): Router {
       const updated = await prisma.user.update({
         where: { id },
         data: { active: false },
-        include: { branch: true },
+        include: USER_INCLUDE,
       });
       // Existing sessions must stop granting access immediately.
       await sessionStore.destroyByUserId(id);

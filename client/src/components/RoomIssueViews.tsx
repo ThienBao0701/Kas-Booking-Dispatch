@@ -50,9 +50,11 @@ export function CollectionStatusBadge({ status, label }: { status: RoomCollectio
 /** What the money column says: the status, and beneath it the amount and how or why. */
 function CollectionCell({ issue }: { issue: RoomIssue }) {
   const c = issue.collection;
+  // Housekeeping is sent no collection state at all.
+  if (issue.collectionStatus === null) return null;
   return (
     <>
-      <CollectionStatusBadge status={issue.collectionStatus} label={issue.collectionStatusLabel} />
+      <CollectionStatusBadge status={issue.collectionStatus} label={issue.collectionStatusLabel ?? ''} />
       {c ? (
         <span className="mt-0.5 block text-xs text-slate-600">
           {formatVnd(c.amount)}
@@ -141,13 +143,21 @@ export function RoomIssueTable({
         </>
       ),
     },
-    {
-      key: 'collection',
-      // Housekeeping is told THAT an issue was settled; the money is the desk's.
-      header: mode === 'housekeeping' ? 'Trạng thái' : 'Thu tiền',
-      className: 'min-w-[8rem]',
-      render: (i) => <CollectionCell issue={i} />,
-    },
+    /*
+      NO COLLECTION COLUMN FOR HOUSEKEEPING. "Đã thu / Chưa thu / Không thu được",
+      the amount and the method are the front desk's business; Bộ phận buồng
+      phòng records the room's condition, and the server sends it none of this.
+    */
+    ...(mode === 'housekeeping'
+      ? []
+      : [
+          {
+            key: 'collection',
+            header: 'Thu tiền',
+            className: 'min-w-[8rem]',
+            render: (i: RoomIssue) => <CollectionCell issue={i} />,
+          } satisfies DataColumn<RoomIssue>,
+        ]),
   ];
 
   const actionable = (mode === 'reception' || mode === 'admin') && onCollect;

@@ -12,6 +12,8 @@ export interface ManagedUser {
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
+  /** Quản lý lễ tân: the branches it supervises. Empty for every other role. */
+  managedBranches?: Branch[];
 }
 
 /** The roles this screen can create. An admin is bootstrapped, never minted here. */
@@ -20,19 +22,34 @@ export type ManageableRole =
   | 'BOOKING_DEPARTMENT'
   | 'TECHNICAL'
   | 'TECHNICAL_MANAGER'
-  | 'HOUSEKEEPING';
+  | 'HOUSEKEEPING'
+  | 'RECEPTION_MANAGER'
+  | 'RECEPTION_GENERAL_MANAGER';
 
 /**
- * The departments that are GLOBAL — no branch, by definition.
+ * The accounts with NO single branch — the global departments, and the two
+ * reception supervisors (a Quản lý lễ tân has SEVERAL branches, chosen with
+ * checkboxes; a Tổng quản lý lễ tân has all of them).
  *
  * Derived from a list rather than tested as `!== 'BOOKING_DEPARTMENT'`: that
  * negative form silently classified any NEW branchless role as a receptionist,
  * demanded a branch for it, and was then refused by the server.
  */
-export const GLOBAL_ROLES: readonly ManageableRole[] = ['BOOKING_DEPARTMENT', 'TECHNICAL', 'TECHNICAL_MANAGER'];
+export const GLOBAL_ROLES: readonly ManageableRole[] = [
+  'BOOKING_DEPARTMENT',
+  'TECHNICAL',
+  'TECHNICAL_MANAGER',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
   return !GLOBAL_ROLES.includes(role ?? 'RECEPTIONIST');
+}
+
+/** Only a Quản lý lễ tân picks its branches — one or more, with checkboxes. */
+export function requiresBranchSet(role: ManageableRole | undefined): boolean {
+  return role === 'RECEPTION_MANAGER';
 }
 
 export interface CreateUserInput {
@@ -43,6 +60,8 @@ export interface CreateUserInput {
   role?: ManageableRole;
   /** Required for a receptionist; must be absent for a global department. */
   branchId?: number;
+  /** Quản lý lễ tân only: the branches it supervises (at least one). */
+  branchIds?: number[];
 }
 
 export const adminUsersApi = {
@@ -50,6 +69,9 @@ export const adminUsersApi = {
   list: (params: { includeAdmins?: boolean } = {}) =>
     api.get<{ users: ManagedUser[] }>(params.includeAdmins ? '/admin/users?includeAdmins=true' : '/admin/users'),
   create: (input: CreateUserInput) => api.post<{ user: ManagedUser }>('/admin/users', input),
+  /** Replaces a Quản lý lễ tân's supervised branches, as a set. Records it created stay put. */
+  setBranches: (id: number, branchIds: number[]) =>
+    api.put<{ user: ManagedUser }>(`/admin/users/${id}`, { branchIds }),
   enable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/enable`),
   disable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/disable`),
   resetPassword: (id: number, temporaryPassword: string) =>

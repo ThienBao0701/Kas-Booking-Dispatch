@@ -90,11 +90,15 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
   );
 }
 
-/** Shared mutation wiring — every form creates through the same endpoint. */
-function useCreateReport(onCreated: () => void | Promise<void>) {
+/**
+ * Shared mutation wiring — every form creates through the same endpoint.
+ * `branchId` is a SUPERVISOR's target branch; omitted for Reception, whose
+ * branch is its open shift's (the server ignores it for a receptionist).
+ */
+function useCreateReport(onCreated: () => void | Promise<void>, branchId?: number) {
   const [error, setError] = useState<string | null>(null);
   const mutation = useMutation({
-    mutationFn: (input: NewReportInput) => reportsApi.create(input),
+    mutationFn: (input: NewReportInput) => reportsApi.create({ ...input, branchId }),
     onSuccess: async () => {
       setError(null);
       await onCreated();
@@ -146,10 +150,13 @@ export function GuestRequestForm({
   onCreated,
   bare,
   onCancel,
+  branchId,
 }: {
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
+  /** A supervisor's target branch; omitted for Reception (its shift decides). */
+  branchId?: number;
 }) {
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
@@ -159,7 +166,7 @@ export function GuestRequestForm({
     setEzCode('');
     setContent('');
     await onCreated();
-  });
+  }, branchId);
 
   return (
     <FormShell
@@ -212,10 +219,13 @@ export function ServiceQualityForm({
   onCreated,
   bare,
   onCancel,
+  branchId,
 }: {
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
+  /** A supervisor's target branch; omitted for Reception (its shift decides). */
+  branchId?: number;
 }) {
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
@@ -225,7 +235,7 @@ export function ServiceQualityForm({
     setEzCode('');
     setDescription('');
     await onCreated();
-  });
+  }, branchId);
 
   return (
     <FormShell
@@ -303,11 +313,14 @@ export function RoomServiceForm({
   onCreated,
   bare,
   onCancel,
+  branchId,
 }: {
   options?: ReportOptions;
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
+  /** A supervisor's target branch; omitted for Reception (its shift decides). */
+  branchId?: number;
 }) {
   const [serviceType, setServiceType] = useState<RoomServiceType | ''>('');
   const [guestName, setGuestName] = useState('');
@@ -335,7 +348,7 @@ export function RoomServiceForm({
     setTripadvisor('');
     setGoogle('');
     await onCreated();
-  });
+  }, branchId);
 
   const labelOf = (t: RoomServiceType) =>
     options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
@@ -539,11 +552,14 @@ export function DeliveryForm({
   onCreated,
   bare,
   onCancel,
+  branchId,
 }: {
   options?: ReportOptions;
   onCreated: () => void | Promise<void>;
   bare?: boolean;
   onCancel?: () => void;
+  /** A supervisor's target branch; omitted for Reception (its shift decides). */
+  branchId?: number;
 }) {
   const departments = options?.deliveryDepartments ?? DELIVERY_DEPARTMENT_FALLBACK;
   const [department, setDepartment] = useState<DeliveryDepartment | ''>('');
@@ -556,7 +572,7 @@ export function DeliveryForm({
     setQuantity('');
     setNote('');
     await onCreated();
-  });
+  }, branchId);
 
   const parsed = parseQuantity(quantity);
   return (

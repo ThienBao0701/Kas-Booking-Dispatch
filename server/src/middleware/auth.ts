@@ -5,12 +5,18 @@ import { ApiError } from '../lib/errors';
 import { devToolsActive, isTestReceptionist } from '../devtest/guard';
 import type { UserWithBranch } from '../auth/serialize';
 
+/**
+ * The authenticated user as every route sees it: the account, its branch, and —
+ * for a Quản lý lễ tân — the branches it supervises (`managedBranchIds`).
+ */
+export type SessionUser = UserWithBranch & { managedBranchIds?: number[] };
+
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       /** The freshly loaded authenticated user, set by requireAuth. */
-      currentUser?: UserWithBranch;
+      currentUser?: SessionUser;
     }
   }
 }
@@ -18,13 +24,48 @@ declare global {
 /**
  * Loads the session's user straight from the database on every protected
  * request. Nothing authoritative is trusted from the session itself, so a
- * disabled account, a changed branch, or a forced password reset all take
- * effect immediately even while an old session cookie is still presented.
+ * disabled account, a changed branch, a forced password reset — or an Admin
+ * changing which branches a Quản lý lễ tân supervises — all take effect
+ * immediately even while an old session cookie is still presented.
  */
-async function loadSessionUser(req: Request): Promise<UserWithBranch | null> {
+async function loadSessionUser(req: Request): Promise<SessionUser | null> {
   const userId = req.session?.userId;
   if (typeof userId !== 'number') return null;
-  return prisma.user.findUnique({ where: { id: userId }, include: { branch: true } });
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { branch: true, branchAssignments: { select: { branchId: true } } },
+  });
+  if (!user) return null;
+  const { branchAssignments, ...rest } = user;
+  return user.role === 'RECEPTION_MANAGER'
+    ? { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) }
+    : rest;
+}
+
+/**
+ * WHAT A QUẢN LÝ LỄ TÂN / TỔNG QUẢN LÝ LỄ TÂN MAY REACH — default deny, for the
+ * same reason as Housekeeping below: many routes decide "who is not an admin" by
+ * comparing `user.branchId`, and a branchless supervisor falling through them
+ * would get either nothing or, worse, something. The supervision screens need
+ * exactly these; each service then scopes by `branchScope.ts`.
+ */
+const RECEPTION_SUPERVISOR_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
+  /^\/api\/reception\/reports(\/|$)/,
+  /^\/api\/issues(\/|$)/,
+  /^\/api\/chat\/channels(\/|$)/,
+  /^\/api\/chat\/attachments(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/hotel-deliveries(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+];
+
+function supervisorMayReach(req: Request): boolean {
+  const path = req.originalUrl.split('?')[0] ?? '';
+  return RECEPTION_SUPERVISOR_ROUTES.some((route) => route.test(path));
 }
 
 /**
@@ -48,6 +89,8 @@ const HOUSEKEEPING_ROUTES = [
   /^\/api\/hotel-deliveries(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
+  // The room catalog of its own branch, for the inspection form's selector.
+  /^\/api\/branches\/\d+\/rooms$/,
 ];
 
 function housekeepingMayReach(req: Request): boolean {
@@ -68,6 +111,13 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
         return;
       }
       if (user.role === 'HOUSEKEEPING' && !housekeepingMayReach(req)) {
+        next(ApiError.forbidden());
+        return;
+      }
+      if (
+        (user.role === 'RECEPTION_MANAGER' || user.role === 'RECEPTION_GENERAL_MANAGER') &&
+        !supervisorMayReach(req)
+      ) {
         next(ApiError.forbidden());
         return;
       }

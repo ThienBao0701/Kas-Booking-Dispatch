@@ -24,8 +24,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
+  ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
+  createAdmin,
   createReceptionist,
   createUser,
   loginAgent,
@@ -47,6 +50,7 @@ let letanA: Agent;
 let letanB: Agent;
 let letanCn2: Agent;
 let tech: Agent;
+let admin: Agent;
 
 beforeAll(async () => {
   await resetAll();
@@ -70,6 +74,10 @@ beforeAll(async () => {
     mustChangePassword: false,
   });
   tech = (await loginAgent(app, 'kythuat', TECHNICAL_PASSWORD)).agent;
+
+  // The Admin gives each job to the technician before it can be taken.
+  await createAdmin({ mustChangePassword: false });
+  admin = (await loginAgent(app, 'admin', ADMIN_PASSWORD)).agent;
 });
 
 beforeEach(async () => {
@@ -134,7 +142,7 @@ async function archiveIds(agent: Agent): Promise<string[]> {
 async function incidentAt(agent: Agent, day: string, hhmm: string): Promise<string> {
   const res = await agent
     .post('/api/issues')
-    .send({ areaCategory: 'ROOM', roomNumber: '305', category: 'AIR_CONDITIONER', description: 'Máy lạnh' });
+    .send({ areaCategory: 'ROOM', roomNumber: '301', category: 'AIR_CONDITIONER', description: 'Máy lạnh' });
   expect(res.status).toBe(201);
   await testPrisma.hotelIssue.update({ where: { id: res.body.issue.id }, data: { createdAt: hcm(day, hhmm) } });
   return res.body.issue.id as string;
@@ -433,6 +441,7 @@ describe('the completion archive, narrowed by the day a record was RECEIVED', ()
     const on24 = await incidentAt(letanA, '2026-09-24', '09:00');
     const on25 = await incidentAt(letanA, '2026-09-25', '00:00');
     for (const id of [on24, on25]) {
+      await assignTo(admin, id, tech);
       await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
       expect((await tech.post(`/api/issues/${id}/complete`).send({})).status).toBe(200);
     }
@@ -459,6 +468,7 @@ describe('the completion archive, narrowed by the day a record was RECEIVED', ()
     at('2026-09-25', '10:00');
     const open = await incidentAt(letanA, '2026-09-25', '08:00');
     const recent = await incidentAt(letanA, '2026-09-25', '09:00');
+    await assignTo(admin, recent, tech);
     await tech.post(`/api/issues/${recent}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
     expect((await tech.post(`/api/issues/${recent}/complete`).send({})).status).toBe(200);
@@ -485,6 +495,7 @@ describe('the 12-hour completion archive (III, the incidents)', () => {
     const finished = await incidentAt(letanA, '2026-09-25', '10:00');
     const open = await incidentAt(letanA, '2026-09-24', '08:00'); // reported yesterday, still waiting
     at('2026-09-25', '10:30');
+    await assignTo(admin, finished, tech);
     await tech.post(`/api/issues/${finished}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
     expect((await tech.post(`/api/issues/${finished}/complete`).send({})).status).toBe(200);
@@ -673,6 +684,7 @@ describe('a service-quality report', () => {
 describe('Technical "Đã hoàn thành" by completion date', () => {
   async function finishAt(id: string, day: string, hhmm: string) {
     at(day, hhmm);
+    await assignTo(admin, id, tech);
     expect((await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' })).status).toBe(200);
     expect((await tech.post(`/api/issues/${id}/complete`).send({})).status).toBe(200);
   }

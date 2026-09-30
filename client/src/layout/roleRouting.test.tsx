@@ -69,8 +69,8 @@ describe('role-based shell and routing', () => {
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
     // "Hoàn thành vấn đề" is the 12-hour completion archive of II, III and IV;
-    // "Thu tiền buồng phòng" is the room-issue collection. The chat is the bubble.
-    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Hoàn thành vấn đề', 'Thu tiền buồng phòng', 'Nhắc nhở']);
+    // "Buồng phòng" is the room-issue collection (address unchanged). The chat is the bubble.
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Hoàn thành vấn đề', 'Buồng phòng', 'Nhắc nhở']);
     expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
     /*
       Removed from the MENU only. Their routes, records and APIs are untouched;

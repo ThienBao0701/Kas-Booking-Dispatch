@@ -38,7 +38,7 @@ import { MoreNote } from '../components/MoreNote';
 import { DeliveryTable } from '../components/HotelDelivery';
 import { useDeliveries } from '../hooks/useDeliveries';
 import { ARCHIVED_REPORTS_KEY, DELIVERIES_KEY, FACILITY_BOARD_KEY } from '../lib/reportKeys';
-import { CATEGORY_MARKERS, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
+import { CATEGORY_MARKERS, GUEST_REQUEST_TITLE, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
 import { hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
@@ -147,7 +147,7 @@ export function CompletedIssuesPage() {
           <div>
             <GuestRequestTable
               rows={requests}
-              title="Vấn đề khách yêu cầu thực hiện (Request)"
+              title={GUEST_REQUEST_TITLE}
               onChanged={noop}
               onToast={() => undefined}
               {...journalState}

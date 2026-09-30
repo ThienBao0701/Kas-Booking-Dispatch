@@ -16,6 +16,8 @@
  * aligned and the empty state reads the same wherever the receptionist is.
  */
 import { useState } from 'react';
+import { SourceTag } from './SourceTag';
+import { GUEST_REQUEST_EDIT, SERVICE_QUALITY_EDIT, roomServiceEditFields } from '../lib/recordEdit';
 import { CheckCircle2, Pencil, Trash2 } from 'lucide-react';
 import { type OperationalReport, type RoomServiceType } from '../api/receptionReports';
 import { DataTable, RowAction, type DataColumn } from './DataTable';
@@ -26,7 +28,6 @@ import {
   RecordEditDialog,
   VoidDialog,
   VoidedNote,
-  type EditField,
 } from './RecordDialogs';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
@@ -111,12 +112,6 @@ function useRowActions(onChanged: () => Promise<void>, onToast: (m: string) => v
 }
 
 /* -------------- Vấn đề khách yêu cầu thực hiện (Request) -------------- */
-
-const GUEST_REQUEST_EDIT: EditField[] = [
-  { name: 'guestName', label: 'Tên khách', required: true },
-  { name: 'ezCode', label: 'Mã EZ' },
-  { name: 'note', label: 'Nội dung', kind: 'textarea', required: true },
-];
 
 const statusBadge = (tone: 'amber' | 'emerald', text: string) => (
   <span
@@ -278,7 +273,12 @@ export function GuestRequestTable({
       header: 'Thời gian tiếp nhận',
       secondary: true,
       className: 'min-w-[5.5rem] text-slate-500',
-      render: (r) => formatDateTime(r.createdAt),
+      render: (r) => (
+        <>
+          {formatDateTime(r.createdAt)}
+          <SourceTag label={r.sourceLabel} />
+        </>
+      ),
     },
     {
       key: 'completedAt',
@@ -354,12 +354,6 @@ export function GuestRequestTable({
 }
 
 /* ------------------- Vấn đề về chất lượng và dịch vụ ------------------- */
-
-const SERVICE_QUALITY_EDIT: EditField[] = [
-  { name: 'guestName', label: 'Tên khách', required: true },
-  { name: 'ezCode', label: 'Mã EZ' },
-  { name: 'description', label: 'Mô tả', kind: 'textarea', required: true },
-];
 
 /**
  * "Đã tiếp nhận", or "Đã hoàn thành" with the server's completion time — and,
@@ -558,34 +552,6 @@ export function ServiceQualityTable({
 
 /* ------------------------- Dịch vụ phòng, KPI ------------------------- */
 
-/** The correction fields for one service — the same rules the entry form renders. */
-function roomServiceEditFields(type: RoomServiceType): EditField[] {
-  const needs = roomServiceFields(type);
-  // "Review" corrects its guest and its two counts — it has no price or note.
-  if (needs.review) {
-    return [
-      { name: 'guestName', label: 'Tên khách', required: true },
-      { name: 'ezCode', label: 'Mã EZ' },
-      { name: 'tripadvisorCount', label: 'Tripadvisor', kind: 'count', required: true },
-      { name: 'googleCount', label: 'Google', kind: 'count', required: true },
-    ];
-  }
-  return [
-    { name: 'guestName', label: 'Tên khách', required: true },
-    { name: 'ezCode', label: 'Mã EZ' },
-    ...(needs.roomClass ? [{ name: 'roomClass', label: 'Hạng phòng', required: true } as EditField] : []),
-    ...(needs.upgrade
-      ? ([
-          { name: 'fromRoomClass', label: 'Từ hạng phòng', required: true },
-          { name: 'toRoomClass', label: 'Tới hạng phòng', required: true },
-        ] as EditField[])
-      : []),
-    ...(needs.nights ? [{ name: 'nights', label: 'Số đêm', kind: 'integer', required: true } as EditField] : []),
-    { name: 'price', label: ROOM_SERVICE_PRICE_LABEL, kind: 'money', required: true },
-    { name: 'note', label: 'Ghi chú', kind: 'textarea' },
-  ];
-}
-
 /**
  * ONE SERVICE'S TABLE, COLUMNS CHOSEN BY THE SERVICE.
  *
@@ -698,7 +664,12 @@ export function RoomServiceTable({
       key: 'createdAt',
       header: 'Thời gian',
       className: 'whitespace-nowrap text-slate-500',
-      render: (r) => formatDateTime(r.createdAt),
+      render: (r) => (
+        <>
+          {formatDateTime(r.createdAt)}
+          <SourceTag label={r.sourceLabel} />
+        </>
+      ),
     },
   ];
 

@@ -20,7 +20,10 @@
  * are the payload; the PDF and the XLSX are built from this same structure,
  * which is what stops the file and the screen disagreeing.
  */
-import type { OperationalReportCategory, PrismaClient } from '@prisma/client';
+import type { OperationalReportCategory, PrismaClient, ShiftType } from '@prisma/client';
+import { scopedBranchFilter } from '../auth/branchScope';
+import { listRoomIssues, type SerializedRoomIssue } from '../housekeeping/roomIssueService';
+import { hcmRange } from '../booking/recreationReport';
 import { prisma } from '../db/prisma';
 import { getClock } from '../lib/clock';
 import {
@@ -65,6 +68,13 @@ export interface BranchOperationalReport {
   shifts: OfficialShift[];
   /** Shifts of the period still open — named, and left out of every figure. */
   openShifts: OpenShiftNotice[];
+  /**
+   * "Buồng phòng": the room findings recorded in the period (by their own HCM
+   * day — an inspection has no shift), with their collection state. Present on
+   * the FULL report only; empty when the export is one category or one shift.
+   */
+  housekeeping: SerializedRoomIssue[];
+  housekeepingTruncated: boolean;
 }
 
 export interface OperationalReportData {
@@ -72,6 +82,8 @@ export interface OperationalReportData {
   to: string;
   /** Set when the export was scoped to one category; the header names it. */
   category?: OperationalReportCategory;
+  /** Set when the export was scoped to one shift type; the header names it. */
+  shiftType?: ShiftType;
   branches: BranchOperationalReport[];
   generatedAt: Date;
 }
@@ -125,17 +137,27 @@ export async function branchOperationalReport(
    * toán" never loads a complaint and then drops it.
    */
   category?: OperationalReportCategory,
+  /**
+   * The period's own instants, for the records a SUPERVISOR entered while no
+   * shift was open: they belong to no shift, so their HCM day decides. Omitted
+   * when the report is for one shift — a shift-less row is in no shift.
+   */
+  unshiftedWindow?: { from: Date; to: Date },
 ): Promise<BranchOperationalReport> {
   const now = getClock().now();
   const closed = sessions.filter((s) => s.closedAt !== null);
   const closedIds = closed.map((s) => s.id);
-  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds };
+  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow };
 
-  const [rows, total, cash, shiftCash] = await Promise.all([
+  const [rows, total, cash, shiftCash, rooms] = await Promise.all([
     listReports(actor, { ...filter, take: MAX_ROWS_PER_BRANCH }, client),
     countReports(actor, filter, client),
     sessionsCashSummary(closedIds, client),
     perShiftCash(closed, client),
+    // Housekeeping belongs to the full report: no category, no single shift.
+    category === undefined && unshiftedWindow
+      ? listRoomIssues(actor, { branchId: branch.id, from: unshiftedWindow.from, to: unshiftedWindow.to }, client)
+      : Promise.resolve({ issues: [] as SerializedRoomIssue[], total: 0, truncated: false }),
   ]);
 
   const byCategory = emptyGroups();
@@ -164,6 +186,9 @@ export async function branchOperationalReport(
       cash: shiftCash.get(s.id)!,
     })),
     openShifts: openShiftNotices(sessions),
+    // Oldest first, like every other section of the report.
+    housekeeping: [...rooms.issues].reverse(),
+    housekeepingTruncated: rooms.truncated,
   };
 }
 
@@ -181,31 +206,54 @@ export async function operationalReport(
     from: string;
     to: string;
     branchId?: number;
+    /** Several branches at once — "Chi nhánh 1 + 2 + 3". */
+    branchIds?: number[];
     category?: OperationalReportCategory;
+    /** One shift type only ("Ca A"); every shift when absent. */
+    shiftType?: ShiftType;
   },
   client: PrismaClient = prisma,
 ): Promise<OperationalReportData> {
-  const [branches, sessions] = await Promise.all([
+  /*
+    THE BRANCHES ARE THE ACTOR'S SCOPE, narrowed to what was asked — the same
+    `scopedBranchFilter` every journal read goes through. A Quản lý lễ tân asking
+    for "all" gets its own branches; asking for another one is refused.
+  */
+  const requested = params.branchIds ?? (params.branchId !== undefined ? [params.branchId] : undefined);
+  const branchWhere = scopedBranchFilter(actor, requested);
+  const [branches, allSessions] = await Promise.all([
     client.branch.findMany({
-      where: params.branchId !== undefined ? { id: params.branchId } : { active: true },
+      // Named branches as asked (active or not, as before); otherwise the
+      // scope's active branches — every branch for the Admin.
+      where: requested
+        ? { id: branchWhere.branchId! }
+        : { active: true, ...(branchWhere.branchId !== undefined ? { id: branchWhere.branchId } : {}) },
       select: { id: true, code: true, hotelName: true, address: true, branchNumber: true },
       orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }],
     }),
-    sessionsForBusinessDates({ from: params.from, to: params.to, branchId: params.branchId }, client),
+    sessionsForBusinessDates(
+      { from: params.from, to: params.to, branchId: requested?.length === 1 ? requested[0] : undefined },
+      client,
+    ),
   ]);
+  const sessions = params.shiftType ? allSessions.filter((s) => s.shiftType === params.shiftType) : allSessions;
+  // Shift-less supervisor rows join by their own HCM day — unless one shift was asked for.
+  const window = hcmRange(params.from, params.to);
+  const unshiftedWindow = params.shiftType ? undefined : { from: window.start, to: window.end };
 
   const sections: BranchOperationalReport[] = [];
   // Sequential on purpose: eight branches × four queries in parallel would open
   // thirty-two connections at once on a pool this application sizes for a desk.
   for (const branch of branches) {
     const mine = sessions.filter((s) => s.branchId === branch.id);
-    sections.push(await branchOperationalReport(actor, branch, mine, client, params.category));
+    sections.push(await branchOperationalReport(actor, branch, mine, client, params.category, unshiftedWindow));
   }
 
   return {
     from: params.from,
     to: params.to,
     category: params.category,
+    shiftType: params.shiftType,
     branches: sections,
     generatedAt: getClock().now(),
   };

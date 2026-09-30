@@ -254,8 +254,50 @@ export interface Issue {
   needsRework: boolean;
   /** What the desk corrected after filing ("Sửa vấn đề"), oldest first. */
   edits: IssueEdit[];
+  /** Who holds the job NOW; null when unassigned or waiting to be reassigned. */
+  assignedTechnician?: { id: number; name: string } | null;
+  assignedAt?: string | null;
+  assignedByName?: string | null;
+  /** Every assignment and reassignment, oldest first. */
+  assignments?: IssueAssignment[];
+  /** Where the job stands in the assignment model, and how to say it. */
+  assignmentState?: AssignmentState;
+  assignmentStateLabel?: string;
+  /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor filed it. */
+  sourceLabel?: string | null;
+  /** The earlier completed incident at this room with this fault, if any. */
+  repeatOf?: IssueRepeat | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type AssignmentState =
+  | 'UNASSIGNED'
+  | 'ASSIGNED'
+  | 'IN_PROGRESS'
+  | 'AWAITING_REASSIGNMENT'
+  | 'AWAITING_INSPECTION'
+  | 'COMPLETED';
+
+/** One assignment: who got the job, from whom, by whom, when. */
+export interface IssueAssignment {
+  id: string;
+  technicianId: number;
+  technicianName: string;
+  previousTechnicianName: string | null;
+  reassigned: boolean;
+  assignedByName: string;
+  assignedByRole: string;
+  createdAt: string;
+}
+
+/** "Báo lại sau lần hoàn thành trước" — the previous completion, stated neutrally. */
+export interface IssueRepeat {
+  id: string;
+  description: string;
+  reportedAt: string;
+  completedAt: string | null;
+  technicianName: string | null;
 }
 
 /** One corrected field: the words that were there, the words that replaced them, who and when. */
@@ -307,6 +349,17 @@ export interface IncidentStatistics {
     byTechnician: { name: string; attempts: number; completed: number; cannotRepair: number }[];
   };
   trend: { date: string; reported: number; completed: number }[];
+  /** Set when the figures are ONE technician's own work. */
+  technician?: {
+    id: number;
+    name: string;
+    assignedNow: number;
+    inProgressNow: number;
+    completed: number;
+    cannotRepair: number;
+    reassignedAway: number;
+    reopened: number;
+  } | null;
 }
 
 /**
@@ -393,6 +446,8 @@ function query(params: Record<string, string | number | undefined>): string {
 }
 
 export interface NewIssueInput {
+  /** A supervisor's target branch; ignored by the server for Reception. */
+  branchId?: number;
   areaCategory: IssueAreaCategory;
   description: string;
   /** "Nguyên nhân" — optional. */
@@ -430,6 +485,8 @@ export const issuesApi = {
       /** Technical's "Đã hoàn thành": inclusive HCM days of the technician's completion. */
       completedFrom?: string;
       completedTo?: string;
+      /** Waiting incidents nobody holds — the supervisors' to-do list. */
+      assignment?: 'UNASSIGNED';
       page?: number;
       pageSize?: number;
     } = {},
@@ -444,6 +501,7 @@ export const issuesApi = {
 
   create: (input: NewIssueInput) => {
     const form = new FormData();
+    if (input.branchId !== undefined) form.append('branchId', String(input.branchId));
     form.append('areaCategory', input.areaCategory);
     form.append('description', input.description);
     if (input.cause?.trim()) form.append('cause', input.cause.trim());
@@ -461,8 +519,19 @@ export const issuesApi = {
   /** "Sửa vấn đề" — corrects an open incident; the server keeps the old words. */
   update: (id: string, input: UpdateIssueInput) => api.put<{ issue: Issue }>(`/issues/${id}`, input),
 
-  statistics: (params: { days?: number; branchId?: number } = {}) =>
+  statistics: (params: { days?: number; branchId?: number; technicianUserId?: number } = {}) =>
     api.get<{ statistics: IncidentStatistics }>(`/issues/statistics${query(params)}`),
+
+  /** "Giao kỹ thuật" — give the incident to a technician, or move it. */
+  assign: (id: string, technicianUserId: number) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/assign`, { technicianUserId }),
+
+  /** Active technicians by full name, for the assignment picker. */
+  technicians: () => api.get<{ technicians: { id: number; fullName: string }[] }>('/issues/technicians'),
+
+  /** Open duplicates and recent completions at a room — a warning, never a block. */
+  similar: (params: { branchId?: number; roomNumber: string; category?: IssueCategory }) =>
+    api.get<{ open: Issue[]; recent: Issue[] }>(`/issues/similar${query(params)}`),
 
   accept: (id: string, input: AcceptIssueInput) =>
     api.post<{ issue: Issue }>(`/issues/${id}/accept`, input),

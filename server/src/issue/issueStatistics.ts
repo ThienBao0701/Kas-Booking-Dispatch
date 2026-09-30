@@ -13,8 +13,9 @@
  *   - RIGHT NOW: everything not finished, at any age — an old open incident is
  *     the one a period-scoped report structurally hides.
  *
- * Scope: Bộ phận kỹ thuật and Admin see every branch (optionally one); it is not
- * available to anyone else, so there is no per-branch narrowing rule to get wrong.
+ * Scope: a TECHNICIAN sees only their own work (`technicianUserId`, set by the
+ * route from the session — never from the request); the Admin sees every branch
+ * and every technician, optionally narrowed to one of either. Nobody else.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db/prisma';
@@ -22,7 +23,7 @@ import { getClock, hcmDateOnly } from '../lib/clock';
 import { durationSeconds, formatDuration } from '../lib/duration';
 import { hcmRange } from '../booking/recreationReport';
 import { ISSUE_AREA_LABELS } from './issueArea';
-import { ISSUE_CATEGORY_LABELS } from './issueService';
+import { ISSUE_CATEGORY_LABELS, technicianHistoryWhere } from './issueService';
 import { completedStatuses, outstandingStatuses, stageWhere } from './issueLifecycle';
 
 /** The periods the screen offers. A closed list, so the query cannot be made huge. */
@@ -66,6 +67,26 @@ export interface IncidentStatistics {
   };
   /** One entry per HCM day in the period, oldest first — zeros included. */
   trend: { date: string; reported: number; completed: number }[];
+  /**
+   * Set when the statistics are ONE technician's: their own work, counted from
+   * their assignments and attempts. Facts only — no score, no ranking.
+   */
+  technician: {
+    id: number;
+    name: string;
+    /** Given to them now and not yet accepted. */
+    assignedNow: number;
+    /** Accepted by them and still being repaired. */
+    inProgressNow: number;
+    /** Their attempts in the period that ended "Hoàn thành". */
+    completed: number;
+    /** Their attempts in the period that ended "Không sửa được". */
+    cannotRepair: number;
+    /** Jobs moved from them to someone else in the period. */
+    reassignedAway: number;
+    /** Jobs given to them in the period that repeat an earlier completed repair. */
+    reopened: number;
+  } | null;
 }
 
 const STATUS_LABELS = {
@@ -80,15 +101,28 @@ function shiftDay(day: string, delta: number): string {
 }
 
 export async function computeIncidentStatistics(
-  filter: { days: StatisticsPeriodDays; branchId?: number },
+  filter: {
+    days: StatisticsPeriodDays;
+    branchId?: number;
+    /**
+     * ONE TECHNICIAN'S statistics: the incidents they were assigned, accepted,
+     * attempted or finished, and their own attempts — never the eight-branch
+     * totals. Always set for a technician (by the route, from the session);
+     * optional for the Admin, whose default is the global view.
+     */
+    technicianUserId?: number;
+  },
   now: Date = getClock().now(),
 ): Promise<IncidentStatistics> {
   const to = hcmDateOnly(now);
   const from = shiftDay(to, -(filter.days - 1));
   const { start, end } = hcmRange(from, to);
 
-  const branch: Prisma.HotelIssueWhereInput =
-    filter.branchId !== undefined ? { branchId: filter.branchId } : {};
+  const tech = filter.technicianUserId;
+  const branch: Prisma.HotelIssueWhereInput = {
+    ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}),
+    ...(tech !== undefined ? { OR: technicianHistoryWhere(tech) } : {}),
+  };
   const reported: Prisma.HotelIssueWhereInput = { ...branch, createdAt: { gte: start, lt: end } };
 
   const result = await prisma.$transaction(async (tx) => ({
@@ -116,16 +150,45 @@ export async function computeIncidentStatistics(
     // something PostgreSQL can be asked for without a timezone decision made here.
     reportedTimes: await tx.hotelIssue.findMany({ where: reported, select: { createdAt: true } }),
     completedTimes: await tx.hotelIssue.findMany({
-      where: { ...branch, completedAt: { gte: start, lt: end } },
+      where: {
+        ...branch,
+        ...(tech !== undefined ? { completedByUserId: tech } : {}),
+        completedAt: { gte: start, lt: end },
+      },
       select: { completedAt: true },
     }),
     attempts: await tx.technicalRepairAttempt.findMany({
       where: {
         acceptedAt: { gte: start, lt: end },
         ...(filter.branchId !== undefined ? { issue: { branchId: filter.branchId } } : {}),
+        ...(tech !== undefined ? { technicianUserId: tech } : {}),
       },
       select: { technicianNameSnapshot: true, outcome: true, acceptedAt: true, outcomeAt: true },
     }),
+    technician:
+      tech === undefined
+        ? null
+        : {
+            user: await tx.user.findUnique({ where: { id: tech }, select: { id: true, fullName: true } }),
+            assignedNow: await tx.hotelIssue.count({ where: { assignedTechnicianUserId: tech, status: 'NEW' } }),
+            inProgressNow: await tx.hotelIssue.count({ where: { acceptedByUserId: tech, status: 'IN_PROGRESS' } }),
+            completed: await tx.technicalRepairAttempt.count({
+              where: { technicianUserId: tech, outcome: 'COMPLETED', outcomeAt: { gte: start, lt: end } },
+            }),
+            cannotRepair: await tx.technicalRepairAttempt.count({
+              where: { technicianUserId: tech, outcome: 'CANNOT_REPAIR', outcomeAt: { gte: start, lt: end } },
+            }),
+            reassignedAway: await tx.hotelIssueAssignment.count({
+              where: { previousTechnicianUserId: tech, createdAt: { gte: start, lt: end } },
+            }),
+            reopened: await tx.hotelIssueAssignment.count({
+              where: {
+                technicianUserId: tech,
+                createdAt: { gte: start, lt: end },
+                issue: { repeatOfIssueId: { not: null } },
+              },
+            }),
+          },
   }));
 
   /*
@@ -161,20 +224,21 @@ export async function computeIncidentStatistics(
     }))
     .sort((a, b) => b.count - a.count);
 
-  const byBranch = result.branches.map((b) => {
-    const rows = result.byBranchStatus.filter((g) => g.branchId === b.id);
-    const completed = sumOf(rows, (st) => finishedStatuses.has(st));
-    const total = sumOf(rows, () => true);
-    return {
-      branchId: b.id,
-      branchNumber: b.branchNumber,
-      address: b.address,
-      hotelName: b.hotelName,
-      total,
-      open: total - completed,
-      completed,
-    };
-  });
+  const byBranch = result.branches
+    .map((b) => {
+      const rows = result.byBranchStatus.filter((g) => g.branchId === b.id);
+      const completed = sumOf(rows, (st) => finishedStatuses.has(st));
+      const total = sumOf(rows, () => true);
+      return {
+        branchId: b.id,
+        branchNumber: b.branchNumber,
+        address: b.address,
+        hotelName: b.hotelName,
+        total,
+        open: total - completed,
+        completed,
+      };
+    });
 
   // The trend: every day of the period, so a quiet day is a zero and not a gap.
   const days: string[] = [];
@@ -247,5 +311,17 @@ export async function computeIncidentStatistics(
       reported: reportedByDay.get(date) ?? 0,
       completed: completedByDay.get(date) ?? 0,
     })),
+    technician: result.technician
+      ? {
+          id: tech!,
+          name: result.technician.user?.fullName ?? '—',
+          assignedNow: result.technician.assignedNow,
+          inProgressNow: result.technician.inProgressNow,
+          completed: result.technician.completed,
+          cannotRepair: result.technician.cannotRepair,
+          reassignedAway: result.technician.reassignedAway,
+          reopened: result.technician.reopened,
+        }
+      : null,
   };
 }

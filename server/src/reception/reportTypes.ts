@@ -138,7 +138,12 @@ export const PAYMENT_SOURCES = [
   'Expedia',
   'Walking',
   'Khác',
+  // Not a channel: a cash PAYOUT at the desk. See `assertExpenseRow` in reportService.
+  'Chi tiền',
 ] as const;
+
+/** The source that makes a payment row a pure cash outflow ("Chi tiền"). */
+export const EXPENSE_SOURCE = 'Chi tiền';
 
 /** "Bộ phận" of a delivered item, in the order of the selector. */
 export const DELIVERY_DEPARTMENT_LABELS: Record<HotelDeliveryDepartment, string> = {

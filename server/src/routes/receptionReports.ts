@@ -10,8 +10,10 @@
  * in any schema below, and nothing reads it. That is stronger than validating
  * it: there is no code path where a client-supplied identity could be believed.
  *
- * THE ONE EXCEPTION IS `issueId`, on a facility report, and it is checked
- * against the actor's own branch before it is accepted.
+ * THE EXCEPTIONS: `issueId`, on a facility report, checked against the target
+ * branch before it is accepted; and `branchId` on CREATE — read ONLY for a
+ * reception supervisor, who has no shift and must name exactly one branch of
+ * its scope (`auth/branchScope.ts`). A receptionist's `branchId` is ignored.
  */
 import { Router } from 'express';
 import { z } from 'zod';
@@ -213,11 +215,32 @@ const archiveSchema = z
 
 const openingCashSchema = z.object({ openingCash: money });
 
-function actor(user: UserWithBranch) {
-  return { id: user.id, role: user.role, branchId: user.branchId, fullName: user.fullName };
+function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
+  return {
+    id: user.id,
+    role: user.role,
+    branchId: user.branchId,
+    fullName: user.fullName,
+    managedBranchIds: user.managedBranchIds,
+  };
 }
 
 const requireReception = requireRole('RECEPTIONIST');
+
+/**
+ * WHO MAY WRITE A JOURNAL RECORD: the desk on its open shift, and the reception
+ * supervisors (Admin, Quản lý lễ tân, Tổng quản lý lễ tân) on a branch of their
+ * scope. The service decides the branch and the shift; this only admits the roles.
+ */
+const requireJournalWriter = requireRole(
+  'RECEPTIONIST',
+  'ADMIN',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+);
+
+/** A supervisor names its target branch; a receptionist's is its shift's. */
+const targetSchema = z.object({ branchId: z.number().int().positive().optional() });
 
 export function createReceptionReportsRouter(): Router {
   const router = Router();
@@ -233,7 +256,7 @@ export function createReceptionReportsRouter(): Router {
     '/reception/reports/options',
     requireAuth,
     requirePasswordChanged,
-    requireRole('ADMIN', 'RECEPTIONIST'),
+    requireJournalWriter,
     (_req, res) => {
       res.json({
         categories: CATEGORIES.map((c) => ({ code: c, label: CATEGORY_LABELS[c] })),
@@ -320,18 +343,19 @@ export function createReceptionReportsRouter(): Router {
   });
 
   // POST /api/reception/reports — one journal entry.
-  router.post('/reception/reports', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  router.post('/reception/reports', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = createSchema.parse(req.body ?? {});
+      const { branchId } = targetSchema.parse(req.body ?? {});
       const clock = getClock();
-      const created = await createReport(input, actor(user), clock);
+      const created = await createReport({ ...input, branchId }, actor(user), clock);
       res.status(201).json({ report: serializeReport(created, clock.now()) });
     })().catch(next);
   });
 
   // PATCH /api/reception/reports/:id — correct a record, keeping the old value.
-  router.patch('/reception/reports/:id', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  router.patch('/reception/reports/:id', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const patch = updateSchema.parse(req.body ?? {});
@@ -347,6 +371,7 @@ export function createReceptionReportsRouter(): Router {
     NOT `DELETE`, and the verb is the point: nothing here removes a row. The
     record keeps its place in the journal with the reason, the person and the
     instant attached, and drops out of every total.
+    Reception only: a supervisor corrects a record ("Sửa") but never withdraws it.
   */
   router.post('/reception/reports/:id/void', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
     (async () => {
