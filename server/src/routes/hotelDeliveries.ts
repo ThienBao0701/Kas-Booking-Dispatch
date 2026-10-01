@@ -18,7 +18,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock } from '../lib/clock';
@@ -26,6 +26,7 @@ import { requireAuth, requirePasswordChanged } from '../middleware/auth';
 import { REPORT_INCLUDE, serializeReport } from '../reception/reportService';
 import { lifecycleWhere } from '../reception/deliveryLifecycle';
 import { hcmRange } from '../booking/recreationReport';
+import { scopedBranchFilter } from '../auth/branchScope';
 
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -50,10 +51,15 @@ const querySchema = z
 
 /** Who may read which deliveries — the whole authorization rule, in one function. */
 export function deliveryVisibilityWhere(
-  user: { role: string; branchId: number | null },
+  user: { role: UserRole; branchId: number | null; managedBranchIds?: number[] },
   filter: { branchId?: number },
 ): Prisma.ReceptionOperationalReportWhereInput {
   switch (user.role) {
+    // Reception's view of its branches — every department's deliveries — for
+    // the managers: assigned branches, or all eight; another branch is refused.
+    case 'RECEPTION_MANAGER':
+    case 'RECEPTION_GENERAL_MANAGER':
+      return scopedBranchFilter(user, filter.branchId);
     case 'RECEPTIONIST':
       // `?? -1` matches no branch: an unassigned account sees nothing, and the
       // key is never left out — leaving it out would widen the query.

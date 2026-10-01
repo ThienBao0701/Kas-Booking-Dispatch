@@ -34,6 +34,7 @@ import { AlertTriangle, Building2, Download, Plus } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, type Branch } from '../auth/types';
 import { branchesApi } from '../api/bookings';
+import { shiftsApi } from '../api/shifts';
 import { SupervisorCreateDialog } from '../components/SupervisorCreateDialog';
 import { AssignTechnicianDialog } from '../components/AssignTechnicianDialog';
 import { RecordEditDialog } from '../components/RecordDialogs';
@@ -44,6 +45,7 @@ import type { Issue } from '../api/issues';
 import {
   adminReportsApi,
   operationalPdfUrl,
+  operationalXlsxUrl,
   reportsApi,
   type CashSummary,
   type OpenShiftNotice,
@@ -218,7 +220,8 @@ export function AdminOperationalReportsPage() {
           <Button
             variant="secondary"
             onClick={() => setExportOpen(true)}
-            disabled={branch === null || !rangeValid}
+            // The dialog carries its own hotel, shift and dates; it only needs the branch list.
+            disabled={branches.isLoading}
             data-testid="operational-export-open"
             className="shadow-sm"
           >
@@ -382,13 +385,15 @@ export function AdminOperationalReportsPage() {
           branchId={filters.branchId ?? null}
           initialRange={range}
         />
-      ) : exportOpen && branch !== null && rangeValid ? (
+      ) : exportOpen ? (
         <ExportDialog
           openShifts={data.data?.openShifts ?? []}
           openShiftWarning={data.data?.openShiftWarning ?? ''}
-          filters={filters}
-          branches={branch === 'ALL' ? branchList : branchList.filter((b) => b.id === branch)}
-          categoryName={category ? label(category) : 'Tất cả danh mục'}
+          initial={{ ...filters, from: rangeValid ? range.from : '', to: rangeValid ? range.to : '' }}
+          // Every branch of the reader's scope ("Tất cả khách sạn"); the Admin's
+          // inactive branches stay out of a new report's choices.
+          branches={branchList.filter((b) => (b as { active?: boolean }).active !== false)}
+          categoryName={category ? label(category) : null}
           onClose={() => setExportOpen(false)}
         />
       ) : null}
@@ -1028,17 +1033,20 @@ function CashStrip({
 }
 
 /**
- * THE EXPORT IS WHAT IS ON SCREEN.
+ * "XUẤT BÁO CÁO" — KHÁCH SẠN · CA · NGÀY (or a period) · NỘI DUNG, then PDF or Excel.
  *
- * It used to carry its own period picker and its own "all branches" box, so a
- * file could be produced for a range and a branch different from the ones being
- * looked at — and nothing on the page said so. It now takes the page's three
- * filters and only confirms them: the file an Admin downloads is the screen they
- * were reading, with nothing capped.
+ * It OPENS ON WHAT THE SCREEN SHOWS, and every choice it adds is spelled out in
+ * the scope box above the buttons, so a file for another hotel or day than the
+ * screen is never produced silently.
+ *
+ * "TẤT CẢ KHÁCH SẠN" IS A REPORT FILTER: every branch of the reader's scope — all
+ * eight for the Admin and the Tổng quản lý lễ tân, the assigned ones for a Quản
+ * lý lễ tân — in one consolidated file. (Creating a record still needs one real
+ * branch; that rule lives in the create dialog.) The server checks every branch,
+ * the dates and the shift against the reader's scope, whatever this dialog sends.
  */
-/** The shift types a report can be narrowed to — the server's closed list. */
+/** The shift types a report can be narrowed to — the server's closed list (fallback labels). */
 const SHIFT_CHOICES = [
-  ['', 'Tất cả ca'],
   ['A', 'Ca A'],
   ['B', 'Ca B'],
   ['C', 'Ca C'],
@@ -1046,139 +1054,276 @@ const SHIFT_CHOICES = [
   ['C4', 'Ca C4'],
 ] as const;
 
+type DateMode = 'DAY' | 'RANGE';
+
+const EXPORT_FIELD =
+  'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+
 function ExportDialog({
-  filters,
   branches,
+  initial,
   categoryName,
   openShifts,
   openShiftWarning,
   onClose,
 }: {
-  filters: { from: string; to: string; branchId?: number; category?: ReportCategory };
-  /** The branches on screen: one, or every branch of the reader's scope. */
+  /** Every branch of the reader's scope — from the server, never a typed list. */
   branches: Branch[];
-  categoryName: string;
-  /** Shifts of the period still running — left out of the file, and named. */
+  /** The screen's filters: where the dialog starts. */
+  initial: { from: string; to: string; branchId?: number; category?: ReportCategory };
+  /** The screen's category, by name, when one is chosen. */
+  categoryName: string | null;
+  /** Shifts of the screen's period still running — left out of the file, and named. */
   openShifts: OpenShiftNotice[];
   openShiftWarning: string;
   onClose: () => void;
 }) {
-  const period =
-    filters.from === filters.to
-      ? formatDate(filters.from)
-      : `${formatDate(filters.from)} – ${formatDate(filters.to)}`;
-  /*
-    BRANCHES AND SHIFT — the two choices a supervisor's export adds. With one
-    branch on screen that branch is the file; with "Tất cả" the reader may pick
-    a subset ("Chi nhánh 1 + 2 + 3"). The server checks every one against the
-    reader's scope, whatever this dialog sends.
-  */
-  const multi = filters.branchId === undefined && branches.length > 1;
+  const today = hcmToday();
+  const startFrom = initial.from || today;
+  const startTo = initial.to || today;
+  const [hotel, setHotel] = useState<number | 'ALL'>(initial.branchId ?? 'ALL');
   const [picked, setPicked] = useState<number[]>(() => branches.map((b) => b.id));
-  const [shiftType, setShiftType] = useState<string>('');
-  const allPicked = picked.length === branches.length;
-  const url = operationalPdfUrl({
-    ...filters,
-    branchIds: multi && !allPicked ? picked.join(',') : undefined,
+  const [shiftType, setShiftType] = useState('');
+  const [mode, setMode] = useState<DateMode>(startFrom === startTo ? 'DAY' : 'RANGE');
+  const [day, setDay] = useState(startTo);
+  const [range, setRange] = useState<DateRangeValue>({ from: startFrom, to: startTo });
+  // The whole report, or only the screen's category.
+  const [whole, setWhole] = useState(initial.category === undefined);
+
+  // The five shifts with their clock times, as the server defines them.
+  const shifts = useQuery({ queryKey: ['shift-options'], queryFn: () => shiftsApi.options(), staleTime: Infinity });
+  const shiftChoices: [string, string][] = shifts.data
+    ? shifts.data.shifts.map((s) => [s.code, `${s.name} (${s.startLocalTime} – ${s.endLocalTime})`])
+    : SHIFT_CHOICES.map(([code, name]) => [code, name]);
+
+  const from = mode === 'DAY' ? day : range.from;
+  const to = mode === 'DAY' ? day : range.to;
+  const datesValid = from !== '' && to !== '' && from <= to;
+  const several = hotel === 'ALL' && branches.length > 1;
+  const subset = several && picked.length < branches.length;
+  const noneChosen = several && picked.length === 0;
+  const ready = datesValid && !noneChosen;
+
+  const params = {
+    branchId: hotel === 'ALL' ? undefined : hotel,
+    category: whole ? undefined : initial.category,
+    from,
+    to,
+    branchIds: subset ? picked.join(',') : undefined,
     shiftType: shiftType || undefined,
-  });
-  const branchName =
-    filters.branchId !== undefined
-      ? (branches[0] ? branchLabel(branches[0]) : '')
-      : allPicked
-        ? 'Tất cả chi nhánh trong phạm vi'
-        : `${picked.length} chi nhánh đã chọn`;
+  };
+
+  const hotelName =
+    hotel !== 'ALL'
+      ? branchLabel(branches.find((b) => b.id === hotel) ?? { address: '—', branchNumber: 0 })
+      : subset
+        ? `${picked.length} khách sạn đã chọn`
+        : `Tất cả khách sạn (${branches.length})`;
+  const shiftName = shiftType ? (shiftChoices.find(([code]) => code === shiftType)?.[1] ?? shiftType) : 'Tất cả ca';
+  const periodName = !datesValid
+    ? '—'
+    : from === to
+      ? `Ngày ${formatDate(from)}`
+      : `${formatDate(from)} – ${formatDate(to)}`;
+  const contentName = whole || !categoryName ? 'Toàn bộ báo cáo' : `Chỉ danh mục: ${categoryName}`;
+
+  /** "Xuất toàn bộ ngày": one day, every shift, every section. */
+  const wholeDay = () => {
+    setMode('DAY');
+    setShiftType('');
+    setWhole(true);
+  };
+
+  const link = (href: string, testId: string, text: string, primary: boolean) => (
+    <a
+      href={ready ? href : undefined}
+      aria-disabled={ready ? undefined : true}
+      data-testid={testId}
+      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
+        primary
+          ? 'bg-brand-600 text-white hover:bg-brand-700'
+          : 'border border-line-strong bg-white text-slate-700 hover:bg-slate-50'
+      } ${ready ? '' : 'pointer-events-none opacity-50'}`}
+    >
+      <Download className="h-4 w-4" aria-hidden="true" />
+      {text}
+    </a>
+  );
+
   return (
     <Modal
       open
-      title="Xuất báo cáo vấn đề"
+      size="2xl"
+      title="Xuất báo cáo"
       onClose={onClose}
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
             Đóng
           </Button>
-          {/* PDF only: the report is read and filed, not re-worked in a spreadsheet. */}
-          <a
-            href={picked.length === 0 && multi ? undefined : url}
-            aria-disabled={picked.length === 0 && multi ? true : undefined}
-            data-testid="operational-export-pdf"
-            className={`inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 ${
-              picked.length === 0 && multi ? 'pointer-events-none opacity-50' : ''
-            }`}
-          >
-            <Download className="h-4 w-4" aria-hidden="true" />
-            Xuất PDF
-          </a>
+          {link(operationalXlsxUrl(params), 'operational-export-xlsx', 'Xuất Excel', false)}
+          {link(operationalPdfUrl(params), 'operational-export-pdf', 'Xuất PDF', true)}
         </>
       }
     >
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm" data-testid="operational-export-scope">
-        <dt className="text-slate-500">Khoảng thời gian</dt>
-        <dd className="font-medium text-slate-800">{period}</dd>
-        <dt className="text-slate-500">Chi nhánh</dt>
-        <dd className="font-medium text-slate-800">{branchName}</dd>
-        <dt className="text-slate-500">Danh mục</dt>
-        <dd className="font-medium text-slate-800">{categoryName}</dd>
-      </dl>
+      <div className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-sm font-medium text-slate-700">
+            Khách sạn
+            <select
+              aria-label="Khách sạn"
+              data-testid="export-hotel"
+              value={hotel}
+              onChange={(e) => setHotel(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))}
+              className={EXPORT_FIELD}
+            >
+              <option value="ALL">Tất cả khách sạn</option>
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {branchLabel(b)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Ca
+            <select
+              aria-label="Ca"
+              data-testid="export-shift"
+              value={shiftType}
+              onChange={(e) => setShiftType(e.target.value)}
+              className={EXPORT_FIELD}
+            >
+              <option value="">Tất cả ca</option>
+              {shiftChoices.map(([value, text]) => (
+                <option key={value} value={value}>
+                  {text}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <label className="block text-sm font-medium text-slate-700">
-          Ca
-          <select
-            aria-label="Ca"
-            data-testid="export-shift"
-            value={shiftType}
-            onChange={(e) => setShiftType(e.target.value)}
-            className="mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-          >
-            {SHIFT_CHOICES.map(([value, text]) => (
-              <option key={value} value={value}>
-                {text}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+        {several ? (
+          <fieldset>
+            <legend className="text-sm font-medium text-slate-700">Khách sạn trong báo cáo</legend>
+            <div className="mt-1 grid gap-1.5 sm:grid-cols-2" data-testid="export-branches">
+              {branches.map((b) => {
+                const checked = picked.includes(b.id);
+                return (
+                  <label
+                    key={b.id}
+                    className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+                      checked ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line bg-white text-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-brand-600"
+                      checked={checked}
+                      data-testid={`export-branch-${b.id}`}
+                      onChange={() => setPicked(checked ? picked.filter((id) => id !== b.id) : [...picked, b.id])}
+                    />
+                    {branchLabel(b)}
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+        ) : null}
 
-      {multi ? (
-        <fieldset className="mt-3">
-          <legend className="text-sm font-medium text-slate-700">Chi nhánh trong báo cáo</legend>
-          <div className="mt-1 grid gap-1.5 sm:grid-cols-2" data-testid="export-branches">
-            {branches.map((b) => {
-              const checked = picked.includes(b.id);
-              return (
-                <label
-                  key={b.id}
-                  className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
-                    checked ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line bg-white text-slate-700'
+        <fieldset>
+          <legend className="text-sm font-medium text-slate-700">Ngày</legend>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <div className="inline-flex overflow-hidden rounded-xl border border-line-strong bg-white" role="group" aria-label="Kiểu ngày">
+              {(
+                [
+                  ['DAY', 'Một ngày'],
+                  ['RANGE', 'Khoảng ngày'],
+                ] as const
+              ).map(([value, text], i) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={mode === value}
+                  data-testid={`export-date-mode-${value}`}
+                  onClick={() => setMode(value)}
+                  className={`min-h-[2.5rem] px-3.5 text-sm ${i > 0 ? 'border-l border-line-strong' : ''} ${
+                    mode === value ? 'bg-brand-50 font-semibold text-brand-700' : 'font-medium text-slate-600 hover:bg-slate-50'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-brand-600"
-                    checked={checked}
-                    data-testid={`export-branch-${b.id}`}
-                    onChange={() => setPicked(checked ? picked.filter((id) => id !== b.id) : [...picked, b.id])}
-                  />
-                  {branchLabel(b)}
-                </label>
-              );
-            })}
+                  {text}
+                </button>
+              ))}
+            </div>
+            <Button variant="secondary" onClick={wholeDay} data-testid="export-whole-day">
+              Xuất toàn bộ ngày
+            </Button>
+          </div>
+          <div className="mt-2">
+            {mode === 'DAY' ? (
+              <input
+                type="date"
+                aria-label="Ngày báo cáo"
+                data-testid="export-day"
+                value={day}
+                max={today}
+                onChange={(e) => setDay(e.target.value)}
+                className={`${EXPORT_FIELD} max-w-[14rem]`}
+              />
+            ) : (
+              <div className="max-w-md">
+                <DateRangeField legend="Khoảng ngày" value={range} onChange={setRange} max={today} testId="export-range" />
+              </div>
+            )}
           </div>
         </fieldset>
-      ) : null}
-      {/* An unfinished day is never exported as though it were finished. */}
-      {openShifts.length > 0 ? (
-        <div className="mt-3">
-          <OpenShiftWarning notices={openShifts} warning={openShiftWarning} />
-        </div>
-      ) : null}
-      <p className="mt-3 text-xs text-slate-500">
-        Báo cáo chính thức theo ngày nghiệp vụ của ca, chỉ gồm các ca đã kết thúc. In đầy đủ từng bản
-        ghi, xếp theo chi nhánh, ngày, ca và nhân viên — không chỉ số lượng. Để xuất phạm vi khác, hãy
-        đổi bộ lọc trên trang.
-      </p>
+
+        {initial.category !== undefined && categoryName ? (
+          <fieldset>
+            <legend className="text-sm font-medium text-slate-700">Nội dung</legend>
+            <div className="mt-1 flex flex-wrap gap-4 text-sm text-slate-700">
+              <label className="flex items-center gap-2">
+                <input type="radio" name="export-content" checked={whole} onChange={() => setWhole(true)} data-testid="export-content-all" />
+                Toàn bộ báo cáo
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="export-content" checked={!whole} onChange={() => setWhole(false)} data-testid="export-content-category" />
+                Chỉ danh mục: {categoryName}
+              </label>
+            </div>
+          </fieldset>
+        ) : null}
+
+        {/* What the file WILL contain — said in words before it is produced. */}
+        <dl
+          className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-xl border border-line bg-slate-50 px-3 py-2.5 text-sm"
+          data-testid="operational-export-scope"
+        >
+          <dt className="text-slate-500">Khách sạn</dt>
+          <dd className="font-medium text-slate-800">{hotelName}</dd>
+          <dt className="text-slate-500">Ca</dt>
+          <dd className="font-medium text-slate-800">{shiftName}</dd>
+          <dt className="text-slate-500">Thời gian</dt>
+          <dd className="font-medium text-slate-800">{periodName}</dd>
+          <dt className="text-slate-500">Nội dung</dt>
+          <dd className="font-medium text-slate-800">{contentName}</dd>
+        </dl>
+        {!datesValid ? (
+          <p className="text-sm font-medium text-rose-700" role="alert">
+            Hãy chọn ngày hợp lệ (ngày bắt đầu không sau ngày kết thúc).
+          </p>
+        ) : null}
+
+        {/* An unfinished day is never exported as though it were finished. */}
+        {openShifts.length > 0 ? <OpenShiftWarning notices={openShifts} warning={openShiftWarning} /> : null}
+        <p className="text-xs text-slate-500">
+          Báo cáo chính thức theo ngày nghiệp vụ của ca, chỉ gồm các ca đã kết thúc. In đầy đủ từng bản ghi, xếp
+          theo chi nhánh, ngày, ca và nhân viên — không chỉ số lượng. Báo cáo toàn bộ gồm Đơn mới,
+          sáu danh mục của Báo cáo vấn đề, Buồng phòng và Hoàn thành vấn đề; mục không có bản ghi ghi &quot;Không có
+          dữ liệu&quot;. Đơn mới và Buồng phòng ghi theo ngày, nên chỉ có trong báo cáo &quot;Tất cả ca&quot;.
+        </p>
+      </div>
     </Modal>
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 
 afterEach(() => {
@@ -23,6 +23,18 @@ function mockShell(user: unknown, extra: Record<string, () => { status: number; 
     ...extra,
   });
 }
+
+/** A Quản lý lễ tân supervising branches 1 and 2. */
+const MANAGER_USER = {
+  id: 9,
+  username: 'quanly',
+  fullName: 'Quản lý Một',
+  role: 'RECEPTION_MANAGER',
+  branch: null,
+  managedBranchIds: [1, 2],
+  active: true,
+  mustChangePassword: false,
+};
 
 describe('role-based shell and routing', () => {
   it('shows the full admin menu (13 items)', async () => {
@@ -88,6 +100,46 @@ describe('role-based shell and routing', () => {
     }
     expect(within(nav).queryByRole('link', { name: 'Quản lý tài khoản' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Nhập đơn' })).not.toBeInTheDocument();
+  });
+
+  it('gives a Quản lý lễ tân Reception’s own menu, and "Đơn mới" over its branches', async () => {
+    mockShell(MANAGER_USER, {
+      'GET /api/branches': () => ({
+        status: 200,
+        body: {
+          branches: [
+            { id: 1, code: 'TRUONG_DINH_05', hotelName: 'KAS A', address: '05 Trương Định', branchNumber: 1 },
+            { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 },
+          ],
+        },
+      }),
+    });
+    renderApp('/app/new');
+
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual([
+      'Đơn mới',
+      'Báo cáo vấn đề',
+      'Hoàn thành vấn đề',
+      'Buồng phòng',
+    ]);
+    // The orders of its branches — the branch picker is the server's scoped list.
+    expect((await screen.findAllByRole('heading', { name: 'Đơn mới' })).length).toBeGreaterThan(0);
+    const picker = await screen.findByLabelText('Lọc theo chi nhánh');
+    await waitFor(() =>
+      expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual([
+        'Tất cả chi nhánh được giao',
+        '05 Trương Định — KAS A',
+        '260 Lý Tự Trọng — KAS B',
+      ]),
+    );
+  });
+
+  it('opens "Hoàn thành vấn đề" to a Quản lý lễ tân, with a branch picker', async () => {
+    mockShell(MANAGER_USER);
+    renderApp('/app/completed-issues');
+    expect(await screen.findByTestId('completed-branch')).toBeInTheDocument();
+    expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
   });
 
   it('blocks a receptionist from an admin route directly', async () => {

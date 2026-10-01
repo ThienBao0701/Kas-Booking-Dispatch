@@ -92,13 +92,15 @@ export const RECEPTIONIST_NAV: NavItem[] = [
 ];
 
 /**
- * "Quản lý lễ tân" and "Tổng quản lý lễ tân" — the supervision layer over
- * Reception. The same screens the Admin uses for Reception, scoped by the server
- * to the manager's branches (all eight for the general manager). The chat is the
- * bubble in the corner, listing the same branches.
+ * "Quản lý lễ tân" and "Tổng quản lý lễ tân" — RECEPTION'S OWN MENU, for the
+ * manager's branches (all eight for the general manager), scoped by the server.
+ * Every Reception entry is here except "Nhắc nhở", which is a private inbox of
+ * reminders addressed to one receptionist account each. The chat is the bubble.
  */
 export const RECEPTION_MANAGER_NAV: NavItem[] = [
+  { to: '/app/new', label: 'Đơn mới', icon: Inbox },
   { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
+  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
   { to: '/app/housekeeping', label: 'Buồng phòng', icon: BedDouble },
 ];
 

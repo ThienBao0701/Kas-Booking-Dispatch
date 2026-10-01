@@ -137,9 +137,16 @@ export function BookingDetailView({
   suppressInternalToast = false,
   cut,
   serverNow,
+  readOnly = false,
 }: {
   booking: BookingDetail;
   isAdmin: boolean;
+  /**
+   * A reception manager: the desk's view of the order, with its branch named
+   * (it manages several), and no proof upload — creating the order and proving
+   * it stay the receptionist's.
+   */
+  readOnly?: boolean;
   onCompleted?: (message?: string) => void;
   suppressInternalToast?: boolean;
   /**
@@ -284,7 +291,7 @@ export function BookingDetailView({
               uncopyable rendering of the same string to mistype from.
             */}
             {/* The Admin dispatches across eight hotels: which one is part of who this is. */}
-            {isAdmin && b.branch ? (
+            {(isAdmin || readOnly) && b.branch ? (
               <p className="mt-1 flex items-center gap-1.5 text-sm font-medium text-slate-600" data-testid="booking-header-branch">
                 <Building2 className="h-4 w-4 text-slate-400" aria-hidden="true" />
                 {b.branch.address}
@@ -448,7 +455,7 @@ export function BookingDetailView({
           {pmsCard}
           {roomsCard}
           {warningsCard}
-          <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />
+          {readOnly ? null : <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />}
         </>
       )}
 

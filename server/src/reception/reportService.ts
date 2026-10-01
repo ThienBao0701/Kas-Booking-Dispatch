@@ -1035,8 +1035,14 @@ export async function listArchivedJournal(
   now: Date,
   received: ReceivedWindow | null = null,
   client: PrismaClient = prisma,
+  /** A supervisor's one branch (inside its scope); a receptionist's is always its own. */
+  branchId?: number,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
-  return pageByCategory(archivedJournalWhere(reportVisibilityWhere(actor), now, received), ARCHIVE_PAGE_SIZE, client);
+  return pageByCategory(
+    archivedJournalWhere(reportVisibilityWhere(actor, { branchId }), now, received),
+    ARCHIVE_PAGE_SIZE,
+    client,
+  );
 }
 
 export async function countReports(

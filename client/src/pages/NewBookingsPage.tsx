@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Inbox, RefreshCw } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
+import { isReceptionSupervisor } from '../auth/types';
 import { bookingsApi, branchesApi, type BookingDetail, type NewListItem } from '../api/bookings';
 import { toUserMessage } from '../api/errors';
 import { Card } from '../components/Card';
@@ -23,7 +24,11 @@ const POLL_MS = 20_000;
 
 export function NewBookingsPage() {
   const { user } = useAuth();
-  return user?.role === 'ADMIN' ? <AdminWaitingList /> : <ReceptionistInbox />;
+  if (user?.role === 'ADMIN') return <AdminWaitingList />;
+  // A reception manager reads the same orders over its branches — the Admin's
+  // table, whose branch list and rows the server scopes. It takes no order.
+  if (user && isReceptionSupervisor(user.role)) return <AdminWaitingList manager />;
+  return <ReceptionistInbox />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -277,7 +282,7 @@ function SelectedBookingBody({
 /* Admin: waiting list (dispatched, awaiting a branch to confirm creation)     */
 /* -------------------------------------------------------------------------- */
 
-function AdminWaitingList() {
+function AdminWaitingList({ manager = false }: { manager?: boolean }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialBranch = searchParams.get('branchId');
@@ -303,8 +308,12 @@ function AdminWaitingList() {
   return (
     <div>
       <PageHeader
-        title="Chờ chi nhánh tạo"
-        description="Đơn đã gửi xuống chi nhánh, đang chờ lễ tân xác nhận đã tạo trên hệ thống khách sạn."
+        title={manager ? 'Đơn mới' : 'Chờ chi nhánh tạo'}
+        description={
+          manager
+            ? 'Đơn mới gửi đến các chi nhánh bạn quản lý, đúng như lễ tân đang thấy. Chỉ xem — lễ tân nhận và tạo đơn.'
+            : 'Đơn đã gửi xuống chi nhánh, đang chờ lễ tân xác nhận đã tạo trên hệ thống khách sạn.'
+        }
         actions={
           <select
             value={branchId ?? ''}
@@ -315,7 +324,7 @@ function AdminWaitingList() {
             aria-label="Lọc theo chi nhánh"
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
-            <option value="">Tất cả chi nhánh</option>
+            <option value="">{manager ? 'Tất cả chi nhánh được giao' : 'Tất cả chi nhánh'}</option>
             {branches.data?.branches.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.address} — {b.hotelName}

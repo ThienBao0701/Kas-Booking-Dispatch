@@ -29,6 +29,7 @@ import type { CashSummary } from '../reception/cashService';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import type { SerializedReport } from '../reception/reportService';
 import type { SerializedRoomIssue } from '../housekeeping/roomIssueService';
+import { ARCHIVE_SECTION_CATEGORIES, type ReportBooking } from '../reception/reportSections';
 import { shiftDefinition } from '../shift/shiftTypes';
 import {
   CATEGORIES,
@@ -420,6 +421,75 @@ const HOUSEKEEPING_COLUMNS = checked<Numbered<SerializedRoomIssue>>('operational
   { header: 'Thu tiền', width: 150, value: roomCollection },
 ]);
 
+/* ------------------------------ Đơn mới ------------------------------ */
+
+/** "22/09/2026" from a stored day, or a dash for a date the order never had. */
+function dayOrDash(iso: string | null): string {
+  return iso ? dayLabel(iso) : '—';
+}
+
+const BOOKING_COLUMNS = checked<Numbered<ReportBooking>>('operational bookings', [
+  { header: 'STT', width: 26, value: (r) => String(r.stt) },
+  { header: 'Mã Booking', width: 84, value: (r) => r.bookingCode },
+  { header: 'Khách', width: 130, value: (r) => r.customerName },
+  { header: 'Nguồn', width: 64, value: (r) => r.sourceLabel },
+  { header: 'Nhận phòng', width: 58, value: (r) => dayOrDash(r.checkInDate) },
+  { header: 'Trả phòng', width: 58, value: (r) => dayOrDash(r.checkOutDate) },
+  { header: 'Gửi lúc', width: 70, value: (r) => hcmDateTime(new Date(r.sentAt)) },
+  { header: 'Trạng thái', width: 90, value: (r) => r.stateLabel },
+  { header: 'Lễ tân xử lý', width: 120, value: (r) => (r.handledBy ? `${r.handledBy} · ${hcmDateTime(new Date(r.handledAt!))}` : '—') },
+]);
+
+/* -------------------------- Hoàn thành vấn đề -------------------------- */
+
+/** Who or where the archived record is about — the guest, the place, or the department. */
+function archivedSubject(r: SerializedReport): string {
+  if (r.guestRequest) return r.guestRequest.guestName ?? '';
+  if (r.complaint) return r.complaint.guestName ?? '';
+  if (r.facility) return r.facility.issue.locationLabel;
+  if (r.delivery) return r.delivery.departmentLabel;
+  return '';
+}
+
+function archivedContent(r: SerializedReport): string {
+  if (r.guestRequest) return r.guestRequest.content ?? '';
+  if (r.complaint) return r.complaint.description;
+  if (r.facility) return r.facility.issue.description;
+  if (r.delivery) return `${r.delivery.itemName} × ${r.delivery.quantity}`;
+  return '';
+}
+
+function archivedFinish(r: SerializedReport): { at: string | null; by: string | null } {
+  if (r.guestRequest) return { at: r.guestRequest.completedAt, by: r.guestRequest.completedByName };
+  if (r.complaint) return { at: r.complaint.completedAt, by: r.complaint.completedByName };
+  if (r.facility) {
+    const issue = r.facility.issue;
+    return { at: issue.completedAt, by: issue.completedByName ?? issue.technicianName };
+  }
+  if (r.delivery) return { at: r.delivery.completedAt, by: r.createdByName };
+  return { at: null, by: null };
+}
+
+const COMPLETED_COLUMNS = checked<Numbered<SerializedReport>>('operational completed', [
+  { header: 'STT', width: 26, value: (r) => String(r.stt) },
+  { header: 'Danh mục', width: 120, value: (r) => `${CATEGORY_NUMERALS[r.category]}. ${CATEGORY_LABELS[r.category]}` },
+  { header: 'Khách / Vị trí', width: 120, value: archivedSubject },
+  { header: 'Nội dung', width: 220, value: archivedContent },
+  {
+    header: 'Tiếp nhận',
+    width: 70,
+    value: (r) => hcmDateTime(new Date(r.facility ? r.facility.issue.createdAt : r.createdAt)),
+  },
+  { header: 'Hoàn thành', width: 70, value: (r) => { const at = archivedFinish(r).at; return at ? hcmDateTime(new Date(at)) : '—'; } },
+  { header: 'Người hoàn thành', width: 110, value: (r) => archivedFinish(r).by ?? '—' },
+]);
+
+/** A section with nothing in it says so, rather than disappearing. */
+const NO_DATA = 'Không có dữ liệu';
+
+/** Why a one-shift file has no "Đơn mới" or "Buồng phòng" rows: they are by day, not by shift. */
+const BY_DAY_ONLY = 'Mục này ghi theo ngày, không theo ca — xem báo cáo "Tất cả ca" của cùng ngày.';
+
 const COLUMNS_BY_CATEGORY: Record<OperationalReportCategory, Column<Numbered<SerializedReport>>[]> = {
   PAYMENT: PAYMENT_COLUMNS,
   GUEST_REQUEST: GUEST_REQUEST_COLUMNS,
@@ -454,6 +524,33 @@ function categoryCounts(counts: Partial<Record<OperationalReportCategory, number
     (c) => `${CATEGORY_LABELS[c]}: ${counts[c]}`,
   );
   return parts.length ? parts.join('  ·  ') : 'Không có bản ghi';
+}
+
+/**
+ * THE BRANCH SUMMARY, one line per section of the report — every one of them,
+ * with "Không có dữ liệu" for an empty one, so a quiet category reads as quiet
+ * rather than as missing.
+ */
+function sectionCounts(
+  section: BranchOperationalReport,
+  data: OperationalReportData,
+  fullDay: boolean,
+  showArchive: boolean,
+): string[] {
+  const count = (n: number, unit: string) => (n > 0 ? `${n} ${unit}` : NO_DATA);
+  const lines: string[] = [];
+  if (data.category === undefined) {
+    lines.push(`Đơn mới: ${fullDay ? count(section.bookingsTotal, 'đơn') : 'theo ngày (xem báo cáo tất cả ca)'}`);
+  }
+  for (const c of CATEGORIES) {
+    if (data.category !== undefined && data.category !== c) continue;
+    lines.push(`${CATEGORY_NUMERALS[c]}. ${CATEGORY_LABELS[c]}: ${count(section.counts[c], 'bản ghi')}`);
+  }
+  if (data.category === undefined) {
+    lines.push(`Buồng phòng: ${fullDay ? count(section.housekeeping.length, 'vấn đề phòng') : 'theo ngày (xem báo cáo tất cả ca)'}`);
+  }
+  if (showArchive) lines.push(`Hoàn thành vấn đề: ${count(section.completed.length, 'bản ghi')}`);
+  return lines;
 }
 
 /** How tall a category's title bar is: one 9pt line and its padding. */
@@ -539,6 +636,7 @@ const FILENAME_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
  *   05_Truong Dinh_07-01-2027.pdf            one branch, one day
  *   05_Truong Dinh_01-01-2027_07-01-2027.pdf one branch, a period
  *   Tat ca chi nhanh_07-01-2027.pdf          every branch
+ *   05_Truong Dinh_07-01-2027_Ca A.pdf       one shift
  *
  * "05" and "Truong Dinh" are the branch's address as operators say it — its
  * leading house number, then the street — folded to plain ASCII so the name
@@ -547,9 +645,11 @@ const FILENAME_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
  * Anything a filesystem refuses ("/", ":", …) becomes "-".
  */
 export function operationalPdfFileName(
-  data: Pick<OperationalReportData, 'from' | 'to' | 'branches'>,
+  data: Pick<OperationalReportData, 'from' | 'to' | 'branches'> & Partial<Pick<OperationalReportData, 'shiftType'>>,
   /** True when ONE branch was asked for — not merely when only one exists. */
   singleBranch: boolean,
+  /** The PDF and the XLSX of one scope share one name. */
+  extension: 'pdf' | 'xlsx' = 'pdf',
 ): string {
   const dates = data.from === data.to ? fileDate(data.from) : `${fileDate(data.from)}_${fileDate(data.to)}`;
   const branch = singleBranch && data.branches.length === 1 ? data.branches[0]!.branch : null;
@@ -561,7 +661,9 @@ export function operationalPdfFileName(
     const split = /^(\d\S*)\s+(.+)$/.exec(address);
     who = split ? `${split[1]}_${split[2]}` : `${branch.branchNumber}_${address}`;
   }
-  return `${`${who}_${dates}`.replace(FILENAME_UNSAFE, '-')}.pdf`;
+  // A one-shift file says which shift: "05_Truong Dinh_30-09-2026_Ca A".
+  const shift = data.shiftType ? `_${asciiFold(shiftDefinition(data.shiftType).name)}` : '';
+  return `${`${who}_${dates}${shift}`.replace(FILENAME_UNSAFE, '-')}.${extension}`;
 }
 
 export async function buildOperationalReportPdf(data: OperationalReportData): Promise<Buffer> {
@@ -570,6 +672,9 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     ? `Chi nhánh ${singleBranch.branch.branchNumber} — ${singleBranch.branch.address}`
     : `Tất cả chi nhánh (${data.branches.length})`;
   const showCash = data.category === undefined || data.category === 'PAYMENT';
+  // Every shift of the day: the by-day sections (Đơn mới, Buồng phòng) have rows.
+  const fullDay = data.category === undefined && data.shiftType === undefined;
+  const showArchive = data.category === undefined || ARCHIVE_SECTION_CATEGORIES.includes(data.category);
 
   const doc = createReportDocument({
     title: 'KAS HOTEL & RESTAURANT — BÁO CÁO VẤN ĐỀ VẬN HÀNH LỄ TÂN',
@@ -616,6 +721,23 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     }
     doc.moveDown(0.3);
     openShiftBlock(doc, section);
+
+    /* ĐƠN MỚI — the orders sent to this branch in the period (full report). */
+    if (data.category === undefined) {
+      sectionTitle(doc, `ĐƠN MỚI — ${section.bookingsTotal} đơn`);
+      if (!fullDay) note(doc, BY_DAY_ONLY);
+      else if (section.bookings.length === 0) note(doc, NO_DATA);
+      else {
+        if (section.bookingsTruncated) {
+          note(doc, 'CHÚ Ý: danh sách đơn chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+        }
+        doc.x = doc.page.margins.left;
+        const table = numbered(section.bookings);
+        ensureSpace(doc, tableLeadHeight(doc, BOOKING_COLUMNS, table));
+        drawTable(doc, BOOKING_COLUMNS, table, { frame: true });
+      }
+      doc.moveDown(0.8);
+    }
 
     // Records a SUPERVISOR entered while no shift was open — they belong to no
     // shift, and are printed in their own block below rather than dropped.
@@ -714,22 +836,40 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     }
 
     /* BUỒNG PHÒNG — what housekeeping found in the period, and the collection. */
-    if (section.housekeeping.length > 0) {
+    if (data.category === undefined) {
       sectionTitle(doc, `BUỒNG PHÒNG — ${section.housekeeping.length} vấn đề phòng`);
-      if (section.housekeepingTruncated) {
-        note(doc, 'CHÚ Ý: danh sách buồng phòng chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+      if (!fullDay) note(doc, BY_DAY_ONLY);
+      else if (section.housekeeping.length === 0) note(doc, NO_DATA);
+      else {
+        if (section.housekeepingTruncated) {
+          note(doc, 'CHÚ Ý: danh sách buồng phòng chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+        }
+        doc.x = doc.page.margins.left;
+        const table = numbered(section.housekeeping);
+        ensureSpace(doc, tableLeadHeight(doc, HOUSEKEEPING_COLUMNS, table));
+        drawTable(doc, HOUSEKEEPING_COLUMNS, table, { frame: true });
       }
-      doc.x = doc.page.margins.left;
-      const table = numbered(section.housekeeping);
-      ensureSpace(doc, tableLeadHeight(doc, HOUSEKEEPING_COLUMNS, table));
-      drawTable(doc, HOUSEKEEPING_COLUMNS, table, { frame: true });
+      doc.moveDown(0.8);
+    }
+
+    /* HOÀN THÀNH VẤN ĐỀ — the rows above that the 12-hour rule has archived. */
+    if (showArchive) {
+      sectionTitle(doc, `HOÀN THÀNH VẤN ĐỀ — ${section.completed.length} bản ghi`);
+      note(doc, 'Đã hoàn thành, từ 12 giờ trở lên kể từ lúc lễ tân tiếp nhận (tính đến lúc lập báo cáo).');
+      if (section.completed.length === 0) note(doc, NO_DATA);
+      else {
+        doc.x = doc.page.margins.left;
+        const table = numbered(section.completed);
+        ensureSpace(doc, tableLeadHeight(doc, COMPLETED_COLUMNS, table));
+        drawTable(doc, COMPLETED_COLUMNS, table, { frame: true });
+      }
       doc.moveDown(0.8);
     }
 
     /* THE BRANCH SUBTOTAL, immediately below its own records. */
     sectionTitle(doc, `TỔNG KẾT CHI NHÁNH ${section.branch.branchNumber}`);
     note(doc, `${section.shifts.length} ca đã kết thúc  ·  ${section.total} bản ghi`);
-    note(doc, categoryCounts(section.counts));
+    for (const line of sectionCounts(section, data, fullDay, showArchive)) note(doc, line);
     if (showCash) note(doc, `Tiền mặt trong kỳ  ·  ${cashLine(section.cash)}`, true);
     if (section.cash.voidedCount > 0) note(doc, `(${section.cash.voidedCount} dòng đã hủy, không tính vào tổng)`);
   });

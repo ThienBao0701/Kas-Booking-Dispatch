@@ -624,7 +624,7 @@ describe('the exports', () => {
     expect((one.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
   });
 
-  it('produces an XLSX with eight sheets and real numbers', async () => {
+  it('produces an XLSX with ten sheets and real numbers', async () => {
     await seedFullDay(letan, 'Nguyễn Văn A');
 
     const res = await admin
@@ -655,6 +655,9 @@ describe('the exports', () => {
       'Giao nhận hàng hóa',
       // Housekeeping's findings and Reception's collections, in the same export.
       'Buồng phòng',
+      // Reception's orders and its completion archive, in the same export.
+      'Đơn mới',
+      'Hoàn thành vấn đề',
     ]);
 
     const payments = wb.getWorksheet('Theo dõi thanh toán')!;

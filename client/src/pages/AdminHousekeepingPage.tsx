@@ -9,8 +9,9 @@
  *
  * The Admin may settle any issue, as Reception does, and is the only role that
  * can void a mistaken one (with a reason; it stays on file). Quản lý lễ tân and
- * Tổng quản lý lễ tân READ the same page over their own branches — the server
- * scopes the list and refuses them the collection and the void.
+ * Tổng quản lý lễ tân work the same page over their own branches, as Reception
+ * does: they read and settle the collection; the void stays the Admin's. The
+ * server scopes the list and checks the branch of every settlement.
  */
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -168,7 +169,7 @@ export function AdminHousekeepingPage() {
             isError={list.isError}
             error={list.error}
             onRetry={() => void list.refetch()}
-            onCollect={isAdmin ? setCollecting : undefined}
+            onCollect={setCollecting}
             onVoid={isAdmin ? setVoiding : undefined}
             emptyTitle="Không có vấn đề phòng"
             emptyMessage="Không có vấn đề nào khớp với bộ lọc đang chọn."

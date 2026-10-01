@@ -17,11 +17,13 @@ export function useDeliveries(
   scope: 'active' | 'archived',
   received?: { from: string; to: string } | null,
   enabled = true,
+  /** A reception manager's one branch; absent, the caller's whole scope. */
+  branchId?: number,
 ) {
   return useQuery({
     // The received-day window is part of the key: another period is another list.
-    queryKey: [...DELIVERIES_KEY, scope, received ?? null],
-    queryFn: () => deliveriesApi.list(scope, received ?? {}),
+    queryKey: [...DELIVERIES_KEY, scope, received ?? null, branchId ?? null],
+    queryFn: () => deliveriesApi.list(scope, { ...(received ?? {}), branchId }),
     enabled,
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,

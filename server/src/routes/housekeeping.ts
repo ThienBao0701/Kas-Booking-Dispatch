@@ -133,13 +133,18 @@ export function createHousekeepingRouter(): Router {
   });
 
   // PUT /api/housekeeping/issues/:id/collection — Reception (own branch) or Admin.
-  router.put('/housekeeping/issues/:id/collection', requireRole('RECEPTIONIST', 'ADMIN'), (req, res, next) => {
+  // Reception and the reception managers settle a finding; the service checks the branch.
+  router.put(
+    '/housekeeping/issues/:id/collection',
+    requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
+    (req, res, next) => {
     (async () => {
       const input = collectionSchema.parse(req.body ?? {});
       const issue = await saveCollection(req.params.id!, input, actorOf(req), getClock());
       res.json({ issue });
     })().catch(next);
-  });
+    },
+  );
 
   // POST /api/housekeeping/issues/:id/void — Admin only, with a reason.
   router.post('/housekeeping/issues/:id/void', requireRole('ADMIN'), (req, res, next) => {

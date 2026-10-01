@@ -22,7 +22,8 @@
 import ExcelJS from 'exceljs';
 import type { BranchOperationalReport, OperationalReportData } from '../reception/operationalReport';
 import type { SerializedReport } from '../reception/reportService';
-import { CATEGORY_LABELS, ROOM_SERVICE_PRICE_LABEL } from '../reception/reportTypes';
+import { CATEGORY_LABELS, CATEGORY_NUMERALS, ROOM_SERVICE_PRICE_LABEL } from '../reception/reportTypes';
+import { shiftDefinition } from '../shift/shiftTypes';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import { inspectionEnabled } from '../issue/issueLifecycle';
 import { hcmDateTime, hcmDayLabel } from './format';
@@ -86,6 +87,9 @@ export async function buildOperationalReportWorkbook(
     { header: CATEGORY_LABELS.ROOM_SERVICE, key: 'services', width: 20 },
     { header: CATEGORY_LABELS.HOTEL_DELIVERY, key: 'deliveries', width: 20 },
     { header: 'Tổng bản ghi', key: 'total', width: 14 },
+    { header: 'Đơn mới', key: 'bookings', width: 12 },
+    { header: 'Buồng phòng', key: 'rooms', width: 14 },
+    { header: 'Hoàn thành vấn đề', key: 'archived', width: 18 },
   ];
   headerRow(summary);
 
@@ -95,6 +99,11 @@ export async function buildOperationalReportWorkbook(
   // Named when the file is scoped to one category, so a workbook of payments
   // alone cannot be read as "nothing else was recorded".
   if (data.category) summary.addRow({ branch: `Danh mục: ${CATEGORY_LABELS[data.category]}` });
+  // …and to one shift, likewise. "Đơn mới" and "Buồng phòng" are by day, so a
+  // one-shift workbook has none of their rows.
+  if (data.shiftType) {
+    summary.addRow({ branch: `Ca: ${shiftDefinition(data.shiftType).name} (Đơn mới và Buồng phòng ghi theo ngày, không theo ca)` });
+  }
   // Open shifts are named, never counted: the day is not finished until they end.
   const open = data.branches.flatMap((b) => b.openShifts);
   if (open.length > 0) {
@@ -126,6 +135,9 @@ export async function buildOperationalReportWorkbook(
       services: section.counts.ROOM_SERVICE,
       deliveries: section.counts.HOTEL_DELIVERY,
       total: section.total,
+      bookings: section.bookingsTotal,
+      rooms: section.housekeeping.length,
+      archived: section.completed.length,
     });
   }
   moneyColumns(summary, ['opening', 'cash', 'transfer', 'card', 'receivable', 'expense', 'ending']);
@@ -530,9 +542,83 @@ export async function buildOperationalReportWorkbook(
     });
   }
 
+  /* ------------- 9. Đơn mới — the orders sent to each branch in the period ------------- */
+  const orders = wb.addWorksheet('Đơn mới');
+  orders.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Mã Booking', key: 'code', width: 18 },
+    { header: 'Khách', key: 'guest', width: 26 },
+    { header: 'Nguồn', key: 'source', width: 14 },
+    { header: 'Nhận phòng', key: 'checkIn', width: 12 },
+    { header: 'Trả phòng', key: 'checkOut', width: 12 },
+    { header: 'Gửi lúc', key: 'sentAt', width: 18 },
+    { header: 'Trạng thái', key: 'state', width: 18 },
+    { header: 'Lễ tân xử lý', key: 'handledBy', width: 22 },
+    { header: 'Thời gian xử lý', key: 'handledAt', width: 18 },
+  ];
+  headerRow(orders);
+  for (const section of data.branches) {
+    section.bookings.forEach((b, i) => {
+      orders.addRow({
+        branch: branchLabel(section),
+        stt: i + 1,
+        code: b.bookingCode,
+        guest: b.customerName,
+        source: b.sourceLabel,
+        checkIn: b.checkInDate ? hcmDayLabel(b.checkInDate) : '',
+        checkOut: b.checkOutDate ? hcmDayLabel(b.checkOutDate) : '',
+        sentAt: when(b.sentAt),
+        state: b.stateLabel,
+        handledBy: b.handledBy ?? '',
+        handledAt: when(b.handledAt),
+      });
+    });
+  }
+
+  /* ---- 10. Hoàn thành vấn đề — the rows the 12-hour rule has archived ---- */
+  const archived = wb.addWorksheet('Hoàn thành vấn đề');
+  archived.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Danh mục', key: 'category', width: 34 },
+    { header: 'Khách / Vị trí', key: 'subject', width: 24 },
+    { header: 'Nội dung', key: 'content', width: 44 },
+    { header: 'Tiếp nhận', key: 'receivedAt', width: 18 },
+    { header: 'Hoàn thành', key: 'completedAt', width: 18 },
+    { header: 'Người hoàn thành', key: 'completedBy', width: 22 },
+  ];
+  headerRow(archived);
+  for (const section of data.branches) {
+    section.completed.forEach((row, i) => {
+      const issue = row.facility?.issue;
+      archived.addRow({
+        branch: branchLabel(section),
+        stt: i + 1,
+        category: `${CATEGORY_NUMERALS[row.category]}. ${CATEGORY_LABELS[row.category]}`,
+        subject:
+          row.guestRequest?.guestName ?? row.complaint?.guestName ?? issue?.locationLabel ?? row.delivery?.departmentLabel ?? '',
+        content:
+          row.guestRequest?.content ??
+          row.complaint?.description ??
+          issue?.description ??
+          (row.delivery ? `${row.delivery.itemName} × ${row.delivery.quantity}` : ''),
+        receivedAt: when(issue ? issue.createdAt : row.createdAt),
+        completedAt: when(
+          row.guestRequest?.completedAt ?? row.complaint?.completedAt ?? issue?.completedAt ?? row.delivery?.completedAt ?? null,
+        ),
+        completedBy:
+          row.guestRequest?.completedByName ??
+          row.complaint?.completedByName ??
+          (issue ? (issue.completedByName ?? issue.technicianName ?? '') : row.createdByName),
+      });
+    });
+  }
+
   const out = await wb.xlsx.writeBuffer();
   return Buffer.from(out);
 }
+
 
 /**
  * The correction trail, flattened into one cell.

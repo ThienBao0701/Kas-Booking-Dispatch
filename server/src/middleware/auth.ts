@@ -54,6 +54,8 @@ const RECEPTION_SUPERVISOR_ROUTES = [
   /^\/api\/branches(\/|$)/,
   /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
   /^\/api\/reception\/reports(\/|$)/,
+  // The five shifts and their clock times — the export's shift choices.
+  /^\/api\/reception\/shifts\/options$/,
   /^\/api\/issues(\/|$)/,
   /^\/api\/chat\/channels(\/|$)/,
   /^\/api\/chat\/attachments(\/|$)/,
@@ -63,9 +65,17 @@ const RECEPTION_SUPERVISOR_ROUTES = [
   /^\/api\/notifications(\/|$)/,
 ];
 
+/**
+ * "Đơn mới" — READ ONLY. A supervisor sees the orders sent to its branches and
+ * opens one, exactly as Reception does; it never claims, cuts or confirms one
+ * (those stay Reception's, on its shift), so only these two GETs are let through.
+ */
+const RECEPTION_SUPERVISOR_READ_ROUTES = [/^\/api\/bookings\/new$/, /^\/api\/bookings\/[^/]+$/];
+
 function supervisorMayReach(req: Request): boolean {
   const path = req.originalUrl.split('?')[0] ?? '';
-  return RECEPTION_SUPERVISOR_ROUTES.some((route) => route.test(path));
+  if (RECEPTION_SUPERVISOR_ROUTES.some((route) => route.test(path))) return true;
+  return req.method === 'GET' && RECEPTION_SUPERVISOR_READ_ROUTES.some((route) => route.test(path));
 }
 
 /**

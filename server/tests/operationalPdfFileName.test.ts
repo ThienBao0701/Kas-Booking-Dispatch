@@ -52,3 +52,14 @@ describe('operationalPdfFileName', () => {
     );
   });
 });
+
+describe('the shift and the format in the name', () => {
+  it('names a one-shift file by its shift, and the workbook like the PDF', () => {
+    const oneShift = { ...data('2026-09-30', '2026-09-30', [branch('05 Trương Định')]), shiftType: 'A' as const };
+    expect(operationalPdfFileName(oneShift, true)).toBe('05_Truong Dinh_30-09-2026_Ca A.pdf');
+    expect(operationalPdfFileName(oneShift, true, 'xlsx')).toBe('05_Truong Dinh_30-09-2026_Ca A.xlsx');
+    expect(operationalPdfFileName(data('2026-09-01', '2026-09-30', [branch('05 Trương Định')]), false, 'xlsx')).toBe(
+      'Tat ca chi nhanh_01-09-2026_30-09-2026.xlsx',
+    );
+  });
+});

@@ -22,9 +22,16 @@
  * COMPACT BY DESIGN: the summary form of each category's table, with the status
  * "Đã hoàn thành". Deliveries (VI) follow the same rule and are the fourth section.
  * Payments (I) and room services (V) are not part of this rule and never appear here.
+ *
+ * A RECEPTION MANAGER reads the same archive over its branches (all eight for
+ * the general manager): one more control, the branch, from the server's scoped
+ * list — "Tất cả" meaning every branch it manages. The server scopes every read.
  */
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../auth/AuthProvider';
+import { branchLabel, isReceptionSupervisor } from '../auth/types';
+import { branchesApi } from '../api/bookings';
 import { RefreshCw } from 'lucide-react';
 import { reportsApi } from '../api/receptionReports';
 import { issuesApi } from '../api/issues';
@@ -53,7 +60,12 @@ export function CompletedIssuesPage() {
   const [range, setRange] = useState<DateRangeValue>(() => ({ from: daysBefore(today, 6), to: today }));
   // Both ends or nothing: a half range is never sent (the server refuses it too).
   const rangeValid = range.from !== '' && range.to !== '';
-  const period = { from: range.from, to: range.to };
+  const { user } = useAuth();
+  const manager = !!user && isReceptionSupervisor(user.role) && user.role !== 'ADMIN';
+  // The manager's branches, from the server's scope; undefined = all of them.
+  const [branchId, setBranchId] = useState<number | undefined>(undefined);
+  const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), enabled: manager });
+  const period = { from: range.from, to: range.to, ...(branchId !== undefined ? { branchId } : {}) };
 
   const journal = useQuery({
     queryKey: [...ARCHIVED_REPORTS_KEY, period],
@@ -63,7 +75,7 @@ export function CompletedIssuesPage() {
   });
   const incidents = useQuery({
     queryKey: [...FACILITY_BOARD_KEY, 'archive', period],
-    queryFn: () => issuesApi.list({ scope: 'archive', from: period.from, to: period.to, pageSize: 100 }),
+    queryFn: () => issuesApi.list({ scope: 'archive', from: period.from, to: period.to, branchId, pageSize: 100 }),
     enabled: rangeValid,
     refetchOnWindowFocus: true,
   });
@@ -71,7 +83,7 @@ export function CompletedIssuesPage() {
   // "Giao nhận hàng hóa" is the fourth thing the 12-hour rule moves here. It is
   // read from its own branch-wide endpoint (a delivery outlives its shift), by the
   // same received-day window.
-  const deliveries = useDeliveries('archived', rangeValid ? period : null, rangeValid);
+  const deliveries = useDeliveries('archived', rangeValid ? { from: range.from, to: range.to } : null, rangeValid, branchId);
 
   const reports = journal.data?.reports ?? [];
   const requests = reports.filter((r) => r.category === 'GUEST_REQUEST');
@@ -109,6 +121,25 @@ export function CompletedIssuesPage() {
           Lọc theo ngày tiếp nhận
         </p>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3 px-4 py-3">
+          {manager ? (
+            <label className="block min-w-[14rem] text-xs font-medium text-slate-500">
+              Chi nhánh
+              <select
+                aria-label="Chi nhánh"
+                data-testid="completed-branch"
+                value={branchId ?? ''}
+                onChange={(e) => setBranchId(e.target.value === '' ? undefined : Number(e.target.value))}
+                className="mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-800 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+              >
+                <option value="">Tất cả chi nhánh được giao</option>
+                {(branches.data?.branches ?? []).map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {branchLabel(b)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <div className="min-w-[17rem] max-w-full">
             <DateRangeField
               legend="Ngày tiếp nhận"

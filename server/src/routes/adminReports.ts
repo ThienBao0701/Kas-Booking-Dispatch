@@ -147,10 +147,6 @@ const drillDownQuery = z
   });
 
 /** The workbook's name. The PDF is named by `operationalPdfFileName` (branch + business date). */
-function operationalFileName(from: string, to: string, ext: 'xlsx'): string {
-  return `KAS-bao-cao-van-de-le-tan-${from}-${to}.${ext}`;
-}
-
 function sendPdf(res: Response, pdf: Buffer, fileName: string): void {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', contentDisposition(fileName));
@@ -544,7 +540,7 @@ export function createAdminReportsRouter(): Router {
     })().catch(next);
   });
 
-  // GET /api/admin/reports/operational.xlsx — the same data, six sheets.
+  // GET /api/admin/reports/operational.xlsx — the same data, one sheet per section.
   router.get('/admin/reports/operational.xlsx', (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
@@ -558,11 +554,13 @@ export function createAdminReportsRouter(): Router {
         shiftType: q.shiftType,
       });
       const workbook = await buildOperationalReportWorkbook(data);
+      // The same name as the PDF of the same scope: branch, business date(s), shift.
+      const single = q.branchIds ? q.branchIds.length === 1 : q.branchId !== undefined;
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       );
-      res.setHeader('Content-Disposition', contentDisposition(operationalFileName(q.from, q.to, 'xlsx')));
+      res.setHeader('Content-Disposition', contentDisposition(operationalPdfFileName(data, single, 'xlsx')));
       res.setHeader('Cache-Control', 'private, no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.send(workbook);

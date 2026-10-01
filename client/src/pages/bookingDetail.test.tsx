@@ -138,6 +138,35 @@ function mockDetail(booking: unknown) {
   });
 }
 
+describe('BookingDetailPage — a reception manager reads, and acts on nothing', () => {
+  it('shows the order and its branch, with no proof upload', async () => {
+    installApiMock({
+      'GET /api/auth/me': () => ({
+        status: 200,
+        body: {
+          user: {
+            id: 9,
+            username: 'quanly',
+            fullName: 'Quản lý Một',
+            role: 'RECEPTION_MANAGER',
+            branch: null,
+            managedBranchIds: [1],
+            active: true,
+            mustChangePassword: false,
+          },
+        },
+      }),
+      'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
+      'GET /api/bookings/b1': () => ({ status: 200, body: { booking: NEW_BOOKING } }),
+    });
+    renderApp('/app/booking/b1');
+
+    expect(await screen.findByRole('heading', { name: 'Nguyễn Văn A' })).toBeInTheDocument();
+    expect(screen.getByTestId('booking-header-branch')).toHaveTextContent('05 Trương Định');
+    expect(screen.queryByTestId('proof-creator')).not.toBeInTheDocument();
+  });
+});
+
 describe('BookingDetailPage — simplified copy surface', () => {
   it('exposes only a nightly-price copy on room rows (no room-block copies)', async () => {
     mockDetail(NEW_BOOKING);

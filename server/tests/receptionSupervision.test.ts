@@ -335,3 +335,135 @@ describe('a technician works only what was assigned to them', () => {
     expect((await admin.get(`/api/issues/${otherRoom}`)).body.issue.repeatOf).toBeNull();
   });
 });
+
+/* ================================================================== */
+/* 5. The complete Reception scope, for the branches managed            */
+/* ================================================================== */
+
+describe('a Quản lý lễ tân has Reception’s whole picture of its branches', () => {
+  let hk1: Agent;
+  let hk3: Agent;
+  let own = '';
+  let other = '';
+
+  async function sendOrder(branchId: number, code: string): Promise<string> {
+    const booking = await testPrisma.booking.create({
+      data: {
+        bookingCode: code,
+        hotelName: 'KAS',
+        branchId,
+        customerName: `Khách ${code}`,
+        sourcePlatform: 'BOOKING_COM',
+        paymentStatus: 'PAY_BEFORE',
+        rawText: 'fixture',
+        checkInDate: new Date('2026-09-20T00:00:00.000Z'),
+        checkOutDate: new Date('2026-09-22T00:00:00.000Z'),
+        status: 'NEW',
+        sentAt: hcm('2026-09-19', '08:00'),
+        verificationStatus: 'NOT_SUBMITTED',
+      },
+    });
+    return booking.id;
+  }
+
+  async function loadWorkbook(bytes: Buffer) {
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(bytes as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    return wb;
+  }
+
+  const download = (agent: Agent, url: string) =>
+    agent
+      .get(url)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+
+  beforeAll(async () => {
+    for (const [username, branchId] of [
+      ['buongphong1', cn1],
+      ['buongphong3', cn3],
+    ] as const) {
+      await createUser({ username, password: TECH_PASSWORD, fullName: username, role: 'HOUSEKEEPING', branchId, mustChangePassword: false });
+    }
+    hk1 = (await loginAgent(app, 'buongphong1', TECH_PASSWORD)).agent;
+    hk3 = (await loginAgent(app, 'buongphong3', TECH_PASSWORD)).agent;
+  });
+
+  beforeEach(async () => {
+    await testPrisma.booking.deleteMany({ where: { bookingCode: { in: ['MINE-1', 'THEIRS-3'] } } });
+    own = await sendOrder(cn1, 'MINE-1');
+    other = await sendOrder(cn3, 'THEIRS-3');
+  });
+
+  it('reads "Đơn mới" of its branches only — and takes no order', async () => {
+    const list = await manager.get('/api/bookings/new?page=1&pageSize=20');
+    expect(list.status).toBe(200);
+    expect(list.body.bookings.map((b: { bookingCode: string }) => b.bookingCode)).toEqual(['MINE-1']);
+    expect((await manager.get(`/api/bookings/new?branchId=${cn3}`)).status).toBe(403);
+
+    const detail = await manager.get(`/api/bookings/${own}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.booking.cutFields).toEqual([]);
+    expect(detail.body.booking.rawText).toBeUndefined();
+    expect((await manager.get(`/api/bookings/${other}`)).status).toBe(403);
+
+    // Claiming, cutting and proving stay the desk's.
+    expect((await manager.post(`/api/bookings/${own}/claim`).send({})).status).toBe(403);
+    expect((await manager.post(`/api/bookings/${own}/cut`).send({ field: 'CUSTOMER_NAME' })).status).toBe(403);
+
+    // The Tổng quản lý lễ tân reads every branch's.
+    const all = await general.get('/api/bookings/new?page=1&pageSize=20');
+    expect(all.body.bookings.map((b: { bookingCode: string }) => b.bookingCode).sort()).toEqual(['MINE-1', 'THEIRS-3']);
+  });
+
+  it('reads "Hoàn thành vấn đề" and the deliveries of its branches only', async () => {
+    expect((await manager.get('/api/reception/reports/archive')).status).toBe(200);
+    expect((await manager.get(`/api/reception/reports/archive?branchId=${cn1}`)).status).toBe(200);
+    expect((await manager.get(`/api/reception/reports/archive?branchId=${cn3}`)).status).toBe(403);
+    expect((await manager.get('/api/hotel-deliveries?scope=archived')).status).toBe(200);
+    expect((await manager.get(`/api/hotel-deliveries?scope=active&branchId=${cn3}`)).status).toBe(403);
+    expect((await manager.get('/api/reception/shifts/options')).status).toBe(200);
+  });
+
+  it('settles a room finding of its branches, as Reception does — never another branch’s', async () => {
+    const inspect = (agent: Agent) =>
+      agent.post('/api/housekeeping/inspections').send({ roomNumber: '301', staffName: 'Chị Lan', issues: [{ type: 'SMOKING' }] });
+    const mine = (await inspect(hk1)).body.inspection.issues[0].id as string;
+    const theirs = (await inspect(hk3)).body.inspection.issues[0].id as string;
+
+    const settle = (id: string) =>
+      manager.put(`/api/housekeeping/issues/${id}/collection`).send({ status: 'COLLECTED', amount: 200_000, method: 'CASH' });
+    const ok = await settle(mine);
+    expect(ok.status).toBe(200);
+    expect(ok.body.issue.collectionStatus).toBe('COLLECTED');
+    expect((await settle(theirs)).status).toBe(403);
+    // The void stays the Admin's.
+    expect((await manager.post(`/api/housekeeping/issues/${mine}/void`).send({ reason: 'x' })).status).toBe(403);
+  });
+
+  it('exports its branches — whole day, one shift, PDF and Excel — and never another branch', async () => {
+    const day = 'from=2026-09-19&to=2026-09-19';
+    const all = await download(manager, `/api/admin/reports/operational.xlsx?${day}`);
+    expect(all.status).toBe(200);
+    expect(all.headers['content-disposition']).toContain('Tat ca chi nhanh_19-09-2026.xlsx');
+    const wb = await loadWorkbook(all.body as Buffer);
+    const codes: string[] = [];
+    wb.getWorksheet('Đơn mới')!.eachRow((row, i) => {
+      if (i > 1) codes.push(String(row.getCell(3).value));
+    });
+    expect(codes).toEqual(['MINE-1']);
+    expect(wb.getWorksheet('Hoàn thành vấn đề')).toBeDefined();
+
+    const oneShift = await manager.get(`/api/admin/reports/operational.pdf?${day}&branchIds=${cn1}&shiftType=A`);
+    expect(oneShift.status).toBe(200);
+    expect(oneShift.headers['content-disposition']).toContain('05_Truong Dinh_19-09-2026_Ca A.pdf');
+
+    expect((await manager.get(`/api/admin/reports/operational.pdf?${day}&branchIds=${cn1},${cn3}`)).status).toBe(403);
+    expect((await manager.get(`/api/admin/reports/operational.xlsx?${day}&branchId=${cn3}`)).status).toBe(403);
+  });
+});

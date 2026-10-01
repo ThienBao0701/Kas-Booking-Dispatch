@@ -203,7 +203,8 @@ const listSchema = z
  * every other period in KAS.
  */
 const archiveSchema = z
-  .object({ from: isoDay.optional(), to: isoDay.optional() })
+  // `branchId`: a reception manager narrowing to one branch of its scope.
+  .object({ from: isoDay.optional(), to: isoDay.optional(), branchId: z.coerce.number().int().positive().optional() })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
     path: ['to'],
@@ -326,13 +327,14 @@ export function createReceptionReportsRouter(): Router {
     the records RECEIVED on those days — the original reception time, the same
     instant the 12-hour rule is measured from; never the completion.
   */
-  router.get('/reception/reports/archive', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  // Reception's own branch; a supervisor's scope (one branch of it, or all of it).
+  router.get('/reception/reports/archive', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const q = archiveSchema.parse(req.query);
       const received = q.from && q.to ? hcmRange(q.from, q.to) : null;
       const now = getClock().now();
-      const { reports, totals } = await listArchivedJournal(actor(user), now, received);
+      const { reports, totals } = await listArchivedJournal(actor(user), now, received, undefined, q.branchId);
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),
         totals,

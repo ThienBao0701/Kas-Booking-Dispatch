@@ -37,6 +37,8 @@ import { readProofFile } from '../booking/proofStorage';
 import { analyzeAfterSubmit } from '../booking/ocr/analysisService';
 import { isTest } from '../config/env';
 import type { UserWithBranch } from '../auth/serialize';
+import type { SessionUser } from '../middleware/auth';
+import { branchScopeOf, isReceptionSupervisor, scopeIncludes, scopedBranchFilter } from '../auth/branchScope';
 
 const extractSchema = z.object({
   rawText: z.string().min(1, 'Nội dung không được để trống.').max(50000, 'Nội dung quá dài.'),
@@ -186,9 +188,14 @@ function meta(page: number, pageSize: number, total: number) {
  * The branch a receptionist is locked to. Admins may target any branch (or none
  * for "all"). A receptionist's own branch always wins over any client-supplied
  * branchId, so branch isolation cannot be bypassed from the query string.
+ *
+ * A Quản lý lễ tân reads its assigned branches and a Tổng quản lý lễ tân every
+ * branch — narrowed to the one asked for, and REFUSED (403) for a branch outside
+ * the scope — through the same `scopedBranchFilter` as every reception read.
  */
-function branchScope(user: UserWithBranch, requested: number | undefined): number | undefined {
+function branchScope(user: SessionUser, requested: number | undefined): number | { in: number[] } | undefined {
   if (user.role === 'ADMIN') return requested;
+  if (isReceptionSupervisor(user.role)) return scopedBranchFilter(user, requested).branchId;
   return user.branchId ?? -1; // -1 never matches, so an unassigned receptionist sees nothing
 }
 
@@ -387,7 +394,8 @@ export function createBookingsRouter(): Router {
         const claimable = verificationStatuses.some(
           (status) => status === 'NOT_SUBMITTED' || status === 'REJECTED',
         );
-        if (user.role === 'RECEPTIONIST' && claimable) {
+        // A reception manager reads the queue exactly as the desk sees it.
+        if ((user.role === 'RECEPTIONIST' || (user.role !== 'ADMIN' && isReceptionSupervisor(user.role))) && claimable) {
           Object.assign(where, activeQueueWhere(getClock().now()));
         }
 
@@ -710,7 +718,11 @@ export function createBookingsRouter(): Router {
       const booking = await loadBookingDetail(req.params.id!);
 
       if (user.role !== 'ADMIN') {
-        if (booking.branchId !== user.branchId) throw ApiError.branchAccessDenied();
+        // A reception manager reads the orders of its branches; a receptionist its own.
+        const mine = isReceptionSupervisor(user.role)
+          ? booking.branchId !== null && scopeIncludes(branchScopeOf(user), booking.branchId)
+          : booking.branchId === user.branchId;
+        if (!mine) throw ApiError.branchAccessDenied();
         // Not-yet-dispatched drafts are not visible to receptionists.
         if (booking.status === 'DRAFT' || booking.status === 'READY') {
           throw ApiError.notFound('Không tìm thấy đơn đặt phòng.');
@@ -727,7 +739,8 @@ export function createBookingsRouter(): Router {
         amount and the note are all still there, and this list only says which
         of them reception has finished with.
       */
-      const cutFields = isAdmin ? [] : await cutFieldsFor(booking.id, booking.claimCycle, prisma);
+      // A reception manager reads; it takes nothing off the order, so nothing is hidden from it.
+      const cutFields = isReceptionSupervisor(user.role) ? [] : await cutFieldsFor(booking.id, booking.claimCycle, prisma);
 
       res.json({
         booking: { ...serializeOpsBookingDetail(booking, isAdmin), cutFields },

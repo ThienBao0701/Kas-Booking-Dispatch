@@ -20,7 +20,7 @@
  *   8. The export asks for a period and offers a PDF (no Excel action).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
@@ -1810,13 +1810,13 @@ describe('the period', () => {
         .slice(before)
         .some(([u]) => String(u).startsWith('/api/admin/reports/operational?')),
     ).toBe(false);
-    // And there is nothing to export until the period is whole again.
-    expect(screen.getByTestId('operational-export-open')).toBeDisabled();
+    // The export keeps its own dates, so it stays available — and refuses a bad one itself.
+    expect(screen.getByTestId('operational-export-open')).toBeEnabled();
   });
 });
 
-describe('the export is what is on screen', () => {
-  it('exports the screen’s branch and period as a PDF — and offers no Excel', async () => {
+describe('the export opens on what is on screen', () => {
+  it('starts from the screen’s branch and period, as a PDF and as Excel', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
@@ -1826,8 +1826,54 @@ describe('the export is what is on screen', () => {
       'href',
       `/api/admin/reports/operational.pdf?branchId=11&${PERIOD}`,
     );
-    expect(screen.queryByTestId('operational-export-xlsx')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Xuất Excel/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('operational-export-xlsx')).toHaveAttribute(
+      'href',
+      `/api/admin/reports/operational.xlsx?branchId=11&${PERIOD}`,
+    );
+  });
+
+  it('exports another hotel, one shift and one day — and says so before the file is made', async () => {
+    installApiMock(shellRoutes());
+    renderApp('/app/reports');
+    await chooseBranch();
+    await userEvent.click(screen.getByTestId('operational-export-open'));
+
+    await userEvent.selectOptions(await screen.findByTestId('export-hotel'), '13');
+    await userEvent.selectOptions(screen.getByTestId('export-shift'), 'A');
+    fireEvent.change(screen.getByTestId('export-day'), { target: { value: '2026-09-30' } });
+
+    const scope = screen.getByTestId('operational-export-scope');
+    expect(scope).toHaveTextContent('47A Nguyễn Trãi');
+    expect(scope).toHaveTextContent('Ca A');
+    expect(scope).toHaveTextContent('Ngày 30/09/2026');
+    expect(screen.getByTestId('operational-export-pdf')).toHaveAttribute(
+      'href',
+      '/api/admin/reports/operational.pdf?branchId=13&from=2026-09-30&to=2026-09-30&shiftType=A',
+    );
+  });
+
+  it('exports every hotel, every shift, over a range — and "Xuất toàn bộ ngày" is one press', async () => {
+    installApiMock(shellRoutes());
+    renderApp('/app/reports');
+    await chooseBranch();
+    await userEvent.click(screen.getByTestId('operational-export-open'));
+
+    await userEvent.selectOptions(await screen.findByTestId('export-hotel'), 'ALL');
+    await userEvent.click(screen.getByTestId('export-date-mode-RANGE'));
+    fireEvent.change(screen.getByTestId('export-range-from'), { target: { value: '2026-09-01' } });
+    fireEvent.change(screen.getByTestId('export-range-to'), { target: { value: '2026-09-30' } });
+    expect(screen.getByTestId('operational-export-scope')).toHaveTextContent('Tất cả khách sạn');
+    expect(screen.getByTestId('operational-export-xlsx')).toHaveAttribute(
+      'href',
+      '/api/admin/reports/operational.xlsx?from=2026-09-01&to=2026-09-30',
+    );
+
+    // One press back to a single whole day: every shift, every section.
+    await userEvent.selectOptions(screen.getByTestId('export-shift'), 'B');
+    await userEvent.click(screen.getByTestId('export-whole-day'));
+    expect(screen.getByTestId('export-shift')).toHaveValue('');
+    expect(screen.getByTestId('export-day')).toBeInTheDocument();
+    expect(screen.getByTestId('operational-export-scope')).toHaveTextContent('Toàn bộ báo cáo');
   });
 
   it('carries the chosen category into the file', async () => {
@@ -1839,7 +1885,7 @@ describe('the export is what is on screen', () => {
     await userEvent.click(screen.getByTestId('operational-export-open'));
 
     const scope = await screen.findByTestId('operational-export-scope');
-    expect(scope).toHaveTextContent('Theo dõi thanh toán');
+    expect(scope).toHaveTextContent('Chỉ danh mục: Theo dõi thanh toán');
     expect(screen.getByTestId('operational-export-pdf')).toHaveAttribute(
       'href',
       `/api/admin/reports/operational.pdf?branchId=11&category=PAYMENT&${PERIOD}`,
@@ -1882,7 +1928,7 @@ describe('the export is what is on screen', () => {
     await screen.findByTestId('row-p1');
     await userEvent.click(screen.getByTestId('operational-export-open'));
 
-    expect(await screen.findByTestId('operational-export-scope')).toHaveTextContent('Tất cả chi nhánh');
+    expect(await screen.findByTestId('operational-export-scope')).toHaveTextContent('Tất cả khách sạn');
     expect(screen.getByTestId('operational-export-pdf').getAttribute('href')).not.toContain('branchId');
   });
 

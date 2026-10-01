@@ -61,6 +61,12 @@ const TECHNICAL_ROLES: readonly UserRole[] = ['TECHNICAL', 'TECHNICAL_MANAGER'];
  */
 const SUPERVISION_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'];
 const REPORT_ROLES: readonly UserRole[] = ['RECEPTIONIST', ...SUPERVISION_ROLES];
+/**
+ * Reception's screens, for Reception and the two reception managers ("the
+ * complete Reception experience, for the branches I manage"). The server scopes
+ * every read; a manager never claims, cuts or confirms an order.
+ */
+const RECEPTION_SCOPE_ROLES: readonly UserRole[] = [...BOOKING_ROLES, 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'];
 
 /** Sends each role to its natural landing page. */
 function RoleLanding() {
@@ -112,7 +118,7 @@ export function AppRoutes() {
             authenticated user, which sent a technician to an empty inbox with
             nothing to explain it.
           */}
-          <Route path="new" element={<RequireRole role={BOOKING_ROLES}><NewBookingsPage /></RequireRole>} />
+          <Route path="new" element={<RequireRole role={RECEPTION_SCOPE_ROLES}><NewBookingsPage /></RequireRole>} />
           <Route path="pending-review" element={<RequireRole role={BOOKING_ROLES}><PendingReviewPage /></RequireRole>} />
           <Route path="rejected" element={<RequireRole role={BOOKING_ROLES}><RejectedPage /></RequireRole>} />
           {/*
@@ -123,7 +129,7 @@ export function AppRoutes() {
           */}
           <Route path="completed" element={<Navigate to="/app/history" replace />} />
           <Route path="history" element={<RequireRole role={BOOKING_ROLES}><HistoryPage /></RequireRole>} />
-          <Route path="booking/:id" element={<RequireRole role={BOOKING_ROLES}><BookingDetailPage /></RequireRole>} />
+          <Route path="booking/:id" element={<RequireRole role={RECEPTION_SCOPE_ROLES}><BookingDetailPage /></RequireRole>} />
           {/*
             OLD ADDRESSES, KEPT AS REDIRECTS. Incidents are reported and watched
             in "Báo cáo vấn đề" → "Sự cố cơ sở vật chất đang xử lý" now, and "Bàn giao
@@ -146,7 +152,10 @@ export function AppRoutes() {
           */}
           <Route path="reports" element={<RequireRole role={REPORT_ROLES}><OperationalReportsPage /></RequireRole>} />
           {/* Reception's 12-hour completion archive — a query over the same records. */}
-          <Route path="completed-issues" element={<RequireRole role="RECEPTIONIST"><CompletedIssuesPage /></RequireRole>} />
+          <Route
+            path="completed-issues"
+            element={<RequireRole role={['RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER']}><CompletedIssuesPage /></RequireRole>}
+          />
           {/*
             Bộ phận kỹ thuật. `queue` is a real path segment so each workflow
             state has its own address and can be bookmarked or opened alongside.

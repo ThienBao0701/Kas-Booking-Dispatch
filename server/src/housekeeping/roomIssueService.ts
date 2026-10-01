@@ -34,7 +34,7 @@ import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { captureShiftContext, type ShiftActor } from '../shift/shiftService';
 import { assertMoney } from '../reception/reportService';
-import { isReceptionSupervisor, scopedBranchFilter } from '../auth/branchScope';
+import { branchScopeOf, isReceptionSupervisor, scopeIncludes, scopedBranchFilter } from '../auth/branchScope';
 import { catalogRoom } from '../room/branchRooms';
 import {
   ROOM_COLLECTION_METHODS,
@@ -450,14 +450,21 @@ async function loadIssue(id: string, client: PrismaClient): Promise<IssueRow> {
   return row;
 }
 
-/** Reception reaches its own branch only; Admin reaches every branch. */
+/**
+ * Reception reaches its own branch only; a reception manager the branches of its
+ * scope (all eight for the general manager); Admin every branch.
+ */
 function assertMayHandle(row: IssueRow, actor: HousekeepingActor): void {
   if (actor.role === 'ADMIN') return;
   if (actor.role === 'RECEPTIONIST') {
     if (row.branchId !== actor.branchId) throw ApiError.branchAccessDenied();
     return;
   }
-  throw ApiError.forbidden('Chỉ lễ tân hoặc Admin mới cập nhật được thu tiền phòng.');
+  if (isReceptionSupervisor(actor.role)) {
+    if (!scopeIncludes(branchScopeOf(actor), row.branchId)) throw ApiError.branchAccessDenied();
+    return;
+  }
+  throw ApiError.forbidden('Chỉ lễ tân, quản lý lễ tân hoặc Admin mới cập nhật được thu tiền phòng.');
 }
 
 /**

@@ -346,7 +346,8 @@ export const reportsApi = {
    * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —
    * optionally only those RECEIVED between `from` and `to` (inclusive days).
    */
-  archive: (params: { from?: string; to?: string } = {}) =>
+  /** `branchId`: a reception manager narrowing to one branch of its scope. */
+  archive: (params: { from?: string; to?: string; branchId?: number } = {}) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
   /**
@@ -447,8 +448,8 @@ export const adminReportsApi = {
  * Content-Disposition and the bytes straight to disk; fetching into memory to
  * build a blob would hold a multi-megabyte file in the tab for no gain.
  *
- * PDF ONLY. The report's Excel action was removed at the operators' request;
- * the server's .xlsx endpoint is left in place, unlinked from this screen.
+ * PDF AND EXCEL, from the same scope: the export dialog offers both (the Excel
+ * action is back at the operators' request), and the server names both files alike.
  */
 /** The export's scope — the same three filters the screen uses. */
 export interface OperationalExportScope {
@@ -464,4 +465,8 @@ export interface OperationalExportScope {
 
 export function operationalPdfUrl(params: OperationalExportScope): string {
   return `/api/admin/reports/operational.pdf${query({ ...params })}`;
+}
+
+export function operationalXlsxUrl(params: OperationalExportScope): string {
+  return `/api/admin/reports/operational.xlsx${query({ ...params })}`;
 }

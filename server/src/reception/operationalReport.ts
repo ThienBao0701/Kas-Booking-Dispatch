@@ -43,6 +43,7 @@ import {
   type OpenShiftNotice,
 } from './businessDate';
 import { shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
+import { bookingsForReport, completionArchiveRows, type ReportBooking } from './reportSections';
 
 /** One closed shift of the official report, with its own drawer. */
 export interface OfficialShift {
@@ -75,6 +76,15 @@ export interface BranchOperationalReport {
    */
   housekeeping: SerializedRoomIssue[];
   housekeepingTruncated: boolean;
+  /**
+   * "Đơn mới": the orders sent to the branch in the period (by the day they were
+   * sent — an order belongs to no shift). Full report only, like "Buồng phòng".
+   */
+  bookings: ReportBooking[];
+  bookingsTotal: number;
+  bookingsTruncated: boolean;
+  /** "Hoàn thành vấn đề": this report's rows the 12-hour rule has archived. */
+  completed: SerializedReport[];
 }
 
 export interface OperationalReportData {
@@ -149,15 +159,20 @@ export async function branchOperationalReport(
   const closedIds = closed.map((s) => s.id);
   const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow };
 
-  const [rows, total, cash, shiftCash, rooms] = await Promise.all([
+  // "Đơn mới" and "Buồng phòng" are by day, not by shift: the full report only.
+  const fullDay = category === undefined && unshiftedWindow !== undefined;
+  const [rows, total, cash, shiftCash, rooms, orders] = await Promise.all([
     listReports(actor, { ...filter, take: MAX_ROWS_PER_BRANCH }, client),
     countReports(actor, filter, client),
     sessionsCashSummary(closedIds, client),
     perShiftCash(closed, client),
     // Housekeeping belongs to the full report: no category, no single shift.
-    category === undefined && unshiftedWindow
+    fullDay
       ? listRoomIssues(actor, { branchId: branch.id, from: unshiftedWindow.from, to: unshiftedWindow.to }, client)
       : Promise.resolve({ issues: [] as SerializedRoomIssue[], total: 0, truncated: false }),
+    fullDay
+      ? bookingsForReport(branch.id, unshiftedWindow, client)
+      : Promise.resolve({ bookings: [] as ReportBooking[], total: 0, truncated: false }),
   ]);
 
   const byCategory = emptyGroups();
@@ -189,6 +204,10 @@ export async function branchOperationalReport(
     // Oldest first, like every other section of the report.
     housekeeping: [...rooms.issues].reverse(),
     housekeepingTruncated: rooms.truncated,
+    bookings: orders.bookings,
+    bookingsTotal: orders.total,
+    bookingsTruncated: orders.truncated,
+    completed: completionArchiveRows(byCategory, now),
   };
 }
 
