@@ -852,7 +852,13 @@ export function IncidentTable({
     key: 'location',
     header: 'Khu vực',
     className: 'min-w-[8rem] font-medium text-slate-800',
-    render: (i) => i.locationLabel,
+    // "Admin tạo" beside the place: on every incident view, summary included.
+    render: (i) => (
+      <>
+        {i.locationLabel}
+        <SourceTag label={i.sourceLabel} />
+      </>
+    ),
   };
   /** THE cause — the latest technician's, else what Reception reported. */
   const cause: DataColumn<Issue> = {
@@ -988,7 +994,6 @@ export function IncidentTable({
           render: (i) => (
             <>
               {i.reporterName ?? muted('—')}
-              <SourceTag label={i.sourceLabel} />
             </>
           ),
         },

@@ -227,13 +227,14 @@ describe('an approved booking leaves the reception queue', () => {
     expect(res.body.bookings.some((b: { id: string }) => b.id === id)).toBe(false);
   });
 
-  it('a rejected booking appears only in the recreate queue', async () => {
+  it('a rejected booking is back in "Đơn mới", marked for recreation (and in the recreate queue)', async () => {
     const id = await dispatched();
     await testPrisma.booking.update({ where: { id }, data: { verificationStatus: 'REJECTED' } });
     const r = await asReception();
 
     expect((await r.get('/api/bookings/rejected')).body.bookings.some((b: { id: string }) => b.id === id)).toBe(true);
-    expect((await r.get('/api/bookings/new')).body.bookings.some((b: { id: string }) => b.id === id)).toBe(false);
+    const fresh = (await r.get('/api/bookings/new')).body.bookings.find((b: { id: string }) => b.id === id);
+    expect(fresh?.verificationStatus).toBe('REJECTED');
   });
 
   it('a not-yet-submitted booking is still waiting for the branch', async () => {

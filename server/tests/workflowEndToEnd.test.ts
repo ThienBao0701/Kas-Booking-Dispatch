@@ -305,7 +305,9 @@ describe('end-to-end operational workflow', () => {
     expect(rejectEvent.reason).toBe('WRONG_DATES');
     expect(JSON.stringify(rejectEvent)).not.toContain('Ngày nhận phòng không khớp.');
 
-    // The receptionist recreates and resubmits: attempt #2, first attempt intact.
+    // The receptionist takes the returned order again (CUT), recreates and
+    // resubmits: attempt #2, first attempt intact.
+    expect((await receptionAgent.post(`/api/bookings/${booking.id}/claim`).send({})).status).toBe(200);
     await receptionAgent
       .post(`/api/bookings/${booking.id}/proofs`)
       .attach('image', pngBuffer(), { filename: 'p2.png', contentType: 'image/png' });

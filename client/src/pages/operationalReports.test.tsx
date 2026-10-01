@@ -473,6 +473,31 @@ describe('the overview', () => {
     expect(within(within(overview).getByTestId('service-quality-table')).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
   });
 
+  it('marks a record the Admin entered "Admin tạo", beside the guest, on the overview — and only that one', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({
+          status: 200,
+          body: {
+            reports: [
+              requestRow({ id: 'g-admin', createdByRole: 'ADMIN', sourceLabel: 'Admin tạo' }, { guestName: 'Khách Admin nhập' }),
+              requestRow({ id: 'g-desk', sourceLabel: null }, { guestName: 'Khách lễ tân nhập' }),
+            ],
+            archiveAfterHours: 12,
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports');
+
+    const overview = await screen.findByTestId('report-overview');
+    const requests = within(overview).getByTestId('guest-request-table');
+    const adminCell = (await within(requests).findByText('Khách Admin nhập')).closest('td')!;
+    expect(within(adminCell).getByTestId('source-tag')).toHaveTextContent('Admin tạo');
+    const deskCell = within(requests).getByText('Khách lễ tân nhập').closest('td')!;
+    expect(within(deskCell).queryByTestId('source-tag')).not.toBeInTheDocument();
+  });
+
   /**
    * THE CATEGORY SCREENS READ THE SAME ACTIVE SET: a request the last shift
    * left unfinished is on this shift's "Vấn đề khách yêu cầu thực hiện" screen

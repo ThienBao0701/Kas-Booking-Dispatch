@@ -92,8 +92,9 @@ export function createNavBadgesRouter(): Router {
       // An interactive transaction so the numbers are one snapshot without
       // issuing queries for screens this role does not have.
       const counts: NavBadgeCounts = await prisma.$transaction(async (tx) => ({
+        // "Đơn mới" lists fresh orders AND orders sent back as "Cần tạo lại".
         new: await tx.booking.count({
-          where: { ...dispatched, verificationStatus: 'NOT_SUBMITTED', ...queue },
+          where: { ...dispatched, verificationStatus: { in: ['NOT_SUBMITTED', 'REJECTED'] }, ...queue },
         }),
         pendingReview: await tx.booking.count({
           where: { ...dispatched, verificationStatus: 'PENDING_REVIEW' },

@@ -18,7 +18,7 @@ import { ErrorAlert } from './ErrorAlert';
 import { Section } from './Section';
 import { DeleteBookingButton } from './DeleteBookingButton';
 import { RedispatchButton } from './RedispatchButton';
-import { ProofSection } from './ProofSection';
+import { ProofSection, RejectionHistory } from './ProofSection';
 import { Toast } from './Toast';
 
 const MISSING_PHONE = '(Hiển thị số điện thoại)';
@@ -455,7 +455,11 @@ export function BookingDetailView({
           {pmsCard}
           {roomsCard}
           {warningsCard}
-          {readOnly ? null : <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />}
+          {readOnly ? (
+            <RejectionHistory proofs={b.proofs} />
+          ) : (
+            <ProofSection booking={b} isAdmin={isAdmin} onChanged={handleProofChanged} />
+          )}
         </>
       )}
 

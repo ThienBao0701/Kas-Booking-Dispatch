@@ -90,6 +90,7 @@ export function DeliveryTable({
       render: (r) => (
         <>
           {r.delivery?.itemName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
           <VoidedNote report={r} />
           {r.audits.some((a) => a.action === 'EDIT') ? (
             <span className="mt-0.5 block text-xs font-normal text-amber-700">Đã sửa</span>
@@ -125,7 +126,6 @@ export function DeliveryTable({
       render: (r) => (
         <>
           {formatDateTime(r.delivery?.completedAt ?? r.createdAt)}
-          <SourceTag label={r.sourceLabel} />
         </>
       ),
     },

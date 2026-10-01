@@ -434,7 +434,8 @@ export function createBookingsRouter(): Router {
         if (rows.length > 0) {
           const groups = await prisma.bookingAuditEvent.groupBy({
             by: ['bookingId'],
-            where: { bookingId: { in: rows.map((r) => r.id) }, action: 'BOOKING_RESENT' },
+            // A "Cần tạo lại" verdict puts the order in front of reception again, like a resend.
+            where: { bookingId: { in: rows.map((r) => r.id) }, action: { in: ['BOOKING_RESENT', 'BOOKING_PROOF_REJECTED'] } },
             _max: { createdAt: true },
           });
           for (const g of groups) {
@@ -593,7 +594,9 @@ export function createBookingsRouter(): Router {
 
   // GET /api/bookings/new — dispatched work the BRANCH must act on: no proof
   // submitted yet, or a proof already approved and the stay still to be run.
-  router.get('/bookings/new', requireAuth, requirePasswordChanged, newStageList(['NOT_SUBMITTED']));
+  // "Đơn mới" holds both stages that need creating: a fresh order, and one the
+  // Admin sent back as "Cần tạo lại" (its badge says which).
+  router.get('/bookings/new', requireAuth, requirePasswordChanged, newStageList(['NOT_SUBMITTED', 'REJECTED']));
   // GET /api/bookings/pending-review — proof submitted, awaiting admin verdict.
   router.get('/bookings/pending-review', requireAuth, requirePasswordChanged, newStageList(['PENDING_REVIEW']));
   // GET /api/bookings/rejected — proof rejected, needs recreation ("Cần tạo lại").

@@ -220,7 +220,12 @@ export function GuestRequestTable({
       key: 'guest',
       header: 'Tên khách',
       className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
-      render: (r) => r.guestRequest?.guestName ?? '—',
+      render: (r) => (
+        <>
+          {r.guestRequest?.guestName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
+        </>
+      ),
     },
     { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
     {
@@ -246,6 +251,7 @@ export function GuestRequestTable({
       render: (r) => (
         <>
           {r.guestRequest?.guestName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
           <VoidedNote report={r} />
         </>
       ),
@@ -276,7 +282,6 @@ export function GuestRequestTable({
       render: (r) => (
         <>
           {formatDateTime(r.createdAt)}
-          <SourceTag label={r.sourceLabel} />
         </>
       ),
     },
@@ -421,7 +426,12 @@ export function ServiceQualityTable({
       key: 'guest',
       header: 'Tên khách',
       className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
-      render: (r) => r.complaint?.guestName ?? '—',
+      render: (r) => (
+        <>
+          {r.complaint?.guestName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
+        </>
+      ),
     },
     { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.complaint?.ezCode || '—' },
     {
@@ -447,6 +457,7 @@ export function ServiceQualityTable({
       render: (r) => (
         <>
           {r.complaint?.guestName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
           <VoidedNote report={r} />
         </>
       ),
@@ -592,6 +603,7 @@ export function RoomServiceTable({
       render: (r) => (
         <>
           {r.roomService?.guestName ?? '—'}
+          <SourceTag label={r.sourceLabel} />
           <VoidedNote report={r} />
         </>
       ),
@@ -667,7 +679,6 @@ export function RoomServiceTable({
       render: (r) => (
         <>
           {formatDateTime(r.createdAt)}
-          <SourceTag label={r.sourceLabel} />
         </>
       ),
     },

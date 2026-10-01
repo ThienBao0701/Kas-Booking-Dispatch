@@ -56,6 +56,7 @@ import type { SectionFrame } from './ReportSection';
 import { formatVnd, groupDigits, parseVnd, parseVndOrZero } from '../lib/money';
 import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import { EXPENSE_SOURCE, PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
+import { SourceTag } from './SourceTag';
 import { useShiftCash } from '../hooks/useShiftCash';
 
 /**
@@ -848,6 +849,7 @@ function ReadRow({
       <td className="px-3 py-2.5 align-top text-slate-500">{index + 1}</td>
       <td className="min-w-[7rem] px-3 py-2.5 align-top">
         {p.guestName ?? '—'}
+        <SourceTag label={row.sourceLabel} />
         {row.voided ? (
           <span className="mt-0.5 block text-xs font-medium text-rose-600 no-underline">
             Đã hủy: {row.voidReason}

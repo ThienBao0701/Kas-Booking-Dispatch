@@ -115,7 +115,8 @@ describe('nav badge counts', () => {
     await dispatchOrder('PENDING_REVIEW');
     await dispatchOrder('REJECTED');
 
-    expect(await counts(letan)).toMatchObject({ new: 2, pendingReview: 1, rejected: 1 });
+    // "Đơn mới" counts the order sent back for recreation too — it is listed there.
+    expect(await counts(letan)).toMatchObject({ new: 3, pendingReview: 1, rejected: 1 });
   });
 
   it('gives Bộ phận đặt phòng all zeros — it has no operational queue', async () => {

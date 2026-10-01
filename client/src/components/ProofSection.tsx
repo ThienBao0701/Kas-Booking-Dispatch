@@ -105,12 +105,13 @@ function UploadCard({ booking: b, onChanged }: { booking: BookingDetail; onChang
             <span className="text-sm font-semibold">Admin yêu cầu tạo lại</span>
           </div>
           <p className="mt-1 text-sm text-red-700">
-            Lý do: <strong>{lastRejection.reviewReasonCode ? REVIEW_REASON_LABEL[lastRejection.reviewReasonCode] : '—'}</strong>
+            Lý do mới nhất: <strong>{lastRejection.reviewReasonCode ? REVIEW_REASON_LABEL[lastRejection.reviewReasonCode] : '—'}</strong>
             {lastRejection.reviewNote ? ` — ${lastRejection.reviewNote}` : ''}
           </p>
           <p className="mt-1 text-xs text-red-600">
-            Vui lòng kiểm tra lại, tạo đúng trên hệ thống khách sạn rồi chụp và gửi lại ảnh mới.
+            Bấm CẮT trên thông tin đơn để nhận lại đơn, tạo đúng trên hệ thống khách sạn rồi chụp và gửi lại ảnh mới.
           </p>
+          <RejectionHistory proofs={b.proofs} className="mt-3" />
         </div>
       ) : (
         <>
@@ -200,6 +201,7 @@ function ReceptionistPendingCard({ booking: b, proof }: { booking: BookingDetail
       {/* Receptionists see only that the image was received — never OCR details. */}
       <p className="mt-1 text-xs text-slate-500">Ảnh đã được hệ thống tiếp nhận.</p>
       {proof ? <ProofThumb proof={proof} className="mt-4 w-40" /> : null}
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 1 ? <ProofHistory proofs={b.proofs} className="mt-5" /> : null}
     </Card>
   );
@@ -228,6 +230,7 @@ function AdminWaitingCard({ booking: b }: { booking: BookingDetail }) {
       ) : (
         <p className="mt-1 text-sm text-slate-600">Chi nhánh chưa gửi ảnh chứng minh. Không có gì để kiểm tra lúc này.</p>
       )}
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 0 ? <ProofHistory proofs={b.proofs} className="mt-5" /> : null}
     </Card>
   );
@@ -280,7 +283,18 @@ function AdminReviewCard({
 
   return (
     <Card className="border-brand-200 p-5">
-      <p className="mb-3 text-sm font-semibold text-slate-700">Kiểm tra ảnh chứng minh (lần {proof.attemptNumber})</p>
+      <p className="mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-700">
+        Kiểm tra ảnh chứng minh (lần {proof.attemptNumber})
+        {rejectionsOf(b.proofs).length > 0 ? (
+          <span
+            data-testid="recreated-badge"
+            className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+          >
+            Đơn tạo lại · đã yêu cầu tạo lại {rejectionsOf(b.proofs).length} lần
+          </span>
+        ) : null}
+      </p>
+      <RejectionHistory proofs={b.proofs} className="mb-4" />
 
       {/* Desktop: side-by-side comparison. Mobile: stacked. */}
       <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
@@ -432,6 +446,7 @@ function ApprovedCard({ booking: b }: { booking: BookingDetail }) {
         {b.reviewedBy ? `Admin ${b.reviewedBy.fullName} đã duyệt · ` : ''}
         {formatDateTime(b.reviewedAt ?? b.completedAt)}
       </p>
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 0 ? <ProofHistory proofs={b.proofs} className="mt-4" /> : null}
     </Card>
   );
@@ -462,6 +477,51 @@ const PROOF_STATUS_META: Record<ProofView['status'], { label: string; className:
   APPROVED: { label: 'Đúng', className: 'bg-green-100 text-green-700' },
   REJECTED: { label: 'Cần tạo lại', className: 'bg-red-100 text-red-700' },
 };
+
+/** The "Cần tạo lại" verdicts of an order, oldest first. */
+function rejectionsOf(proofs: ProofView[]): ProofView[] {
+  return proofs.filter((p) => p.status === 'REJECTED').sort((a, b) => a.attemptNumber - b.attemptNumber);
+}
+
+/**
+ * "CẦN TẠO LẠI" — EVERY verdict that sent this order back, oldest first: the
+ * attempt, the Admin, when, and why. One row per rejected attempt, read from the
+ * attempts themselves, so a later rejection never replaces an earlier one and a
+ * resubmission erases nothing. Renders nothing for an order never sent back.
+ * The same list on the desk's, the Admin's and the managers' view of the order.
+ */
+export function RejectionHistory({ proofs, className = '' }: { proofs: ProofView[]; className?: string }) {
+  const rejected = rejectionsOf(proofs);
+  if (rejected.length === 0) return null;
+  return (
+    <section data-testid="rejection-history" className={className} aria-label="Lịch sử yêu cầu tạo lại">
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-red-700">
+        Cần tạo lại — {rejected.length} lần
+      </p>
+      <ol className="space-y-1.5">
+        {rejected.map((p, i) => (
+          <li
+            key={p.id}
+            data-testid={`rejection-${i + 1}`}
+            className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-slate-700"
+          >
+            <p className="font-semibold text-slate-900">
+              Lần {i + 1}
+              <span className="font-normal text-slate-500"> · ảnh gửi lần {p.attemptNumber}</span>
+            </p>
+            <p className="text-xs text-slate-600">
+              Admin: {p.reviewedBy?.fullName ?? '—'} · {p.reviewedAt ? formatDateTime(p.reviewedAt) : '—'}
+            </p>
+            <p className="text-xs text-red-700">
+              Lý do: {p.reviewReasonCode ? REVIEW_REASON_LABEL[p.reviewReasonCode] : '—'}
+              {p.reviewNote ? ` — ${p.reviewNote}` : ''}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
 
 function ProofHistory({ proofs, className = '' }: { proofs: ProofView[]; className?: string }) {
   return (

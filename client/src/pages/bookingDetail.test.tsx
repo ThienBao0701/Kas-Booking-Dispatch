@@ -167,6 +167,40 @@ describe('BookingDetailPage — a reception manager reads, and acts on nothing',
   });
 });
 
+describe('BookingDetailPage — an order sent back for recreation', () => {
+  const rejectedAttempt = (n: number, admin: string, at: string, reasonCode: string, note: string | null) => ({
+    ...PENDING_PROOF,
+    id: `p${n}`,
+    attemptNumber: n,
+    status: 'REJECTED',
+    reviewedBy: { id: 1, fullName: admin },
+    reviewedAt: at,
+    reviewReasonCode: reasonCode,
+    reviewNote: note,
+  });
+
+  it('shows every rejection, oldest first — the Admin, the time and the reason — above the new upload', async () => {
+    mockDetail({
+      ...NEW_BOOKING,
+      verificationStatus: 'REJECTED',
+      proofs: [
+        rejectedAttempt(1, 'Nguyễn Văn A', '2026-09-29T07:20:00.000Z', 'WRONG_DATES', 'Sai ngày check-in'),
+        rejectedAttempt(2, 'Trần Văn B', '2026-09-30T02:10:00.000Z', 'WRONG_ROOM_TYPE', null),
+      ],
+    });
+    renderApp('/app/booking/b1');
+
+    const history = await screen.findByTestId('rejection-history');
+    expect(history).toHaveTextContent('Cần tạo lại — 2 lần');
+    expect(within(history).getByTestId('rejection-1')).toHaveTextContent('Lần 1');
+    expect(within(history).getByTestId('rejection-1')).toHaveTextContent('Nguyễn Văn A');
+    expect(within(history).getByTestId('rejection-1')).toHaveTextContent('Sai ngày check-in');
+    expect(within(history).getByTestId('rejection-2')).toHaveTextContent('Trần Văn B');
+    // The upload to resubmit is still there.
+    expect(screen.getByRole('button', { name: /Gửi Admin kiểm tra/ })).toBeInTheDocument();
+  });
+});
+
 describe('BookingDetailPage — simplified copy surface', () => {
   it('exposes only a nightly-price copy on room rows (no room-block copies)', async () => {
     mockDetail(NEW_BOOKING);

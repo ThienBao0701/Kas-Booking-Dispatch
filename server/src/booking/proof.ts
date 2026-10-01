@@ -355,9 +355,23 @@ export async function rejectProof(
 
     // The booking status stays NEW (still operationally open); only the
     // verification verdict changes. The immutable proof attempt is the audit.
+    //
+    // THE ORDER GOES BACK TO "ĐƠN MỚI", TAKEABLE. The receptionist's claim from
+    // the attempt just judged is released and a new claim cycle starts — the
+    // same release the resend performs — so the order is not left holding a
+    // lapsed claim (hidden from the queue, and takeable by nobody) and the
+    // values taken with CẮT last time are visible again for the correction.
     await tx.booking.update({
       where: { id: bookingId },
-      data: { verificationStatus: 'REJECTED', reviewedByUserId: admin.id, reviewedAt: clock.now() },
+      data: {
+        verificationStatus: 'REJECTED',
+        reviewedByUserId: admin.id,
+        reviewedAt: clock.now(),
+        claimedByUserId: null,
+        claimedAt: null,
+        claimExpiresAt: null,
+        claimCycle: { increment: 1 },
+      },
     });
 
     // This IS the "correction requested" event: rejecting with a reason is how
