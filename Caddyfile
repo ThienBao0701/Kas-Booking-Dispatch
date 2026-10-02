@@ -1,0 +1,61 @@
+# KAS — reverse proxy and automatic HTTPS.
+#
+# The domain comes from the APP_DOMAIN environment variable (set in .env.production
+# next to compose.production.yml). No real domain and no IP address is committed.
+#
+# Caddy issues and renews a certificate automatically and redirects HTTP to HTTPS
+# by itself — there is no explicit redirect block to keep in sync.
+
+{
+	# Contact address for the ACME account (expiry warnings). Optional.
+	email {$ACME_EMAIL}
+	# Do not advertise the server software.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# Security headers. HSTS is set only here, where TLS is terminated.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Kas needs no camera/microphone/geolocation.
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		-Server
+	}
+
+	# Proof screenshots are uploaded as multipart bodies. Keep this comfortably
+	# above MAX_UPLOAD_MB (default 10 MB) so the app — not the proxy — produces
+	# the friendly 413 message.
+	request_body {
+		max_size 20MB
+	}
+
+	# The application container's internal port. It is never published to the
+	# host, so this is the only path to it.
+	reverse_proxy app:3001 {
+		# Preserve the client's identity for the login rate limiter and logs.
+		header_up X-Real-IP {remote_host}
+		# Caddy sets X-Forwarded-For / -Proto / -Host by default; the app trusts
+		# exactly one proxy hop (TRUST_PROXY=1).
+
+		# WebSockets are not used today, but this keeps upgrades working if a
+		# future feature adds them.
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+		# Do not log request bodies or cookies — proof uploads and session
+		# identifiers must never reach the log.
+	}
+}

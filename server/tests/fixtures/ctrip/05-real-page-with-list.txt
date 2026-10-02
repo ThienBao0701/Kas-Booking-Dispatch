@@ -1,0 +1,51 @@
+Trip.com
+Home
+My Bookings
+Help Center
+
+Property: KAS Zody Boutique Hotel
+Switch property
+
+Filter
+Check-in date from: May 1, 2026
+Check-in date to: Aug 1, 2026
+Status: All
+
+Reservations
+1658113703317875   LEE/JENSON HWEE   Aug 1, 2026   Confirmed
+1658113703317111   TRAN/MINH ANH     Jul 4, 2026   Cancelled
+
+Reservation: 1658113703317875 · Confirmed
+
+Property name
+KAS Zody Boutique Hotel
+
+Guest name:
+LEE/JENSON HWEE
+
+Stay period:
+Aug 1, 2026 - Aug 8, 2026 7 night(s)
+
+Room type:
+Standard Double Room No Window 1 room(s)
+
+Payment: Prepay
+
+Original room rate:
+6637080.00
+
+Discounts:
+-1991124.00
+
+Final room rate:
+4645956.00
+
+VAT:
+0.00
+
+Your payout:
+4645956.00
+
+Download the app
+Terms and Conditions
+Privacy Policy

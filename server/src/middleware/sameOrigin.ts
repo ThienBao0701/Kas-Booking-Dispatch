@@ -1,8 +1,25 @@
 import type { RequestHandler } from 'express';
 import { ApiError } from '../lib/errors';
-import { isProduction } from '../config/env';
+import { env, isProduction } from '../config/env';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * The single allowed origin host in production, taken from APP_ORIGIN. This is
+ * the app's entire "CORS allowlist": Kas serves its own frontend, so there is no
+ * cross-origin browser client at all and no `Access-Control-Allow-Origin` header
+ * is ever emitted. Comparing against configuration (rather than only against the
+ * inbound Host header) means a request forwarded with an unexpected Host cannot
+ * define its own notion of "same origin".
+ */
+export function allowedOriginHost(): string | null {
+  if (!env.APP_ORIGIN) return null;
+  try {
+    return new URL(env.APP_ORIGIN).host;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Defense-in-depth CSRF mitigation.
@@ -22,16 +39,18 @@ export const sameOriginCheck: RequestHandler = (req, _res, next) => {
     return;
   }
 
-  const host = req.headers.host;
+  // The configured public origin wins; the inbound Host header is only the
+  // fallback for a deployment that has not declared APP_ORIGIN.
+  const expected = allowedOriginHost() ?? req.headers.host;
   const source = req.headers.origin ?? req.headers.referer;
   // Non-browser / same-origin internal callers send no Origin or Referer.
-  if (!host || !source) {
+  if (!expected || !source) {
     next();
     return;
   }
 
   try {
-    if (new URL(source).host !== host) {
+    if (new URL(source).host !== expected) {
       next(ApiError.forbidden('Yêu cầu bị từ chối: khác nguồn gốc.'));
       return;
     }

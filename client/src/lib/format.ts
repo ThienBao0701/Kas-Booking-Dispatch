@@ -44,6 +44,20 @@ export function hcmToday(now: Date = new Date()): string {
 }
 
 /** Today's date in Asia/Ho_Chi_Minh as "DD/MM" (no year) — for the PMS note. */
+/**
+ * "13:15" — the wall-clock time in Asia/Ho_Chi_Minh.
+ *
+ * Computed from the browser's UTC instant plus the fixed +7 offset, NOT from
+ * `getHours()`. A reception PC whose timezone is set to somewhere else would
+ * otherwise show a time several hours out in the very dialog where the operator
+ * confirms when a shift changed hands. Its UTC clock being wrong is far less
+ * likely than its timezone being wrong, and the server records the real instant
+ * either way — this is what the operator READS, not what is stored.
+ */
+export function hcmTimeOfDay(now: Date = new Date()): string {
+  return new Date(now.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(11, 16);
+}
+
 export function hcmDayMonth(now: Date = new Date()): string {
   const iso = hcmToday(now);
   const [, m, d] = iso.split('-');
@@ -91,6 +105,12 @@ const STATUS_LABELS: Record<string, string> = {
   NEW: 'Chờ chi nhánh tạo',
   COMPLETED: 'Đã xác nhận tạo',
   ARCHIVED: 'Đã lưu trữ',
+  // The Phase 5 operational lifecycle, in the receptionist's own words.
+  RECEIVED: 'Đã nhận đơn',
+  CHECKED_IN: 'Khách đã nhận phòng',
+  CHECKED_OUT: 'Khách đã trả phòng',
+  CANCELLED: 'Đã huỷ',
+  NO_SHOW: 'Khách không đến',
 };
 
 export function statusLabel(status: string | null | undefined): string {

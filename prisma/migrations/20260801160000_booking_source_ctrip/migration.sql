@@ -1,0 +1,28 @@
+-- ===========================================================================
+-- KAS — CTrip as a booking intake source
+--
+-- ADDITIVE ONLY. One new member on an existing enum. No table is created,
+-- redefined or dropped, no column is altered, and no row is written, deleted
+-- or rewritten. Every existing Booking row keeps its exact sourcePlatform.
+--
+-- WHY THIS IS ITS OWN MIGRATION FILE:
+-- PostgreSQL allows ALTER TYPE ... ADD VALUE inside a transaction block (12+),
+-- but the newly added label may NOT be used until that transaction commits.
+-- Prisma runs each migration file in one transaction, so an enum addition must
+-- never share a file with a statement that uses it. This file therefore adds
+-- the label and does nothing else; the application only writes it at runtime,
+-- long after the migration has committed.
+--
+-- IF NOT EXISTS makes the statement idempotent, so re-running `migrate deploy`
+-- against a database that already has it is a no-op rather than an error.
+--
+-- ROLLBACK: PostgreSQL cannot remove a value from an enum type. Rolling this
+-- back means rolling back the APPLICATION only — the extra label is inert to a
+-- build that never writes it, so an older release runs unchanged against this
+-- schema. No backup restore is required for that direction. (If CTrip bookings
+-- have already been taken, rolling the application back would leave rows whose
+-- source the old build cannot render; that is a data question for the operator,
+-- not something a migration may decide.)
+-- ===========================================================================
+
+ALTER TYPE "BookingSource" ADD VALUE IF NOT EXISTS 'CTRIP';

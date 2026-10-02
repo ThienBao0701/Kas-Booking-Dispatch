@@ -67,7 +67,7 @@ describe('AgodaPartnerCard', () => {
     expect(note.textContent).toBe(
       'AGD 1753026280_1STAN_2DEM 1.016.710 CN\nGIÁ KHÁCH ĐẶT 1.680.000 KHONG AN SANG',
     );
-    expect(screen.getByRole('button', { name: 'Sao chép ghi chú' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sao chép PMS Note' })).toBeInTheDocument();
   });
 
   it('warns (and offers no note) when the room type is unknown', () => {
@@ -85,7 +85,7 @@ describe('AgodaPartnerCard', () => {
     );
     expect(screen.getByText(/chưa có mã nội bộ/)).toBeInTheDocument();
     expect(screen.getByText(/Chưa đủ dữ liệu để tạo ghi chú Agoda/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Sao chép ghi chú' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sao chép PMS Note' })).not.toBeInTheDocument();
   });
 
   it('shows the total debt and the per-night debt schedule', () => {

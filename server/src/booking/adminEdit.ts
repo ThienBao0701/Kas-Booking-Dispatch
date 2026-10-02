@@ -4,6 +4,7 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { generateStayDates } from './dates';
 import { loadBookingDetail } from './bookingRepo';
+import { snapshotRoomClasses } from './store';
 import type { BookingDetail } from './bookingView';
 
 /**
@@ -175,6 +176,12 @@ export async function updateBookingDraft(
       });
     }
   });
+
+  // Rooms may have been replaced or the branch reassigned, so re-derive the
+  // snapshots. Already-resolved rooms are skipped by the snapshot service, and
+  // this only ever runs for a DRAFT/READY booking (guarded above) — a
+  // dispatched booking's codes are never recalculated by an edit.
+  await snapshotRoomClasses(bookingId);
 
   return loadBookingDetail(bookingId);
 }

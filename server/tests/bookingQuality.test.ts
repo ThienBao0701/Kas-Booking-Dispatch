@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { fixtureBranches } from './helpers/branchFixtures';
 import { parseBooking } from '../src/booking/parser';
 import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch } from '../src/booking/types';
 
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 interface MiniOpts {
   hotel?: string;
@@ -42,10 +38,17 @@ describe('branch confidence (0–100 scale)', () => {
     expect(r.suggestedBranch?.address).toBe('05 Trương Định');
   });
 
-  it('stays confident (90) for a property-ID-suffixed hotel name and strips the ID', () => {
+  it('assigns a property-ID-suffixed hotel name to its branch (5.1)', () => {
+    // The extranet glues the property id onto the name. This is THE production
+    // symptom the 5.1 hotfix addresses: the name carries the configured
+    // internal name as a whole word sequence, so containment resolves it — to
+    // the branch the suggestion always pointed at, never a different one.
     const r = parseBooking(mini({ hotel: 'Saigon Hotel & Ben Thanh Market16806954' }), branches);
-    expect(r.branchConfidence).toBe(90);
+    expect(r.suggestedBranch?.code).toBe('TRUONG_DINH_05');
     expect(r.branchConfident).toBe(true);
+    expect(r.requiresManualConfirmation).toBe(false);
+    expect(r.branchConfidence).toBeGreaterThan(0);
+    expect(r.warnings.map((w) => w.code)).not.toContain('LOW_BRANCH_CONFIDENCE');
     expect(r.hotelName).toBe('Saigon Hotel & Ben Thanh Market');
     expect(r.bookingCode).toBe('1234567890'); // property ID never used as booking code
   });

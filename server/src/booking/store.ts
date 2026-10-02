@@ -2,6 +2,7 @@ import type { BookingSource, PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { isoToUtcDate } from './dates';
 import { detectBusinessType } from './businessType';
+import { applyRoomClassSnapshots } from '../room/roomSnapshotService';
 import type { ParsedBooking } from './types';
 
 /** Prisma transaction client (the callback argument of `$transaction`). */
@@ -99,4 +100,23 @@ export async function persistDraftBooking(
 
     return booking.id;
   });
+}
+
+/**
+ * Captures each room's branch-specific room-class snapshot.
+ *
+ * Deliberately called AFTER the booking transaction rather than inside it: the
+ * snapshot is advisory metadata, so a resolver problem must never roll back a
+ * successfully extracted booking. A room left unresolved here is simply
+ * resolved later — when the Admin assigns the branch, or explicitly.
+ */
+export async function snapshotRoomClasses(
+  bookingId: string,
+  client: PrismaClient = defaultPrisma,
+): Promise<void> {
+  try {
+    await applyRoomClassSnapshots(bookingId, client);
+  } catch {
+    // Never block extraction on room-class resolution.
+  }
 }

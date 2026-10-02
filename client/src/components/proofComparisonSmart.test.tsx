@@ -124,7 +124,7 @@ describe('ProofComparisonCard smart — suggestions + note checklist', () => {
       { key: 'ARRIVAL_NOTE', label: 'Giờ đến', result: 'NOT_FOUND' },
     ];
     mount(result({ noteComponents }));
-    const list = await screen.findByLabelText('Thành phần ghi chú tạo đơn');
+    const list = await screen.findByLabelText('Thành phần PMS Note');
     expect(within(list).getByText('Mã Booking')).toBeInTheDocument();
     const arrival = within(list).getByText('Giờ đến').closest('li')!;
     expect(within(arrival).getByText(/chưa tìm thấy/)).toBeInTheDocument(); // accessible text

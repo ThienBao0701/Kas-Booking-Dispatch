@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express';
+import type { UserRole } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
@@ -45,7 +46,7 @@ function destroySession(req: Request): Promise<void> {
 }
 
 /** Writes the minimal identity into a freshly regenerated session. */
-function setSessionIdentity(req: Request, user: { id: number; role: 'ADMIN' | 'RECEPTIONIST'; branchId: number | null }): void {
+function setSessionIdentity(req: Request, user: { id: number; role: UserRole; branchId: number | null }): void {
   req.session.userId = user.id;
   req.session.role = user.role;
   req.session.branchId = user.branchId;

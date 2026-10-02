@@ -33,7 +33,10 @@ export type ApiErrorCode =
   | 'FILE_TOO_LARGE'
   | 'PROOF_NOT_PENDING'
   | 'PROOF_ALREADY_REVIEWED'
-  | 'REVIEW_REASON_REQUIRED';
+  | 'REVIEW_REASON_REQUIRED'
+  // Reception shift codes. The client keys off SHIFT_CHECK_IN_REQUIRED to open
+  // the shift picker, so it must be distinguishable from any other 422.
+  | 'SHIFT_CHECK_IN_REQUIRED';
 
 const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   BAD_REQUEST: 400,
@@ -61,6 +64,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   PROOF_NOT_PENDING: 409,
   PROOF_ALREADY_REVIEWED: 409,
   REVIEW_REASON_REQUIRED: 422,
+  SHIFT_CHECK_IN_REQUIRED: 422,
 };
 
 export class ApiError extends Error {
@@ -169,6 +173,14 @@ export class ApiError extends Error {
 
   static reviewReasonRequired(message = 'Cần chọn lý do khi từ chối.'): ApiError {
     return new ApiError('REVIEW_REASON_REQUIRED', message);
+  }
+
+  /** The receptionist has no open shift, so the server cannot say who they are. */
+  static shiftCheckInRequired(
+    message = 'Vui lòng chọn ca làm việc trước khi tạo đơn.',
+    details?: unknown,
+  ): ApiError {
+    return new ApiError('SHIFT_CHECK_IN_REQUIRED', message, details);
   }
 }
 

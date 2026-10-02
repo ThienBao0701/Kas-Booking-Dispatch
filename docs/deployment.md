@@ -1,4 +1,29 @@
-# Triển khai Kas trong mạng nội bộ (LAN)
+# Triển khai Kas
+
+> **CÁCH TRIỂN KHAI HIỆN TẠI: Windows + PostgreSQL.**
+>
+> Cài đặt bằng `scripts\production\windows\Install-Kas.cmd`, khởi động bằng
+> `Kas.cmd`, chạy nền bằng Scheduled Task `Kas` → `KasService.cmd`.
+> **Mọi lệnh vận hành nằm trong [launcher.md](launcher.md).**
+> Danh sách nghiệm thu: [production-checklist.md](production-checklist.md).
+>
+> Cơ sở dữ liệu là **PostgreSQL 17**, không phải SQLite. Phần bên dưới còn nói
+> "SQLite" là di sản của giai đoạn thử nghiệm; mọi thứ khác về mạng nội bộ,
+> tường lửa và máy lễ tân vẫn đúng.
+
+## Tóm tắt: từ máy trắng đến Kas đang chạy
+
+1. Cài **Node.js LTS** (https://nodejs.org) và **PostgreSQL 17**.
+2. Tạo cơ sở dữ liệu và người dùng `kas_app`.
+3. Giải nén bản phát hành, nhấn đúp `Install-Kas.cmd`.
+   *Muốn Kas tự chạy cùng Windows thì mở bằng PowerShell (Administrator).*
+4. Mở `.env` trong thư mục cài đặt, điền `DATABASE_URL`.
+5. Chạy `npm run db:migrate` một lần để tạo schema.
+6. Nhấn đúp `Kas.cmd`.
+7. Chạy `Kas.cmd --diagnose` — phải PASS, hoặc chỉ còn WARNING bạn chấp nhận.
+
+---
+
 
 Kas chạy trên **một máy chủ trung tâm** (máy của Admin). Các máy lễ tân chỉ mở
 trình duyệt trỏ tới máy chủ đó. Tất cả dùng chung **một** cơ sở dữ liệu SQLite
@@ -14,7 +39,23 @@ npm run build      # build cả server và client
 npm start          # chạy backend (mặc định cổng 3001), phục vụ luôn giao diện đã build
 ```
 
-Trong lúc phát triển có thể dùng:
+> **`npm run dev` KHÔNG BAO GIỜ dùng cho máy chủ thật.**
+>
+> Máy chủ dev (cổng 5173) phục vụ `/src/main.tsx` và `@vite/client`, **không**
+> phục vụ `manifest.webmanifest` hay service worker đã build. Ứng dụng vẫn chạy
+> bình thường — đăng nhập, điều phối, đặt phòng đều được, vì Vite chuyển tiếp
+> `/api` sang backend — nên **không có dấu hiệu gì cho thấy sai**. Triệu chứng
+> duy nhất là không cài được ứng dụng: không có nút cài, không có biểu tượng cài
+> trên thanh địa chỉ.
+>
+> Đây là lỗi đã xảy ra thật: tunnel trỏ vào cổng 5173 và cả bản triển khai chạy
+> ở chế độ phát triển. Máy chủ thật chỉ khởi động bằng `KasService.cmd` (hoặc
+> Scheduled Task "Kas"), phục vụ mọi thứ trên **một cổng duy nhất, 3001**.
+>
+> Kiểm tra bất cứ lúc nào: `Kas.cmd --diagnose` — mục `clientBuild` sẽ báo lỗi
+> nếu địa chỉ đang phục vụ bản dev thay vì bản build.
+
+Trong lúc phát triển (chỉ trên máy lập trình viên) có thể dùng:
 
 ```bash
 npm run dev        # backend :3001 + client dev :5173 (client proxy /api sang backend)

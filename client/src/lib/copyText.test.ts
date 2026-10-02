@@ -8,6 +8,12 @@ function booking(overrides: Partial<BookingDetail> = {}): BookingDetail {
     status: 'NEW',
     sourcePlatform: 'BOOKING_COM',
     verificationStatus: 'NOT_SUBMITTED',
+    // Unclaimed: these fixtures are about text formatting, not ownership.
+    claimedBy: null,
+    claimedByUserId: null,
+    claimedAt: null,
+    claimExpiresAt: null,
+    claimCycle: 0,
     businessType: 'DIRECT',
     businessTypeManuallyConfirmed: false,
     hotelName: 'Saigon Hotel & Ben Thanh',
@@ -41,7 +47,23 @@ function booking(overrides: Partial<BookingDetail> = {}): BookingDetail {
       },
     ],
     warnings: [],
-    statusHistory: [],
+    // 5.2b: a Booking.com fixture collects no Admin note, so both are null.
+    adminPmsNote: null,
+    reviewedPaymentMode: null,
+    // Phase 5 operational blocks — a Booking.com fixture stores none of the
+    // OTA metadata, exactly as the database does.
+    ota: { paymentType: null },
+    operational: {
+      receivedAt: null,
+      receivedBy: null,
+      actualCheckInAt: null,
+      checkedInBy: null,
+      actualCheckOutAt: null,
+      checkedOutBy: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      cancellationReason: null,
+    },
     proofs: [],
     createdBy: null,
     sentBy: null,

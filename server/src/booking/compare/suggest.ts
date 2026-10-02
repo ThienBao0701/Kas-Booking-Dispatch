@@ -32,7 +32,7 @@ const FIELD_CHECK_LABEL: Record<FieldKey, string> = {
   NIGHTS: 'Số đêm',
   NIGHTLY_PRICES: 'Giá từng đêm',
   CUSTOMER_NAME: 'Tên khách',
-  PMS_NOTE: 'Ghi chú tạo đơn',
+  PMS_NOTE: 'PMS Note',
 };
 
 const NEEDS_CHECK = new Set(['MISMATCH', 'WARNING', 'NOT_FOUND']);

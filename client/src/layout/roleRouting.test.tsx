@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 
 afterEach(() => {
@@ -24,8 +24,20 @@ function mockShell(user: unknown, extra: Record<string, () => { status: number; 
   });
 }
 
+/** A Quản lý lễ tân supervising branches 1 and 2. */
+const MANAGER_USER = {
+  id: 9,
+  username: 'quanly',
+  fullName: 'Quản lý Một',
+  role: 'RECEPTION_MANAGER',
+  branch: null,
+  managedBranchIds: [1, 2],
+  active: true,
+  mustChangePassword: false,
+};
+
 describe('role-based shell and routing', () => {
-  it('shows the full admin menu (10 items)', async () => {
+  it('shows the full admin menu — "Báo cáo vấn đề" a folded group', async () => {
     mockShell(ADMIN_USER);
     renderApp('/app/new');
 
@@ -37,23 +49,95 @@ describe('role-based shell and routing', () => {
       'Chờ chi nhánh tạo',
       'Chờ kiểm tra',
       'Cần tạo lại',
-      'Đã xác nhận đúng',
       'Lịch sử',
-      'Sự cố khách sạn',
+      'Hoàn thành vấn đề',
+      'Gửi lại đơn',
+      'Chứng từ',
+      'Nhắc nhở',
       'Khách sạn & chi nhánh',
       'Quản lý tài khoản',
     ]);
+    // The group: Lễ tân (with its categories), Kỹ thuật, Buồng phòng — folded off the reports.
+    expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toHaveAttribute('aria-expanded', 'false');
+    /*
+      "Sự cố khách sạn" is the "Sự cố cơ sở vật chất đang xử lý" category of "Báo cáo
+      vấn đề" now, and "Bàn giao ca" is gone from the menu. Both addresses
+      still resolve — see "the retired addresses" below.
+    */
+    expect(within(nav).queryByRole('link', { name: 'Sự cố khách sạn' })).not.toBeInTheDocument();
+    expect(within(nav).queryByRole('link', { name: 'Bàn giao ca' })).not.toBeInTheDocument();
+    /*
+      "Đã xác nhận đúng" and "Chat box" are gone from the menu. The chat is the
+      bubble in the corner of every page (below); confirmed orders are listed,
+      with every other status, in "Lịch sử".
+    */
+    expect(within(nav).queryByRole('link', { name: 'Đã xác nhận đúng' })).not.toBeInTheDocument();
+    expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
   });
 
-  it('shows only the six receptionist items', async () => {
+  it('shows only the five receptionist items', async () => {
     mockShell(RECEPTIONIST_USER);
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
-    expect(labels).toEqual(['Đơn mới', 'Chờ Admin kiểm tra', 'Cần tạo lại', 'Đã xác nhận đúng', 'Lịch sử', 'Báo cáo sự cố']);
+    // "Hoàn thành vấn đề" is the 12-hour completion archive of II, III and IV;
+    // "Buồng phòng" is the room-issue collection (address unchanged). The chat is the bubble.
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Hoàn thành vấn đề', 'Buồng phòng', 'Nhắc nhở']);
+    expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
+    /*
+      Removed from the MENU only. Their routes, records and APIs are untouched;
+      "Báo cáo sự cố" is a category inside "Báo cáo vấn đề".
+    */
+    for (const gone of [
+      'Chờ Admin kiểm tra',
+      'Cần tạo lại',
+      'Đã xác nhận đúng',
+      'Lịch sử',
+      'Bàn giao ca',
+      'Báo cáo sự cố',
+    ]) {
+      expect(within(nav).queryByRole('link', { name: gone })).not.toBeInTheDocument();
+    }
     expect(within(nav).queryByRole('link', { name: 'Quản lý tài khoản' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Nhập đơn' })).not.toBeInTheDocument();
+  });
+
+  it('gives a Quản lý lễ tân Reception’s own menu, and "Đơn mới" over its branches', async () => {
+    mockShell(MANAGER_USER, {
+      'GET /api/branches': () => ({
+        status: 200,
+        body: {
+          branches: [
+            { id: 1, code: 'TRUONG_DINH_05', hotelName: 'KAS A', address: '05 Trương Định', branchNumber: 1 },
+            { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 },
+          ],
+        },
+      }),
+    });
+    renderApp('/app/new');
+
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới', 'Hoàn thành vấn đề']);
+    // "Báo cáo vấn đề" is the same folded group as the Admin's (Lễ tân, Kỹ thuật, Buồng phòng).
+    expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
+    // The orders of its branches — the branch picker is the server's scoped list.
+    expect((await screen.findAllByRole('heading', { name: 'Đơn mới' })).length).toBeGreaterThan(0);
+    const picker = await screen.findByLabelText('Lọc theo chi nhánh');
+    await waitFor(() =>
+      expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual([
+        'Tất cả chi nhánh được giao',
+        '05 Trương Định — KAS A',
+        '260 Lý Tự Trọng — KAS B',
+      ]),
+    );
+  });
+
+  it('opens "Hoàn thành vấn đề" to a Quản lý lễ tân, with a branch picker', async () => {
+    mockShell(MANAGER_USER);
+    renderApp('/app/completed-issues');
+    expect(await screen.findByTestId('completed-branch')).toBeInTheDocument();
+    expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
   });
 
   it('blocks a receptionist from an admin route directly', async () => {
@@ -78,5 +162,104 @@ describe('role-based shell and routing', () => {
     // No fake bookings: nothing tabular is rendered when the list is empty.
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
     expect(screen.queryByRole('row')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * THE RETIRED ADDRESSES STILL RESOLVE.
+ *
+ * Removing a menu entry must not strand a bookmark or delete a record: the old
+ * incident and handover addresses redirect into "Báo cáo vấn đề", and the
+ * booking lists that left reception's menu are still served by their routes.
+ */
+describe('the retired addresses', () => {
+  it('sends the Admin from the old "Sự cố khách sạn" to the incident category, every branch', async () => {
+    mockShell(ADMIN_USER, {
+      'GET /api/admin/branches': () => ({
+        status: 200,
+        body: { branches: [{ id: 1, code: 'B1', hotelName: 'KAS', address: '05 Trương Định', branchNumber: 1, active: true }] },
+      }),
+    });
+    renderApp('/app/issues');
+
+    expect(await screen.findByTestId('admin-incident-view')).toBeInTheDocument();
+    expect(await screen.findByTestId('branch-select')).toHaveValue('ALL');
+    expect(screen.getByTestId('admin-category-FACILITY_ISSUE')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('sends the Admin from the old "Bàn giao ca" to "Báo cáo vấn đề"', async () => {
+    mockShell(ADMIN_USER);
+    renderApp('/app/handover');
+
+    expect(await screen.findByText('Chọn một chi nhánh')).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: 'Báo cáo vấn đề' }).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    // "Đã xác nhận đúng" is not a screen any more: its address is a redirect.
+    ['/app/completed', 'Lịch sử'],
+    ['/app/history', 'Lịch sử'],
+  ])('still serves %s to a receptionist who has the address', async (path, heading) => {
+    mockShell(RECEPTIONIST_USER);
+    renderApp(path);
+
+    expect((await screen.findAllByRole('heading', { name: heading })).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
+  });
+
+  it('sends an Admin from the removed "Đã xác nhận đúng" to "Lịch sử"', async () => {
+    mockShell(ADMIN_USER);
+    renderApp('/app/completed');
+    expect((await screen.findAllByRole('heading', { name: 'Lịch sử' })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('heading', { name: 'Đã xác nhận đúng' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the old chat pages reachable by address, with no menu entry', async () => {
+    mockShell(RECEPTIONIST_USER, {
+      'GET /api/chat/conversations': () => ({ status: 200, body: { conversations: [] } }),
+      'GET /api/chat/channels': () => ({ status: 200, body: { channels: [] } }),
+    });
+    renderApp('/app/chat');
+    expect((await screen.findAllByRole('heading', { name: /Chat box/ })).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
+  });
+});
+
+describe('the chat bubble', () => {
+  const CHANNELS = {
+    'GET /api/chat/channels': () => ({
+      status: 200,
+      body: {
+        channels: [
+          {
+            branchId: 1,
+            branchNumber: 1,
+            address: '05 Trương Định',
+            hotelName: 'KAS',
+            conversationId: null,
+            lastMessage: null,
+            unreadCount: 3,
+          },
+        ],
+      },
+    }),
+  };
+
+  it.each([
+    ['an Admin', ADMIN_USER],
+    ['a receptionist', RECEPTIONIST_USER],
+  ])('is on the page for %s, whatever page it is', async (_who, user) => {
+    mockShell(user, CHANNELS);
+    renderApp('/app/reminders');
+    expect(await screen.findByTestId('chat-bubble')).toBeInTheDocument();
+    // The badge is the server's unread count, not something remembered here.
+    expect(await screen.findByTestId('chat-bubble-unread')).toHaveTextContent('3');
+  });
+
+  it('is not offered to a department with no part in the chat', async () => {
+    mockShell({ ...RECEPTIONIST_USER, role: 'TECHNICAL', branch: null }, CHANNELS);
+    renderApp('/app/technical/new');
+    expect(await screen.findByRole('navigation', { name: 'Điều hướng chính' })).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-bubble')).not.toBeInTheDocument();
   });
 });

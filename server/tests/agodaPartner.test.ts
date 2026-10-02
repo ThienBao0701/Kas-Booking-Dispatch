@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { fixtureBranches } from './helpers/branchFixtures';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,11 +16,10 @@ import {
 import { AGODA_PARSER_VERSION, AGODA_PARTNER_PARSER_VERSION, parseAgodaBooking } from '../src/booking/agoda';
 import { AGODA_HOTEL_NAMES } from '../src/booking/branchMatcher';
 import { allocateEvenly } from '../src/booking/money';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch } from '../src/booking/types';
 
 // Branch fixtures mirror the seed, with deterministic ids 1..8.
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({ id: i + 1, code: b.code, hotelName: b.hotelName, address: b.address }));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'agoda', '05-partner-ycs-booking.txt');
 const SAMPLE = fs.readFileSync(FIXTURE, 'utf8');
@@ -371,13 +371,20 @@ describe('Agoda partner — routed through parseAgodaBooking', () => {
     expect(r.agoda!.branchCode).toBe('BUI_THI_XUAN_40');
   });
 
-  it('5–8. Property ID is ignored and absent from every output', () => {
+  it('5–8. Property ID is recorded for audit but never routes a booking', () => {
+    // The id used to be discarded entirely. It is now kept on the booking
+    // record because operators need it for reconciliation — but ONLY as a
+    // recorded fact. The reason it was discarded still holds: a property
+    // renumbered on Agoda must not silently reroute a reservation, so nothing
+    // resolves a branch from it, and it never contaminates the hotel name.
     const r = routed();
+    expect(r.agoda!.sourcePropertyId).toBe('245858');
     expect(r.agoda!.sourceHotelName).not.toContain('245858');
     expect(r.agoda!.sourceHotelName).not.toMatch(/property\s*id/i);
-    const serialized = JSON.stringify(r);
-    expect(serialized).not.toContain('245858');
-    expect(serialized).not.toMatch(/propertyId/i);
+
+    // The branch came from the configured platform identity, not the id.
+    expect(r.agoda!.branchCode).not.toBeNull();
+    expect(r.hotelName).not.toContain('245858');
   });
 
   it('9/10. an unknown or incomplete hotel name never selects a default branch', () => {

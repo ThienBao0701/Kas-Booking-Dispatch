@@ -3,13 +3,23 @@ import type { IssueStatus } from '@prisma/client';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
-import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, loginAgent } from './helpers/auth';
+import { assignTo } from './helpers/issues';
+import {
+  ADMIN_PASSWORD,
+  RECEPTIONIST_PASSWORD,
+  createAdmin,
+  createReceptionist,
+  createUser,
+  loginAgent,
+} from './helpers/auth';
 import { BRANCH_COUNT } from '../src/db/branches';
 
 let app: ReturnType<typeof createApp>;
 let adminAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let ownAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let otherAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
+let techAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
+const TECHNICAL_PASSWORD = 'Technical1';
 let ownBranchId: number;
 let otherBranchId: number;
 let ownReceptionistId: number;
@@ -27,6 +37,16 @@ beforeEach(async () => {
   ownAgent = (await loginAgent(app, 'letan_own', RECEPTIONIST_PASSWORD)).agent;
   await createReceptionist(otherBranchId, { username: 'letan_other', mustChangePassword: false });
   otherAgent = (await loginAgent(app, 'letan_other', RECEPTIONIST_PASSWORD)).agent;
+  // Bộ phận kỹ thuật drives the transitions now; an Admin is refused.
+  await createUser({
+    username: 'kythuat',
+    password: TECHNICAL_PASSWORD,
+    fullName: 'Kỹ thuật viên trực',
+    role: 'TECHNICAL',
+    branchId: null,
+    mustChangePassword: false,
+  });
+  techAgent = (await loginAgent(app, 'kythuat', TECHNICAL_PASSWORD)).agent;
 });
 
 afterAll(async () => {
@@ -64,11 +84,11 @@ describe('GET /api/issues/summary — admin', () => {
     expect(empty?.totalUnresolved).toBe(0);
   });
 
-  it('counts NEW and IN_PROGRESS but excludes RESOLVED', async () => {
+  it('counts NEW and IN_PROGRESS but excludes COMPLETED', async () => {
     await makeIssue(ownBranchId, 'NEW');
     await makeIssue(ownBranchId, 'NEW');
     await makeIssue(ownBranchId, 'IN_PROGRESS');
-    await makeIssue(ownBranchId, 'RESOLVED'); // must not be counted
+    await makeIssue(ownBranchId, 'COMPLETED'); // must not be counted
     const res = await summaryOf(adminAgent);
     const own = branchRow(res.body, ownBranchId)!;
     expect(own.newCount).toBe(2);
@@ -118,7 +138,12 @@ describe('GET /api/issues/summary — receptionist isolation', () => {
 describe('GET /api/issues/summary — reflects workflow transitions', () => {
   it('creating an issue increments the unresolved total', async () => {
     const before = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
-    await ownAgent.post('/api/issues').field('category', 'DOOR').field('description', 'Cửa hỏng');
+    await ownAgent
+      .post('/api/issues')
+      .field('areaCategory', 'ROOM')
+      .field('roomNumber', '301')
+      .field('category', 'DOOR')
+      .field('description', 'Cửa hỏng');
     const after = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     expect(after).toBe(before + 1);
   });
@@ -129,17 +154,26 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
     expect(before.newCount).toBe(1);
     expect(before.inProgressCount).toBe(0);
 
-    await adminAgent.post(`/api/issues/${issue.id}/accept`).send({});
+    await assignTo(adminAgent, issue.id, techAgent);
+    await techAgent
+      .post(`/api/issues/${issue.id}/accept`)
+      .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
     const after = (await summaryOf(adminAgent)).body.summary;
     expect(after.newCount).toBe(0);
     expect(after.inProgressCount).toBe(1);
     expect(after.totalUnresolved).toBe(before.totalUnresolved); // unchanged
   });
 
-  it('resolving decreases the unresolved total', async () => {
+  it('completing decreases the unresolved total', async () => {
     const issue = await makeIssue(ownBranchId, 'NEW');
     const before = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
-    await adminAgent.post(`/api/issues/${issue.id}/resolve`).send({});
+    // COMPLETED is reachable only from IN_PROGRESS, so the incident is accepted
+    // first — the summary counts both of those as unresolved.
+    await assignTo(adminAgent, issue.id, techAgent);
+    await techAgent
+      .post(`/api/issues/${issue.id}/accept`)
+      .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
+    await techAgent.post(`/api/issues/${issue.id}/complete`).send({});
     const after = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     expect(after).toBe(before - 1);
   });

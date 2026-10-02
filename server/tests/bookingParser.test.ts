@@ -1,17 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { fixtureBranches } from './helpers/branchFixtures';
 import { parseBooking, PARSER_VERSION } from '../src/booking/parser';
 import { BRANCH_ALIASES, matchBranch, scoreHotel } from '../src/booking/branchMatcher';
 import { generateStayDates } from '../src/booking/dates';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch } from '../src/booking/types';
 
-// Branch fixtures mirror the seed, with deterministic ids 1..8.
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 function warningCodes(result: ReturnType<typeof parseBooking>): string[] {
   return result.warnings.map((w) => w.code);
@@ -233,18 +227,16 @@ describe('branch mapping', () => {
     ['Kaliee Nata Hotel', 'NGUYEN_THAI_BINH_170', '170-172-174 Nguyễn Thái Bình'],
   ];
 
-  it('resolves the current Booking.com public names to their branch', () => {
+  it('the legacy similarity matcher still scores the superseded names (suggestions)', () => {
     for (const [name, code, address] of renamedMap) {
       const match = matchBranch(name, branches);
       expect(match?.branch.code, name).toBe(code);
       expect(match?.branch.address, name).toBe(address);
-      expect(match?.score, name).toBe(1); // exact alias ⇒ confidently auto-assigned
+      expect(match?.score, name).toBe(1); // a perfect SIMILARITY score — still only a suggestion
     }
   });
 
-  it('a booking carrying the new name normalises to the stored branch address', () => {
-    for (const [name, code, address] of renamedMap) {
-      const text = `${name}
+  const bookingText = (name: string): string => `${name}
 Mã đặt phòng: 777888999
 Khách: Test Guest
 Nhận phòng: 2026-09-01
@@ -252,13 +244,35 @@ Trả phòng: 2026-09-02
 Phòng 1: Standard Room
 2026-09-01: 500.000 VND
 Thanh toán: Thanh toán tại chỗ`;
-      const result = parseBooking(text, branches);
+
+  it('a booking carrying the CURRENT platform identity is assigned automatically', () => {
+    for (const branch of fixtureBranches) {
+      const current = (branch.identities ?? []).find((i) => i.platform === 'BOOKING_COM');
+      if (!current) continue;
+      const result = parseBooking(bookingText(current.name), branches);
+      expect(result.suggestedBranch?.code, current.name).toBe(branch.code);
+      expect(result.suggestedBranch?.address, current.name).toBe(branch.address);
+      expect(result.branchConfident, current.name).toBe(true);
+      expect(result.requiresManualConfirmation, current.name).toBe(false);
+      expect(result.branchConfidence, current.name).toBe(100);
+      expect(warningCodes(result)).not.toContain('UNKNOWN_HOTEL');
+      expect(warningCodes(result)).not.toContain('LOW_BRANCH_CONFIDENCE');
+    }
+  });
+
+  it('a SUPERSEDED public name is suggested but never assigned automatically', () => {
+    // These were the branch's Booking.com names before it was renamed. They stay
+    // in the audit history, but recognition only ever assigns on the CURRENT
+    // identity — an old name now needs an Admin to confirm the branch.
+    for (const [name, code, address] of renamedMap) {
+      const result = parseBooking(bookingText(name), branches);
       expect(result.suggestedBranch?.code, name).toBe(code);
       expect(result.suggestedBranch?.address, name).toBe(address);
-      expect(result.branchConfident, name).toBe(true);
+      expect(result.branchConfident, name).toBe(false);
+      expect(result.requiresManualConfirmation, name).toBe(true);
       // The source hotel name stays available for audit / parser review.
       expect(result.hotelName, name).toBe(name);
-      expect(warningCodes(result)).not.toContain('UNKNOWN_HOTEL');
+      expect(warningCodes(result), name).toContain('LOW_BRANCH_CONFIDENCE');
     }
   });
 

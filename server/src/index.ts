@@ -34,6 +34,20 @@ async function start(): Promise<void> {
   registerShutdown(server);
 }
 
+/**
+ * Graceful shutdown, however it is asked for.
+ *
+ * ON WINDOWS, SIGNALS ARE NOT ENOUGH. Windows has no POSIX signals: a parent
+ * calling `child.kill('SIGTERM')` invokes TerminateProcess and the handler
+ * below never runs — verified directly, the handler did not fire while an IPC
+ * message ran it and exited 0. So a process supervised by the production runner
+ * is asked to stop over its IPC channel instead, and that request lands in the
+ * same shutdown path as Ctrl+C. Without this the runner's only way to stop the
+ * server would be to kill it mid-write.
+ *
+ * The signal handlers stay: they are what works when a developer presses Ctrl+C
+ * and what would work if this ever ran anywhere but Windows.
+ */
 function registerShutdown(server: Server): void {
   let shuttingDown = false;
 
@@ -43,6 +57,12 @@ function registerShutdown(server: Server): void {
 
     // eslint-disable-next-line no-console
     console.log(`\nNhận tín hiệu ${signal}, đang tắt server...`);
+
+    // Keep-alive sockets that are sitting idle would otherwise hold the close
+    // open until the force-exit timer fires, turning every clean shutdown into
+    // a ten-second wait and then a kill. In-flight requests are NOT affected:
+    // only genuinely idle connections are closed.
+    server.closeIdleConnections?.();
 
     // Stop accepting connections, then release the database handle.
     server.close((closeError) => {
@@ -65,6 +85,14 @@ function registerShutdown(server: Server): void {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // Present only when a parent spawned this process with an IPC channel, which
+  // is exactly the production runner. The payload is deliberately trivial: this
+  // channel carries one instruction and must never become a control API.
+  process.on('message', (message: unknown) => {
+    if (typeof message === 'object' && message !== null && (message as { type?: string }).type === 'shutdown') {
+      shutdown('yêu cầu dừng từ runner');
+    }
+  });
 }
 
 start().catch((error: unknown) => {

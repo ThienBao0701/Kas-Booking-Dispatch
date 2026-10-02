@@ -3,27 +3,160 @@
 // Money rule: every monetary field is an Int holding whole VND (đồng).
 // VND has no minor unit in practice, so integer arithmetic is exact and
 // floating point is never used for money anywhere in this system.
+//
+// ---------------------------------------------------------------------------
+// ENGINE: PostgreSQL 17 (Phase D.1). Previously SQLite (D.0 pilot).
+//
+// The SQLite migration history is NOT part of this history and is never
+// executed against PostgreSQL — SQLite's table-rebuild idiom
+// (`PRAGMA defer_foreign_keys` + `CREATE new_X` / `DROP TABLE X` / `RENAME`)
+// has no PostgreSQL meaning at all. It is archived verbatim under
+// `prisma/legacy-sqlite/` because it is still the definition of the SOURCE
+// database that the D.1 transfer tool reads, and because historical snapshots
+// must stay explainable. `prisma/migrations/` holds one deterministic
+// PostgreSQL baseline instead.
+//
+// Differences that mattered when porting, and what was decided:
+//   - Enums were TEXT in SQLite and become native PostgreSQL enum types. A row
+//     holding an off-enum string therefore fails the transfer LOUDLY rather
+//     than being silently coerced; the transfer tool pre-flights every enum
+//     column in --dry-run for exactly this reason.
+//   - `Int @id @default(autoincrement())` was a SQLite ROWID and becomes a
+//     sequence-backed identity. Sequences do NOT advance on explicit-ID
+//     inserts, so the transfer tool resynchronises every one of them (D.1 §12).
+//   - Boolean was 0/1 and becomes native `boolean`.
+//   - DateTime becomes `timestamp(3)`; the app's UTC-midnight date-only
+//     convention is unchanged and is asserted by the verification report.
+//   - String stays `text`. `Session.data` and the several *Json columns keep
+//     holding serialised JSON as TEXT deliberately: converting them to `jsonb`
+//     would re-interpret stored business data, which D.1 forbids.
+//   - The one-ACTIVE-version-per-branch partial unique index is not
+//     expressible in the Prisma schema and is created in the baseline
+//     migration, exactly as it was under SQLite.
+// ---------------------------------------------------------------------------
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+/// ADMIN            = the dispatch centre; sees every branch.
+/// RECEPTIONIST     = one branch, bound by `User.branchId`.
+/// BOOKING_DEPARTMENT = Bộ phận đặt phòng. GLOBAL like an admin (branchId is
+///   null): it works across branches and picks the branch on each charge
+///   document. It is NOT an admin — it reaches the Chứng từ module and nothing
+///   else that is admin-only.
+/// TECHNICAL        = Bộ phận kỹ thuật. GLOBAL like an admin (branchId is null)
+///   because one maintenance team serves all eight properties: a broken lift at
+///   CN5 is worked by the same people who fix a door at CN1, so scoping them to
+///   one branch would make the department unusable. It is NOT an admin — it
+///   reaches the incident queues and nothing else. It is the ONLY role that may
+///   move an incident NEW → IN_PROGRESS → COMPLETED; an Admin watches and
+///   reports but never performs the work, so it never performs the transition.
+/// HOUSEKEEPING     = Bộ phận buồng phòng. Bound to ONE branch by `User.branchId`
+///   like a receptionist, because a room inspection belongs to the hotel it was
+///   made in. It is NOT a receptionist: `requireAuth` confines it to the
+///   housekeeping and hotel-delivery endpoints, so no booking, incident or
+///   report route that scopes "everyone who is not an admin" by branch can ever
+///   serve it.
 enum UserRole {
   ADMIN
   RECEPTIONIST
+  BOOKING_DEPARTMENT
+  TECHNICAL
+  HOUSEKEEPING
+  /// "Quản lý kỹ thuật" — inspects completed repairs (nghiệm thu). A global
+  /// department like TECHNICAL, but it cannot accept, repair or complete: it
+  /// only passes or fails the work a technician has finished.
+  TECHNICAL_MANAGER
+  /// "Quản lý lễ tân" — supervises the reception of the branches listed in
+  /// `UserBranchAssignment` for this account, and no others. `branchId` is null.
+  RECEPTION_MANAGER
+  /// "Tổng quản lý lễ tân" — the same supervision over every branch. No
+  /// assignment rows: the scope is all branches by definition.
+  RECEPTION_GENERAL_MANAGER
 }
 
+/// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
+/// live in ONE place in the code (`server/src/shift/shiftTypes.ts`); this enum
+/// is only the identity of each shift.
+///
+/// A and A4 both begin at 06:00, and C and C4 both end at 06:00, so the current
+/// time CANNOT identify which shift a receptionist is on. The shift is always
+/// chosen explicitly at check-in and never inferred afterwards.
+enum ShiftType {
+  /// Ca A — 06:00 → 14:00.
+  A
+  /// Ca B — 14:00 → 22:00.
+  B
+  /// Ca C — 22:00 → 06:00 the next day.
+  C
+  /// Ca A4 — 06:00 → 18:00.
+  A4
+  /// Ca C4 — 18:00 → 06:00 the next day.
+  C4
+}
+
+/// Where a charge document stands. A new document is CHUA_XU_LY — never
+/// assumed charged before the result is known.
+/// CHUA_XU_LY  = "Chưa xử lý"
+/// DA_BI_CHARGE = "Đã bị charge" — the ONLY status counted in charge totals.
+/// CHARGE_THAT_BAI = "Charge thất bại"
+enum ChargeStatus {
+  CHUA_XU_LY
+  DA_BI_CHARGE
+  CHARGE_THAT_BAI
+}
+
+/// Which of the three upload slots an attachment belongs to.
+enum ChargeAttachmentCategory {
+  GUEST_IMAGE
+  CHARGE_DOCUMENT
+  CARD_IMAGE
+}
+
+/// Auditable actions on a charge document.
+///
+/// CARD_REVEALED records THAT the card number was shown, by whom and when —
+/// never the number itself. No audit row ever carries card data.
+enum ChargeAuditAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  ATTACHMENT_ADDED
+  ATTACHMENT_REMOVED
+  CARD_REVEALED
+}
+
+/// The booking lifecycle.
+///
+/// The first five members are the ORIGINAL Booking.com machine and keep their
+/// exact meanings — NEW has always meant "dispatched, awaiting the branch", not
+/// "newly created". Renaming or re-ordering them would silently change what
+/// every existing query, dashboard and notification means, so nothing here is
+/// redefined; the operational states are appended instead.
+///
+/// Booking.com:  DRAFT -> READY -> NEW -> COMPLETED -> ARCHIVED
+/// Operational:  NEW -> RECEIVED -> CHECKED_IN -> CHECKED_OUT -> COMPLETED
+///
+/// A Booking.com booking never enters the appended states, so its behaviour is
+/// unchanged. Proof approval stays an INDEPENDENT workflow: it may complete a
+/// booking on its own and never defines these states.
 enum BookingStatus {
   DRAFT
   READY
   NEW
   COMPLETED
   ARCHIVED
+  RECEIVED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  NO_SHOW
 }
 
 enum PaymentStatus {
@@ -32,9 +165,20 @@ enum PaymentStatus {
 }
 
 /// Where a reservation originated. Existing rows default to BOOKING_COM.
+///
+/// This is the INTAKE source — the platform whose text was pasted — and it is
+/// stored verbatim. A CTrip booking is never recorded as Agoda even though the
+/// two currently share property names: the source drives history, filters,
+/// audit and which platform identity recognition resolves against.
+///
+/// Tripadvisor and Traveloka are deliberately absent: they are valid
+/// `OtaPlatform` identity values, but no intake parser produces them yet, so
+/// accepting them here would let a booking claim a source the system cannot
+/// actually extract.
 enum BookingSource {
   BOOKING_COM
   AGODA
+  CTRIP
 }
 
 /// Operational business type of a booking, independent of the OTA source.
@@ -120,7 +264,44 @@ enum BranchAliasMatchMode {
   SIMILARITY
 }
 
+/// The external booking platforms a branch can be listed on.
+///
+/// Deliberately a SEPARATE enum from `BranchAliasSource`, not an extension of
+/// it: that enum carries MANUAL/OTHER, which are not platforms and must never
+/// appear as a platform tab or be accepted by the identity API. This enum is
+/// exactly the set an operator can configure — no more, no less — so the
+/// database itself rejects anything else.
+enum OtaPlatform {
+  BOOKING_COM
+  AGODA
+  CTRIP
+  TRIPADVISOR
+  TRAVELOKA
+}
+
+/// What happened to a branch's platform identity. Immutable audit trail.
+/// IDENTITY_MIGRATED records a legacy alias that the one-current-identity
+/// migration did NOT promote, so a superseded name is preserved rather than
+/// discarded.
+enum PlatformIdentityAction {
+  IDENTITY_CREATED
+  IDENTITY_UPDATED
+  IDENTITY_DELETED
+  IDENTITY_MIGRATED
+  IDENTITY_CONFIRMED
+}
+
+/// What happened to one OTA room mapping. Immutable audit trail.
+enum OtaRoomMappingAction {
+  MAPPING_CREATED
+  MAPPING_UPDATED
+  MAPPING_DELETED
+}
+
 /// What changed on a branch (audit trail for Admin branch management).
+/// The ROOM_MAPPING_* / ROOM_CLASS_* members extend the SAME audit trail to
+/// branch room-class configuration — room classes are branch configuration, so
+/// they belong in BranchChangeLog rather than in a second audit system.
 enum BranchChangeAction {
   BRANCH_CREATED
   BRANCH_NUMBER_CHANGED
@@ -135,6 +316,78 @@ enum BranchChangeAction {
   ALIAS_ENABLED
   ALIAS_DISABLED
   ALIAS_REMOVED
+  ROOM_MAPPING_DRAFT_CREATED
+  ROOM_MAPPING_DRAFT_CANCELLED
+  ROOM_CLASS_ADDED
+  ROOM_CLASS_UPDATED
+  ROOM_CLASS_DEACTIVATED
+  ROOM_CLASS_REORDERED
+  ROOM_CLASS_ALIAS_ADDED
+  ROOM_CLASS_ALIAS_REMOVED
+  ROOM_MAPPING_VALIDATED
+  ROOM_MAPPING_ACTIVATED
+  ROOM_MAPPING_ACTIVATION_FAILED
+}
+
+/// Lifecycle of one branch room-class mapping version.
+/// DRAFT    = being prepared; never used to resolve a booking.
+/// ACTIVE   = the single version new bookings resolve against (one per branch).
+/// ARCHIVED = superseded, kept forever so historical snapshots stay explainable.
+enum RoomMappingVersionStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+/// Where a room-class alias came from.
+enum RoomClassAliasSource {
+  SEED
+  ADMIN
+  PARSER
+}
+
+/// How a room name was resolved to a branch room class for a booking room.
+/// RESOLVED   = matched a configured name/alias of the booking's own branch.
+/// MANUAL     = an authorized user selected the class explicitly.
+/// UNRESOLVED = no deterministic match; the source text is preserved verbatim
+///              and the room is flagged for manual review. Never guessed.
+/// LEGACY     = pre-C.3.8 row backfilled from its stored room text; the note
+///              keeps using the legacy abbreviation until a human resolves it.
+enum RoomClassResolutionStatus {
+  RESOLVED
+  MANUAL
+  UNRESOLVED
+  LEGACY
+}
+
+/// Booking-scoped audit trail (guests, room-mapping re-application, proof
+/// lifecycle). Mirrors the shape of BranchChangeLog so both trails read the
+/// same way.
+///
+/// The BOOKING_PROOF_* members close the two holes in the operational timeline:
+/// BookingStatusHistory can only record BookingStatus transitions, but proof
+/// submission and rejection change `verificationStatus` while `status` stays
+/// NEW, so neither was recorded anywhere queryable as history.
+///
+/// BOOKING_PROOF_REJECTED IS the "correction requested" event — rejecting with
+/// a reason is exactly how an Admin asks a receptionist to recreate and
+/// resubmit. There is deliberately no separate correction state.
+enum BookingAuditAction {
+  BOOKING_GUEST_ADDED
+  BOOKING_GUEST_UPDATED
+  BOOKING_GUEST_REMOVED
+  BOOKING_PRIMARY_GUEST_CHANGED
+  BOOKING_ROOM_MAPPING_REAPPLIED
+  BOOKING_PROOF_SUBMITTED
+  BOOKING_PROOF_APPROVED
+  BOOKING_PROOF_REJECTED
+  /// A receptionist took ownership of a dispatched order ("CUT").
+  BOOKING_CLAIMED
+  /// An Admin released an expired claim so the order can be taken again.
+  BOOKING_RESENT
+  /// Recorded when an expired claim is OBSERVED, not when it elapses — there is
+  /// no scheduler, and expiry is derived from claimExpiresAt.
+  BOOKING_CLAIM_EXPIRED
 }
 
 /// Severity of an extraction warning surfaced to the admin during preview.
@@ -142,6 +395,54 @@ enum WarningSeverity {
   INFO
   WARNING
   ERROR
+}
+
+/// WHERE in the hotel an incident is. This is the first thing a receptionist
+/// picks, and it decides which location fields the report even has: a room
+/// number is meaningless for the rooftop, and a floor number is meaningless for
+/// a room. Storing the area as its own column — rather than folding it into the
+/// description — is what lets Technical filter a queue and what lets the Admin
+/// report group by place.
+///
+/// Rows created before the structured form existed have `areaCategory = NULL`.
+/// That is deliberate: their area was never recorded, and guessing one from the
+/// old free-text `roomNumber` would be inventing history.
+enum IssueAreaCategory {
+  /// Phòng — carries `roomNumber`.
+  ROOM
+  /// Khu Vực Sảnh — carries `areaSubtype`.
+  LOBBY
+  /// Khu Vực Hành Lang — carries `floorNumber`.
+  HALLWAY
+  /// Khu Vực Cầu Thang — carries `floorNumber`.
+  STAIRCASE
+  /// Khu Vực Nhà Hàng.
+  RESTAURANT
+  /// Khu Vực Rooftop.
+  ROOFTOP
+  /// Các Khu Vực Còn Lại — carries `locationDetail`, which is REQUIRED so the
+  /// report can never be "something is broken somewhere".
+  OTHER_AREA
+}
+
+/// The fixed list of things that go wrong in the lobby (Khu Vực Sảnh). Separate
+/// from `IssueCategory` because it is a list of OBJECTS in one place, not a list
+/// of fault types that apply anywhere.
+enum IssueAreaSubtype {
+  /// Quầy lễ tân
+  RECEPTION_DESK
+  /// Sofa
+  SOFA
+  /// Nền nhà
+  FLOOR
+  /// Trần nhà
+  CEILING
+  /// Bóng đèn
+  LIGHT_BULB
+  /// Đồng hồ
+  CLOCK
+  /// Khác — the receptionist says what in `locationDetail`.
+  OTHER
 }
 
 /// Category of a receptionist-reported hotel issue.
@@ -159,12 +460,63 @@ enum IssueCategory {
   OTHER
 }
 
-/// Lifecycle of a reported hotel issue. Deliberately minimal: no workflow beyond
-/// NEW → IN_PROGRESS → RESOLVED.
+/// Lifecycle of a reported hotel incident, and a real state machine: each step
+/// is taken by a different party and each one is refused out of order.
+///
+///   NEW                  a receptionist reported it; nobody has picked it up —
+///                        or an inspection FAILED / the technician could not
+///                        repair it, and it waits to be picked up again.
+///   IN_PROGRESS          Bộ phận kỹ thuật accepted it and named the technician
+///                        who is doing the work. Reachable ONLY from NEW.
+///   AWAITING_INSPECTION  the technician finished ("Chờ nghiệm thu"). Reachable
+///                        ONLY from IN_PROGRESS. Finished work is not accepted
+///                        work: the Technical Manager still has to inspect it.
+///   COMPLETED            the Technical Manager passed the inspection. Reachable
+///                        ONLY from AWAITING_INSPECTION — plus every incident
+///                        completed before inspection existed, which stays
+///                        COMPLETED with no inspection record, never an invented one.
+///
+/// COMPLETED is terminal: nothing reopens an incident, and nothing deletes one.
+///
+/// This value was called RESOLVED until the maintenance lifecycle landed. It was
+/// RENAMED in place (`ALTER TYPE ... RENAME VALUE`) rather than replaced, so
+/// every historical row kept its identity and no data was rewritten.
 enum IssueStatus {
   NEW
   IN_PROGRESS
-  RESOLVED
+  COMPLETED
+  AWAITING_INSPECTION
+}
+
+/// "Nghiệm thu" — the Technical Manager's verdict on ONE repair attempt.
+///
+/// PASSED closes the incident (COMPLETED). FAILED sends it back to the queue as
+/// "Cần sửa lại"; the attempt it judged stays exactly as it was completed, and
+/// the next acceptance opens a new attempt that gets its own inspection.
+enum InspectionResult {
+  /// "Đạt".
+  PASSED
+  /// "Không đạt" — always with a reason.
+  FAILED
+}
+
+/// How one technician's attempt at an incident ENDED.
+///
+/// An attempt is open while the technician is working — `outcome` is null then,
+/// and the partial unique index `TechnicalRepairAttempt_one_open_per_issue`
+/// guarantees there is at most one such row per incident. It is set exactly once
+/// and never changed.
+///
+/// CANNOT_REPAIR is NOT a failure of the incident: it returns the incident to
+/// NEW so somebody else can pick it up, while keeping the attempt itself as
+/// permanent evidence that the work WAS done and what stopped it. That is the
+/// whole reason attempts are a separate table rather than more columns on
+/// HotelIssue — columns get overwritten by attempt 2, rows do not.
+enum RepairOutcome {
+  /// "Hoàn thành" — the incident is fixed and closed.
+  COMPLETED
+  /// "Không sửa được" — the incident went back to the queue with a reason.
+  CANNOT_REPAIR
 }
 
 /// Application user: one administrator plus receptionists bound to a branch.
@@ -183,30 +535,98 @@ model User {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  branch            Branch?                @relation(fields: [branchId], references: [id])
-  bookingsSent      Booking[]              @relation("BookingSentBy")
-  bookingsCompleted Booking[]              @relation("BookingCompletedBy")
-  bookingsReviewed  Booking[]              @relation("BookingReviewedBy")
-  bookingsCreated   Booking[]              @relation("BookingCreatedBy")
-  proofsSubmitted   BookingCreationProof[] @relation("ProofSubmittedBy")
-  proofsReviewed    BookingCreationProof[] @relation("ProofReviewedBy")
-  statusChanges     BookingStatusHistory[]
-  notifications     Notification[]
-  sessions          Session[]
-  issuesReported    HotelIssue[]           @relation("IssueReportedBy")
-  issuesAccepted    HotelIssue[]           @relation("IssueAcceptedBy")
-  issuesResolved    HotelIssue[]           @relation("IssueResolvedBy")
-  branchChanges     BranchChangeLog[]
+  branch                   Branch?                       @relation(fields: [branchId], references: [id])
+  bookingsSent             Booking[]                     @relation("BookingSentBy")
+  bookingsCompleted        Booking[]                     @relation("BookingCompletedBy")
+  bookingsDeleted          Booking[]                     @relation("BookingDeletedBy")
+  bookingsReceived         Booking[]                     @relation("BookingReceivedBy")
+  bookingsCheckedIn        Booking[]                     @relation("BookingCheckedInBy")
+  bookingsCheckedOut       Booking[]                     @relation("BookingCheckedOutBy")
+  bookingsCancelled        Booking[]                     @relation("BookingCancelledBy")
+  bookingCorrections       BookingCorrection[]           @relation("BookingCorrectionBy")
+  requestAudits            RequestAudit[]                @relation("RequestAuditActor")
+  bookingsReviewed         Booking[]                     @relation("BookingReviewedBy")
+  bookingsCreated          Booking[]                     @relation("BookingCreatedBy")
+  proofsSubmitted          BookingCreationProof[]        @relation("ProofSubmittedBy")
+  proofsReviewed           BookingCreationProof[]        @relation("ProofReviewedBy")
+  statusChanges            BookingStatusHistory[]
+  notifications            Notification[]
+  sessions                 Session[]
+  issuesReported           HotelIssue[]                  @relation("IssueReportedBy")
+  issuesAccepted           HotelIssue[]                  @relation("IssueAcceptedBy")
+  issuesCompleted          HotelIssue[]                  @relation("IssueCompletedBy")
+  shiftSessions            ReceptionShiftSession[]       @relation("ShiftSessionUser")
+  branchChanges            BranchChangeLog[]
+  identityEvents           BranchPlatformIdentityEvent[]
+  otaRoomMappingEvents     BranchOtaRoomMappingEvent[]
+  roomMappingsCreated      BranchRoomMappingVersion[]    @relation("RoomMappingCreatedBy")
+  roomMappingsActivated    BranchRoomMappingVersion[]    @relation("RoomMappingActivatedBy")
+  bookingAuditEvents       BookingAuditEvent[]
+  chargeDocumentsCreated   ChargeDocument[]              @relation("ChargeCreatedBy")
+  chargeDocumentsUpdated   ChargeDocument[]              @relation("ChargeUpdatedBy")
+  chargeAttachments        ChargeDocumentAttachment[]
+  chargeAuditEvents        ChargeDocumentAudit[]
+  chatConversations        ChatConversation[]            @relation("ChatConversationCreatedBy")
+  chatMessages             ChatMessage[]                 @relation("ChatMessageSender")
+  chatConversationsHandled ChatConversation[]            @relation("ChatConversationHandledBy")
+  bookingsClaimed          Booking[]                     @relation("BookingClaimedBy")
+  remindersSent            Reminder[]                    @relation("ReminderSender")
+  remindersReceived        Reminder[]                    @relation("ReminderRecipient")
+  handoversGiven           ShiftHandover[]               @relation("HandoverOutgoingUser")
+  handoversReceived        ShiftHandover[]               @relation("HandoverIncomingUser")
+  handoverNotesWritten     ShiftHandoverNote[]           @relation("HandoverNoteAuthor")
+  repairAttempts           TechnicalRepairAttempt[]      @relation("AttemptTechnician")
+  repairInspections        TechnicalRepairAttempt[]      @relation("AttemptInspector")
+  operationalReports       ReceptionOperationalReport[]  @relation("OperationalReportCreatedBy")
+  operationalReportsVoided ReceptionOperationalReport[]  @relation("OperationalReportVoidedBy")
+  guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
+  complaintsCompleted      CustomerComplaintReport[]     @relation("ComplaintCompletedBy")
+  operationalReportAudits  ReceptionReportAudit[]        @relation("ReportAuditActor")
+  issueEdits               HotelIssueEdit[]              @relation("IssueEditActor")
+  chatReadStates           ChatReadState[]               @relation("ChatReadStateUser")
+  roomInspections          RoomInspection[]              @relation("RoomInspectionCreatedBy")
+  roomIssuesVoided         RoomInspectionIssue[]         @relation("RoomIssueVoidedBy")
+  roomCollectionsRecorded  RoomIssueCollection[]         @relation("RoomCollectionRecordedBy")
+  roomCollectionEvents     RoomIssueCollectionEvent[]    @relation("RoomCollectionEventActor")
+  /// RECEPTION_MANAGER only: the branches this account supervises.
+  branchAssignments        UserBranchAssignment[]        @relation("UserBranchAssignmentUser")
+  issuesAssigned           HotelIssue[]                  @relation("IssueAssignedTechnician")
+  issueAssignmentsReceived HotelIssueAssignment[]        @relation("IssueAssignmentTechnician")
+  issueAssignmentsMade     HotelIssueAssignment[]        @relation("IssueAssignmentAssigner")
+  repairStages             TechnicalRepairStage[]        @relation("RepairStageTechnician")
+  housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
 
   @@index([branchId])
   @@index([role])
 }
 
+/// WHICH BRANCHES A "QUẢN LÝ LỄ TÂN" SUPERVISES — one row per (account, branch).
+///
+/// Read on EVERY request by `requireAuth`, never cached in the session, so an
+/// Admin moving a manager from branches 1–3 to 4–6 takes effect on that
+/// manager's very next request: their chat, reports and incident lists follow
+/// these rows and nothing else. Records the manager created stay where they are.
+model UserBranchAssignment {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  branchId  Int
+  createdAt DateTime @default(now())
+
+  user   User   @relation("UserBranchAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation("UserBranchAssignmentBranch", fields: [branchId], references: [id])
+
+  @@unique([userId, branchId])
+  @@index([branchId])
+}
+
 /// Server-side login session backing express-session.
 ///
-/// A native SQLite session store (connect-sqlite3 / better-sqlite3) is blocked
-/// by this project's install-script allow-list, so sessions live in the same
-/// Prisma/SQLite database — the simplest reliable persistent store here.
+/// Sessions live in the application's own Prisma database rather than in a
+/// native store: connect-sqlite3 / better-sqlite3 / connect-pg-simple are all
+/// blocked by this project's install-script allow-list, and one storage engine
+/// is one less thing to back up, restore and keep consistent. On PostgreSQL
+/// this also means concurrent reception logins across the eight branches are
+/// handled by the same MVCC engine as every other write.
 /// The browser only ever holds the opaque `id` (the session cookie); all
 /// session data stays server-side in `data`. `userId` is denormalised out of
 /// `data` so a user's sessions can be invalidated on disable / password reset.
@@ -269,11 +689,296 @@ model Branch {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  users      User[]
-  bookings   Booking[]
-  issues     HotelIssue[]
-  aliases    BranchSourceAlias[]
-  changeLogs BranchChangeLog[]
+  users                   User[]
+  bookings                Booking[]
+  issues                  HotelIssue[]
+  shiftSessions           ReceptionShiftSession[]
+  aliases                 BranchSourceAlias[]
+  platformIdentities      BranchPlatformIdentity[]
+  identityEvents          BranchPlatformIdentityEvent[]
+  otaRoomMappings         BranchOtaRoomMapping[]
+  otaRoomMappingEvents    BranchOtaRoomMappingEvent[]
+  changeLogs              BranchChangeLog[]
+  roomMappingVersions     BranchRoomMappingVersion[]
+  roomClasses             BranchRoomClass[]
+  chargeDocuments         ChargeDocument[]
+  chatConversations       ChatConversation[]
+  shiftHandovers          ShiftHandover[]
+  handoverNotes           ShiftHandoverNote[]
+  operationalReports      ReceptionOperationalReport[]
+  operationalReportAudits ReceptionReportAudit[]
+  roomInspections         RoomInspection[]
+  roomInspectionIssues    RoomInspectionIssue[]
+  managerAssignments      UserBranchAssignment[]       @relation("UserBranchAssignmentBranch")
+  housekeepingSegments    HousekeepingWorkSegment[]
+}
+
+/// A charge document ("Chứng từ"): evidence that a guest was, or was not,
+/// charged — and why.
+///
+/// THE CARD NUMBER IS NEVER STORED IN PLAINTEXT. `cardNumberCipher` holds an
+/// AES-256-GCM ciphertext whose key lives only in CARD_ENCRYPTION_KEY, outside
+/// this database. `cardLast4` is the masked form every ordinary screen, report
+/// and export uses; the full number is reachable only through the explicit,
+/// audited reveal endpoint.
+///
+/// THERE IS NO CVV/CVC/CID COLUMN, AND THERE MUST NEVER BE ONE. A card security
+/// code is Sensitive Authentication Data: it may not be retained after
+/// authorization, encrypted or not.
+///
+/// `bookingId` is nullable ON PURPOSE. A charge document is frequently raised
+/// from an external reservation that was never dispatched through Kas, so
+/// `bookingCode` is kept as free text and the relation is a bonus, not a
+/// requirement — forcing it would make those documents impossible to record.
+model ChargeDocument {
+  id        String  @id @default(cuid())
+  branchId  Int
+  /// Set only when the external code matches a booking Kas actually holds.
+  bookingId String?
+
+  guestName   String
+  /// The reservation code as the external system states it. Free text.
+  bookingCode String
+  /// Whole VND, like every other amount in this system.
+  amount      Int
+
+  /// AES-256-GCM ciphertext of the full card number, base64, with its iv and
+  /// auth tag. Never logged, never exported, never returned by a list endpoint.
+  cardNumberCipher String
+  /// The last four digits, stored separately so the masked form needs no key.
+  cardLast4        String
+  /// "MM/YY" as the staff entered it. Not sensitive authentication data.
+  cardExpiry       String
+  /// Which key version encrypted this row, so a future key rotation is a
+  /// re-encryption job rather than a schema change.
+  cardKeyVersion   Int    @default(1)
+
+  checkIn  DateTime
+  checkOut DateTime
+
+  /// Why the guest was charged. REQUIRED — the point of the module is that this
+  /// is never blank. Free text, not an enum: the situations vary.
+  reason String
+
+  status    ChargeStatus @default(CHUA_XU_LY)
+  /// When the charge actually succeeded. The ONLY date the monthly report uses
+  /// — never createdAt, checkIn or checkOut. Null unless status is DA_BI_CHARGE.
+  chargedAt DateTime?
+
+  createdByUserId Int?
+  updatedByUserId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  branch      Branch                     @relation(fields: [branchId], references: [id])
+  booking     Booking?                   @relation(fields: [bookingId], references: [id])
+  createdBy   User?                      @relation("ChargeCreatedBy", fields: [createdByUserId], references: [id])
+  updatedBy   User?                      @relation("ChargeUpdatedBy", fields: [updatedByUserId], references: [id])
+  attachments ChargeDocumentAttachment[]
+  auditEvents ChargeDocumentAudit[]
+
+  @@index([branchId])
+  @@index([status])
+  @@index([chargedAt])
+  @@index([bookingCode])
+  @@index([checkIn])
+  @@index([createdAt])
+}
+
+/// One uploaded file belonging to a charge document. A child table rather than
+/// columns on the parent, because all three categories accept MANY files.
+///
+/// Only metadata and a server-generated file name live here — never the bytes,
+/// and never a client-supplied path.
+model ChargeDocumentAttachment {
+  id               String                   @id @default(cuid())
+  chargeDocumentId String
+  category         ChargeAttachmentCategory
+  /// Server-generated name on disk (never the client's original name).
+  storedFileName   String
+  /// The client's original name, kept for display only — never trusted.
+  originalFileName String
+  mimeType         String
+  fileSize         Int
+  uploadedByUserId Int?
+  uploadedAt       DateTime                 @default(now())
+
+  chargeDocument ChargeDocument @relation(fields: [chargeDocumentId], references: [id], onDelete: Cascade)
+  uploadedBy     User?          @relation(fields: [uploadedByUserId], references: [id])
+
+  @@index([chargeDocumentId])
+  @@index([chargeDocumentId, category])
+}
+
+/// Charge-document audit trail.
+///
+/// Separate from BookingAuditEvent, which is bound to a booking by a non-null
+/// FK and a closed action enum — a charge document frequently has no booking at
+/// all, so it could not have lived there.
+///
+/// NO ROW EVER CARRIES CARD DATA. A CARD_REVEALED row records that the number
+/// was shown, by whom and when; the number itself appears nowhere.
+model ChargeDocumentAudit {
+  id               String            @id @default(cuid())
+  chargeDocumentId String
+  action           ChargeAuditAction
+  /// Which field changed, for an UPDATED row.
+  field            String?
+  /// Safe before/after values. Card fields are recorded as "••••1234" only.
+  oldValue         String?
+  newValue         String?
+  actorUserId      Int?
+  actorRole        UserRole?
+  createdAt        DateTime          @default(now())
+
+  chargeDocument ChargeDocument @relation(fields: [chargeDocumentId], references: [id], onDelete: Cascade)
+  actor          User?          @relation(fields: [actorUserId], references: [id])
+
+  @@index([chargeDocumentId, createdAt])
+  @@index([action])
+}
+
+/// One immutable-once-activated version of a branch's room-class mapping.
+///
+/// Exactly one ACTIVE version per branch at any time (enforced by the activation
+/// transaction plus a partial unique index created in the migration). A new
+/// configuration is prepared as a DRAFT copy, so the live mapping keeps serving
+/// reception while an Admin edits — and activation is a single atomic swap.
+model BranchRoomMappingVersion {
+  id                String                   @id @default(cuid())
+  branchId          Int
+  /// 1-based, monotonically increasing per branch. Shown to operators.
+  versionNumber     Int
+  status            RoomMappingVersionStatus @default(DRAFT)
+  createdByUserId   Int?
+  activatedByUserId Int?
+  createdAt         DateTime                 @default(now())
+  activatedAt       DateTime?
+  archivedAt        DateTime?
+  /// Operator-supplied reason, shown in the version history.
+  changeReason      String?
+
+  branch      Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createdBy   User?             @relation("RoomMappingCreatedBy", fields: [createdByUserId], references: [id])
+  activatedBy User?             @relation("RoomMappingActivatedBy", fields: [activatedByUserId], references: [id])
+  roomClasses BranchRoomClass[]
+
+  @@unique([branchId, versionNumber])
+  @@index([branchId, status])
+}
+
+/// One room class of one branch, within one mapping version.
+///
+/// Room classes are BUSINESS-MANAGED data, never a code enum: each branch has
+/// its own display names and PMS codes, and the same code (e.g. STAN) legitimately
+/// exists in several branches. `stableKey` is what identifies "the same room
+/// class" across versions of a branch, so a booking snapshot stays explainable
+/// after a rename.
+model BranchRoomClass {
+  id             String  @id @default(cuid())
+  branchId       Int
+  versionId      String
+  /// Stable across versions of this branch, e.g. "standard", "deluxe-bal".
+  stableKey      String
+  displayName    String
+  /// Case/diacritic/punctuation-folded form used for deterministic lookup.
+  normalizedName String
+  /// The exact PMS note code, e.g. STAN, LUXDEL, PRE_DD.
+  pmsCode        String
+  active         Boolean @default(true)
+  sortOrder      Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch  Branch                   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  version BranchRoomMappingVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  aliases BranchRoomClassAlias[]
+
+  /// Within one version: no duplicate normalized name, PMS code or stable key.
+  @@unique([versionId, normalizedName])
+  @@unique([versionId, pmsCode])
+  @@unique([versionId, stableKey])
+  @@index([branchId])
+  @@index([versionId, active])
+}
+
+/// A recognised spelling of a room class, scoped to its branch AND version.
+///
+/// `versionId` is denormalised so the database itself can guarantee an alias is
+/// unambiguous within a version — two room classes of the same branch may never
+/// claim the same normalized alias.
+model BranchRoomClassAlias {
+  id              String               @id @default(cuid())
+  roomClassId     String
+  versionId       String
+  branchId        Int
+  alias           String
+  normalizedAlias String
+  source          RoomClassAliasSource @default(SEED)
+  active          Boolean              @default(true)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  roomClass BranchRoomClass @relation(fields: [roomClassId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, normalizedAlias])
+  @@index([roomClassId])
+  @@index([branchId])
+}
+
+/// One guest on a booking.
+///
+/// Introduced in C.3.8. `Booking.customerName` / `Booking.phone` remain the
+/// denormalised mirror of the PRIMARY guest so every existing read path, note
+/// builder, export and comparison keeps working unchanged; the service layer
+/// keeps the two in step inside one transaction.
+model BookingGuest {
+  id             String  @id @default(cuid())
+  bookingId      String
+  fullName       String
+  phone          String?
+  email          String?
+  nationality    String?
+  /// Passport / national id number, and which kind it is.
+  identityNumber String?
+  identityType   String?
+  note           String?
+  /// Exactly one primary guest per booking (enforced by the service).
+  isPrimary      Boolean @default(false)
+  sortOrder      Int     @default(0)
+
+  createdByUserId Int?
+  updatedByUserId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([bookingId, isPrimary])
+}
+
+/// Immutable booking-scoped audit trail (guest edits, mapping re-application).
+model BookingAuditEvent {
+  id            String             @id @default(cuid())
+  bookingId     String
+  action        BookingAuditAction
+  field         String?
+  oldValue      String?
+  newValue      String?
+  reason        String?
+  actorUserId   Int?
+  actorRole     UserRole?
+  /// Request correlation id, when the caller supplied one.
+  correlationId String?
+  createdAt     DateTime           @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  actor   User?   @relation(fields: [actorUserId], references: [id])
+
+  @@index([bookingId, createdAt])
+  @@index([action])
 }
 
 /// One external platform hotel name that resolves to a branch. Replaces the
@@ -305,6 +1010,141 @@ model BranchSourceAlias {
   @@index([source, normalizedAlias])
   @@index([source, active])
   @@index([branchId])
+}
+
+/// The ONE current hotel name a branch is listed under on one platform.
+///
+/// This supersedes `BranchSourceAlias` for recognition. The alias table allowed
+/// many rows per (branch, platform) with active/inactive toggles, which meant a
+/// name could be ambiguous, an operator had to reason about strikethrough
+/// history in the main table, and "which name is live right now" had no single
+/// answer. Here there is exactly one row per (branch, platform) — enforced by
+/// the database, not by the service — and superseded names live in
+/// BranchPlatformIdentityEvent where they belong.
+///
+/// Two unique constraints carry the whole safety model:
+///   @@unique([branchId, platform])       one current identity per branch/platform
+///   @@unique([platform, normalizedName]) a name resolves to exactly ONE branch
+/// The second is what makes recognition safe: a duplicate cannot be created
+/// even by two concurrent requests, so a booking can never route two ways.
+model BranchPlatformIdentity {
+  id                        String      @id @default(cuid())
+  branchId                  Int
+  platform                  OtaPlatform
+  /// Exactly as the platform displays it — shown to the operator verbatim.
+  name                      String
+  /// Case/accent/whitespace/punctuation-folded form used for lookup.
+  normalizedName            String
+  /// True when the migration had to CHOOSE between competing legacy aliases.
+  /// Recognition still works; the Admin is asked to confirm the pick.
+  identityNeedsConfirmation Boolean     @default(false)
+
+  createdByUserId Int?
+  updatedByUserId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, platform])
+  @@unique([platform, normalizedName])
+  @@index([platform, normalizedName])
+  @@index([branchId])
+}
+
+/// Immutable history of every platform-identity change, including the values a
+/// migration or a delete removed from recognition. Never shown in the main
+/// branch table — the whole point of the redesign is that the live list holds
+/// only current values — and reachable through a dedicated history endpoint.
+model BranchPlatformIdentityEvent {
+  id            String                 @id @default(cuid())
+  branchId      Int
+  platform      OtaPlatform
+  action        PlatformIdentityAction
+  oldValue      String?
+  newValue      String?
+  /// A stable machine reason (e.g. "LEGACY_COMPETING_ALIAS"), never free text
+  /// that could carry operational or personal data.
+  reason        String?
+  actorUserId   Int?
+  actorRole     UserRole?
+  correlationId String?
+  createdAt     DateTime               @default(now())
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorUserId], references: [id])
+
+  @@index([branchId, createdAt])
+  @@index([platform, createdAt])
+  @@index([action])
+}
+
+/// How ONE room name shown on ONE platform maps to a branch's internal PMS code.
+///
+/// Separate from `BranchRoomClass`, which is the branch's own versioned room
+/// CATALOGUE. This table answers a different question: "when Agoda calls a room
+/// «Phòng Queen Superior Có Cửa Sổ», which of this branch's PMS codes is that?"
+/// The same physical class is named differently by each OTA, and the same OTA
+/// name can mean different classes at different branches — so the mapping is
+/// keyed by (branch, platform, OTA name) and never by name alone.
+///
+/// AGODA AND CTRIP ARE INDEPENDENT ROWS even where the names are identical
+/// today. Sharing one row would mean renaming a room on Agoda silently changed
+/// what a CTrip booking resolves to.
+///
+/// `pmsCode` is a plain string rather than a foreign key to BranchRoomClass on
+/// purpose: room classes are versioned and archived, and a mapping must keep
+/// naming the same operational code across a catalogue re-version. The seed and
+/// the API both validate the code against the branch's ACTIVE catalogue.
+model BranchOtaRoomMapping {
+  id                    String      @id @default(cuid())
+  branchId              Int
+  platform              OtaPlatform
+  /// Exactly as the platform displays it — never normalised for storage.
+  otaRoomName           String
+  /// Case/accent/whitespace/punctuation-folded form used for lookup.
+  normalizedOtaRoomName String
+  /// The platform's own room-type identifier when one is known (Agoda supplies
+  /// these). Null when the platform has not given us a real identifier — never
+  /// borrowed from another platform.
+  otaRoomTypeId         String?
+  /// The branch's internal PMS code, e.g. STAN, SUP, LUXDEL, PRE_DD.
+  pmsCode               String
+  active                Boolean     @default(true)
+
+  createdByUserId Int?
+  updatedByUserId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  /// One current mapping per OTA room name, per platform, per branch.
+  @@unique([branchId, platform, normalizedOtaRoomName])
+  @@index([branchId, platform])
+  @@index([platform, normalizedOtaRoomName])
+}
+
+/// Immutable history of every OTA room-mapping change.
+model BranchOtaRoomMappingEvent {
+  id            String               @id @default(cuid())
+  branchId      Int
+  platform      OtaPlatform
+  action        OtaRoomMappingAction
+  otaRoomName   String
+  oldPmsCode    String?
+  newPmsCode    String?
+  reason        String?
+  actorUserId   Int?
+  actorRole     UserRole?
+  correlationId String?
+  createdAt     DateTime             @default(now())
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorUserId], references: [id])
+
+  @@index([branchId, createdAt])
+  @@index([platform, createdAt])
 }
 
 /// Immutable audit trail of Admin branch/alias configuration changes. Values are
@@ -389,16 +1229,122 @@ model Booking {
   completedByUserId Int?
   completionNote    String?
 
+  /// ── OPERATIONAL TIMESTAMPS ────────────────────────────────────────────
+  /// What ACTUALLY happened, recorded by the receptionist. Deliberately kept
+  /// apart from `checkInDate` / `checkOutDate`, which are the dates the OTA
+  /// reservation EXPECTS. Overloading those would destroy the distinction
+  /// between "the reservation says the guest arrives today" and "the guest
+  /// arrived", and with it any hope of measuring no-shows or late arrivals.
+  receivedAt         DateTime?
+  receivedByUserId   Int?
+  actualCheckInAt    DateTime?
+  checkedInByUserId  Int?
+  actualCheckOutAt   DateTime?
+  checkedOutByUserId Int?
+  cancelledAt        DateTime?
+  cancelledByUserId  Int?
+  cancellationReason String?
+
+  /// ── OTA REVIEW SNAPSHOT ───────────────────────────────────────────────
+  /// Everything the Admin saw on the review screen, kept with the booking so
+  /// the branch sees exactly what was reviewed and the decision stays auditable
+  /// after the fact. All nullable and all OTA-only: a Booking.com booking
+  /// leaves every one of them NULL and behaves exactly as before.
+  ///
+  /// The OTA's own identifiers and its own status live here. `otaBookingStatus`
+  /// is the PLATFORM's word for the reservation (CONFIRMED / AMENDED /
+  /// CANCELLED) and is deliberately NOT the operational `status` above — the
+  /// two answer different questions and must never be conflated.
+  sourcePropertyId   String?
+  otaBookingStatus   String?
+  ratePlanName       String?
+  cancellationPolicy String?
+  countryOfResidence String?
+  websiteLanguage    String?
+  paymentType        String?
+  benefitsIncluded   String?
+
+  /// ── WHAT THE ADMIN REVIEWED AND TYPED AT DISPATCH ─────────────────────
+  /// Deliberately separate from the fields above, which record what the OTA
+  /// SAID. These record what a human decided, and the two must never be
+  /// conflated: `paymentType` is the mail's wording, `reviewedPaymentMode` is
+  /// the mode the Admin accepted in the review screen.
+  ///
+  /// Who created the reservation in the hotel's PMS, typed by the Admin —
+  /// e.g. "Nguyen Van A / Morning Shift". Never generated, never inferred.
+  /// Required by the OTA dispatch endpoint; null for Booking.com bookings and
+  /// for every booking dispatched before this field existed.
+  /// ── SOFT DELETE ───────────────────────────────────────────────────────
+  /// When an Admin removed the booking from the operational queues. NOT a
+  /// row deletion: 25 relations cascade from Booking, so DELETE would destroy
+  /// the audit events, the append-only corrections, the status history and the
+  /// receptionist's proof images along with it. Those are the records that
+  /// prove what happened, and they must outlive the booking.
+  ///
+  /// Every operational query filters on `deletedAt: null`. The row stays,
+  /// reachable for audit, and invisible to the people working the queues.
+  deletedAt       DateTime?
+  deletedByUserId Int?
+
+  adminPmsNote        String?
+  /// The payment mode the Admin accepted in the review ("CN" /
+  /// "HOTEL_PAYMENT"). Stored verbatim so reception shows exactly what was
+  /// reviewed rather than a value re-derived from the mail.
+  reviewedPaymentMode String?
+  /// The review model that produced this booking, beside `parserVersion`.
+  reviewVersion       String?
+  /// The BUILD that ran — a git commit or release tag. `parserVersion` and
+  /// `reviewVersion` name the rules; these name the deployed code, so a
+  /// booking can be traced to an exact revision. Both are written once at
+  /// dispatch and never updated, like the versions and the source hash.
+  parserCommit        String?
+  reviewBuildId       String?
+  /// SHA-256 of the pasted text. Lets two dispatches of the same mail be
+  /// recognised as the same source without storing the body twice.
+  rawTextSha256       String?
+
   /// Proof-of-creation review state. NOT_SUBMITTED until a receptionist submits.
   verificationStatus VerificationStatus @default(NOT_SUBMITTED)
   /// The Admin who approved/rejected the current proof, and when.
   reviewedByUserId   Int?
   reviewedAt         DateTime?
 
+  /// ── DISPATCH CLAIM ("CUT") ────────────────────────────────────────────────
+  ///
+  /// Ownership of the CREATION work for a dispatched order. Deliberately on the
+  /// verification axis, NOT the BookingStatus axis: `RECEIVED` / `receivedAt`
+  /// belong to the guest-stay lifecycle (RECEIVED -> CHECKED_IN) and mean the
+  /// branch acknowledged the guest — a different question entirely.
+  ///
+  /// EXISTS TO PREVENT DUPLICATE BOOKINGS. Every receptionist at a branch sees
+  /// the same queue, so without an owner two of them can create the same
+  /// reservation in the hotel system. The claim is the lock; the countdown is
+  /// only a deadline on holding it.
+  ///
+  /// A claim is ACTIVE while `claimExpiresAt > now`. Expiry is DERIVED, never
+  /// swept: there is no domain scheduler in KAS and this feature does not
+  /// justify introducing one. Every read filters on the timestamp and every
+  /// write re-checks it, so an expired claim cannot be acted on even when a
+  /// polled screen still shows it.
+  claimedByUserId Int?
+  claimedAt       DateTime?
+  /// Absolute server deadline = claimedAt + CLAIM_WINDOW_MS. Stored, never
+  /// recomputed on read, so a refresh, a second tab or a wound-back client
+  /// clock cannot extend it.
+  claimExpiresAt  DateTime?
+  /// How many dispatch cycles this order has been through. 0 until the first
+  /// Admin resend; the Booking row is never duplicated for a resend.
+  claimCycle      Int       @default(0)
+
   /// Which extraction-engine version produced this draft.
   parserVersion   String?
   /// The admin who ran the extraction that created this booking.
   createdByUserId Int?
+
+  /// When the operator-facing PMS note was last generated, and under which note
+  /// ruleset. A room-mapping change never regenerates a historical note.
+  noteGeneratedAt DateTime?
+  noteVersion     String?
 
   /// Development demo marker (dev-test tools only). Real bookings are always false.
   isDemo      Boolean @default(false)
@@ -411,23 +1357,39 @@ model Booking {
   branch           Branch?                  @relation(fields: [branchId], references: [id])
   sentBy           User?                    @relation("BookingSentBy", fields: [sentByUserId], references: [id])
   completedBy      User?                    @relation("BookingCompletedBy", fields: [completedByUserId], references: [id])
+  deletedBy        User?                    @relation("BookingDeletedBy", fields: [deletedByUserId], references: [id])
+  receivedBy       User?                    @relation("BookingReceivedBy", fields: [receivedByUserId], references: [id])
+  checkedInBy      User?                    @relation("BookingCheckedInBy", fields: [checkedInByUserId], references: [id])
+  checkedOutBy     User?                    @relation("BookingCheckedOutBy", fields: [checkedOutByUserId], references: [id])
+  cancelledBy      User?                    @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id])
   reviewedBy       User?                    @relation("BookingReviewedBy", fields: [reviewedByUserId], references: [id])
   createdBy        User?                    @relation("BookingCreatedBy", fields: [createdByUserId], references: [id])
+  claimedBy        User?                    @relation("BookingClaimedBy", fields: [claimedByUserId], references: [id])
   rooms            BookingRoom[]
+  guests           BookingGuest[]
+  auditEvents      BookingAuditEvent[]
   statusHistory    BookingStatusHistory[]
   notifications    Notification[]
   warnings         BookingExtractWarning[]
+  corrections      BookingCorrection[]
   proofs           BookingCreationProof[]
   proofComparisons BookingProofComparison[]
+  chargeDocuments  ChargeDocument[]
 
   @@index([bookingCode])
   @@index([branchId, status])
   @@index([status])
+  /// Every operational query filters deleted bookings out.
+  @@index([deletedAt])
   @@index([branchId, verificationStatus])
   @@index([verificationStatus])
   @@index([sourcePlatform])
   @@index([businessType])
   @@index([sentAt])
+  /// The Admin "Gửi lại đơn" query is (claimedByUserId IS NOT NULL AND
+  /// claimExpiresAt < now); the receptionist queue filters on the same column.
+  @@index([claimExpiresAt])
+  @@index([claimedByUserId])
   @@index([checkInDate])
   @@index([isLastMinute])
   @@index([customerName])
@@ -450,9 +1412,31 @@ model BookingCreationProof {
   originalFileName  String
   mimeType          String
   fileSize          Int
+  /// FREE TEXT THE RECEPTIONIST USED TO TYPE. Superseded by
+  /// `receptionistNameSnapshot`, which the server derives from the active shift
+  /// instead of accepting from the browser. Kept, never backfilled: on old rows
+  /// it is the only record of who created the order, and rewriting it would be
+  /// inventing history.
   submissionNote    String?
   submittedByUserId Int?
   submittedAt       DateTime @default(now())
+
+  /// WHO CREATED THIS ORDER, AND ON WHICH SHIFT — resolved by the server from
+  /// the submitter's open shift session, never sent by the client.
+  ///
+  /// It lives HERE rather than on `Booking` because a proof row is one CREATION
+  /// ATTEMPT: immutable, append-only, `@@unique([bookingId, attemptNumber])`,
+  /// and never deleted. Attempt 1 is therefore the ORIGINAL creator for all
+  /// time, and a re-creation after a rejection adds attempt 2 beside it instead
+  /// of overwriting anything. Putting it on `Booking` would give one order one
+  /// mutable creator column — exactly the field that gets clobbered on the
+  /// re-creation whose accountability this is meant to record.
+  shiftSessionId           String?
+  /// The receptionist's name AT THE TIME, copied from the shift session so it
+  /// survives a rename, a transfer or a disabled account.
+  receptionistNameSnapshot String?
+  /// The shift they were on, copied for the same reason.
+  shiftType                ShiftType?
 
   status           ProofStatus        @default(PENDING_REVIEW)
   reviewedByUserId Int?
@@ -462,15 +1446,21 @@ model BookingCreationProof {
 
   createdAt DateTime @default(now())
 
-  booking     Booking                  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  submittedBy User?                    @relation("ProofSubmittedBy", fields: [submittedByUserId], references: [id])
-  reviewedBy  User?                    @relation("ProofReviewedBy", fields: [reviewedByUserId], references: [id])
-  analyses    BookingProofAnalysis[]
-  comparisons BookingProofComparison[]
+  booking      Booking                  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  submittedBy  User?                    @relation("ProofSubmittedBy", fields: [submittedByUserId], references: [id])
+  reviewedBy   User?                    @relation("ProofReviewedBy", fields: [reviewedByUserId], references: [id])
+  shiftSession ReceptionShiftSession?   @relation("ProofShiftSession", fields: [shiftSessionId], references: [id])
+  analyses     BookingProofAnalysis[]
+  comparisons  BookingProofComparison[]
 
   @@unique([bookingId, attemptNumber])
   @@index([bookingId])
   @@index([status])
+  /// The "Cần tạo lại" accountability report: rejected attempts over a date
+  /// range, grouped by shift or by receptionist.
+  @@index([status, reviewedAt])
+  @@index([shiftSessionId])
+  @@index([submittedByUserId])
 }
 
 /// One immutable OCR analysis run over a proof screenshot. A proof may have many
@@ -541,7 +1531,7 @@ model BookingProofComparison {
 
 /// One room within a booking. Rooms are never merged; each keeps its own prices.
 model BookingRoom {
-  id           String   @id @default(cuid())
+  id           String  @id @default(cuid())
   bookingId    String
   /// 1-based position as shown in the UI ("Phòng 1", "Phòng 2").
   roomIndex    Int
@@ -550,8 +1540,34 @@ model BookingRoom {
   roomSubtotal Int?
   taxAmount    Int?
   feeAmount    Int?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+
+  /// ---------------------------------------------------------------------
+  /// IMMUTABLE ROOM-CLASS SNAPSHOT (C.3.8)
+  ///
+  /// Captured when the room is created or explicitly re-resolved, and NEVER
+  /// rewritten by a later mapping change. A booking made today under
+  /// "Premium / LUXDEL / version 1" keeps showing Premium / LUXDEL forever,
+  /// even after an Admin activates a version that renames or re-codes it.
+  ///
+  /// The snapshot is what every note, export and comparison reads; the live
+  /// mapping is only ever consulted to CREATE a snapshot.
+  /// ---------------------------------------------------------------------
+  /// The resolved room class, kept for provenance. Nulled if that class row is
+  /// ever removed — the *_Snapshot columns below stay authoritative regardless.
+  roomClassId          String?
+  roomClassVersionId   String?
+  /// The branch the class belonged to, so a cross-branch edit is detectable.
+  roomClassBranchId    Int?
+  /// Verbatim copies — deliberately duplicated, never joined at read time.
+  roomClassDisplayName String?
+  roomClassPmsCode     String?
+  /// The exact source text that was resolved (or failed to resolve).
+  roomClassSourceText  String?
+  roomClassStatus      RoomClassResolutionStatus?
+  roomClassResolvedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   booking Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   nights  BookingNightPrice[]
@@ -606,6 +1622,80 @@ model BookingExtractWarning {
 }
 
 /// Immutable audit trail of every booking status transition.
+/// Where a write came FROM: the request that caused it.
+///
+/// One row per REQUEST, not per changed record. A single dispatch writes a
+/// status-history row and several correction rows; they all point at one
+/// context, so the IP, user agent and correlation id are stored once instead of
+/// being copied onto every history row in the system.
+///
+/// Deliberately a separate table rather than columns on each history table:
+/// the same four values would otherwise be duplicated across
+/// BookingStatusHistory, BookingCorrection and anything added later, and each
+/// new history table would have to remember to carry them.
+///
+/// Everything except the actor is nullable, because a value that was not sent
+/// is recorded as absent rather than guessed. Nothing here is used for
+/// authorisation — it is evidence, not identity.
+model RequestAudit {
+  id String @id @default(cuid())
+
+  /// Who made the request. Null only for an unauthenticated action.
+  actorUserId Int?
+  occurredAt  DateTime @default(now())
+
+  /// The client address as the proxy reported it. May be a shared or NAT
+  /// address, so it identifies a request, never a person.
+  ipAddress     String?
+  userAgent     String?
+  /// The session the request authenticated with, for "same device" questions.
+  sessionId     String?
+  /// `x-request-id`, echoed in error responses and logs, so a booking change
+  /// can be joined to the request trace that produced it.
+  correlationId String?
+  /// The route that ran, e.g. "POST /api/admin/ota/dispatch".
+  route         String?
+
+  actor User? @relation("RequestAuditActor", fields: [actorUserId], references: [id])
+
+  statusHistory BookingStatusHistory[]
+  corrections   BookingCorrection[]
+
+  @@index([actorUserId])
+  @@index([occurredAt])
+  @@index([correlationId])
+}
+
+/// An Admin correction made on the review screen before dispatch.
+///
+/// APPEND-ONLY. One row per field the Admin changed away from what the parser
+/// read, written once at dispatch and never updated or deleted. The parser's
+/// original value is preserved alongside the corrected one, so "what did the
+/// email actually say, and what did we send instead" stays answerable for the
+/// life of the booking — including after someone edits the booking later.
+model BookingCorrection {
+  id        String  @id @default(cuid())
+  bookingId String
+  /// The reviewed field, e.g. "guestName", "branchPrice", "rooms[0].pmsCode".
+  field     String
+  /// What the PARSER read. Null when the parser found nothing at all.
+  oldValue  String?
+  /// What the Admin dispatched instead.
+  newValue  String?
+
+  correctedByUserId Int?
+  correctedAt       DateTime @default(now())
+
+  requestAuditId String?
+
+  booking      Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  correctedBy  User?         @relation("BookingCorrectionBy", fields: [correctedByUserId], references: [id])
+  requestAudit RequestAudit? @relation(fields: [requestAuditId], references: [id])
+
+  @@index([bookingId])
+  @@index([correctedAt])
+}
+
 model BookingStatusHistory {
   id              String         @id @default(cuid())
   bookingId       String
@@ -614,9 +1704,11 @@ model BookingStatusHistory {
   changedByUserId Int?
   changedAt       DateTime       @default(now())
   note            String?
+  requestAuditId  String?
 
-  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  changedBy User?   @relation(fields: [changedByUserId], references: [id])
+  booking      Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  changedBy    User?         @relation(fields: [changedByUserId], references: [id])
+  requestAudit RequestAudit? @relation(fields: [requestAuditId], references: [id])
 
   @@index([bookingId])
   @@index([changedAt])
@@ -645,16 +1737,59 @@ model Notification {
   @@index([isDemo])
 }
 
-/// A hotel issue a receptionist reports to the Admin after receiving a booking
-/// (broken door, AC not cold, clogged toilet, guest request, …). Reports are kept
-/// permanently — never hard-deleted — and are scoped to the reporter's branch.
+/// A hotel incident: a receptionist reports it, Bộ phận kỹ thuật works it, and
+/// an Admin watches. Reports are kept permanently — never hard-deleted — and a
+/// receptionist only ever sees and creates their own branch's.
+///
+/// WHY THE LOCATION IS STRUCTURED AND NOT ONE STRING
+///
+/// `areaCategory` + `roomNumber` / `floorNumber` / `areaSubtype` /
+/// `locationDetail` are separate columns because the Admin report has to GROUP
+/// by place and the Technical queue has to FILTER by it. A single free-text
+/// "where" cannot be grouped, and a technician reading "tầng 3" cannot be told
+/// apart from one reading "phòng 3" after the fact.
+///
+/// Exactly which of those columns is populated is decided by `areaCategory`, and
+/// that rule is enforced on the server (`server/src/issue/issueArea.ts`), not by
+/// the form — the form only decides which inputs to render.
+///
+/// WHY THERE ARE NAME SNAPSHOTS NEXT TO THE FOREIGN KEYS
+///
+/// `reportedByNameSnapshot`, `acceptedByNameSnapshot`, `completedByNameSnapshot`
+/// and `technicianName` record who acted AT THE TIME. The FK answers "which
+/// account", which is the right key for permissions; the snapshot answers "whose
+/// name was on this job", which is the right answer for an audit a year later,
+/// after somebody has been renamed, moved department or disabled. Neither one
+/// substitutes for the other.
+///
+/// `technicianName` / `technicianPhone` are deliberately NOT a user FK: the
+/// person holding the spanner is frequently a contractor with no account here.
 model HotelIssue {
-  id              String        @id @default(cuid())
+  id              String             @id @default(cuid())
   branchId        Int
-  /// Optional room number the issue relates to (free-form).
+  /// WHERE the incident is. Null ONLY on rows created before the structured
+  /// form existed — never guessed for them, because their area was never asked.
+  areaCategory    IssueAreaCategory?
+  /// Room number — set when `areaCategory` is ROOM (free-form; there is no
+  /// physical-room table in this system). Also holds the legacy free-form value
+  /// on pre-structured rows.
   roomNumber      String?
-  category        IssueCategory
+  /// Floor — set when `areaCategory` is HALLWAY or STAIRCASE (free-form).
+  floorNumber     String?
+  /// Which fixture — set when `areaCategory` is LOBBY.
+  areaSubtype     IssueAreaSubtype?
+  /// Says WHERE, in words, when the area alone is not enough to find it:
+  /// required for OTHER_AREA and for LOBBY/OTHER, optional elsewhere.
+  locationDetail  String?
+  /// Fault type. Nullable because a hallway or staircase report is a place plus
+  /// a description — the receptionist is not asked to classify it.
+  category        IssueCategory?
   description     String
+  /// "Nguyên nhân" AS REPORTED — optional; a receptionist is not expected to
+  /// know why the air conditioner stopped. Never overwritten: a technician's
+  /// determination is recorded on their attempt, and the incident's current
+  /// cause is read as the latest one of those, else this.
+  cause           String?
   /// Server-generated file name of the (optional, single) attached photo. Only
   /// metadata + a safe relative path live here, never the image bytes.
   photoStoredName String?
@@ -662,11 +1797,54 @@ model HotelIssue {
 
   status IssueStatus @default(NEW)
 
-  reportedByUserId Int
-  /// The Admin who moved the issue to IN_PROGRESS / RESOLVED (audit).
-  acceptedByUserId Int?
-  resolvedByUserId Int?
-  resolvedAt       DateTime?
+  reportedByUserId       Int
+  /// The reporter's name at the moment of reporting. Null on rows predating the
+  /// snapshot; `reportedBy.fullName` is the fallback for those.
+  reportedByNameSnapshot String?
+
+  /// The TECHNICAL user who accepted the incident (NEW → IN_PROGRESS).
+  acceptedByUserId       Int?
+  acceptedByNameSnapshot String?
+  acceptedAt             DateTime?
+  /// The person actually doing the repair, and how to reach them. Both are
+  /// required to accept an incident, so an IN_PROGRESS row always names someone.
+  technicianName         String?
+  technicianPhone        String?
+
+  /// The TECHNICAL user who completed it (IN_PROGRESS → COMPLETED).
+  completedByUserId       Int?
+  completedByNameSnapshot String?
+  completedAt             DateTime?
+
+  /// THE CURRENT ASSIGNMENT — which Bộ phận kỹ thuật account this incident is
+  /// given to. A technician sees ONLY incidents assigned to them (plus their own
+  /// history); unassigned incidents wait for an Admin or a Quản lý lễ tân. Null
+  /// again after "Không sửa được", when the incident waits for reassignment.
+  /// Every assignment ever made is kept in `HotelIssueAssignment`.
+  assignedTechnicianUserId       Int?
+  assignedTechnicianNameSnapshot String?
+  assignedAt                     DateTime?
+  assignedByUserId               Int?
+  assignedByNameSnapshot         String?
+
+  /// The reporter's ROLE at the moment of reporting — how Reception can tell an
+  /// incident an Admin or a manager filed ("Admin tạo"). Null on older rows.
+  reportedByRole UserRole?
+
+  /// A LIKELY REPEAT: the most recent COMPLETED incident at the same branch,
+  /// same room and same fault type, found deterministically when this one was
+  /// reported. A neutral fact for the technician ("Báo lại sau lần hoàn thành
+  /// trước"), never a score.
+  repeatOfIssueId String?
+
+  /// The reporter's shift AT THE MOMENT OF REPORTING, when there was one.
+  ///
+  /// Captured, never required: reporting a broken door is not an accounting
+  /// action the way creating an order is, so an incident is accepted from a
+  /// receptionist who has not checked in — it simply carries no shift. Null on
+  /// every row predating shifts, and on reports filed by an Admin.
+  shiftSessionId String?
+  shiftType      ShiftType?
 
   /// Development demo marker (dev-test tools only). Real issues are always false.
   isDemo      Boolean @default(false)
@@ -675,15 +1853,1353 @@ model HotelIssue {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  branch     Branch @relation(fields: [branchId], references: [id])
-  reportedBy User   @relation("IssueReportedBy", fields: [reportedByUserId], references: [id])
-  acceptedBy User?  @relation("IssueAcceptedBy", fields: [acceptedByUserId], references: [id])
-  resolvedBy User?  @relation("IssueResolvedBy", fields: [resolvedByUserId], references: [id])
+  branch             Branch                   @relation(fields: [branchId], references: [id])
+  reportedBy         User                     @relation("IssueReportedBy", fields: [reportedByUserId], references: [id])
+  acceptedBy         User?                    @relation("IssueAcceptedBy", fields: [acceptedByUserId], references: [id])
+  completedBy        User?                    @relation("IssueCompletedBy", fields: [completedByUserId], references: [id])
+  /// SET NULL, not RESTRICT: an incident outlives the shift it was reported in,
+  /// and the shift's own name is already snapshotted on the attempt rows.
+  shiftSession       ReceptionShiftSession?   @relation("IssueShiftSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
+  /// Every attempt anyone has made at this incident, oldest first when read.
+  attempts           TechnicalRepairAttempt[] @relation("AttemptIssue")
+  /// The reception journal entries that POINT AT this incident. A reference, not
+  /// a copy: "Sự cố cơ sở vật chất" in the journal is this row, seen from the
+  /// desk that reported it, and there is exactly one incident system.
+  operationalReports FacilityIssueReport[]    @relation("FacilityReportIssue")
+  /// What a receptionist changed AFTER the report was filed — one row per field.
+  edits              HotelIssueEdit[]         @relation("IssueEdits")
+  assignedTechnician User?                    @relation("IssueAssignedTechnician", fields: [assignedTechnicianUserId], references: [id])
+  /// Every assignment and reassignment, oldest first when read.
+  assignments        HotelIssueAssignment[]   @relation("IssueAssignments")
+  repeatOf           HotelIssue?              @relation("IssueRepeatOf", fields: [repeatOfIssueId], references: [id], onDelete: SetNull)
+  repeatedBy         HotelIssue[]             @relation("IssueRepeatOf")
+  /// The repair, stage by stage, oldest first when read.
+  stages             TechnicalRepairStage[]   @relation("IssueRepairStages")
 
+  @@index([assignedTechnicianUserId, status])
+  @@index([branchId, roomNumber])
   @@index([branchId, status])
   @@index([status])
   @@index([createdAt])
   @@index([reportedByUserId])
   @@index([isDemo])
   @@index([demoBatchId])
+  /// Technical works ONE status queue across ALL branches, newest first — the
+  /// exact shape of every one of its three tabs.
+  @@index([status, createdAt])
+  /// The Admin report: a date range, optionally narrowed to one branch.
+  @@index([branchId, createdAt])
+  @@index([areaCategory])
+  @@index([completedAt])
+  @@index([shiftSessionId])
+}
+
+/// What a Chat box submission is ABOUT.
+///
+/// A CLOSED LIST, not free text. The title used to be typed, which made the
+/// Admin's list a pile of one-off phrases that could not be counted, filtered or
+/// compared across branches — "Máy lạnh hỏng", "may lanh phong 302", "AC broken"
+/// are one category written three ways. Three stable values make the question
+/// "what do reception actually keep raising?" answerable.
+///
+/// Rows created before the selector existed have `category = NULL` and keep
+/// their original `subject`. Guessing a category for them from that free text
+/// would be inventing a classification nobody made.
+enum ChatCategory {
+  /// Phòng
+  ROOM
+  /// Môi trường làm việc
+  WORK_ENVIRONMENT
+  /// Các vấn đề nội bộ
+  INTERNAL
+}
+
+/// How urgent a shift handover note is for the receptionist taking over.
+///
+/// Two values, not five. The note is read once at the start of a shift; a scale
+/// finer than "read this first" and "read this" would be a decision the writer
+/// has to make and the reader has to interpret, for no operational difference.
+enum HandoverPriority {
+  NORMAL
+  HIGH
+}
+
+/// Where a Chat box conversation stands, from the ADMIN's point of view.
+///
+/// Derived from real events, never claimed by a client: a receptionist message
+/// sets WAITING_ADMIN, an Admin reply sets ANSWERED. That is what makes "which
+/// threads has nobody answered?" a cheap indexed query instead of a scan that
+/// re-reads every message to work out who spoke last.
+enum ChatConversationStatus {
+  /// A receptionist has spoken more recently than any Admin.
+  WAITING_ADMIN
+  /// An Admin has replied since the last receptionist message.
+  ANSWERED
+  /// Closed by an Admin; kept for the record, no longer awaiting anyone.
+  CLOSED
+}
+
+/// One question thread between a receptionist and the Admins.
+///
+/// HUMAN TO HUMAN. Nothing in this module generates, suggests or answers a
+/// message; it is internal correspondence and the only writers are the two
+/// people at either end.
+///
+/// VISIBILITY IS OWNERSHIP, NOT BRANCH. `createdByUserId` is the authority on
+/// who may read a thread: an Admin reads every conversation, and a receptionist
+/// reads only their own. `branchId` is a SNAPSHOT taken at creation, carried so
+/// the Admin list can show where a question came from — it is display context
+/// and is deliberately not used as an access rule, because two receptionists at
+/// one branch asking the Admin separate questions must not read each other's.
+model ChatConversation {
+  id       String        @id @default(cuid())
+  /// The free-text title threads carried BEFORE the category selector existed.
+  ///
+  /// Nullable, and never written again. New threads are identified by
+  /// `category`; the old ones keep the words their author typed, because
+  /// deriving a category from them would be a guess recorded as a fact.
+  subject  String?
+  /// What the thread is about — the closed list that replaced the typed title.
+  category ChatCategory?
+
+  /// The asker's branch AT CREATION. Null for a user with no branch.
+  branchId        Int?
+  createdByUserId Int
+
+  /// The asker's shift AT CREATION, so the Admin can see which shift raised
+  /// what. Null when the receptionist had not checked in, and on legacy rows.
+  shiftSessionId     String?
+  shiftType          ShiftType?
+  /// The asker's name at the time, taken from the shift session — NOT read back
+  /// off the account, which would rewrite history when somebody is renamed.
+  senderNameSnapshot String?
+
+  /// SUBMITTED ANONYMOUSLY.
+  ///
+  /// `createdByUserId` is STILL recorded, always. Anonymity here is a rule about
+  /// who may READ the identity, not a hole in the audit trail: an anonymous
+  /// report still has to be attributable if it ever describes something that
+  /// requires action against a named person.
+  ///
+  /// The enforcement is one line — `visibilityWhere()` adds `anonymous: false`
+  /// for every non-Admin — which is what makes the thread disappear from
+  /// Reception's list, its detail, its messages, its attachments AND the nav
+  /// badge at once, rather than from four places that must each remember.
+  anonymous Boolean @default(false)
+
+  /// THE PERSISTENT CONVERSATION BETWEEN THE ADMINS AND ONE BRANCH — the chat
+  /// bubble's thread. Exactly one per branch (partial unique index
+  /// `ChatConversation_one_channel_per_branch`, created in the migration because
+  /// Prisma cannot express it), created the first time anybody writes to it.
+  ///
+  /// Visibility is the BRANCH, not the author: every Admin and every receptionist
+  /// of that branch reads it. That is the opposite of the question threads
+  /// above, which is why a channel is never returned by `visibilityWhere` and a
+  /// question thread is never returned by `channelWhere`. Channels carry no
+  /// category, are never anonymous and are never "closed".
+  branchChannel Boolean @default(false)
+
+  /// Admin moderation. The original content is NEVER edited; a verdict is
+  /// recorded BESIDE it, so "what was said" and "what we did about it" can never
+  /// be confused for each other.
+  handledByUserId Int?
+  handledAt       DateTime?
+  adminNote       String?
+
+  status ChatConversationStatus @default(WAITING_ADMIN)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  /// Denormalised so the list sorts and pages without touching ChatMessage.
+  lastMessageAt DateTime @default(now())
+
+  branch       Branch?                @relation(fields: [branchId], references: [id])
+  createdBy    User                   @relation("ChatConversationCreatedBy", fields: [createdByUserId], references: [id])
+  handledBy    User?                  @relation("ChatConversationHandledBy", fields: [handledByUserId], references: [id])
+  shiftSession ReceptionShiftSession? @relation("ChatShiftSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
+  messages     ChatMessage[]
+  readStates   ChatReadState[]
+
+  @@index([branchChannel, branchId])
+  @@index([createdByUserId, lastMessageAt])
+  @@index([status, lastMessageAt])
+  @@index([lastMessageAt])
+  @@index([branchId])
+  /// The Admin audit view: a period, optionally narrowed to one category.
+  @@index([category, createdAt])
+  /// "Show me the anonymous reports" — the one query only an Admin can run.
+  @@index([anonymous, createdAt])
+  @@index([shiftSessionId])
+}
+
+/// One message in a thread.
+///
+/// `senderRole` is a SNAPSHOT of the sender's role at the moment of writing.
+/// Reading it back off the User row would rewrite history the day an account is
+/// promoted or moved — a message sent as a receptionist must still read as one.
+model ChatMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderUserId   Int
+  senderRole     UserRole
+  /// The text. May be empty ONLY when the message carries attachments.
+  body           String
+  createdAt      DateTime @default(now())
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User             @relation("ChatMessageSender", fields: [senderUserId], references: [id])
+  attachments  ChatAttachment[]
+
+  @@index([conversationId, createdAt])
+  @@index([senderUserId])
+}
+
+/// An image attached to a chat message.
+///
+/// Same shape and same rules as ChargeDocumentAttachment: only metadata and a
+/// server-generated name live here, never the bytes, and the stored name is
+/// meaningless without this row — which is what authorises the download. There
+/// is no public URL for any of these files.
+model ChatAttachment {
+  id               String   @id @default(cuid())
+  messageId        String
+  /// Server-generated name on disk (never the client's original name).
+  storedFileName   String
+  /// The client's original name, kept for display only — never trusted.
+  originalFileName String
+  mimeType         String
+  fileSize         Int
+  createdAt        DateTime @default(now())
+
+  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+/// An Admin's private message to ONE receptionist ("Nhắc nhở").
+///
+/// DELIBERATELY NOT A `Notification`. That model is system-generated and
+/// booking-centric: it has no sender, and every row in it is an event the
+/// application raised about a booking. A reminder is a person writing to
+/// another person, so it needs `senderUserId`, and mixing it into the
+/// notification stream would put Admin prose in the booking-event bell and
+/// distort the unread badge that reception uses to spot new work.
+///
+/// PRIVATE BY CONSTRUCTION: every read is filtered on `recipientUserId`, so a
+/// receptionist cannot see a reminder addressed to a colleague. There is no
+/// broadcast — an Admin picks exactly one recipient.
+model Reminder {
+  id              String    @id @default(cuid())
+  senderUserId    Int
+  recipientUserId Int
+  body            String
+  createdAt       DateTime  @default(now())
+  /// Null until the recipient opens it. Doubles as the read flag, so there is
+  /// no second boolean that can disagree with the timestamp.
+  readAt          DateTime?
+
+  sender    User @relation("ReminderSender", fields: [senderUserId], references: [id])
+  recipient User @relation("ReminderRecipient", fields: [recipientUserId], references: [id])
+
+  /// The recipient's inbox and unread count are the only queries that matter.
+  @@index([recipientUserId, readAt])
+  @@index([recipientUserId, createdAt])
+  @@index([senderUserId])
+}
+
+/// One reception work shift, opened by a receptionist checking in.
+///
+/// WHY THIS TABLE EXISTS
+///
+/// It is the answer to "who was on the desk when this order was created?". The
+/// system already knew which ACCOUNT was logged in; it did not know which PERSON
+/// was working, on which shift. A branch runs one login across a rotating team,
+/// so the account alone names nobody. The receptionist types their name once at
+/// check-in and every order they create that shift carries it — instead of the
+/// old flow, which asked them to retype it on every single order and trusted
+/// whatever the browser sent.
+///
+/// WHY `receptionistName` IS A PLAIN STRING AND NOT A FK
+///
+/// It is a SNAPSHOT of who said they were working, captured at check-in. It must
+/// not move when an account is renamed, reassigned or disabled, because the
+/// question it answers is about a shift that is already over.
+///
+/// THE GRACE RULE
+///
+/// `graceEndAt` is `nominalEndAt + 10 minutes` — a fixed instant computed from
+/// the SHIFT'S END, never from "now". That is the whole point: the prompt for
+/// the next shift appears once the current one has actually run out, not ten
+/// minutes after check-in, and not repeatedly in between.
+///
+/// ONE OPEN SESSION PER RECEPTIONIST
+///
+/// Enforced by a partial unique index created in the migration —
+/// `ReceptionShiftSession_one_open_per_user` on (`userId`) WHERE
+/// `closedAt IS NULL` — which is not expressible in the Prisma schema. It is the
+/// concurrency authority: two browser tabs checking in at the same instant
+/// cannot both win, because the second INSERT physically cannot land. The
+/// application closes the previous session and opens the new one in ONE
+/// transaction, so there is no window in which a receptionist has none.
+model ReceptionShiftSession {
+  id               String    @id @default(cuid())
+  branchId         Int
+  userId           Int
+  shiftType        ShiftType
+  /// Typed by the receptionist at check-in, trimmed. Never derived from the
+  /// account, and never rewritten afterwards.
+  receptionistName String
+
+  /// When this session was opened — the real instant of check-in, which is NOT
+  /// the shift's nominal start (someone checking in at 06:07 is on Ca A).
+  startedAt    DateTime
+  /// The shift's nominal end, as an instant: the chosen shift's end wall-clock
+  /// time in Asia/Ho_Chi_Minh, on the day the shift runs out.
+  nominalEndAt DateTime
+  /// `nominalEndAt` + the 10-minute grace. Until this instant the application
+  /// does not ask for a shift again.
+  graceEndAt   DateTime
+
+  /// Null while the session is open. Set when the receptionist checks in to
+  /// their next shift, or when an Admin/the user closes it explicitly.
+  closedAt DateTime?
+
+  /// "Tiền đầu ca" — the cash in the drawer when this shift started, in whole
+  /// đồng. Null until the receptionist counts it, which is NOT the same as zero:
+  /// an uncounted drawer and an empty one are different facts, and only one of
+  /// them lets "Tiền cuối ca" be trusted.
+  ///
+  /// THERE IS NO "tiền cuối ca" COLUMN, deliberately. Ending cash is
+  /// opening + cash collected - cash paid out, derived on read from the payment
+  /// rows. Storing it would create a second number that can disagree with the
+  /// rows it was supposedly computed from — and the disagreement would surface
+  /// as a cash discrepancy nobody could explain.
+  openingCash      Int?
+  /// When it was counted. The WHO is already this session's own `userId` — only
+  /// the receptionist working a shift can set that shift's opening cash — and
+  /// every change to it is an `OPENING_CASH` row in `ReceptionReportAudit`.
+  openingCashSetAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch                Branch                       @relation(fields: [branchId], references: [id])
+  user                  User                         @relation("ShiftSessionUser", fields: [userId], references: [id])
+  /// Every order created during this shift.
+  proofs                BookingCreationProof[]       @relation("ProofShiftSession")
+  /// Incidents reported during this shift, and questions raised during it.
+  issues                HotelIssue[]                 @relation("IssueShiftSession")
+  chatThreads           ChatConversation[]           @relation("ChatShiftSession")
+  /// The handover that ENDED this session, and the one that STARTED it. At most
+  /// one of each — see the `@unique` on ShiftHandover's two session columns.
+  handedOver            ShiftHandover?               @relation("HandoverOutgoing")
+  receivedFrom          ShiftHandover?               @relation("HandoverIncoming")
+  /// Notes written during this session for whoever takes over.
+  handoverNotes         ShiftHandoverNote[]          @relation("HandoverNoteSession")
+  /// "Báo cáo vấn đề" — everything the desk recorded during this shift.
+  operationalReports    ReceptionOperationalReport[] @relation("OperationalReportSession")
+  /// Guest requests COMPLETED during this session, which is usually a different
+  /// shift from the one that created them.
+  guestRequestsCompleted GuestRequestReport[]        @relation("GuestRequestCompletedSession")
+  /// Service-quality reports COMPLETED during this session — same reasoning.
+  complaintsCompleted   CustomerComplaintReport[]    @relation("ComplaintCompletedSession")
+  reportAudits          ReceptionReportAudit[]       @relation("ReportAuditSession")
+
+  /// "Is this person checked in?" — the query every protected request makes.
+  @@index([userId, closedAt])
+  /// The accountability report: one branch over a date range.
+  @@index([branchId, startedAt])
+  @@index([startedAt])
+  @@index([shiftType])
+}
+
+/// ONE EARLY SHIFT CHANGE — "Đổi ca".
+///
+/// WHAT IT RECORDS THAT THE TWO SESSIONS DO NOT
+///
+/// The sessions already say when each one ran: the outgoing session's
+/// `closedAt` IS the actual end, and the incoming session's `startedAt` IS the
+/// actual start, and a handover sets them to the same server instant. What is
+/// missing from them is the LINK and the WHY — that these two sessions are one
+/// event, who received the desk, and the reason the shift ended early. Without
+/// that, an audit can see a shift stopped at 13:15 but not whether it was a
+/// handover, a forgotten logout, or somebody starting a second shift by mistake.
+///
+/// PLANNED TIME IS NOT TOUCHED. The incoming session keeps its shift's nominal
+/// end, so a Ca B handed over at 13:15 is still asked for the next shift at
+/// 22:10 rather than at 21:25. That rule lives in `shiftBoundaries()`, which
+/// derives the end from the shift's clock time and not from the session length;
+/// nothing here overrides it.
+///
+/// IMMUTABLE. There is no update path: a handover is an event that happened, and
+/// the only honest correction to a wrong one is another handover.
+model ShiftHandover {
+  id       String @id @default(cuid())
+  branchId Int
+
+  /// The session that ENDED. `@unique`, so a session can be handed over exactly
+  /// once — two confirmations of the same handover are refused by the database
+  /// rather than by whichever request happens to read first.
+  outgoingShiftSessionId String @unique
+  /// The session that BEGAN. `@unique` for the same reason from the other side.
+  incomingShiftSessionId String @unique
+
+  outgoingUserId       Int
+  outgoingNameSnapshot String
+  outgoingShiftType    ShiftType
+
+  /// The account the incoming shift runs under, WHEN there is a separate one.
+  ///
+  /// Null is the common case and not a gap: a branch runs one login across a
+  /// rotating team, so the desk changes hands without the account changing. The
+  /// person is identified by `incomingNameSnapshot` either way; binding an
+  /// account when one exists is the stronger record, not the required one.
+  incomingUserId       Int?
+  incomingNameSnapshot String
+  incomingShiftType    ShiftType
+
+  /// The SERVER's instant of confirmation. Never a client timestamp — a
+  /// reception PC with a wrong clock would otherwise decide when a shift ended,
+  /// and therefore which receptionist owns the orders around the boundary.
+  actualHandoverAt DateTime
+  /// Why the shift ended early. Required and trimmed: "Đổi ca" with no reason is
+  /// exactly the record that explains nothing when it is read back months later.
+  reason           String
+
+  createdAt DateTime @default(now())
+
+  branch          Branch                @relation(fields: [branchId], references: [id])
+  outgoingSession ReceptionShiftSession @relation("HandoverOutgoing", fields: [outgoingShiftSessionId], references: [id])
+  incomingSession ReceptionShiftSession @relation("HandoverIncoming", fields: [incomingShiftSessionId], references: [id])
+  outgoingUser    User                  @relation("HandoverOutgoingUser", fields: [outgoingUserId], references: [id])
+  incomingUser    User?                 @relation("HandoverIncomingUser", fields: [incomingUserId], references: [id])
+  /// The optional "what is still outstanding" note written at the same moment.
+  notes           ShiftHandoverNote[]   @relation("HandoverNoteHandover")
+
+  /// The Admin audit: one branch over a period, newest first.
+  @@index([branchId, actualHandoverAt])
+  @@index([actualHandoverAt])
+  @@index([outgoingUserId])
+  @@index([incomingUserId])
+}
+
+/// ONE TECHNICIAN'S ATTEMPT at one incident.
+///
+/// WHY THIS IS A TABLE AND NOT MORE COLUMNS ON HotelIssue
+///
+/// An incident can be worked more than once: Bảo takes it at 15:54, runs out of
+/// parts and returns it at 15:58; Minh takes it at 16:20 and finishes at 16:35.
+/// On columns, Minh's acceptance OVERWRITES Bảo's — the four minutes somebody
+/// actually spent, and the reason they stopped, are gone, and the report can
+/// only ever show the last person to touch it. As rows they are both permanent.
+///
+/// So HotelIssue's `acceptedAt` / `technicianName` / `technicianPhone` are the
+/// CURRENT assignment — live, overwritable, cleared when an attempt fails — and
+/// these rows are the HISTORY. The information is never lost; it just stops
+/// living in a place that gets overwritten.
+///
+/// AN ATTEMPT IS OPEN WHILE THE WORK IS HAPPENING. `outcome` and `outcomeAt` are
+/// null until the technician says how it went, and the partial unique index
+/// `TechnicalRepairAttempt_one_open_per_issue` makes "at most one open attempt
+/// per incident" a database fact rather than a rule the service must remember.
+///
+/// DURATION IS NOT STORED. It is `outcomeAt - acceptedAt`, computed on read. A
+/// stored copy is a second source of truth that can disagree with the timestamps
+/// it was derived from, and there is no query here that needs to sum or sort by
+/// it in the database.
+///
+/// NO ROWS EXIST FOR INCIDENTS WORKED BEFORE THIS TABLE DID. They were not
+/// backfilled: their acceptance and completion are recorded on HotelIssue, and
+/// manufacturing attempt rows from those columns would put invented history
+/// beside the real kind.
+model TechnicalRepairAttempt {
+  id            String @id @default(cuid())
+  issueId       String
+  /// 1-based, unique per incident — "Lần 1", "Lần 2" as the report says them.
+  attemptNumber Int
+
+  /// The TECHNICAL account that accepted the job.
+  technicianUserId       Int?
+  /// The person who actually did the work, and how to reach them, exactly as
+  /// entered at acceptance. Snapshots: renaming an account must not rewrite who
+  /// went to the room.
+  technicianNameSnapshot String
+  technicianPhone        String
+  /// The TECHNICAL account's own name at acceptance, kept separately because the
+  /// person who accepts and the person who repairs are not always the same.
+  acceptedByNameSnapshot String?
+
+  acceptedAt DateTime
+  /// Null while the attempt is open. Set exactly once, with `outcomeAt`.
+  outcome    RepairOutcome?
+  outcomeAt  DateTime?
+  /// Why it could not be repaired. REQUIRED for CANNOT_REPAIR and null
+  /// otherwise — an incident that came back to the queue always says why.
+  reason     String?
+  /// "Nguyên nhân" as THIS attempt's technician determined it, recorded when
+  /// the attempt is completed. Optional: the reported cause may already be right.
+  cause      String?
+  /// "Kết quả sửa chữa" — what was done. Required to complete an attempt.
+  result     String?
+
+  /// THE INSPECTION OF THIS ATTEMPT ("Nghiệm thu"), written once by the Technical
+  /// Manager, all together. Null until then — and null forever on attempts made
+  /// before inspection existed: an inspection nobody performed is never invented.
+  inspectionResult        InspectionResult?
+  inspectedByUserId       Int?
+  inspectedByNameSnapshot String?
+  /// Server time.
+  inspectedAt             DateTime?
+  /// Optional note on a pass; the REQUIRED reason on a fail.
+  inspectionNote          String?
+
+  createdAt DateTime @default(now())
+
+  issue          HotelIssue @relation("AttemptIssue", fields: [issueId], references: [id], onDelete: Cascade)
+  technicianUser User?      @relation("AttemptTechnician", fields: [technicianUserId], references: [id])
+  inspectedBy    User?      @relation("AttemptInspector", fields: [inspectedByUserId], references: [id])
+
+  @@unique([issueId, attemptNumber])
+  @@index([issueId, acceptedAt])
+  /// "How many attempts failed in this period?" — the Admin range summary.
+  @@index([outcome, outcomeAt])
+  @@index([technicianUserId])
+  @@index([inspectedByUserId])
+  @@index([inspectionResult, inspectedAt])
+}
+
+/// ONE STAGE OF A REPAIR ("Giai đoạn"), recorded when it is FINISHED.
+///
+/// A repair may take several stages ("Đang trong quá trình theo dõi thêm"): each
+/// says what was done and what still needs doing, and the incident stays "Đang
+/// sửa" until a stage closes it ("Đã xử lý xong", `final`). Numbered per incident,
+/// in order, never overwritten; the stage under way is the next number.
+model TechnicalRepairStage {
+  id                     String   @id @default(cuid())
+  issueId                String
+  stageNumber            Int
+  technicianUserId       Int?
+  technicianNameSnapshot String
+  /// When the stage began — the previous stage's end, or the acceptance.
+  startedAt              DateTime
+  completedAt            DateTime
+  /// "Công việc hoàn thành".
+  workDone               String
+  /// "Các công việc cần xử lý tiếp" — null on the final stage.
+  nextWork               String?
+  /// True on the stage that finished the repair ("Đã xử lý xong").
+  final                  Boolean  @default(false)
+  createdAt              DateTime @default(now())
+
+  issue      HotelIssue @relation("IssueRepairStages", fields: [issueId], references: [id], onDelete: Cascade)
+  technician User?      @relation("RepairStageTechnician", fields: [technicianUserId], references: [id])
+
+  @@unique([issueId, stageNumber])
+  @@index([technicianUserId])
+}
+
+/// "BÀN GIAO CA" — what the outgoing shift wants the next one to know.
+///
+/// DELIBERATELY SEPARATE FROM ShiftHandover. That model records that the desk
+/// changed hands and who now has it; this one records the WORK that is still
+/// outstanding. They have different cardinality — one handover per session
+/// transition, but a shift may leave several notes, and may leave a note without
+/// handing over early at all — and different readers. `handoverId` links the two
+/// when a note is written as part of an "Đổi ca", so neither has to duplicate
+/// the other's fields.
+///
+/// THE CONTEXT IS NOT COPIED INTO THE NOTE. Open incidents and unfinished orders
+/// are already in the database and are shown beside the form as it is written;
+/// freezing them into the text would produce a list that is wrong the moment
+/// somebody else resolves one. The note carries what a PERSON needs to say.
+///
+/// IMMUTABLE, like every other handover record: no edit path exists.
+model ShiftHandoverNote {
+  id       String @id @default(cuid())
+  branchId Int
+
+  /// The session that wrote it. SET NULL rather than RESTRICT — the note is
+  /// addressed to the next shift and stands on its own snapshots.
+  shiftSessionId String?
+  handoverId     String?
+
+  outgoingUserId       Int
+  outgoingNameSnapshot String
+  outgoingShiftType    ShiftType
+  /// Who it is FOR, when that is already known. Often it is not: a note written
+  /// mid-shift is for whoever turns up.
+  incomingNameSnapshot String?
+  incomingShiftType    ShiftType?
+
+  /// The note itself. Required and trimmed — an empty handover is not a handover.
+  content  String
+  priority HandoverPriority @default(NORMAL)
+
+  createdAt DateTime @default(now())
+
+  branch       Branch                 @relation(fields: [branchId], references: [id])
+  shiftSession ReceptionShiftSession? @relation("HandoverNoteSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
+  handover     ShiftHandover?         @relation("HandoverNoteHandover", fields: [handoverId], references: [id], onDelete: SetNull)
+  outgoingUser User                   @relation("HandoverNoteAuthor", fields: [outgoingUserId], references: [id])
+
+  /// What the next shift opens: this branch, newest first.
+  @@index([branchId, createdAt])
+  @@index([createdAt])
+  @@index([shiftSessionId])
+  @@index([handoverId])
+  @@index([outgoingUserId])
+}
+
+/// WHAT A RECEPTION JOURNAL ENTRY IS ABOUT — the five categories of
+/// "Báo cáo vấn đề", and a closed list.
+///
+/// The category decides which detail row exists, and exactly one does: a report
+/// is a payment or a guest request or a facility reference, never two at once.
+/// That is enforced by the 1:1 relations below rather than by a JSON blob whose
+/// shape only the reading code knows.
+enum OperationalReportCategory {
+  /// Thu tiền thanh toán
+  PAYMENT
+  /// Vấn đề khách yêu cầu
+  GUEST_REQUEST
+  /// Sự cố cơ sở vật chất đang xử lý — a REFERENCE to an existing HotelIssue.
+  FACILITY_ISSUE
+  /// Khách hàng complain
+  CUSTOMER_COMPLAINT
+  /// Dịch vụ phòng
+  ROOM_SERVICE
+  /// Giao nhận hàng hóa của khách sạn — see `HotelDeliveryReport`.
+  HOTEL_DELIVERY
+}
+
+/// How a guest paid. THE ONLY THING THAT MOVES THE CASH DRAWER IS `CASH`.
+///
+/// Transfer and card money is real revenue but it never reaches the drawer, so
+/// it is deliberately NOT part of the ending-cash arithmetic. Folding all three
+/// into one "collected" number is the mistake this enum exists to prevent: it
+/// would show a drawer holding millions of đồng that are actually in a bank.
+enum ReceptionPaymentMethod {
+  /// Thu tiền mặt — the only method that increases cash on hand.
+  CASH
+  /// Chuyển khoản.
+  TRANSFER
+  /// Cà thẻ.
+  CARD
+  /// Công nợ — recorded as owed, and like transfer and card it NEVER reaches the
+  /// drawer. The amount is stored in `amount`, exactly like the other methods;
+  /// the method decides which column it is reported under. (`receivable` is the
+  /// legacy second column older rows used to carry a debt beside a cash amount.)
+  DEBT
+}
+
+/// The five "Dịch vụ phòng" subtypes. Each one asks for a different set of
+/// fields — see `RoomServiceReport` — which is why this is an enum and not a
+/// free-text service name.
+enum RoomServiceType {
+  /// Bán phòng
+  ROOM_SALE
+  /// Upgrade
+  UPGRADE
+  /// Hút thuốc
+  SMOKING
+  /// Giặt ủi
+  LAUNDRY
+  /// Dịch vụ khác — carries `serviceName`.
+  OTHER
+  /// Review — a KPI count, not a sale: carries `tripadvisorCount` and
+  /// `googleCount`, and its `price` is always 0 and never revenue.
+  REVIEW
+}
+
+/// What happened to an operational record after it was created.
+///
+/// CREATE IS ABSENT ON PURPOSE. The report row already carries its creator,
+/// their name snapshot, their shift and the instant — an audit row saying the
+/// same thing again would be a second copy that can drift from the first.
+enum ReceptionReportAuditAction {
+  /// A field was corrected. One row PER FIELD, with old and new values.
+  EDIT
+  /// The record was voided — removed from the operational total, kept on file.
+  VOID
+  /// "Tiền đầu ca" was set or corrected. Carries no `reportId`: it belongs to
+  /// the shift, not to any one payment.
+  OPENING_CASH
+}
+
+/// ONE ENTRY IN THE RECEPTION OPERATIONAL JOURNAL — "Báo cáo vấn đề".
+///
+/// WHY ONE ROOT AND FIVE DETAIL TABLES
+///
+/// Every category answers the same four questions — which branch, which shift,
+/// which receptionist, when — and differs only in what it then records. Five
+/// independent roots would copy that context five times, and the journal, the
+/// Admin drill-down and the export would each have to union five shapes and
+/// re-implement branch isolation five times. One root means the shift context,
+/// the authorization filter and the void mechanism exist ONCE.
+///
+/// A JSON blob was the other option and is worse: the detail fields are queried
+/// (sum cash by method), constrained (a payment amount is a number, not a
+/// string) and reported on. Those are exactly the guarantees a blob gives up.
+///
+/// THE BROWSER SUPPLIES NONE OF THE CONTEXT. `branchId`, `shiftSessionId`,
+/// `shiftType`, `createdByUserId`, `createdByNameSnapshot` and `createdAt` are
+/// all resolved on the server from the actor's OPEN SHIFT SESSION. A request
+/// that names a different branch or a different employee is not rejected — the
+/// fields are simply never read from it.
+///
+/// RECORDS ARE NEVER DELETED. A wrong one is corrected (with the old value kept
+/// in `ReceptionReportAudit`) or voided (with `voidedAt` set and the row still
+/// readable). Financial history that can be made to disappear is not history.
+model ReceptionOperationalReport {
+  id       String @id @default(cuid())
+  branchId Int
+
+  /// The shift that recorded it. SET NULL rather than RESTRICT — the record
+  /// outlives the session and stands on its own snapshots. Null only if that
+  /// session is ever removed; it is always set at creation, because creating a
+  /// report REQUIRES an open shift.
+  shiftSessionId String?
+  shiftType      ShiftType?
+
+  createdByUserId       Int
+  /// The receptionist's name as the shift recorded it. Renaming an account must
+  /// never rewrite who was at the desk.
+  createdByNameSnapshot String
+  /// The creator's ROLE at creation. Null on rows written before it was
+  /// recorded — all of them by a receptionist on shift. ADMIN / RECEPTION_MANAGER
+  /// / RECEPTION_GENERAL_MANAGER mark a record entered from the supervision
+  /// screen ("Admin tạo"), which may carry no shift at all.
+  createdByRole         UserRole?
+
+  category OperationalReportCategory
+
+  /// Set when the record is withdrawn from the operational totals. The row and
+  /// all its detail stay readable; every sum in the application filters on
+  /// `voidedAt: null`, so a void is a state change, not an erasure.
+  voidedAt             DateTime?
+  voidedByUserId       Int?
+  voidedByNameSnapshot String?
+  voidReason           String?
+
+  /// SERVER TIME, stamped from the injected business clock rather than defaulted
+  /// by PostgreSQL. The Admin period report filters on this column, and a value
+  /// the application cannot control is a value its own tests cannot pin.
+  createdAt DateTime
+  updatedAt DateTime @updatedAt
+
+  branch       Branch                 @relation(fields: [branchId], references: [id])
+  shiftSession ReceptionShiftSession? @relation("OperationalReportSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
+  createdBy    User                   @relation("OperationalReportCreatedBy", fields: [createdByUserId], references: [id])
+  voidedBy     User?                  @relation("OperationalReportVoidedBy", fields: [voidedByUserId], references: [id])
+
+  /// Exactly one of these exists, decided by `category`.
+  payment      ReceptionPayment?
+  guestRequest GuestRequestReport?
+  facility     FacilityIssueReport?
+  complaint    CustomerComplaintReport?
+  roomService  RoomServiceReport?
+  delivery     HotelDeliveryReport?
+
+  audits ReceptionReportAudit[] @relation("ReportAuditReport")
+
+  /// The Admin drill-down: one branch, one category, newest first.
+  @@index([branchId, category, createdAt])
+  /// The shift journal: everything this session recorded.
+  @@index([shiftSessionId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([category, createdAt])
+  @@index([createdAt])
+  @@index([createdByUserId])
+  @@index([voidedAt])
+}
+
+/// ONE PAYMENT ROW — "Thu tiền thanh toán".
+///
+/// AMOUNTS ARE WHOLE ĐỒNG, AS INTEGERS. VND has no minor unit, so there is
+/// nothing to round and no reason to invite binary floating point into a cash
+/// reconciliation. "7.570.000 ₫" is a rendering of 7570000; the formatted string
+/// is never what is stored, and never what is summed.
+///
+/// `expense` ("Chi tiền") IS ALWAYS CASH. That is a business rule, not a
+/// simplification: money paid out at the desk leaves the drawer whatever the
+/// guest's own payment method was, which is why it is a separate column rather
+/// than a fourth payment method.
+model ReceptionPayment {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  /// Mã EZ — the PMS reference, as typed. Free text: it is a foreign system's
+  /// identifier and this application must not pretend to validate it.
+  ezCode     String?
+  /// Nguồn — where the booking came from. New entries are one of the service's
+  /// `PAYMENT_SOURCES`; older rows keep whatever was typed, unrewritten.
+  source     String?
+  guestName  String?
+  /// Số phòng — no longer asked for by reception; kept for the Admin.
+  roomNumber String?
+
+  method     ReceptionPaymentMethod
+  /// Số tiền, whole đồng, non-negative.
+  amount     Int
+  /// Công nợ — recorded, and deliberately NOT part of cash on hand.
+  receivable Int                    @default(0)
+  /// Chi tiền — cash paid out at the desk. Always cash; see the model comment.
+  expense    Int                    @default(0)
+
+  note String?
+
+  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  /// "Sum the cash this shift took" — the ending-cash query.
+  @@index([method])
+}
+
+/// "VẤN ĐỀ KHÁCH YÊU CẦU THỰC HIỆN" — something left with the desk, and who
+/// later dealt with it, and how.
+///
+/// A request is "Đã tiếp nhận" from the moment it is recorded (the report's own
+/// creation stamp) and "Đã hoàn thành" once the completion event below is set.
+///
+/// TWO ACTORS, TWO SETS OF COLUMNS, NEVER ONE. The person who takes a bag at
+/// 10:05 on Ca A and the person who hands it back at 14:02 on Ca B are two
+/// different accountabilities, and they are frequently two different shifts. A
+/// single "handledBy" would overwrite the first with the second and lose the
+/// answer to "who took it?" — which is the question asked when something goes
+/// missing. They are stored separately even when they are the same person.
+model GuestRequestReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  /// Ký gửi — LEGACY. What was left ("Balo", "Hành lý"…), asked for until the
+  /// entry form was reduced to name, Mã EZ and content. Null on every request
+  /// recorded since; kept, never rewritten, on the ones recorded before.
+  itemType   String?
+  guestName  String
+  /// Mã EZ — the PMS reference, as typed, like the payment's.
+  ezCode     String?
+  /// Số phòng — LEGACY, like `itemType`: no longer asked for.
+  roomNumber String?
+  /// Nội dung — what the guest asked for. Required on every request recorded
+  /// under the current form; optional on older ones, where `itemType` said it.
+  note       String?
+
+  /// The completion event. All null until somebody completes it, and all written
+  /// together in one update — a completed request always says who, when, on
+  /// which shift and how it was handled.
+  ///
+  /// THE COLUMNS KEEP THEIR V3 NAMES (`accepted…`). In V3 the second actor was
+  /// called "tiếp nhận"; V4 uses that word for the moment a request is recorded,
+  /// so the fields were renamed here without rewriting the table.
+  completedByUserId       Int?       @map("acceptedByUserId")
+  completedByNameSnapshot String?    @map("acceptedByNameSnapshot")
+  completedAt             DateTime?  @map("acceptedAt")
+  completedShiftSessionId String?    @map("acceptedShiftSessionId")
+  completedShiftType      ShiftType? @map("acceptedShiftType")
+  /// Cách xử lý (nếu có) — optional, and never set without the completion event.
+  resolution              String?
+
+  report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  completedBy      User?                      @relation("GuestRequestCompletedBy", fields: [completedByUserId], references: [id])
+  completedSession ReceptionShiftSession?     @relation("GuestRequestCompletedSession", fields: [completedShiftSessionId], references: [id], onDelete: SetNull)
+
+  /// "What is still outstanding?" — the open-requests query.
+  @@index([completedAt])
+  @@index([completedByUserId])
+  @@index([completedShiftSessionId])
+}
+
+/// "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ" — a POINTER, and nothing else.
+///
+/// THIS MODEL HAS NO FIELDS OF ITS OWN BEYOND THE REFERENCE, AND THAT IS THE
+/// WHOLE POINT. The area, the room, the fault type, the description, the photo,
+/// the status, the technician and the repair attempts all live on `HotelIssue`
+/// and its attempt rows, where Bộ phận kỹ thuật actually works on them. Copying
+/// any of it here would create a second maintenance record that goes stale the
+/// moment a technician touches the first — the report would say "đang xử lý"
+/// forever while the incident was closed hours ago.
+///
+/// So the journal shows the LIVE incident, read through this reference.
+model FacilityIssueReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  /// The existing incident. CASCADE from the report side, RESTRICT from the
+  /// incident side: nothing in this application deletes a HotelIssue, and if
+  /// anything ever did, it must not silently take the journal entry with it.
+  issueId String
+
+  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  issue  HotelIssue                 @relation("FacilityReportIssue", fields: [issueId], references: [id])
+
+  @@index([issueId])
+}
+
+/// "VẤN ĐỀ VỀ CHẤT LƯỢNG VÀ DỊCH VỤ" — what the guest raised, and how the desk
+/// dealt with it.
+///
+/// THE SAME TWO-STATE LIFECYCLE AS A GUEST REQUEST, and nothing more: "Đã tiếp
+/// nhận" from the moment it is recorded, "Đã hoàn thành" once the completion
+/// event below is set. No priority, no severity, no assignee — the desk closes
+/// what the desk opened, and the completion keeps its own actor, shift and time
+/// beside the creator's, never over them.
+model CustomerComplaintReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  guestName   String
+  /// Mã EZ — the PMS reference, as typed.
+  ezCode      String?
+  /// Số phòng / Khác — LEGACY. No longer asked for; kept on older reports.
+  location    String?
+  /// Mô tả — the complaint in the guest's terms. Required: a complaint with no
+  /// description records only that somebody was unhappy.
+  description String
+
+  /// The completion event, written together in one update by the server.
+  completedByUserId       Int?
+  completedByNameSnapshot String?
+  completedAt             DateTime?
+  completedShiftSessionId String?
+  completedShiftType      ShiftType?
+  /// Hướng xử lý (nếu có) — optional, set only with the completion event.
+  resolution              String?
+
+  report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  completedBy      User?                      @relation("ComplaintCompletedBy", fields: [completedByUserId], references: [id])
+  completedSession ReceptionShiftSession?     @relation("ComplaintCompletedSession", fields: [completedShiftSessionId], references: [id], onDelete: SetNull)
+
+  @@index([completedAt])
+  @@index([completedByUserId])
+  @@index([completedShiftSessionId])
+}
+
+/// "DỊCH VỤ PHÒNG" — five subtypes in one table.
+///
+/// ONE TABLE, NOT FIVE. The five share a guest, a price and a note, and differ
+/// by two or three fields each; five tables would multiply the join, the export
+/// and the authorization filter by five to hold what amounts to four nullable
+/// columns. Which fields are REQUIRED for which subtype is enforced by the
+/// service (`roomService.ts`), in one table that the form reads too — the same
+/// split as `issueArea.ts`, for the same reason: a form that validates itself is
+/// a form curl can skip.
+model RoomServiceReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  serviceType      RoomServiceType
+  guestName        String
+  /// Mã EZ — the PMS reference, as typed. Asked for on every subtype.
+  ezCode           String?
+  /// SĐT — LEGACY ("Bán phòng" asked for it once). Kept on older rows.
+  phone            String?
+  /// Số phòng — LEGACY, no longer asked for. Kept on older rows.
+  roomNumber       String?
+  /// Hạng phòng — "Bán phòng".
+  roomClass        String?
+  /// "Upgrade": từ hạng phòng → tới hạng phòng.
+  fromRoomClass    String?
+  toRoomClass      String?
+  /// Số đêm — "Bán phòng" and "Upgrade", a whole number of nights, at least 1.
+  /// Null on the other subtypes and on rows recorded before it was asked for.
+  nights           Int?
+  /// Loại hình dịch vụ — LEGACY ("Dịch vụ khác" asked for it once).
+  serviceName      String?
+  /// Giá tiền, whole đồng, non-negative.
+  price            Int
+  note             String?
+  /// Review only — how many reviews the receptionist reports, per site. Whole
+  /// numbers, at least 0; null on every other service.
+  tripadvisorCount Int?
+  googleCount      Int?
+
+  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([serviceType])
+}
+
+/// WHAT WAS CHANGED AFTER THE FACT — one row per corrected field.
+///
+/// WHY FIELD-LEVEL AND NOT A WHOLE-ROW SNAPSHOT
+///
+/// The question an Admin asks is "what did they change?", and a pair of full row
+/// snapshots makes them diff two JSON objects by eye to answer it. One row per
+/// field answers it directly: 300000 → 3000000, by whom, when. A correction that
+/// touches three fields writes three rows inside one transaction, so they share
+/// an instant and read as one event.
+///
+/// OLD AND NEW ARE STRINGS. They hold values from columns of different types —
+/// an amount, a method, a room number — and the audit's job is to be READ, not
+/// to be recomputed from. Storing them as text keeps one table instead of one
+/// per column type, and nothing downstream does arithmetic on them.
+///
+/// `reportId` IS NULLABLE because one audited change belongs to no report:
+/// "Tiền đầu ca" is a property of the shift. Those rows carry
+/// `shiftSessionId` and action `OPENING_CASH`.
+///
+/// APPEND-ONLY. There is no update or delete path, here or anywhere above it.
+model ReceptionReportAudit {
+  id       String @id @default(cuid())
+  branchId Int
+
+  /// The corrected record — null for a shift-level change (see the comment).
+  reportId       String?
+  /// The shift the CHANGE was made on, which is often not the shift that
+  /// created the record.
+  shiftSessionId String?
+
+  action   ReceptionReportAuditAction
+  /// The column that changed, in the API's own naming ("amount", "method",
+  /// "openingCash"). Null for a VOID, which changes no single field.
+  field    String?
+  oldValue String?
+  newValue String?
+  /// Why. Required for a VOID — a financial row withdrawn without a reason is
+  /// the one an audit will always stop on.
+  reason   String?
+
+  actorUserId       Int
+  actorNameSnapshot String
+  actorShiftType    ShiftType?
+
+  /// Server time, from the business clock. Same reason as the report's own.
+  createdAt DateTime
+
+  branch       Branch                      @relation(fields: [branchId], references: [id])
+  report       ReceptionOperationalReport? @relation("ReportAuditReport", fields: [reportId], references: [id], onDelete: Cascade)
+  shiftSession ReceptionShiftSession?      @relation("ReportAuditSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
+  actor        User                        @relation("ReportAuditActor", fields: [actorUserId], references: [id])
+
+  /// "Show me this record's history" — oldest first when read.
+  @@index([reportId, createdAt])
+  /// The Admin period view of every correction at one branch.
+  @@index([branchId, createdAt])
+  @@index([shiftSessionId])
+  @@index([actorUserId])
+  @@index([action])
+}
+
+/// EVERY ASSIGNMENT OF AN INCIDENT TO A TECHNICIAN — append-only.
+///
+/// The incident's `assigned…` columns are the CURRENT assignment; this table is
+/// the history they would otherwise overwrite: who was given the job, by whom,
+/// when, and who had it before (a reassignment). Outcomes are not repeated here —
+/// they live on `TechnicalRepairAttempt`, which already names the technician.
+model HotelIssueAssignment {
+  id                             String   @id @default(cuid())
+  issueId                        String
+  technicianUserId               Int
+  technicianNameSnapshot         String
+  /// Set on a REASSIGNMENT: the technician who held the job before.
+  previousTechnicianUserId       Int?
+  previousTechnicianNameSnapshot String?
+  assignedByUserId               Int
+  assignedByNameSnapshot         String
+  assignedByRole                 UserRole
+  /// Server time, from the business clock.
+  createdAt                      DateTime
+
+  issue      HotelIssue @relation("IssueAssignments", fields: [issueId], references: [id], onDelete: Cascade)
+  technician User       @relation("IssueAssignmentTechnician", fields: [technicianUserId], references: [id])
+  assignedBy User       @relation("IssueAssignmentAssigner", fields: [assignedByUserId], references: [id])
+
+  @@index([issueId, createdAt])
+  @@index([technicianUserId, createdAt])
+  @@index([previousTechnicianUserId])
+}
+
+/// WHAT WAS CHANGED ON A HOTEL INCIDENT AFTER IT WAS REPORTED — one row per field.
+///
+/// A receptionist can correct the description, the place or the fault type
+/// ("Sửa vấn đề") while the incident is still open. The incident row keeps its
+/// `createdAt`, its status, its technician and every repair attempt exactly as
+/// they were; the words that used to be there are kept HERE, so a technician who
+/// went out against the old description can always be shown what it said.
+/// Append-only, like `ReceptionReportAudit`, and for the same reason.
+model HotelIssueEdit {
+  id                String   @id @default(cuid())
+  issueId           String
+  /// The incident's own column name ("description", "roomNumber", …).
+  field             String
+  oldValue          String?
+  newValue          String?
+  actorUserId       Int
+  /// The editor's name at the time; renaming an account never rewrites this.
+  actorNameSnapshot String
+  /// Server time, from the business clock.
+  createdAt         DateTime
+
+  issue HotelIssue @relation("IssueEdits", fields: [issueId], references: [id], onDelete: Cascade)
+  actor User       @relation("IssueEditActor", fields: [actorUserId], references: [id])
+
+  @@index([issueId, createdAt])
+  @@index([actorUserId])
+}
+
+/// WHAT A USER HAS READ IN A CHAT CONVERSATION — the unread badge's only source.
+///
+/// One row per (conversation, person). "Unread" for a person is every message in
+/// the conversation newer than `lastReadAt` that somebody ELSE wrote; a person
+/// with no row has read nothing. It is a cursor and not a per-message flag, so
+/// opening a conversation is one upsert however long it is, and the count is one
+/// indexed query instead of a scan of `ChatMessage`.
+model ChatReadState {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         Int
+  lastReadAt     DateTime
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User             @relation("ChatReadStateUser", fields: [userId], references: [id])
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+/// Which department a delivered/received item belongs to — "Bộ phận".
+enum HotelDeliveryDepartment {
+  /// Lễ tân
+  RECEPTION
+  /// Buồng phòng
+  HOUSEKEEPING
+  /// Kỹ thuật
+  TECHNICAL
+}
+
+/// "GIAO NHẬN HÀNG HÓA CỦA KHÁCH SẠN" — one item handed over or received.
+///
+/// A DETAIL ROW OF THE RECEPTION JOURNAL, not a table of its own lifecycle. The
+/// branch, the shift, the receptionist, the creation instant, the void and the
+/// correction trail all come from the `ReceptionOperationalReport` root this
+/// hangs off — the same shape as the five categories before it, so there is one
+/// authorization filter and one export pipeline, not two.
+///
+/// "ĐÃ HOÀN THÀNH" IS THE STATE IT IS BORN IN. Submitting the form is the act of
+/// completing the hand-over, so `completedAt` is stamped with the report's own
+/// `createdAt` and never null. The record stays in the active list for
+/// `HOTEL_DELIVERY_ARCHIVE_HOURS` (server/src/reception/deliveryLifecycle.ts)
+/// after that instant and is then shown under "Hoàn thành vấn đề" — a
+/// consequence of READING the clock, not a job that rewrites rows, so there is
+/// nothing to fall behind and no status that can disagree with the time.
+model HotelDeliveryReport {
+  id       String @id @default(cuid())
+  reportId String @unique
+
+  department HotelDeliveryDepartment
+  /// Tên hàng hóa.
+  itemName   String
+  /// Số lượng — a whole number of at least 1.
+  quantity   Int
+  note       String?
+
+  completedAt DateTime
+
+  report ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  /// A department's own view (Technical, Housekeeping) and the archive split.
+  @@index([department, completedAt])
+  @@index([completedAt])
+}
+
+/// What a room inspection found — the six things Bộ phận buồng phòng records.
+enum RoomIssueType {
+  /// Hút thuốc
+  SMOKING
+  /// Phòng có mùi
+  ODOR
+  /// Cơ sở vật chất hư hỏng
+  DAMAGED_FACILITY
+  /// Khách quên đồ
+  LOST_ITEM
+  /// Phòng có khách nhưng hệ thống không có
+  UNREGISTERED_GUEST
+  /// Vấn đề khác
+  OTHER
+}
+
+/// Where the money for a room issue stands. No collection row at all reads as
+/// PENDING with no amount — the state every issue is born in.
+enum RoomCollectionStatus {
+  /// Chưa thu
+  PENDING
+  /// Đã thu — carries a method.
+  COLLECTED
+  /// Không thu được — carries a reason.
+  UNCOLLECTIBLE
+}
+
+/// How a room issue was paid. THREE values, and no "Công nợ": a collection is
+/// money received, and a debt is by definition money that was not.
+enum RoomCollectionMethod {
+  /// Tiền mặt
+  CASH
+  /// Chuyển khoản
+  TRANSFER
+  /// Cà thẻ
+  CARD
+}
+
+/// ONE ROOM INSPECTION — "Buồng phòng: tình trạng sử dụng phòng".
+///
+/// The header of what Bộ phận buồng phòng saw in one room at one moment: which
+/// hotel, which room, who cleaned it and who recorded it. What was WRONG lives
+/// in `RoomInspectionIssue` — one row per finding, because each finding is
+/// collected, waived and reported on independently of the others.
+///
+/// The branch is the recorder's own, stamped by the server from the account;
+/// nothing the browser sends can name another one.
+model RoomInspection {
+  id                    String   @id @default(cuid())
+  branchId              Int
+  roomNumber            String
+  /// Người dọn / người kiểm tra — as typed. The account that saved the form is
+  /// `createdByUserId`; these are often two different people.
+  staffName             String
+  createdByUserId       Int
+  createdByNameSnapshot String
+  /// Server time, from the business clock.
+  createdAt             DateTime
+
+  /// The housekeeping work segment (shift at one branch) it was recorded in.
+  /// Null on inspections recorded before shifts existed.
+  workSegmentId         String?
+
+  branch      Branch                   @relation(fields: [branchId], references: [id])
+  createdBy   User                     @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
+  issues      RoomInspectionIssue[]
+  workSegment HousekeepingWorkSegment? @relation(fields: [workSegmentId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, createdAt])
+  @@index([createdAt])
+  @@index([createdByUserId])
+  @@index([workSegmentId])
+}
+
+/// ONE HOUSEKEEPING WORKDAY ("Vào ca" → "Kết thúc ca") of one account.
+///
+/// A housekeeping account has no permanent branch: the OPEN segment of its open
+/// session decides where it works, server-side, for every request.
+model HousekeepingWorkSession {
+  id        String    @id @default(cuid())
+  userId    Int
+  /// Server time, from the business clock.
+  startedAt DateTime
+  /// Null while the workday is open ("Kết thúc ca" closes it).
+  endedAt   DateTime?
+
+  user     User                      @relation("HousekeepingSessionUser", fields: [userId], references: [id])
+  segments HousekeepingWorkSegment[]
+
+  @@index([userId, endedAt])
+  @@index([startedAt])
+}
+
+/// ONE BRANCH WITHIN A WORKDAY — "Vào ca" opens the first, "Đổi chi nhánh" closes
+/// it and opens the next. Kept as history: where, who cleaned, from when to when.
+model HousekeepingWorkSegment {
+  id        String    @id @default(cuid())
+  sessionId String
+  branchId  Int
+  /// "Tên người dọn buồng" — the default cleaner on this segment's inspections.
+  staffName String
+  startedAt DateTime
+  endedAt   DateTime?
+
+  session     HousekeepingWorkSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  branch      Branch                  @relation(fields: [branchId], references: [id])
+  inspections RoomInspection[]
+
+  @@index([sessionId, startedAt])
+  @@index([branchId, startedAt])
+}
+
+/// ONE FINDING FROM A ROOM INSPECTION — the record Reception collects against.
+///
+/// `branchId` repeats the inspection's, so "this branch's open issues" is one
+/// indexed read and the branch filter cannot be forgotten by a join that
+/// forgot the inspection. It is written once, from the inspection, and never
+/// updated.
+///
+/// VOIDED, NEVER DELETED — the same rule as every operational record. Only an
+/// Admin voids one, with a reason.
+model RoomInspectionIssue {
+  id           String        @id @default(cuid())
+  inspectionId String
+  branchId     Int
+  type         RoomIssueType
+  /// Mô tả — required for `OTHER`, optional for the rest.
+  note         String?
+  createdAt    DateTime
+
+  voidedAt             DateTime?
+  voidedByUserId       Int?
+  voidedByNameSnapshot String?
+  voidReason           String?
+
+  inspection RoomInspection             @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  branch     Branch                     @relation(fields: [branchId], references: [id])
+  voidedBy   User?                      @relation("RoomIssueVoidedBy", fields: [voidedByUserId], references: [id])
+  collection RoomIssueCollection?
+  events     RoomIssueCollectionEvent[]
+
+  @@index([branchId, createdAt])
+  @@index([inspectionId])
+  @@index([type])
+}
+
+/// THE MONEY SIDE OF ONE ROOM ISSUE — kept apart from the Payment Ledger on
+/// purpose.
+///
+/// A room-issue collection is not a front-desk sale: it never enters the shift
+/// drawer, never appears in "Theo dõi thanh toán" and is never summed with it.
+/// It REFERENCES the issue it settles and nothing else in the payment world, so
+/// neither side can corrupt the other's totals.
+///
+/// This row is the CURRENT state; `RoomIssueCollectionEvent` keeps every save.
+/// The two invariants the form enforces are also enforced by CHECK constraints
+/// (see the migration): a COLLECTED row has a method, an UNCOLLECTIBLE row has a
+/// non-blank reason.
+model RoomIssueCollection {
+  id      String                @id @default(cuid())
+  issueId String                @unique
+  /// Whole đồng, non-negative.
+  amount  Int
+  status  RoomCollectionStatus
+  method  RoomCollectionMethod?
+  /// Lý do không thu được.
+  reason  String?
+  note    String?
+
+  recordedByUserId       Int
+  recordedByNameSnapshot String
+  shiftSessionId         String?
+  shiftType              ShiftType?
+  createdAt              DateTime
+  updatedAt              DateTime
+
+  issue      RoomInspectionIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  recordedBy User                @relation("RoomCollectionRecordedBy", fields: [recordedByUserId], references: [id])
+
+  @@index([status])
+  @@index([updatedAt])
+}
+
+/// EVERY SAVE OF A ROOM-ISSUE COLLECTION, oldest first — the trail behind the
+/// current state on `RoomIssueCollection`. Append-only.
+model RoomIssueCollectionEvent {
+  id                String                @id @default(cuid())
+  issueId           String
+  amount            Int
+  status            RoomCollectionStatus
+  method            RoomCollectionMethod?
+  reason            String?
+  note              String?
+  actorUserId       Int
+  actorNameSnapshot String
+  actorRole         UserRole
+  createdAt         DateTime
+
+  issue RoomInspectionIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  actor User                @relation("RoomCollectionEventActor", fields: [actorUserId], references: [id])
+
+  @@index([issueId, createdAt])
 }

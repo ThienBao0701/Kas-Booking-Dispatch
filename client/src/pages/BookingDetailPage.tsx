@@ -35,7 +35,12 @@ export function BookingDetailPage() {
       ) : query.isError ? (
         <ErrorAlert>{toUserMessage(query.error)}</ErrorAlert>
       ) : query.data ? (
-        <BookingDetailView booking={query.data.booking} isAdmin={user?.role === 'ADMIN'} />
+        <BookingDetailView
+          booking={query.data.booking}
+          isAdmin={user?.role === 'ADMIN'}
+          // A reception manager reads the order as the desk does — and acts on nothing.
+          readOnly={user?.role === 'RECEPTION_MANAGER' || user?.role === 'RECEPTION_GENERAL_MANAGER'}
+        />
       ) : null}
     </div>
   );
