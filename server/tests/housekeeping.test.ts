@@ -76,6 +76,15 @@ beforeEach(async () => {
   await resetShiftData();
   await testPrisma.notification.deleteMany();
   setClock({ now: () => hcm('2026-09-19', '10:00') });
+  // Each housekeeping account is on shift ("Vào ca") at its branch.
+  for (const [agent, branchId] of [
+    [hk1, cn1],
+    [hk1b, cn1],
+    [hk2, cn2],
+  ] as const) {
+    const res = await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan' });
+    expect(res.status).toBe(201);
+  }
 });
 
 afterAll(async () => {
@@ -133,7 +142,6 @@ describe('recording an inspection', () => {
     ['no issues', { roomNumber: '101', staffName: 'X', issues: [] }],
     ['a room that is not the branch’s', { roomNumber: '999', staffName: 'X', issues: [{ type: 'ODOR' }] }],
     ['no room', { roomNumber: '  ', staffName: 'X', issues: [{ type: 'ODOR' }] }],
-    ['no person', { roomNumber: '101', staffName: '', issues: [{ type: 'ODOR' }] }],
     ['an unknown type', { roomNumber: '101', staffName: 'X', issues: [{ type: 'FIRE' }] }],
     ['"Vấn đề khác" with no description', { roomNumber: '101', staffName: 'X', issues: [{ type: 'OTHER', note: ' ' }] }],
   ])('refuses %s', async (_label, body) => {
@@ -164,12 +172,17 @@ describe('what a housekeeping account may reach', () => {
     '/api/issues/summary',
     '/api/reception/reports',
     '/api/reception/shifts/cash',
-    '/api/branches',
     '/api/chat/channels',
     '/api/admin/users',
     '/api/charge-documents',
   ])('is refused %s', async (path) => {
     expect((await hk1.get(path)).status).toBe(403);
+  });
+
+  it('may list the branches — "Vào ca" chooses from all of them', async () => {
+    const res = await hk1.get('/api/branches');
+    expect(res.status).toBe(200);
+    expect(res.body.branches.length).toBeGreaterThanOrEqual(2);
   });
 
   it('may sign in, read its profile, and use its own endpoints', async () => {
@@ -362,5 +375,79 @@ describe('voiding', () => {
     expect(all.issues).toHaveLength(3);
     expect(all.summary.total).toBe(2);
     expect((await collect(issue!.id, { status: 'PENDING' })).status).toBe(409);
+  });
+});
+
+describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết thúc ca"', () => {
+  const shift = (agent: Agent = hk1) => agent.get('/api/housekeeping/shift');
+
+  it('works where the shift is, names the shift’s cleaner, and refuses a second "Vào ca"', async () => {
+    const me = (await hk1.get('/api/auth/me')).body.user;
+    expect(me.branch.id).toBe(cn1);
+    const second = await hk1.post('/api/housekeeping/shift/start').send({ branchId: cn2, staffName: 'X' });
+    expect(second.status).toBe(409);
+
+    // No name on the inspection: the shift's cleaner is recorded.
+    const res = await inspect({ roomNumber: '301', issues: [{ type: 'ODOR' }] });
+    expect(res.status).toBe(201);
+    const stored = await testPrisma.roomInspection.findFirstOrThrow({ where: { roomNumber: '301' } });
+    expect(stored).toMatchObject({ branchId: cn1, staffName: 'Chị Lan' });
+    expect(stored.workSegmentId).not.toBeNull();
+  });
+
+  it('keeps each branch as its own segment, and the day’s summary at "Kết thúc ca"', async () => {
+    await inspect({ roomNumber: '301', staffName: 'Chị Lan', issues: [{ type: 'ODOR' }, { type: 'SMOKING' }] });
+    setClock({ now: () => hcm('2026-09-19', '14:00') });
+    expect((await hk1.post('/api/housekeeping/shift/switch').send({ branchId: cn1 })).status).toBe(422);
+    const moved = await hk1.post('/api/housekeeping/shift/switch').send({ branchId: cn2, staffName: 'Chị Hoa' });
+    expect(moved.status).toBe(200);
+    expect(moved.body.shift.current).toMatchObject({ staffName: 'Chị Hoa' });
+    expect((await hk1.get('/api/auth/me')).body.user.branch.id).toBe(cn2);
+    // The room catalog follows the shift: the old branch's is refused now.
+    expect((await hk1.get(`/api/branches/${cn1}/rooms`)).status).toBe(403);
+
+    const cn2Rooms = (await hk1.get(`/api/branches/${cn2}/rooms`)).body.rooms as string[] | null;
+    await inspect({ roomNumber: cn2Rooms?.[0] ?? '101', issues: [{ type: 'LOST_ITEM' }] });
+
+    setClock({ now: () => hcm('2026-09-19', '18:00') });
+    const ended = await hk1.post('/api/housekeeping/shift/end').send({});
+    expect(ended.status).toBe(200);
+    const day = ended.body.shift;
+    expect(day.endedAt).not.toBeNull();
+    expect(day.segments.map((s: { branch: { id: number } }) => s.branch.id)).toEqual([cn1, cn2]);
+    expect(day.segments[0]).toMatchObject({ rooms: 1, inspections: 1, issues: 2, staffName: 'Chị Lan' });
+    expect(day.segments[0].endedAt).toBe(hcm('2026-09-19', '14:00').toISOString());
+    expect(day.segments[1]).toMatchObject({ inspections: 1, issues: 1, staffName: 'Chị Hoa' });
+    expect(day.totals).toMatchObject({ inspections: 2, issues: 3 });
+
+    // Off shift: no branch, and no inspection.
+    expect((await shift()).body.shift).toBeNull();
+    expect((await hk1.get('/api/auth/me')).body.user.branch).toBeNull();
+    expect((await inspect({ roomNumber: '301', staffName: 'X', issues: [{ type: 'ODOR' }] })).status).toBe(409);
+
+    // The Admin reads the workday — every branch's segment; a manager its own branches.
+    const all = await admin.get('/api/housekeeping/shifts?from=2026-09-19&to=2026-09-19');
+    const mine = all.body.shifts.find((s: { user: { fullName: string } }) => s.user.fullName === 'Buồng Một');
+    expect(mine.segments).toHaveLength(2);
+  });
+
+  it('has no permanent branch on a new account', async () => {
+    const res = await admin.post('/api/admin/users').send({
+      username: 'buong_moi',
+      fullName: 'Buồng mới',
+      temporaryPassword: 'TempPass123',
+      role: 'HOUSEKEEPING',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.user.branch).toBeNull();
+    const withBranch = await admin.post('/api/admin/users').send({
+      username: 'buong_sai',
+      fullName: 'Buồng sai',
+      temporaryPassword: 'TempPass123',
+      role: 'HOUSEKEEPING',
+      branchId: cn1,
+    });
+    expect(withBranch.status).toBe(422);
+    await testPrisma.user.delete({ where: { username: 'buong_moi' } });
   });
 });

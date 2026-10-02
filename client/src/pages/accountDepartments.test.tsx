@@ -206,23 +206,23 @@ describe('locking and unlocking, from every section', () => {
     expect(within(admin).queryByRole('button', { name: /Khoá|Mở khoá/ })).not.toBeInTheDocument();
   });
 
-  it('lists a Buồng phòng account in its own section, with the branch it works in', async () => {
-    mount({}, [...USERS, user(7, 'HOUSEKEEPING', { branch: BRANCH })]);
+  it('lists a Buồng phòng account in its own section — its branch is the shift’s', async () => {
+    mount({}, [...USERS, user(7, 'HOUSEKEEPING')]);
     renderApp('/app/settings');
 
     const housekeeping = await screen.findByTestId('department-HOUSEKEEPING');
-    expect(within(housekeeping).getByTestId('row-7')).toHaveTextContent('05 Trương Định');
+    expect(within(housekeeping).getByTestId('row-7')).toHaveTextContent('Theo ca làm việc');
     // Between Lễ tân and Kỹ thuật, and shown only because it has an account.
     const order = screen.getAllByTestId(/^department-/).map((el) => el.getAttribute('data-testid'));
     expect(order.indexOf('department-HOUSEKEEPING')).toBe(order.indexOf('department-RECEPTIONIST') + 1);
   });
 
-  it('creates a Buồng phòng account only with a branch, and sends it', async () => {
+  it('creates a Buồng phòng account with no branch — "Vào ca" picks it', async () => {
     const posted: Record<string, unknown>[] = [];
     mount({
       'POST /api/admin/users': (init) => {
         posted.push(JSON.parse(String(init.body)));
-        return { status: 201, body: { user: user(8, 'HOUSEKEEPING', { branch: BRANCH }) } };
+        return { status: 201, body: { user: user(8, 'HOUSEKEEPING') } };
       },
     });
     renderApp('/app/settings');
@@ -234,17 +234,16 @@ describe('locking and unlocking, from every section', () => {
     await userEvent.type(within(dialog).getByLabelText(/Mật khẩu tạm/), 'Matkhau123');
     await userEvent.selectOptions(within(dialog).getByLabelText('Vai trò'), 'HOUSEKEEPING');
 
-    // Room inspections are made in one hotel, so the branch is asked for — and required.
+    // No permanent branch: none is asked for, and none is sent.
     const create = within(dialog).getByRole('button', { name: 'Tạo' });
-    expect(within(dialog).getByLabelText('Chi nhánh')).toBeInTheDocument();
-    expect(create).toBeDisabled();
-
-    await userEvent.selectOptions(within(dialog).getByLabelText('Chi nhánh'), '1');
+    expect(within(dialog).queryByLabelText('Chi nhánh')).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/Vào ca/)).toBeInTheDocument();
     expect(create).toBeEnabled();
     await userEvent.click(create);
 
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', branchId: 1, username: 'buongphong1' });
+    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', username: 'buongphong1' });
+    expect(posted[0]!.branchId).toBeUndefined();
   });
 
   it('creates a Quản lý lễ tân only with at least one ticked branch, and sends the set', async () => {
@@ -289,14 +288,64 @@ describe('locking and unlocking, from every section', () => {
     );
     renderApp('/app/settings');
 
-    await userEvent.click(await screen.findByTestId('edit-branches-7'));
-    const dialog = await screen.findByRole('dialog', { name: /Chi nhánh quản lý/ });
+    await userEvent.click(await screen.findByTestId('edit-user-7'));
+    const dialog = await screen.findByRole('dialog', { name: /Sửa tài khoản/ });
     expect(within(dialog).getByTestId('manager-branch-1')).toBeChecked();
     await userEvent.click(within(dialog).getByTestId('manager-branch-2'));
     await userEvent.click(within(dialog).getByRole('button', { name: 'Lưu' }));
 
     await waitFor(() => expect(put).toHaveLength(1));
     expect(put[0]).toEqual({ branchIds: [1, 2] });
+  });
+
+  it('edits a Quản lý kỹ thuật’s name and ticked branches with "Sửa"', async () => {
+    const put: Record<string, unknown>[] = [];
+    mount(
+      {
+        'PUT /api/admin/users/7': (init) => {
+          put.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { user: user(7, 'TECHNICAL_MANAGER', { managedBranches: [BRANCH] }) } };
+        },
+      },
+      [...USERS, user(7, 'TECHNICAL_MANAGER')],
+    );
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByTestId('edit-user-7'));
+    const dialog = await screen.findByRole('dialog', { name: /Sửa tài khoản/ });
+    const save = within(dialog).getByTestId('edit-user-save');
+    expect(save).toBeDisabled(); // no branch ticked yet
+    await userEvent.click(within(dialog).getByTestId('manager-branch-1'));
+    await userEvent.clear(within(dialog).getByTestId('edit-user-name'));
+    await userEvent.type(within(dialog).getByTestId('edit-user-name'), 'Kỹ thuật trưởng');
+    await userEvent.click(save);
+
+    await waitFor(() => expect(put).toHaveLength(1));
+    expect(put[0]).toEqual({ fullName: 'Kỹ thuật trưởng', branchIds: [1] });
+  });
+
+  it('deletes an account only after the username is typed', async () => {
+    const deleted: string[] = [];
+    mount(
+      {
+        'DELETE /api/admin/users/7': () => {
+          deleted.push('7');
+          return { status: 200, body: { deleted: true, id: 7 } };
+        },
+      },
+      [...USERS, user(7, 'TECHNICAL')],
+    );
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByTestId('delete-user-7'));
+    const dialog = await screen.findByRole('dialog', { name: 'Xóa tài khoản' });
+    const confirm = within(dialog).getByTestId('delete-user-confirm');
+    expect(confirm).toBeDisabled();
+    expect(dialog).toHaveTextContent('Lịch sử và các bản ghi đã tạo vẫn được giữ nguyên');
+    await userEvent.type(within(dialog).getByTestId('delete-user-typed'), 'u7');
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await userEvent.click(confirm);
+    await waitFor(() => expect(deleted).toEqual(['7']));
   });
 
   it('still creates accounts from the same dialog', async () => {

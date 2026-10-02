@@ -25,17 +25,19 @@ import {
   describeLocation,
   normaliseArea,
   type AreaInput,
+  type NormalisedArea,
 } from './issueArea';
 import { activeIssueWhere, archivedIssueWhere } from '../reception/completionArchive';
 import {
   assertBranchInScope,
   branchScopeOf,
   isReceptionSupervisor,
+  isTechnicalAssigner,
   scopeIncludes,
   scopedBranchFilter,
   supervisorSourceLabel,
 } from '../auth/branchScope';
-import { catalogRoom } from '../room/branchRooms';
+import { catalogFloor, catalogRoom } from '../room/branchRooms';
 import {
   INSPECTION_RESULT_LABELS,
   inspectionEnabled,
@@ -64,7 +66,7 @@ type Actor = {
  *   RECEPTIONIST        its own branch.
  *   ADMIN, TỔNG QUẢN LÝ every branch (optionally narrowed by the request).
  *   QUẢN LÝ LỄ TÂN      its assigned branches only.
- *   TECHNICAL_MANAGER   every branch — it inspects the whole team's work.
+ *   QUẢN LÝ KỸ THUẬT    its assigned branches only (every incident there).
  *   TECHNICAL           ONLY its own work: incidents assigned to it now, and the
  *                       ones it accepted, attempted or was ever assigned — its
  *                       personal history. NOT inferred from branch visibility.
@@ -77,9 +79,8 @@ export function issueVisibilityWhere(actor: Actor, requestedBranchId?: number): 
     case 'ADMIN':
     case 'RECEPTION_GENERAL_MANAGER':
     case 'RECEPTION_MANAGER':
-      return scopedBranchFilter(actor, requestedBranchId);
     case 'TECHNICAL_MANAGER':
-      return requestedBranchId !== undefined ? { branchId: requestedBranchId } : {};
+      return scopedBranchFilter(actor, requestedBranchId);
     case 'TECHNICAL':
       return {
         ...(requestedBranchId !== undefined ? { branchId: requestedBranchId } : {}),
@@ -142,6 +143,8 @@ export const ISSUE_INCLUDE = {
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true } },
   /// Oldest first: every assignment and reassignment.
   assignments: { orderBy: { createdAt: 'asc' } },
+  /// Oldest first: the repair, stage by stage ("Giai đoạn 1", "Giai đoạn 2", …).
+  stages: { orderBy: { stageNumber: 'asc' } },
   /// The likely-repeat link: the earlier completed incident and who finished it.
   repeatOf: {
     select: {
@@ -155,6 +158,11 @@ export const ISSUE_INCLUDE = {
         orderBy: { attemptNumber: 'desc' },
         take: 1,
         select: { technicianNameSnapshot: true, outcomeAt: true },
+      },
+      // What was done last time, stage by stage — read when the fault comes back.
+      stages: {
+        orderBy: { stageNumber: 'asc' },
+        select: { stageNumber: true, workDone: true, nextWork: true, completedAt: true, technicianNameSnapshot: true, final: true },
       },
     },
   },
@@ -368,6 +376,13 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
       createdAt: a.createdAt.toISOString(),
     })),
     ...assignmentState(issue, cannotRepairCount),
+    /** The repair, stage by stage, oldest first — never overwritten. */
+    stages: issue.stages.map(serializeStage),
+    /**
+     * The stage under way while the repair is being worked ("Giai đoạn N đang
+     * thực hiện") — the next number after the stages already finished.
+     */
+    currentStageNumber: issue.status === 'IN_PROGRESS' ? issue.stages.length + 1 : null,
     /** The reporter's role, and "Admin tạo" when a supervisor filed it. */
     reportedByRole: issue.reportedByRole,
     sourceLabel: supervisorSourceLabel(issue.reportedByRole),
@@ -383,11 +398,34 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
           completedAt: issue.repeatOf.completedAt ? issue.repeatOf.completedAt.toISOString() : null,
           technicianName:
             issue.repeatOf.attempts[0]?.technicianNameSnapshot ?? issue.repeatOf.completedByNameSnapshot ?? null,
+          /** What was done last time, stage by stage. */
+          stages: issue.repeatOf.stages.map((st) => ({
+            stageNumber: st.stageNumber,
+            workDone: st.workDone,
+            nextWork: st.nextWork,
+            completedAt: st.completedAt.toISOString(),
+            technicianName: st.technicianNameSnapshot,
+            final: st.final,
+          })),
         }
       : null,
 
     createdAt: issue.createdAt.toISOString(),
     updatedAt: issue.updatedAt.toISOString(),
+  };
+}
+
+/** One repair stage, as every screen and export reads it. */
+export function serializeStage(stage: IssueDetail['stages'][number]) {
+  return {
+    id: stage.id,
+    stageNumber: stage.stageNumber,
+    technicianName: stage.technicianNameSnapshot,
+    startedAt: stage.startedAt.toISOString(),
+    completedAt: stage.completedAt.toISOString(),
+    workDone: stage.workDone,
+    nextWork: stage.nextWork,
+    final: stage.final,
   };
 }
 
@@ -531,11 +569,10 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
   // a room must then be one of THIS branch's rooms (the room catalog).
   const area = normaliseArea(input);
   if (area.roomNumber) area.roomNumber = catalogRoom(branch.code, area.roomNumber);
+  if (area.floorNumber) area.floorNumber = catalogFloor(branch.code, area.floorNumber);
   const category = AREA_FIELDS[area.areaCategory].category ? input.category ?? null : null;
-  const repeatOf =
-    area.areaCategory === 'ROOM' && area.roomNumber && category
-      ? await findRecentCompletion(branchId, area.roomNumber, category)
-      : null;
+  // "Báo lại sau lần hoàn thành trước": the same place and fault, finished recently.
+  const repeatOf = await findRecentCompletion(incidentKeyWhere(branchId, area, category));
 
   // Optional single photo: the declared MIME is never trusted — sniff the bytes.
   const mime = input.photo ? sniffImageMime(input.photo.buffer) : null;
@@ -597,25 +634,40 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
 export const REPEAT_WINDOW_DAYS = 90;
 
 /**
- * The most recent completed incident at this room with this fault — the
- * deterministic repeat rule: same branch, same catalog room, same fault type,
- * finished within `REPEAT_WINDOW_DAYS`. No text matching, no scoring.
+ * "THE SAME PROBLEM" — ONE STRUCTURED KEY, for the duplicate warning and the
+ * repeat link alike: the branch, the area, that area's own location field (the
+ * catalog room, the catalog floor, the lobby fixture) and the fault type when
+ * the area has one. Never the free text ("Vị trí cụ thể", "Sự cố", "Nguyên
+ * nhân") — those are shown beside a match, never used to find one.
+ */
+export function incidentKeyWhere(
+  branchId: number,
+  area: Pick<NormalisedArea, 'areaCategory' | 'roomNumber' | 'floorNumber' | 'areaSubtype'>,
+  category: IssueCategory | null,
+): Prisma.HotelIssueWhereInput {
+  const rules = AREA_FIELDS[area.areaCategory];
+  return {
+    branchId,
+    areaCategory: area.areaCategory,
+    ...(rules.roomNumber ? { roomNumber: area.roomNumber } : {}),
+    ...(rules.floorNumber ? { floorNumber: area.floorNumber } : {}),
+    ...(rules.areaSubtype ? { areaSubtype: area.areaSubtype } : {}),
+    ...(rules.category && category ? { category } : {}),
+  };
+}
+
+/**
+ * The most recent completed incident with the same key — the deterministic
+ * repeat rule: same place, same fault, finished within `REPEAT_WINDOW_DAYS`.
+ * No text matching, no scoring.
  */
 async function findRecentCompletion(
-  branchId: number,
-  roomNumber: string,
-  category: IssueCategory,
+  key: Prisma.HotelIssueWhereInput,
   now: Date = getClock().now(),
 ): Promise<{ id: string } | null> {
   const since = new Date(now.getTime() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   return prisma.hotelIssue.findFirst({
-    where: {
-      branchId,
-      roomNumber,
-      category,
-      status: { in: ['COMPLETED', 'AWAITING_INSPECTION'] },
-      completedAt: { gte: since },
-    },
+    where: { ...key, status: { in: ['COMPLETED', 'AWAITING_INSPECTION'] }, completedAt: { gte: since } },
     orderBy: { completedAt: 'desc' },
     select: { id: true },
   });
@@ -631,15 +683,32 @@ async function findRecentCompletion(
  */
 export async function findSimilarIssues(
   actor: Actor,
-  q: { branchId?: number; roomNumber: string; category?: IssueCategory },
+  q: {
+    branchId?: number;
+    /** Defaults to "Phòng" — the form's first and most common area. */
+    areaCategory?: IssueAreaCategory;
+    roomNumber?: string;
+    floorNumber?: string;
+    areaSubtype?: IssueAreaSubtype;
+    category?: IssueCategory;
+  },
 ): Promise<{ open: IssueDetail[]; recent: IssueDetail[] }> {
   const branchId = actor.role === 'RECEPTIONIST' ? actor.branchId ?? -1 : q.branchId;
   if (branchId === undefined) throw ApiError.validation('Vui lòng chọn chi nhánh.');
+  const areaCategory = q.areaCategory ?? 'ROOM';
+  const rules = AREA_FIELDS[areaCategory];
+  // The key's own location field must be there — "every room" is not a match.
+  const location = {
+    roomNumber: q.roomNumber?.trim() || null,
+    floorNumber: q.floorNumber?.trim() || null,
+    areaSubtype: q.areaSubtype ?? null,
+  };
+  if ((rules.roomNumber && !location.roomNumber) || (rules.floorNumber && !location.floorNumber) || (rules.areaSubtype && !location.areaSubtype)) {
+    return { open: [], recent: [] };
+  }
   const base: Prisma.HotelIssueWhereInput = {
     AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : branchId)],
-    branchId,
-    roomNumber: q.roomNumber.trim(),
-    ...(q.category ? { category: q.category } : {}),
+    ...incidentKeyWhere(branchId, { areaCategory, ...location }, q.category ?? null),
   };
   const since = new Date(getClock().now().getTime() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const [open, recent] = await Promise.all([
@@ -672,6 +741,8 @@ async function notifyNewIssue(branchAddress: string, issue: IssueDetail): Promis
       OR: [
         { role: { in: ['ADMIN', 'RECEPTION_GENERAL_MANAGER'] } },
         { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
+        // The Quản lý kỹ thuật of that branch assigns the repair.
+        { role: 'TECHNICAL_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
       ],
     },
     select: { id: true },
@@ -796,6 +867,9 @@ export async function updateIssue(
   if (next.roomNumber && next.roomNumber !== issue.roomNumber) {
     next.roomNumber = catalogRoom(issue.branch.code, next.roomNumber);
   }
+  if (next.floorNumber && next.floorNumber !== issue.floorNumber) {
+    next.floorNumber = catalogFloor(issue.branch.code, next.floorNumber);
+  }
 
   const changes: { field: string; oldValue: string | null; newValue: string | null }[] = [];
   const data: Prisma.HotelIssueUpdateInput = {};
@@ -850,8 +924,8 @@ export async function assignIssue(
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
-  if (!isReceptionSupervisor(actor.role)) {
-    throw ApiError.forbidden('Chỉ Admin hoặc quản lý lễ tân mới giao được kỹ thuật.');
+  if (!isTechnicalAssigner(actor.role)) {
+    throw ApiError.forbidden('Chỉ Admin, quản lý lễ tân hoặc quản lý kỹ thuật mới giao được kỹ thuật.');
   }
   const issue = await loadIssue(id);
   if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
@@ -1108,12 +1182,95 @@ export async function completeIssue(
       );
     }
     await recordAttemptOutcome(tx, id, 'COMPLETED', null, now, issue, { cause, result });
+    // "Đã xử lý xong": the final stage, after any recorded before it.
+    await createStage(tx, issue, actor, now, { workDone: result ?? 'Đã xử lý xong', nextWork: null, final: true });
   });
 
   const updated = await loadIssue(id);
   if (inspectable) await notifyInspectors(updated);
   else await notifyReporterStatus(updated, 'COMPLETED');
   return updated;
+}
+
+/** When the next stage began: the previous stage's end, or the current acceptance. */
+function nextStageStart(issue: IssueDetail, now: Date): Date {
+  const open = issue.attempts.find((a) => a.outcomeAt === null);
+  const accepted = open?.acceptedAt ?? issue.acceptedAt ?? null;
+  const last = issue.stages.at(-1)?.completedAt ?? null;
+  if (accepted && last) return accepted > last ? accepted : last;
+  return last ?? accepted ?? now;
+}
+
+/** Writes the next stage, numbered in order; a racing second write gets a clean 409. */
+async function createStage(
+  tx: Prisma.TransactionClient,
+  issue: IssueDetail,
+  actor: Actor,
+  now: Date,
+  stage: { workDone: string; nextWork: string | null; final: boolean },
+): Promise<void> {
+  const stageNumber = (await tx.technicalRepairStage.count({ where: { issueId: issue.id } })) + 1;
+  try {
+    await tx.technicalRepairStage.create({
+      data: {
+        issueId: issue.id,
+        stageNumber,
+        technicianUserId: actor.id,
+        technicianNameSnapshot: actor.fullName,
+        startedAt: nextStageStart(issue, now),
+        completedAt: now,
+        ...stage,
+      },
+    });
+  } catch (error) {
+    if (error instanceof PrismaNS.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw ApiError.conflict('Giai đoạn này vừa được ghi nhận. Vui lòng tải lại.');
+    }
+    throw error;
+  }
+}
+
+export interface RepairStageInput {
+  /** "Công việc hoàn thành" in this stage. */
+  workDone: string;
+  /** "Các công việc cần xử lý tiếp". */
+  nextWork: string;
+}
+
+/**
+ * "ĐANG TRONG QUÁ TRÌNH THEO DÕI THÊM" — the current stage is finished, the
+ * repair is NOT: the stage is recorded (numbered after the ones before it) and
+ * the incident stays "Đang sửa" for the next stage. Only the technician holding
+ * the job, only while it is being worked.
+ */
+export async function recordRepairStage(
+  id: string,
+  input: RepairStageInput,
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  assertTechnicalActor(actor);
+  const workDone = optionalText(input.workDone);
+  const nextWork = optionalText(input.nextWork);
+  if (!workDone) throw ApiError.validation('Vui lòng nhập công việc đã hoàn thành.');
+  if (!nextWork) throw ApiError.validation('Vui lòng nhập các công việc cần xử lý tiếp.');
+  if (workDone.length > 2000 || nextWork.length > 2000) throw ApiError.validation('Nội dung quá dài.');
+
+  const issue = await loadIssue(id);
+  assertOwnJob(issue, actor, 'work');
+  if (issue.status !== 'IN_PROGRESS') {
+    throw ApiError.conflict(finishedMessage(issue.status) ?? 'Cần tiếp nhận sự cố trước khi ghi nhận giai đoạn.', {
+      status: issue.status,
+    });
+  }
+  const now = clock.now();
+  await prisma.$transaction(async (tx) => {
+    // Still being worked — a completion that landed a moment ago wins.
+    const still = await tx.hotelIssue.count({ where: { id, status: 'IN_PROGRESS' } });
+    if (still === 0) throw ApiError.conflict('Sự cố vừa được cập nhật ở nơi khác. Vui lòng tải lại.');
+    await createStage(tx, issue, actor, now, { workDone, nextWork, final: false });
+  });
+  return loadIssue(id);
 }
 
 /**
@@ -1636,6 +1793,11 @@ export interface ListIssuesFilter {
   completedTo?: Date;
   /** 'UNASSIGNED': waiting incidents nobody holds — the supervisors' to-do list. */
   assignment?: 'UNASSIGNED';
+  /** Who holds it now, or worked it (the technical report's "Kỹ thuật viên"). */
+  technicianUserId?: number;
+  roomNumber?: string;
+  floorNumber?: string;
+  category?: IssueCategory;
   now?: Date;
   skip: number;
   take: number;
@@ -1679,6 +1841,12 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
   if (filter.assignment === 'UNASSIGNED') {
     (where.AND as Prisma.HotelIssueWhereInput[]).push({ status: 'NEW', assignedTechnicianUserId: null });
   }
+  if (filter.technicianUserId !== undefined) {
+    (where.AND as Prisma.HotelIssueWhereInput[]).push({ OR: technicianHistoryWhere(filter.technicianUserId) });
+  }
+  if (filter.roomNumber) where.roomNumber = filter.roomNumber;
+  if (filter.floorNumber) where.floorNumber = filter.floorNumber;
+  if (filter.category) where.category = filter.category;
   if (filter.status) where.status = filter.status;
   if (filter.stage) where = { ...where, ...stageWhere(filter.stage) };
   if (filter.areaCategory) where.areaCategory = filter.areaCategory;

@@ -461,6 +461,8 @@ export interface OperationalExportScope {
   /** One shift type ('A', 'B', 'C', 'A4', 'C4'); every shift when absent. */
   shiftType?: string;
   category?: ReportCategory;
+  /** A department's report from the same engine: "Kỹ thuật" or "Buồng phòng". */
+  section?: 'TECHNICAL' | 'HOUSEKEEPING';
 }
 
 export function operationalPdfUrl(params: OperationalExportScope): string {

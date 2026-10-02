@@ -6,8 +6,11 @@
  *   ADMIN         reads and reports on all of it, and can void.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
- *   1. The form offers the six conditions, needs a person, a room and at least
- *      one condition, and needs a description for "Vấn đề khác".
+ *   0. The workday: no shift → "Vào ca" (branch + cleaner); on shift, the
+ *      branch is in view with "Đổi chi nhánh" and "Kết thúc ca" (a summary).
+ *   1. The form offers the six conditions, needs a room and at least one
+ *      condition (the cleaner defaults to the shift's), and needs a
+ *      description for "Vấn đề khác".
  *   2. One save posts one inspection with every ticked condition.
  *   3. Reception's dialog enforces the money rules: Đã thu needs a method and an
  *      amount, Không thu được needs a reason — and the fields that do not apply
@@ -83,6 +86,36 @@ const SUMMARY = {
   uncollectibleAmount: 300000,
 };
 
+/** One segment of a workday at BRANCH. */
+function segment(over: Record<string, unknown> = {}) {
+  return {
+    id: 'seg1',
+    branch: BRANCH,
+    staffName: 'Chị Lan',
+    startedAt: '2026-09-19T01:00:00.000Z',
+    endedAt: null,
+    rooms: 1,
+    inspections: 1,
+    issues: 2,
+    byType: [{ type: 'SMOKING', label: 'Hút thuốc', count: 2 }],
+    ...over,
+  };
+}
+
+/** A housekeeping workday, open at BRANCH unless `ended`. */
+function workShift(ended = false) {
+  const seg = segment(ended ? { endedAt: '2026-09-19T09:00:00.000Z' } : {});
+  return {
+    id: 'sh1',
+    user: { id: 6, fullName: 'Buồng phòng Một' },
+    startedAt: '2026-09-19T01:00:00.000Z',
+    endedAt: ended ? '2026-09-19T09:00:00.000Z' : null,
+    segments: [seg],
+    current: ended ? null : seg,
+    totals: { rooms: 1, inspections: 1, issues: 2, byType: seg.byType },
+  };
+}
+
 function shell(user: unknown, extra: Record<string, Handler> = {}): Record<string, Handler> {
   return {
     'GET /api/auth/me': () => ({ status: 200, body: { user } }),
@@ -105,12 +138,57 @@ function shell(user: unknown, extra: Record<string, Handler> = {}): Record<strin
 describe('Bộ phận buồng phòng — the inspection form', () => {
   const routes = (extra: Record<string, Handler> = {}) =>
     shell(HOUSEKEEPING_USER, {
+      'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: workShift() } }),
       'GET /api/housekeeping/issues': () => ({
         status: 200,
         body: { issues: [], total: 0, truncated: false, summary: null },
       }),
       ...extra,
     });
+
+  it('off shift, asks for "Vào ca" — the branch and the cleaner — and sends both', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      routes({
+        'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
+        'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
+        'POST /api/housekeeping/shift/start': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { shift: workShift() } };
+        },
+      }),
+    );
+    renderApp('/app/inspections');
+    const start = await screen.findByTestId('shift-start');
+    expect(screen.queryByTestId('inspection-form')).not.toBeInTheDocument();
+    const submit = within(start).getByTestId('shift-start-submit');
+    expect(submit).toBeDisabled();
+    await waitFor(() => expect(within(start).getAllByRole('option')).toHaveLength(2));
+    await userEvent.selectOptions(within(start).getByTestId('shift-branch'), '1');
+    await userEvent.type(within(start).getByTestId('shift-staff'), 'Chị Lan');
+    await userEvent.click(submit);
+    await waitFor(() => expect(posted).toEqual([{ branchId: 1, staffName: 'Chị Lan' }]));
+  });
+
+  it('on shift, names the branch and the cleaner, and "Kết thúc ca" shows the day’s summary', async () => {
+    installApiMock(
+      routes({
+        'POST /api/housekeeping/shift/end': () => ({ status: 200, body: { shift: workShift(true) } }),
+      }),
+    );
+    renderApp('/app/inspections');
+    const current = await screen.findByTestId('shift-current');
+    expect(current).toHaveTextContent('Chi nhánh 1 — 05 Trương Định');
+    expect(current).toHaveTextContent('Chị Lan');
+    expect(within(current).getByTestId('shift-switch')).toHaveTextContent('Đổi chi nhánh');
+
+    await userEvent.click(within(current).getByTestId('shift-end'));
+    await userEvent.click(await screen.findByTestId('shift-end-confirm'));
+    const summary = await screen.findByTestId('shift-summary');
+    expect(summary).toHaveTextContent('1 chi nhánh');
+    expect(summary).toHaveTextContent('2 vấn đề');
+    expect(summary).toHaveTextContent('Hút thuốc: 2');
+  });
 
   it('lands on the "Buồng phòng" workspace — its one menu entry, and no deliveries', async () => {
     installApiMock(routes());
@@ -169,13 +247,14 @@ describe('Bộ phận buồng phòng — the inspection form', () => {
     ]);
   });
 
-  it('needs the person, the room and at least one condition — and a description for "Vấn đề khác"', async () => {
+  it('needs the room and at least one condition — and a description for "Vấn đề khác"', async () => {
     installApiMock(routes());
     renderApp('/app/inspections');
     const save = await screen.findByTestId('inspection-save');
     expect(save).toBeDisabled();
 
-    await userEvent.type(screen.getByTestId('inspection-staff'), 'Chị Lan');
+    // The cleaner is the shift's unless another is typed.
+    expect(screen.getByTestId('inspection-staff')).toHaveAttribute('placeholder', 'Chị Lan');
     await userEvent.type(screen.getByTestId('inspection-room'), '302');
     expect(save).toBeDisabled();
 
@@ -458,14 +537,21 @@ describe('Admin — buồng phòng', () => {
     // The exact URL carries the period, which is today's date — match any.
     const today = new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
     const from = new Date(Date.now() + 7 * 3600_000 - 29 * 86_400_000).toISOString().slice(0, 10);
-    return { [`GET /api/housekeeping/issues?from=${from}&to=${today}`]: handler };
+    return {
+      [`GET /api/housekeeping/issues?from=${from}&to=${today}`]: handler,
+      [`GET /api/housekeeping/shifts?from=${from}&to=${today}`]: () => ({
+        status: 200,
+        body: { shifts: [{ ...workShift(true), segments: [segment({ endedAt: '2026-09-19T09:00:00.000Z' })] }] },
+      }),
+    };
   }
 
   it('is in the Admin menu, with the branch picker built from the branch table', async () => {
     installApiMock(routes(anyIssuesRoute(list())));
+    // The old address lands under "Báo cáo vấn đề", whose group opens on it.
     renderApp('/app/housekeeping');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getByRole('link', { name: 'Buồng phòng' })).toBeInTheDocument();
+    expect(await within(nav).findByRole('link', { name: 'Buồng phòng' })).toHaveAttribute('href', '/app/reports/housekeeping');
 
     const branch = await screen.findByTestId('housekeeping-branch');
     await waitFor(() =>
@@ -480,9 +566,17 @@ describe('Admin — buồng phòng', () => {
   it('shows every branch’s issues with the server’s totals, and the split by type', async () => {
     installApiMock(routes(anyIssuesRoute(list())));
     renderApp('/app/housekeeping');
-    const table = await screen.findByTestId('room-issue-table');
-    expect(await within(table).findByText('Hút thuốc')).toBeInTheDocument();
-    expect(within(table).getByText('260 Lý Tự Trọng - Chi nhánh 02')).toBeInTheDocument();
+    // Branch → room → finding: one table per branch.
+    const first = await screen.findByTestId('room-issue-table-1');
+    expect(await within(first).findByText('Hút thuốc')).toBeInTheDocument();
+    expect(first).toHaveTextContent('Chi nhánh 1 — 05 Trương Định');
+    const second = screen.getByTestId('room-issue-table-2');
+    expect(within(second).getByText('Phòng có mùi')).toBeInTheDocument();
+    expect(second).toHaveTextContent('Chi nhánh 2 — 260 Lý Tự Trọng');
+    // The housekeeping workdays of the period, with the export beside them.
+    const shifts = await screen.findByTestId('housekeeping-shifts');
+    expect(await within(shifts).findByText('Chị Lan')).toBeInTheDocument();
+    expect(screen.getByTestId('housekeeping-export-pdf').getAttribute('href')).toMatch(/section=HOUSEKEEPING/);
     const summary = await screen.findByTestId('room-issue-summary');
     expect(summary).toHaveTextContent('Tổng đã thu');
     expect(summary).toHaveTextContent('700.000 ₫');

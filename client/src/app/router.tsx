@@ -35,6 +35,7 @@ import { PendingReviewPage, RejectedPage } from '../pages/VerificationBookingsPa
 import { HistoryPage } from '../pages/HistoryPage';
 import { OperationalReportsPage } from '../pages/OperationalReportsPage';
 import { CompletedIssuesPage } from '../pages/CompletedIssuesPage';
+import { TechnicalReportPage } from '../pages/TechnicalReportPage';
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -51,8 +52,11 @@ import { NotFoundPage } from '../pages/NotFoundPage';
  */
 const BOOKING_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
 
-/** The technical screens: the technician works them, the manager inspects from them. */
-const TECHNICAL_ROLES: readonly UserRole[] = ['TECHNICAL', 'TECHNICAL_MANAGER'];
+/**
+ * "Báo cáo vấn đề → Kỹ thuật": the supervisors and the Quản lý kỹ thuật, each
+ * over its own branches (the server scopes every row).
+ */
+const TECHNICAL_REPORT_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER'];
 
 /**
  * "Báo cáo vấn đề" and "Buồng phòng" as the reception SUPERVISORS see them —
@@ -75,8 +79,8 @@ function RoleLanding() {
   // Without this, a technician landed on the receptionist inbox — a branch-scoped
   // screen they have no branch for, so it was permanently empty.
   if (user?.role === 'TECHNICAL') return <Navigate to="/app/technical/new" replace />;
-  // Quản lý kỹ thuật's own work is the inspection queue.
-  if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/technical/awaiting-inspection" replace />;
+  // Quản lý kỹ thuật's own work: the incidents of its branches.
+  if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/reports/technical" replace />;
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
   // The supervision layer opens on its reports.
@@ -84,6 +88,20 @@ function RoleLanding() {
     return <Navigate to="/app/reports" replace />;
   }
   return <Navigate to="/app/new" replace />;
+}
+
+/**
+ * The technician's queues. The Quản lý kỹ thuật's temporary "Nghiệm thu" screen
+ * is gone: an old link of its lands on its incident workspace instead.
+ */
+function TechnicalQueueRoute() {
+  const { user } = useAuth();
+  if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/reports/technical" replace />;
+  return (
+    <RequireRole role="TECHNICAL">
+      <TechnicalPage />
+    </RequireRole>
+  );
 }
 
 export function AppRoutes() {
@@ -151,10 +169,13 @@ export function AppRoutes() {
             the Admin endpoints to everyone else.
           */}
           <Route path="reports" element={<RequireRole role={REPORT_ROLES}><OperationalReportsPage /></RequireRole>} />
-          {/* Reception's 12-hour completion archive — a query over the same records. */}
+          {/* "Báo cáo vấn đề" → "Kỹ thuật" and "Buồng phòng". */}
+          <Route path="reports/technical" element={<RequireRole role={TECHNICAL_REPORT_ROLES}><TechnicalReportPage /></RequireRole>} />
+          <Route path="reports/housekeeping" element={<RequireRole role={SUPERVISION_ROLES}><AdminHousekeepingPage /></RequireRole>} />
+          {/* The 12-hour completion archive — a query over the same records; the Admin reads every branch. */}
           <Route
             path="completed-issues"
-            element={<RequireRole role={['RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER']}><CompletedIssuesPage /></RequireRole>}
+            element={<RequireRole role={['ADMIN', 'RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER']}><CompletedIssuesPage /></RequireRole>}
           />
           {/*
             Bộ phận kỹ thuật. `queue` is a real path segment so each workflow
@@ -172,14 +193,7 @@ export function AppRoutes() {
               </RequireRole>
             }
           />
-          <Route
-            path="technical/:queue"
-            element={
-              <RequireRole role={TECHNICAL_ROLES}>
-                <TechnicalPage />
-              </RequireRole>
-            }
-          />
+          <Route path="technical/:queue" element={<TechnicalQueueRoute />} />
           {/*
             Chứng từ. Reception is refused here AND by the API — this gate only
             renders a forbidden page; the server is the security boundary.
@@ -232,7 +246,8 @@ export function AppRoutes() {
           */}
           <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
           <Route path="room-collections" element={<RequireRole role="RECEPTIONIST"><RoomCollectionsPage /></RequireRole>} />
-          <Route path="housekeeping" element={<RequireRole role={SUPERVISION_ROLES}><AdminHousekeepingPage /></RequireRole>} />
+          {/* The old address of the supervisors' Buồng phòng: under "Báo cáo vấn đề" now. */}
+          <Route path="housekeeping" element={<Navigate to="/app/reports/housekeeping" replace />} />
           {/* "Giao nhận hàng hóa" as Technical and Housekeeping see it — their own department's. */}
           <Route
             path="deliveries"

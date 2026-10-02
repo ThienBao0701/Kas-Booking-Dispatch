@@ -36,6 +36,7 @@ import { captureShiftContext, type ShiftActor } from '../shift/shiftService';
 import { assertMoney } from '../reception/reportService';
 import { branchScopeOf, isReceptionSupervisor, scopeIncludes, scopedBranchFilter } from '../auth/branchScope';
 import { catalogRoom } from '../room/branchRooms';
+import { openSegmentFor } from './workShiftService';
 import {
   ROOM_COLLECTION_METHODS,
   ROOM_COLLECTION_METHOD_LABELS,
@@ -144,7 +145,8 @@ export type SerializedRoomIssue = ReturnType<typeof serializeRoomIssue>;
 
 export interface InspectionInput {
   roomNumber: unknown;
-  staffName: unknown;
+  /** Optional: the open shift segment's cleaner is used when absent. */
+  staffName?: unknown;
   issues: { type: unknown; note?: unknown }[];
 }
 
@@ -161,17 +163,19 @@ export async function createInspection(
   if (actor.role !== 'HOUSEKEEPING') {
     throw ApiError.forbidden('Chỉ bộ phận buồng phòng mới ghi nhận được kiểm tra phòng.');
   }
-  if (actor.branchId === null) {
-    throw ApiError.validation('Tài khoản buồng phòng chưa được gán chi nhánh.');
-  }
+  /*
+    THE BRANCH IS THE SHIFT'S. The open work segment ("Vào ca" / "Đổi chi nhánh")
+    decides where this inspection happened — never the request, never a
+    permanent account branch — and it is recorded against that segment.
+  */
+  const segment = await openSegmentFor(actor.id, client);
   const typedRoom = trimmed(input.roomNumber);
   if (!typedRoom) throw ApiError.validation('Vui lòng nhập số phòng.');
   if (typedRoom.length > 50) throw ApiError.validation('Số phòng quá dài.');
   // One of THIS branch's rooms (the shared room catalog), when it has one.
-  const ownBranch = await client.branch.findUnique({ where: { id: actor.branchId }, select: { code: true } });
-  if (!ownBranch) throw ApiError.validation('Chi nhánh không hợp lệ.');
-  const roomNumber = catalogRoom(ownBranch.code, typedRoom)!;
-  const staffName = trimmed(input.staffName);
+  const roomNumber = catalogRoom(segment.branch.code, typedRoom)!;
+  // The segment's cleaner, unless this inspection names another.
+  const staffName = trimmed(input.staffName) || segment.staffName;
   if (!staffName) throw ApiError.validation('Vui lòng nhập tên người dọn phòng.');
   if (staffName.length > 100) throw ApiError.validation('Tên người dọn phòng quá dài.');
 
@@ -194,12 +198,13 @@ export async function createInspection(
   });
 
   const now = clock.now();
-  const branchId = actor.branchId;
+  const branchId = segment.branchId;
   const created = await client.roomInspection.create({
     data: {
       branchId,
       roomNumber,
       staffName,
+      workSegmentId: segment.id,
       createdByUserId: actor.id,
       createdByNameSnapshot: actor.fullName,
       createdAt: now,
@@ -266,9 +271,11 @@ export function roomIssueWhere(
     where.branchId = actor.branchId ?? -1;
     where.voidedAt = null;
   } else if (actor.role === 'HOUSEKEEPING') {
-    where.branchId = actor.branchId ?? -1;
+    // Its OWN inspections, whichever branch the shift was at — its work history
+    // follows the person across "Đổi chi nhánh", never anybody else's.
     where.voidedAt = null;
     inspection.createdByUserId = actor.id;
+    if (filter.branchId !== undefined) where.branchId = filter.branchId;
   } else if (isReceptionSupervisor(actor.role)) {
     // Admin: every branch; a Quản lý lễ tân: its branches; the general manager: all.
     Object.assign(where, scopedBranchFilter(actor, filter.branchId));

@@ -71,6 +71,10 @@ export async function resetHousekeepingData(): Promise<void> {
   await testPrisma.roomIssueCollection.deleteMany();
   await testPrisma.roomInspectionIssue.deleteMany();
   await testPrisma.roomInspection.deleteMany();
+  // The workdays ("Vào ca"): segments go with their session; the session holds
+  // a RESTRICT reference to User, so it is cleared before any account is.
+  await testPrisma.housekeepingWorkSegment.deleteMany();
+  await testPrisma.housekeepingWorkSession.deleteMany();
 }
 
 /**

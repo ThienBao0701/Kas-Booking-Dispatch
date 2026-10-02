@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import type { Prisma, UserRole } from '@prisma/client';
+import { ApiError } from '../lib/errors';
 import { prisma } from '../db/prisma';
 import { getClock } from '../lib/clock';
 import { requireAuth, requireAdmin, requirePasswordChanged, requireRole } from '../middleware/auth';
@@ -117,8 +118,24 @@ const branchIdList = z
 const shiftTypeQuery = z.enum(['A', 'B', 'C', 'A4', 'C4']).optional();
 
 const operationalExportQuery = rangeQuery.and(
-  z.object({ category: reportCategory.optional(), branchIds: branchIdList, shiftType: shiftTypeQuery }),
+  z.object({
+    category: reportCategory.optional(),
+    branchIds: branchIdList,
+    shiftType: shiftTypeQuery,
+    // A department's report from the same engine: "Kỹ thuật" or "Buồng phòng".
+    section: z.enum(['TECHNICAL', 'HOUSEKEEPING']).optional(),
+  }),
 );
+
+/**
+ * A Quản lý kỹ thuật reads the technical report of its branches and nothing of
+ * Reception's: any other export is refused here, before anything is loaded.
+ */
+function assertExportAllowed(role: UserRole, section: 'TECHNICAL' | 'HOUSEKEEPING' | undefined): void {
+  if (role === 'TECHNICAL_MANAGER' && section !== 'TECHNICAL') {
+    throw ApiError.forbidden('Quản lý kỹ thuật chỉ xuất được báo cáo kỹ thuật.');
+  }
+}
 
 /**
  * The Admin drill-down: khoảng thời gian · chi nhánh · danh mục → bản ghi.
@@ -266,7 +283,7 @@ export function createAdminReportsRouter(): Router {
     '/admin/reports',
     requireAuth,
     requirePasswordChanged,
-    requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
+    requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER'),
     (req, res, next) =>
       /^\/operational(\.pdf|\.xlsx)?$/.test(req.path) ? next() : requireAdmin(req, res, next),
   );
@@ -526,6 +543,7 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const q = operationalExportQuery.parse(req.query);
+      assertExportAllowed(user.role, q.section);
       const data = await operationalReport(supervisorOf(user), {
         from: q.from,
         to: q.to,
@@ -533,6 +551,7 @@ export function createAdminReportsRouter(): Router {
         branchIds: q.branchIds,
         category: q.category,
         shiftType: q.shiftType,
+        section: q.section,
       });
       // "05_Truong Dinh_07-01-2027.pdf" — the branch and the business date.
       const single = q.branchIds ? q.branchIds.length === 1 : q.branchId !== undefined;
@@ -545,6 +564,7 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const q = operationalExportQuery.parse(req.query);
+      assertExportAllowed(user.role, q.section);
       const data = await operationalReport(supervisorOf(user), {
         from: q.from,
         to: q.to,
@@ -552,6 +572,7 @@ export function createAdminReportsRouter(): Router {
         branchIds: q.branchIds,
         category: q.category,
         shiftType: q.shiftType,
+        section: q.section,
       });
       const workbook = await buildOperationalReportWorkbook(data);
       // The same name as the PDF of the same scope: branch, business date(s), shift.

@@ -27,6 +27,7 @@ import {
   ROOM_ISSUE_TYPES,
   ROOM_ISSUE_TYPE_LABELS,
 } from '../housekeeping/roomIssueTypes';
+import { currentShift, endShift, listShifts, startShift, switchShiftBranch } from '../housekeeping/workShiftService';
 
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const TYPE = z.enum(ROOM_ISSUE_TYPES as [string, ...string[]]);
@@ -35,7 +36,8 @@ const STATUS = z.enum(ROOM_COLLECTION_STATUSES as [string, ...string[]]);
 /** Shape only — what is REQUIRED for which case is the service's rule. */
 const inspectionSchema = z.object({
   roomNumber: z.string(),
-  staffName: z.string(),
+  // Optional: the shift's cleaner ("Tên người dọn buồng") is used when absent.
+  staffName: z.string().optional(),
   issues: z.array(z.object({ type: z.string(), note: z.string().optional() })).max(50),
 });
 
@@ -48,6 +50,18 @@ const collectionSchema = z.object({
 });
 
 const voidSchema = z.object({ reason: z.string() });
+
+/** "Vào ca" / "Đổi chi nhánh": where, and who cleans. */
+const shiftBranchSchema = z.object({
+  branchId: z.number().int().positive(),
+  staffName: z.string().trim().min(1, 'Vui lòng nhập tên người dọn buồng.').max(100),
+});
+
+const shiftListSchema = z.object({
+  branchId: z.coerce.number().int().positive().optional(),
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+});
 
 const listSchema = z
   .object({
@@ -145,6 +159,46 @@ export function createHousekeepingRouter(): Router {
     })().catch(next);
     },
   );
+
+  /*
+    THE HOUSEKEEPING WORKDAY — "Vào ca", "Đổi chi nhánh", "Kết thúc ca", and the
+    history of workdays. The account itself only ever acts on its own workday.
+  */
+  router.get('/housekeeping/shift', requireRole('HOUSEKEEPING'), (req, res, next) => {
+    (async () => {
+      res.json({ shift: await currentShift(actorOf(req)) });
+    })().catch(next);
+  });
+
+  router.post('/housekeeping/shift/start', requireRole('HOUSEKEEPING'), (req, res, next) => {
+    (async () => {
+      const body = shiftBranchSchema.parse(req.body ?? {});
+      res.status(201).json({ shift: await startShift(actorOf(req), body, getClock()) });
+    })().catch(next);
+  });
+
+  router.post('/housekeeping/shift/switch', requireRole('HOUSEKEEPING'), (req, res, next) => {
+    (async () => {
+      const body = shiftBranchSchema.partial({ staffName: true }).parse(req.body ?? {});
+      res.json({ shift: await switchShiftBranch(actorOf(req), body, getClock()) });
+    })().catch(next);
+  });
+
+  router.post('/housekeeping/shift/end', requireRole('HOUSEKEEPING'), (req, res, next) => {
+    (async () => {
+      res.json({ shift: await endShift(actorOf(req), getClock()) });
+    })().catch(next);
+  });
+
+  // GET /api/housekeeping/shifts — workdays on record: one's own, or a supervisor's scope.
+  router.get('/housekeeping/shifts', (req, res, next) => {
+    (async () => {
+      const q = shiftListSchema.parse(req.query);
+      const range = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      const shifts = await listShifts(actorOf(req), { from: range?.start, to: range?.end, branchId: q.branchId });
+      res.json({ shifts });
+    })().catch(next);
+  });
 
   // POST /api/housekeeping/issues/:id/void — Admin only, with a reason.
   router.post('/housekeeping/issues/:id/void', requireRole('ADMIN'), (req, res, next) => {

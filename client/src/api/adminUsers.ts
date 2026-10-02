@@ -12,7 +12,7 @@ export interface ManagedUser {
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
-  /** Quản lý lễ tân: the branches it supervises. Empty for every other role. */
+  /** Quản lý lễ tân / Quản lý kỹ thuật: the branches ticked. Empty for every other role. */
   managedBranches?: Branch[];
 }
 
@@ -41,15 +41,17 @@ export const GLOBAL_ROLES: readonly ManageableRole[] = [
   'TECHNICAL_MANAGER',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
+  // No permanent branch: the branch is chosen at "Vào ca", for that shift.
+  'HOUSEKEEPING',
 ];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
   return !GLOBAL_ROLES.includes(role ?? 'RECEPTIONIST');
 }
 
-/** Only a Quản lý lễ tân picks its branches — one or more, with checkboxes. */
-export function requiresBranchSet(role: ManageableRole | undefined): boolean {
-  return role === 'RECEPTION_MANAGER';
+/** Quản lý lễ tân and Quản lý kỹ thuật pick their branches — one or more, with checkboxes. */
+export function requiresBranchSet(role: UserRole | undefined): boolean {
+  return role === 'RECEPTION_MANAGER' || role === 'TECHNICAL_MANAGER';
 }
 
 export interface CreateUserInput {
@@ -72,6 +74,11 @@ export const adminUsersApi = {
   /** Replaces a Quản lý lễ tân's supervised branches, as a set. Records it created stay put. */
   setBranches: (id: number, branchIds: number[]) =>
     api.put<{ user: ManagedUser }>(`/admin/users/${id}`, { branchIds }),
+  /** "Sửa": the name, and the branch or branches the role carries. */
+  update: (id: number, input: { fullName?: string; branchId?: number; branchIds?: number[] }) =>
+    api.put<{ user: ManagedUser }>(`/admin/users/${id}`, input),
+  /** "Xóa": permanent; the account's history stays, under its recorded names. */
+  remove: (id: number) => api.del<{ deleted: true; id: number }>(`/admin/users/${id}`),
   enable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/enable`),
   disable: (id: number) => api.post<{ user: ManagedUser }>(`/admin/users/${id}/disable`),
   resetPassword: (id: number, temporaryPassword: string) =>

@@ -8,6 +8,7 @@ import { hashPassword, passwordSchema } from '../auth/password';
 import { serializeManagedUser } from '../auth/serialize';
 import { sessionStore } from '../auth/session';
 import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware/auth';
+import { DELETED_ACCOUNT_USERNAME, deleteAccount } from '../auth/deleteAccount';
 
 /**
  * The roles this endpoint may create. ADMIN is deliberately absent: an
@@ -37,7 +38,13 @@ const GLOBAL_ROLES: readonly string[] = [
   'RECEPTION_GENERAL_MANAGER',
   // Several branches, through UserBranchAssignment — never one `branchId`.
   'RECEPTION_MANAGER',
+  'TECHNICAL_MANAGER',
+  // No permanent branch: where it works is chosen at "Vào ca" (its shift).
+  'HOUSEKEEPING',
 ];
+
+/** The roles whose branches are a SET of ticked boxes (at least one). */
+const BRANCH_SET_ROLES: readonly string[] = ['RECEPTION_MANAGER', 'TECHNICAL_MANAGER'];
 
 /** Vietnamese department names, for the messages this endpoint returns. */
 const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
@@ -69,22 +76,16 @@ const createUserSchema = z
     message: 'Tài khoản lễ tân phải thuộc một chi nhánh.',
     path: ['branchId'],
   })
-  // Housekeeping inspects rooms in ONE hotel, and the inspection is stamped with
-  // that hotel from the account — so an account without one could record nothing.
-  .refine((v) => v.role !== 'HOUSEKEEPING' || v.branchId !== undefined, {
-    message: 'Tài khoản buồng phòng phải thuộc một chi nhánh.',
-    path: ['branchId'],
-  })
   .refine((v) => !GLOBAL_ROLES.includes(v.role) || v.branchId === undefined, {
     message: 'Tài khoản bộ phận không thuộc chi nhánh nào.',
     path: ['branchId'],
   })
-  .refine((v) => v.role !== 'RECEPTION_MANAGER' || (v.branchIds?.length ?? 0) > 0, {
-    message: 'Quản lý lễ tân phải được gán ít nhất một chi nhánh.',
+  .refine((v) => !BRANCH_SET_ROLES.includes(v.role) || (v.branchIds?.length ?? 0) > 0, {
+    message: 'Tài khoản quản lý phải được gán ít nhất một chi nhánh.',
     path: ['branchIds'],
   })
-  .refine((v) => v.role === 'RECEPTION_MANAGER' || v.branchIds === undefined, {
-    message: 'Chỉ quản lý lễ tân mới được gán nhiều chi nhánh.',
+  .refine((v) => BRANCH_SET_ROLES.includes(v.role) || v.branchIds === undefined, {
+    message: 'Chỉ quản lý lễ tân và quản lý kỹ thuật mới được gán nhiều chi nhánh.',
     path: ['branchIds'],
   });
 
@@ -179,7 +180,7 @@ export function createAdminUsersRouter(): Router {
       const roles: Prisma.UserWhereInput['role'] = {
         in: query.includeAdmins ? [...MANAGEABLE_ROLES, 'ADMIN'] : [...MANAGEABLE_ROLES],
       };
-      const where: Prisma.UserWhereInput = { role: roles };
+      const where: Prisma.UserWhereInput = { role: roles, username: { not: DELETED_ACCOUNT_USERNAME } };
       if (query.branchId !== undefined) where.branchId = query.branchId;
       if (query.active !== undefined) where.active = query.active === 'true';
       if (query.search) {
@@ -213,7 +214,7 @@ export function createAdminUsersRouter(): Router {
         throw ApiError.conflict('Tên đăng nhập đã tồn tại.');
       }
 
-      const managed = body.role === 'RECEPTION_MANAGER' ? await usableBranchIds(body.branchIds ?? []) : [];
+      const managed = BRANCH_SET_ROLES.includes(body.role) ? await usableBranchIds(body.branchIds ?? []) : [];
 
       const created = await prisma.user.create({
         data: {
@@ -260,8 +261,8 @@ export function createAdminUsersRouter(): Router {
       */
       let managed: number[] | null = null;
       if (body.branchIds !== undefined) {
-        if (existing.role !== 'RECEPTION_MANAGER') {
-          throw ApiError.validation('Chỉ quản lý lễ tân mới được gán nhiều chi nhánh.');
+        if (!BRANCH_SET_ROLES.includes(existing.role)) {
+          throw ApiError.validation('Chỉ quản lý lễ tân và quản lý kỹ thuật mới được gán nhiều chi nhánh.');
         }
         managed = await usableBranchIds(body.branchIds);
       }
@@ -290,6 +291,26 @@ export function createAdminUsersRouter(): Router {
   });
 
   // POST /api/admin/users/:id/reset-password — issue a new temporary password.
+  /*
+    DELETE /api/admin/users/:id — "Xóa": PERMANENT. The account is removed; its
+    history stays, under its recorded names and the "Tài khoản đã xóa"
+    placeholder (auth/deleteAccount.ts). Admin only (the router gate), never the
+    Admin's own account, never an Admin (loadReceptionist refuses), and refused
+    while the account has live work.
+  */
+  router.delete('/admin/users/:id', (req, res, next) => {
+    (async () => {
+      const id = parseUserId(req.params.id);
+      if (id === req.currentUser!.id) throw ApiError.forbidden('Không thể xóa tài khoản đang đăng nhập.');
+      const existing = await loadReceptionist(id);
+      if (existing.username === DELETED_ACCOUNT_USERNAME) throw ApiError.notFound('Không tìm thấy tài khoản.');
+      // Refused BEFORE anything is touched: a refused delete must not sign the person out.
+      await deleteAccount(id);
+      await sessionStore.destroyByUserId(id);
+      res.json({ deleted: true, id });
+    })().catch(next);
+  });
+
   router.post('/admin/users/:id/reset-password', (req, res, next) => {
     (async () => {
       const id = parseUserId(req.params.id);

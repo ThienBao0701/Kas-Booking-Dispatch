@@ -48,6 +48,19 @@ export function isReceptionSupervisor(role: UserRole): role is ReceptionSupervis
   return (RECEPTION_SUPERVISOR_ROLES as readonly string[]).includes(role);
 }
 
+/**
+ * WHO MAY GIVE AN INCIDENT TO A TECHNICIAN — the reception supervisors and the
+ * Quản lý kỹ thuật, each within its own branch scope (checked per incident).
+ */
+export const TECHNICAL_ASSIGNER_ROLES = [...RECEPTION_SUPERVISOR_ROLES, 'TECHNICAL_MANAGER'] as const;
+
+export function isTechnicalAssigner(role: UserRole): boolean {
+  return (TECHNICAL_ASSIGNER_ROLES as readonly string[]).includes(role);
+}
+
+/** The roles with a branch SET on the account (UserBranchAssignment rows). */
+export const BRANCH_SET_ROLES: readonly UserRole[] = ['RECEPTION_MANAGER', 'TECHNICAL_MANAGER'];
+
 /** "Admin tạo" and its siblings — how a supervisor-entered record is labelled. */
 export const SUPERVISOR_SOURCE_LABELS: Record<ReceptionSupervisorRole, string> = {
   ADMIN: 'Admin tạo',
@@ -70,7 +83,9 @@ export function branchScopeOf(actor: ScopeSubject): BranchScope {
     case 'ADMIN':
     case 'RECEPTION_GENERAL_MANAGER':
       return 'ALL';
+    // Quản lý lễ tân and Quản lý kỹ thuật: the branches ticked on the account.
     case 'RECEPTION_MANAGER':
+    case 'TECHNICAL_MANAGER':
       return actor.managedBranchIds ?? [];
     case 'RECEPTIONIST':
     case 'HOUSEKEEPING':

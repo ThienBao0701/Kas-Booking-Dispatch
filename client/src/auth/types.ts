@@ -55,6 +55,11 @@ export const RECEPTION_SUPERVISOR_ROLES: readonly UserRole[] = [
   'RECEPTION_GENERAL_MANAGER',
 ];
 
+/** Who gives an incident to a technician: the reception supervisors and the Quản lý kỹ thuật. */
+export function isTechnicalAssigner(role: UserRole | undefined): boolean {
+  return isReceptionSupervisor(role) || role === 'TECHNICAL_MANAGER';
+}
+
 export function isReceptionSupervisor(role: UserRole | undefined): boolean {
   return role !== undefined && RECEPTION_SUPERVISOR_ROLES.includes(role);
 }

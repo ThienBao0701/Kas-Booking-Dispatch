@@ -105,12 +105,29 @@ type TableState = {
 
 export function AdminOperationalReportsPage() {
   const today = hcmToday();
-  const [searchParams] = useSearchParams();
-  // A deep link (the old "Sự cố khách sạn" address redirects here) opens its
-  // category directly — and an incident monitor starts on every branch.
-  const linked = CATEGORY_ORDER.find((c) => c === searchParams.get('category')) ?? null;
-  const [branch, setBranch] = useState<BranchChoice>(linked === 'FACILITY_ISSUE' ? 'ALL' : null);
-  const [category, setCategory] = useState<ReportCategory | null>(linked);
+  const [searchParams, setSearchParams] = useSearchParams();
+  /*
+    THE CATEGORY IS THE ADDRESS: "Báo cáo vấn đề → Lễ tân → <danh mục>" in the
+    menu links to `?category=…`, and a tab here writes the same, so the menu,
+    the tabs and a shared link always agree. A linked category opens on every
+    branch rather than asking for one first.
+  */
+  const category = CATEGORY_ORDER.find((c) => c === searchParams.get('category')) ?? null;
+  const setCategory = (next: ReportCategory | null) =>
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        if (next) params.set('category', next);
+        else params.delete('category');
+        return params;
+      },
+      { replace: true },
+    );
+  const [branch, setBranch] = useState<BranchChoice>(category ? 'ALL' : null);
+  // A category picked from the menu with no branch yet reads every branch.
+  useEffect(() => {
+    if (category && branch === null) setBranch('ALL');
+  }, [category, branch]);
   /*
     TODAY BY DEFAULT. An unbounded default read a branch's entire history —
     capped at 500 rows, so the screen quietly showed a fraction of it — beside a
@@ -276,7 +293,6 @@ export function AdminOperationalReportsPage() {
                 onChange={(e) => {
                   const v = e.target.value;
                   setBranch(v === '' ? null : v === 'ALL' ? 'ALL' : Number(v));
-                  setCategory(null);
                 }}
                 className="min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-800 hover:border-slate-600 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
               >

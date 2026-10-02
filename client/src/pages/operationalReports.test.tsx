@@ -2675,12 +2675,16 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     ).toBe(false);
   });
 
-  it('is Reception’s alone: an Admin is refused, and nothing is read', async () => {
-    const fetchMock = installApiMock(archiveRoutes(undefined, ADMIN_USER));
+  it('is open to the Admin over every branch, with a branch picker and the export', async () => {
+    installApiMock({
+      ...archiveRoutes(undefined, ADMIN_USER),
+      'GET /api/branches': () => ({ status: 200, body: { branches: [{ id: 1, code: 'TD', hotelName: 'KAS', address: '05 Trương Định', branchNumber: 1 }] } }),
+    });
     renderApp('/app/completed-issues');
 
-    expect(await screen.findByText('Không có quyền truy cập')).toBeInTheDocument();
-    expect(screen.queryByTestId('completed-issues')).not.toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/reception/reports/archive'))).toBe(false);
+    expect(await screen.findByTestId('completed-issues')).toBeInTheDocument();
+    const branch = screen.getByTestId('completed-branch');
+    await waitFor(() => expect(within(branch).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tất cả chi nhánh', 'Chi nhánh 1 — 05 Trương Định']));
+    expect(screen.getByTestId('completed-export-pdf').getAttribute('href')).toContain('/api/admin/reports/operational.pdf');
   });
 });

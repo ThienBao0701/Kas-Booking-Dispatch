@@ -593,6 +593,8 @@ model User {
   issuesAssigned           HotelIssue[]                  @relation("IssueAssignedTechnician")
   issueAssignmentsReceived HotelIssueAssignment[]        @relation("IssueAssignmentTechnician")
   issueAssignmentsMade     HotelIssueAssignment[]        @relation("IssueAssignmentAssigner")
+  repairStages             TechnicalRepairStage[]        @relation("RepairStageTechnician")
+  housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
 
   @@index([branchId])
   @@index([role])
@@ -708,6 +710,7 @@ model Branch {
   roomInspections         RoomInspection[]
   roomInspectionIssues    RoomInspectionIssue[]
   managerAssignments      UserBranchAssignment[]       @relation("UserBranchAssignmentBranch")
+  housekeepingSegments    HousekeepingWorkSegment[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -1870,6 +1873,8 @@ model HotelIssue {
   assignments        HotelIssueAssignment[]   @relation("IssueAssignments")
   repeatOf           HotelIssue?              @relation("IssueRepeatOf", fields: [repeatOfIssueId], references: [id], onDelete: SetNull)
   repeatedBy         HotelIssue[]             @relation("IssueRepeatOf")
+  /// The repair, stage by stage, oldest first when read.
+  stages             TechnicalRepairStage[]   @relation("IssueRepairStages")
 
   @@index([assignedTechnicianUserId, status])
   @@index([branchId, roomNumber])
@@ -2361,6 +2366,36 @@ model TechnicalRepairAttempt {
   @@index([technicianUserId])
   @@index([inspectedByUserId])
   @@index([inspectionResult, inspectedAt])
+}
+
+/// ONE STAGE OF A REPAIR ("Giai đoạn"), recorded when it is FINISHED.
+///
+/// A repair may take several stages ("Đang trong quá trình theo dõi thêm"): each
+/// says what was done and what still needs doing, and the incident stays "Đang
+/// sửa" until a stage closes it ("Đã xử lý xong", `final`). Numbered per incident,
+/// in order, never overwritten; the stage under way is the next number.
+model TechnicalRepairStage {
+  id                     String   @id @default(cuid())
+  issueId                String
+  stageNumber            Int
+  technicianUserId       Int?
+  technicianNameSnapshot String
+  /// When the stage began — the previous stage's end, or the acceptance.
+  startedAt              DateTime
+  completedAt            DateTime
+  /// "Công việc hoàn thành".
+  workDone               String
+  /// "Các công việc cần xử lý tiếp" — null on the final stage.
+  nextWork               String?
+  /// True on the stage that finished the repair ("Đã xử lý xong").
+  final                  Boolean  @default(false)
+  createdAt              DateTime @default(now())
+
+  issue      HotelIssue @relation("IssueRepairStages", fields: [issueId], references: [id], onDelete: Cascade)
+  technician User?      @relation("RepairStageTechnician", fields: [technicianUserId], references: [id])
+
+  @@unique([issueId, stageNumber])
+  @@index([technicianUserId])
 }
 
 /// "BÀN GIAO CA" — what the outgoing shift wants the next one to know.
@@ -3024,13 +3059,57 @@ model RoomInspection {
   /// Server time, from the business clock.
   createdAt             DateTime
 
-  branch    Branch                @relation(fields: [branchId], references: [id])
-  createdBy User                  @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
-  issues    RoomInspectionIssue[]
+  /// The housekeeping work segment (shift at one branch) it was recorded in.
+  /// Null on inspections recorded before shifts existed.
+  workSegmentId         String?
+
+  branch      Branch                   @relation(fields: [branchId], references: [id])
+  createdBy   User                     @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
+  issues      RoomInspectionIssue[]
+  workSegment HousekeepingWorkSegment? @relation(fields: [workSegmentId], references: [id], onDelete: SetNull)
 
   @@index([branchId, createdAt])
   @@index([createdAt])
   @@index([createdByUserId])
+  @@index([workSegmentId])
+}
+
+/// ONE HOUSEKEEPING WORKDAY ("Vào ca" → "Kết thúc ca") of one account.
+///
+/// A housekeeping account has no permanent branch: the OPEN segment of its open
+/// session decides where it works, server-side, for every request.
+model HousekeepingWorkSession {
+  id        String    @id @default(cuid())
+  userId    Int
+  /// Server time, from the business clock.
+  startedAt DateTime
+  /// Null while the workday is open ("Kết thúc ca" closes it).
+  endedAt   DateTime?
+
+  user     User                      @relation("HousekeepingSessionUser", fields: [userId], references: [id])
+  segments HousekeepingWorkSegment[]
+
+  @@index([userId, endedAt])
+  @@index([startedAt])
+}
+
+/// ONE BRANCH WITHIN A WORKDAY — "Vào ca" opens the first, "Đổi chi nhánh" closes
+/// it and opens the next. Kept as history: where, who cleaned, from when to when.
+model HousekeepingWorkSegment {
+  id        String    @id @default(cuid())
+  sessionId String
+  branchId  Int
+  /// "Tên người dọn buồng" — the default cleaner on this segment's inspections.
+  staffName String
+  startedAt DateTime
+  endedAt   DateTime?
+
+  session     HousekeepingWorkSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  branch      Branch                  @relation(fields: [branchId], references: [id])
+  inspections RoomInspection[]
+
+  @@index([sessionId, startedAt])
+  @@index([branchId, startedAt])
 }
 
 /// ONE FINDING FROM A ROOM INSPECTION — the record Reception collects against.

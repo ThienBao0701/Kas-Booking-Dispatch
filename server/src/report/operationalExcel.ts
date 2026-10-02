@@ -69,6 +69,10 @@ export async function buildOperationalReportWorkbook(
   wb.creator = 'Kas';
   wb.created = data.generatedAt;
 
+  // A department's report: its own sheets only.
+  if (data.section === 'TECHNICAL') return technicalWorkbook(wb, data);
+  if (data.section === 'HOUSEKEEPING') return housekeepingWorkbook(wb, data);
+
   /* ------------------------- 1. Tổng hợp chi nhánh ------------------------- */
   const summary = wb.addWorksheet('Tổng hợp chi nhánh');
   summary.columns = [
@@ -619,6 +623,154 @@ export async function buildOperationalReportWorkbook(
   return Buffer.from(out);
 }
 
+
+/* ------------------------------ Kỹ thuật ------------------------------ */
+
+async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportData): Promise<Buffer> {
+  const sheet = wb.addWorksheet('Kỹ thuật');
+  sheet.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Vị trí', key: 'location', width: 26 },
+    { header: 'Loại sự cố', key: 'category', width: 16 },
+    { header: 'Sự cố', key: 'description', width: 40 },
+    { header: 'Nguyên nhân', key: 'cause', width: 26 },
+    { header: 'Người báo', key: 'reporter', width: 20 },
+    { header: 'Thời gian báo', key: 'reportedAt', width: 18 },
+    { header: 'Nguồn', key: 'source', width: 16 },
+    { header: 'Kỹ thuật viên', key: 'technician', width: 20 },
+    { header: 'Giao lúc', key: 'assignedAt', width: 18 },
+    { header: 'Giao bởi', key: 'assignedBy', width: 18 },
+    { header: 'Số lần giao lại', key: 'reassigned', width: 10 },
+    { header: 'Trạng thái', key: 'state', width: 24 },
+    { header: 'Cần sửa lại', key: 'rework', width: 10 },
+    { header: 'Báo lại sau hoàn thành', key: 'repeat', width: 14 },
+    { header: 'Số giai đoạn', key: 'stages', width: 10 },
+    { header: 'Không sửa được (lần)', key: 'cannot', width: 12 },
+    { header: 'Hoàn thành lúc', key: 'completedAt', width: 18 },
+  ];
+  headerRow(sheet);
+  const stages = wb.addWorksheet('Giai đoạn sửa chữa');
+  stages.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Vị trí', key: 'location', width: 26 },
+    { header: 'Sự cố', key: 'description', width: 36 },
+    { header: 'Giai đoạn', key: 'stage', width: 10 },
+    { header: 'Kỹ thuật viên', key: 'technician', width: 20 },
+    { header: 'Bắt đầu', key: 'startedAt', width: 18 },
+    { header: 'Hoàn thành', key: 'completedAt', width: 18 },
+    { header: 'Công việc hoàn thành', key: 'workDone', width: 40 },
+    { header: 'Công việc cần xử lý tiếp', key: 'nextWork', width: 40 },
+    { header: 'Giai đoạn cuối', key: 'final', width: 12 },
+  ];
+  headerRow(stages);
+  for (const section of data.branches) {
+    section.technical.forEach((i, n) => {
+      sheet.addRow({
+        branch: branchLabel(section),
+        stt: n + 1,
+        location: i.locationLabel,
+        category: i.category ?? '',
+        description: i.description,
+        cause: i.cause ?? i.reportedCause ?? '',
+        reporter: i.reporterName ?? '',
+        reportedAt: when(i.createdAt),
+        source: i.sourceLabel ?? 'Lễ tân',
+        technician: i.assignedTechnician?.name ?? i.attempts.at(-1)?.technicianName ?? '',
+        assignedAt: when(i.assignedAt),
+        assignedBy: i.assignedByName ?? '',
+        reassigned: i.assignments.filter((a) => a.reassigned).length,
+        state: i.assignmentStateLabel,
+        rework: i.needsRework ? 'Có' : '',
+        repeat: i.repeatOf ? 'Có' : '',
+        stages: i.stages.length,
+        cannot: i.cannotRepairCount,
+        completedAt: when(i.completedAt),
+      });
+      for (const st of i.stages) {
+        stages.addRow({
+          branch: branchLabel(section),
+          location: i.locationLabel,
+          description: i.description,
+          stage: st.stageNumber,
+          technician: st.technicianName,
+          startedAt: when(st.startedAt),
+          completedAt: when(st.completedAt),
+          workDone: st.workDone,
+          nextWork: st.nextWork ?? '',
+          final: st.final ? 'Có' : '',
+        });
+      }
+    });
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/* ------------------------------ Buồng phòng ------------------------------ */
+
+async function housekeepingWorkbook(wb: ExcelJS.Workbook, data: OperationalReportData): Promise<Buffer> {
+  const shifts = wb.addWorksheet('Ca buồng phòng');
+  shifts.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Tài khoản', key: 'account', width: 22 },
+    { header: 'Người dọn buồng', key: 'staff', width: 22 },
+    { header: 'Bắt đầu', key: 'startedAt', width: 18 },
+    { header: 'Kết thúc', key: 'endedAt', width: 18 },
+    { header: 'Số phòng', key: 'rooms', width: 10 },
+    { header: 'Lượt kiểm tra', key: 'inspections', width: 12 },
+    { header: 'Vấn đề', key: 'issues', width: 10 },
+  ];
+  headerRow(shifts);
+  const rooms = wb.addWorksheet('Vấn đề phòng');
+  rooms.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Phòng', key: 'room', width: 10 },
+    { header: 'Tình trạng', key: 'type', width: 28 },
+    { header: 'Mô tả', key: 'note', width: 40 },
+    { header: 'Người dọn buồng', key: 'staff', width: 20 },
+    { header: 'Ghi nhận bởi', key: 'recordedBy', width: 20 },
+    { header: 'Thời gian', key: 'at', width: 18 },
+    { header: 'Thu tiền', key: 'status', width: 16 },
+    { header: 'Số tiền', key: 'amount', width: 16 },
+    { header: 'Phương thức', key: 'method', width: 16 },
+    { header: 'Lý do không thu được', key: 'reason', width: 30 },
+    { header: 'Bản ghi', key: 'state', width: 12 },
+  ];
+  headerRow(rooms);
+  moneyColumns(rooms, ['amount']);
+  for (const section of data.branches) {
+    for (const seg of section.workSegments) {
+      shifts.addRow({
+        branch: branchLabel(section),
+        account: seg.accountName,
+        staff: seg.staffName,
+        startedAt: when(seg.startedAt),
+        endedAt: seg.endedAt ? when(seg.endedAt) : 'Đang làm',
+        rooms: seg.rooms,
+        inspections: seg.inspections,
+        issues: seg.issues,
+      });
+    }
+    const ordered = [...section.housekeeping].sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, 'vi', { numeric: true }));
+    for (const issue of ordered) {
+      rooms.addRow({
+        branch: branchLabel(section),
+        room: issue.roomNumber,
+        type: issue.typeLabel,
+        note: issue.note ?? '',
+        staff: issue.staffName,
+        recordedBy: issue.recordedByName,
+        at: when(issue.createdAt),
+        status: issue.collectionStatusLabel ?? '',
+        amount: issue.collection?.amount ?? null,
+        method: issue.collection?.methodLabel ?? '',
+        reason: issue.collection?.reason ?? '',
+        state: issue.voided ? `Đã hủy — ${issue.voidReason ?? ''}` : 'Hiệu lực',
+      });
+    }
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
 
 /**
  * The correction trail, flattened into one cell.

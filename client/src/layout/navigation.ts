@@ -1,5 +1,11 @@
 import {
   BarChart3,
+  ConciergeBell,
+  MessageSquareText,
+  PackageCheck,
+  Sparkles,
+  ThumbsUp,
+  Wallet,
   BedDouble,
   BellRing,
   Building2,
@@ -20,12 +26,47 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { UserRole } from '../auth/types';
+import { CATEGORY_FALLBACK_LABELS, GUEST_REQUEST_TITLE, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
 
 export interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
+  /** A collapsible group: its children are the links; `to` only names it. */
+  children?: NavItem[];
 }
+
+/**
+ * "BÁO CÁO VẤN ĐỀ" — ONE report, three departments, for the Admin and the two
+ * reception managers alike (the server scopes every read):
+ *
+ *   Lễ tân  → Tổng and each category on its own (the same page, one category)
+ *   Kỹ thuật → incidents by branch and room, with assignment and stages
+ *   Buồng phòng → findings, collection and the housekeeping workdays
+ */
+const REPORT_GROUP: NavItem = {
+  to: '/app/reports',
+  label: 'Báo cáo vấn đề',
+  icon: NotebookPen,
+  children: [
+    {
+      to: '/app/reports#reception',
+      label: 'Lễ tân',
+      icon: ConciergeBell,
+      children: [
+        { to: '/app/reports', label: 'Tổng', icon: LayoutDashboard },
+        { to: '/app/reports?category=PAYMENT', label: CATEGORY_FALLBACK_LABELS.PAYMENT, icon: Wallet },
+        { to: '/app/reports?category=GUEST_REQUEST', label: GUEST_REQUEST_TITLE, icon: MessageSquareText },
+        { to: '/app/reports?category=FACILITY_ISSUE', label: CATEGORY_FALLBACK_LABELS.FACILITY_ISSUE, icon: Wrench },
+        { to: '/app/reports?category=CUSTOMER_COMPLAINT', label: CATEGORY_FALLBACK_LABELS.CUSTOMER_COMPLAINT, icon: ThumbsUp },
+        { to: '/app/reports?category=ROOM_SERVICE', label: CATEGORY_FALLBACK_LABELS.ROOM_SERVICE, icon: Sparkles },
+        { to: '/app/reports?category=HOTEL_DELIVERY', label: HOTEL_DELIVERY_TITLE, icon: PackageCheck },
+      ],
+    },
+    { to: '/app/reports/technical', label: 'Kỹ thuật', icon: Hammer },
+    { to: '/app/reports/housekeeping', label: 'Buồng phòng', icon: BedDouble },
+  ],
+};
 
 /** Admin operates the whole dispatch centre and reviews creation proofs. */
 export const ADMIN_NAV: NavItem[] = [
@@ -39,8 +80,9 @@ export const ADMIN_NAV: NavItem[] = [
   // "Báo cáo vấn đề" -> "Sự cố cơ sở vật chất đang xử lý"; handover has no screen.
   // "Đã xác nhận đúng" is gone too (its address redirects to "Lịch sử"), and
   // "Chat box" is the bubble in the corner of every page, not a menu entry.
-  { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
-  { to: '/app/housekeeping', label: 'Buồng phòng', icon: BedDouble },
+  REPORT_GROUP,
+  // The 12-hour completion archive, every branch.
+  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
   { to: '/app/charge-documents', label: 'Chứng từ', icon: FileText },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
@@ -99,9 +141,8 @@ export const RECEPTIONIST_NAV: NavItem[] = [
  */
 export const RECEPTION_MANAGER_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
-  { to: '/app/reports', label: 'Báo cáo vấn đề', icon: NotebookPen },
+  REPORT_GROUP,
   { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
-  { to: '/app/housekeeping', label: 'Buồng phòng', icon: BedDouble },
 ];
 
 /**
@@ -133,13 +174,12 @@ export const HOUSEKEEPING_NAV: NavItem[] = [
 ];
 
 /**
- * Quản lý kỹ thuật's one entry: inspection. While inspection is DORMANT (the
- * server's TECHNICAL_INSPECTION_ENABLED, off by default) the screen says the
- * feature is not yet active and offers nothing to act on — the operational
- * workflow is the technician's alone.
+ * Quản lý kỹ thuật: the incidents of its ticked branches — who holds each one,
+ * where it stands, what was done — and "Giao kỹ thuật". The temporary
+ * "Nghiệm thu" entry is gone; the inspection code stays dormant on the server.
  */
 export const TECHNICAL_MANAGER_NAV: NavItem[] = [
-  { to: '/app/technical/awaiting-inspection', label: 'Nghiệm thu', icon: ClipboardCheck },
+  { to: '/app/reports/technical', label: 'Quản lý sự cố kỹ thuật', icon: Wrench },
 ];
 
 export function navForRole(role: UserRole | undefined): NavItem[] {
@@ -169,7 +209,9 @@ export function titleForPath(pathname: string): string {
     ...HOUSEKEEPING_NAV,
     ...RECEPTION_MANAGER_NAV,
   ];
-  const match = all
+  const flat = (items: NavItem[]): NavItem[] => items.flatMap((i) => [i, ...flat(i.children ?? [])]);
+  const match = flat(all)
+    .filter((item) => !item.to.includes('?') && !item.to.includes('#'))
     .slice()
     .sort((a, b) => b.to.length - a.to.length)
     .find((item) => pathname.startsWith(item.to));

@@ -101,6 +101,8 @@ beforeAll(async () => {
       mustChangePassword: false,
     })
   ).id;
+  // Its branches are ticked on the account; it sees and inspects only those.
+  await testPrisma.userBranchAssignment.createMany({ data: [cn1, cn5].map((branchId) => ({ userId: managerId, branchId })) });
   manager = (await loginAgent(app, 'quanlykythuat', MANAGER_PASSWORD)).agent;
 
   await createAdmin({ mustChangePassword: false });
@@ -120,11 +122,11 @@ afterAll(async () => {
   await testPrisma.$disconnect();
 });
 
-/** Reports "Máy lạnh không lạnh" in room 305 at CN1 and returns its id. */
+/** Reports "Máy lạnh không lạnh" in room 301 at CN1 and returns its id. */
 async function report(extra: Record<string, unknown> = {}, agent: Agent = letan1): Promise<string> {
   const res = await agent.post('/api/issues').send({
     areaCategory: 'ROOM',
-    roomNumber: '305',
+    roomNumber: '301',
     category: 'AIR_CONDITIONER',
     description: 'Máy lạnh không lạnh',
     ...extra,
@@ -138,6 +140,11 @@ async function report(extra: Record<string, unknown> = {}, agent: Agent = letan1
 }
 
 async function accept(agent: Agent, id: string, name = 'Bảo', phone = '0369852177') {
+  const me = (await agent.get('/api/auth/me')).body.user.id as number;
+  const held = (await admin.get(`/api/issues/${id}`)).body.issue.assignedTechnician?.id;
+  if (held !== me) {
+    expect((await admin.post(`/api/issues/${id}/assign`).send({ technicianUserId: me })).status).toBe(200);
+  }
   const res = await agent.post(`/api/issues/${id}/accept`).send({ technicianName: name, technicianPhone: phone });
   expect(res.status).toBe(200);
   return res.body.issue;
@@ -201,7 +208,7 @@ describe('Reception reports a facility issue', () => {
     // is about the time the server stamps on its own.
     const res = await letan1.post('/api/issues').send({
       areaCategory: 'ROOM',
-      roomNumber: '305',
+      roomNumber: '301',
       category: 'AIR_CONDITIONER',
       description: 'Máy lạnh không lạnh',
       createdAt: '2020-01-01T00:00:00.000Z',
@@ -222,14 +229,14 @@ describe('Reception reports a facility issue', () => {
     expect(checkIn.status).toBe(201);
     const id = await report();
 
-    const res = await tech.get(`/api/issues/${id}`);
+    const res = await admin.get(`/api/issues/${id}`);
     expect(res.body.issue.reporterName).toBe('Đức');
     expect(res.body.issue.reportedByName).toBe('test');
   });
 
   it('names the account when nobody was checked in', async () => {
     const id = await report();
-    const res = await tech.get(`/api/issues/${id}`);
+    const res = await admin.get(`/api/issues/${id}`);
     expect(res.body.issue.reporterName).toBe('test');
   });
 });
@@ -239,8 +246,10 @@ describe('Reception reports a facility issue', () => {
 /* ================================================================== */
 
 describe('the technician repairs', () => {
-  it('sees the new incident in the fresh queue', async () => {
+  it('sees the new incident in the fresh queue once it is assigned to it', async () => {
     const id = await report();
+    expect((await tech.get('/api/issues?stage=WAITING')).body.issues).toHaveLength(0);
+    expect((await admin.post(`/api/issues/${id}/assign`).send({ technicianUserId: techId })).status).toBe(200);
     const list = await tech.get('/api/issues?stage=WAITING');
     expect(list.body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
 
@@ -287,6 +296,8 @@ describe('the technician repairs', () => {
 
   it('refuses a cause on an incident nobody is repairing', async () => {
     const id = await report();
+    // Its own job, assigned but not yet taken.
+    expect((await admin.post(`/api/issues/${id}/assign`).send({ technicianUserId: techId })).status).toBe(200);
     const res = await tech.post(`/api/issues/${id}/cause`).send({ cause: 'Thiếu gas' });
     expect(res.status).toBe(409);
   });
@@ -652,19 +663,27 @@ describe('Quản lý kỹ thuật does not do the technician’s work, or anyone
           .send({ category: 'CUSTOMER_COMPLAINT', complaint: { guestName: 'A', description: 'B' } })
       ).status,
     ).toBe(403);
-    const bookings = await manager.get('/api/bookings/new');
-    expect(bookings.status).toBe(200);
-    expect(bookings.body.bookings).toHaveLength(0);
+    // No booking queue: the server confines the role to its technical routes.
+    expect((await manager.get('/api/bookings/new')).status).toBe(403);
     const badges = await manager.get('/api/nav-badges');
     expect(badges.body.counts).toMatchObject({ new: 0, pendingReview: 0, rejected: 0 });
   });
 
-  it('sees incidents from every branch, as the maintenance team does', async () => {
+  it('sees the incidents of its ticked branches — and follows the Admin moving them', async () => {
     await report();
     await report({}, letan5);
     const res = await manager.get('/api/issues');
     expect(res.status).toBe(200);
     expect(res.body.issues.map((i: { branchId: number }) => i.branchId).sort()).toEqual([cn1, cn5].sort());
+
+    expect((await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1] })).status).toBe(200);
+    try {
+      const narrowed = await manager.get('/api/issues');
+      expect(narrowed.body.issues.map((i: { branchId: number }) => i.branchId)).toEqual([cn1]);
+      expect((await manager.get(`/api/issues?branchId=${cn5}`)).status).toBe(403);
+    } finally {
+      await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1, cn5] });
+    }
   });
 });
 
@@ -730,14 +749,18 @@ describe('historical incidents', () => {
 /* ================================================================== */
 
 describe('the Admin creates a Quản lý kỹ thuật account', () => {
-  it('as a branchless, global role', async () => {
-    const res = await admin
-      .post('/api/admin/users')
-      .send({ username: 'qlkt_moi', fullName: 'Quản lý mới', temporaryPassword: 'TempPass123', role: 'TECHNICAL_MANAGER' });
+  it('with its ticked branches — never none', async () => {
+    const base = { username: 'qlkt_moi', fullName: 'Quản lý mới', temporaryPassword: 'TempPass123', role: 'TECHNICAL_MANAGER' };
+    expect((await admin.post('/api/admin/users').send(base)).status).toBe(422);
+    const res = await admin.post('/api/admin/users').send({ ...base, branchIds: [cn1, cn5] });
     expect(res.status).toBe(201);
-    const stored = await testPrisma.user.findUniqueOrThrow({ where: { username: 'qlkt_moi' } });
+    const stored = await testPrisma.user.findUniqueOrThrow({
+      where: { username: 'qlkt_moi' },
+      include: { branchAssignments: true },
+    });
     expect(stored.role).toBe('TECHNICAL_MANAGER');
     expect(stored.branchId).toBeNull();
+    expect(stored.branchAssignments.map((a) => a.branchId).sort()).toEqual([cn1, cn5].sort());
     await testPrisma.user.delete({ where: { id: stored.id } });
   });
 
@@ -760,7 +783,7 @@ describe('the Admin creates a Quản lý kỹ thuật account', () => {
 /** An incident exactly as the OLD workflow left one: IN_PROGRESS, no attempt. */
 async function legacyInProgress(columns: Record<string, unknown>): Promise<string> {
   const id = await report();
-  await testPrisma.hotelIssue.update({ where: { id }, data: { status: 'IN_PROGRESS', ...columns } });
+  await testPrisma.hotelIssue.update({ where: { id }, data: { status: 'IN_PROGRESS', assignedTechnicianUserId: techId, ...columns } });
   return id;
 }
 
@@ -834,7 +857,7 @@ describe('incidents accepted before repair attempts existed', () => {
 });
 
 describe('only Reception and the Admin report or rewrite an incident', () => {
-  const body = { areaCategory: 'ROOM', roomNumber: '305', category: 'AIR_CONDITIONER', description: 'x', branchId: 0 };
+  const body = { areaCategory: 'ROOM', roomNumber: '301', category: 'AIR_CONDITIONER', description: 'x', branchId: 0 };
 
   it('refuses Quản lý kỹ thuật and Bộ phận kỹ thuật, at any branch', async () => {
     for (const agent of [manager, tech]) {
@@ -943,7 +966,7 @@ describe('while inspection is dormant (the operational default)', () => {
     const reporter = await testPrisma.notification.findMany({ where: { userId: letan1Id } });
     expect(reporter.map((n) => n.title)).toContain('Sự cố đã hoàn thành');
     const managers = await testPrisma.notification.findMany({ where: { userId: managerId } });
-    expect(managers).toHaveLength(0);
+    expect(managers.map((n) => n.title)).not.toContain('Sự cố chờ nghiệm thu');
   });
 
   it('"Không sửa được" still sends it back to the queue', async () => {
@@ -973,7 +996,7 @@ describe('while inspection is dormant (the operational default)', () => {
     await accept(tech, id);
     await testPrisma.hotelIssue.update({
       where: { id },
-      data: { status: 'AWAITING_INSPECTION', completedAt: hcm('2026-09-25', '10:40') },
+      data: { status: 'AWAITING_INSPECTION', completedAt: hcm('2026-09-25', '10:40'), completedByUserId: techId },
     });
 
     const counts = await tech.get('/api/issues/counts');
@@ -1001,7 +1024,7 @@ describe('while inspection is dormant (the operational default)', () => {
     await accept(tech, id);
     await testPrisma.hotelIssue.update({
       where: { id },
-      data: { status: 'AWAITING_INSPECTION', completedAt: hcm('2026-09-25', '10:40') },
+      data: { status: 'AWAITING_INSPECTION', completedAt: hcm('2026-09-25', '10:40'), completedByUserId: techId },
     });
 
     const res = await letan1.get(`/api/issues/${id}`);

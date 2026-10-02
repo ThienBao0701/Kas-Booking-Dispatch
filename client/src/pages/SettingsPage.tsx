@@ -25,8 +25,10 @@ const inputClass =
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
-  /** The Quản lý lễ tân whose branches are being changed. */
+  /** "Sửa": the account whose name / branches are being changed. */
   const [editing, setEditing] = useState<ManagedUser | null>(null);
+  /** "Xóa": the account about to be deleted, after a typed confirmation. */
+  const [deleting, setDeleting] = useState<ManagedUser | null>(null);
 
   // Admins included, so the "Admin / Quản trị" section lists them (read-only).
   // Under the ['admin-users'] prefix, so the invalidation below refreshes it.
@@ -78,7 +80,8 @@ export function SettingsPage() {
                 users={members}
                 togglingId={toggle.isPending ? (toggle.variables?.id ?? null) : null}
                 onToggle={(id, active) => toggle.mutate({ id, active })}
-                onEditBranches={setEditing}
+                onEdit={setEditing}
+                onDelete={setDeleting}
               />
             );
           })}
@@ -86,12 +89,22 @@ export function SettingsPage() {
       </QueryState>
 
       {editing ? (
-        <ManagerBranchesModal
+        <EditUserModal
           user={editing}
           branches={branches.data?.branches ?? []}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
+            void invalidate();
+          }}
+        />
+      ) : null}
+      {deleting ? (
+        <DeleteUserModal
+          user={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            setDeleting(null);
             void invalidate();
           }}
         />
@@ -192,8 +205,14 @@ function BranchChecklist({
   );
 }
 
-/** Change a Quản lý lễ tân's branches — scope moves, records stay. */
-function ManagerBranchesModal({
+/**
+ * "SỬA" — what the role carries, and nothing it does not: a receptionist's
+ * branch; a Quản lý lễ tân's / Quản lý kỹ thuật's ticked branches; nothing for
+ * the global roles (Tổng quản lý lễ tân reads every branch) or for Bộ phận
+ * buồng phòng, whose branch is chosen at each "Vào ca". Scope moves on the next
+ * request; records already made stay as they are.
+ */
+function EditUserModal({
   user,
   branches,
   onClose,
@@ -204,30 +223,112 @@ function ManagerBranchesModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [value, setValue] = useState<number[]>((user.managedBranches ?? []).map((b) => b.id));
+  const [fullName, setFullName] = useState(user.fullName);
+  const [branchId, setBranchId] = useState<number>(user.branch?.id ?? 0);
+  const [branchSet, setBranchSet] = useState<number[]>((user.managedBranches ?? []).map((b) => b.id));
+  const needsBranch = user.role === 'RECEPTIONIST';
+  const needsBranchSet = requiresBranchSet(user.role);
   const save = useMutation({
-    mutationFn: () => adminUsersApi.setBranches(user.id, value),
+    mutationFn: () =>
+      adminUsersApi.update(user.id, {
+        ...(fullName.trim() !== user.fullName ? { fullName: fullName.trim() } : {}),
+        ...(needsBranch && branchId !== user.branch?.id ? { branchId } : {}),
+        ...(needsBranchSet ? { branchIds: branchSet } : {}),
+      }),
     onSuccess: onSaved,
   });
+  const valid = fullName.trim().length > 0 && (!needsBranch || branchId > 0) && (!needsBranchSet || branchSet.length > 0);
   return (
     <Modal
       open
-      title={`Chi nhánh quản lý — ${user.fullName}`}
+      title={`Sửa tài khoản — ${user.username}`}
       onClose={onClose}
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Hủy</Button>
-          <Button onClick={() => save.mutate()} disabled={value.length === 0} loading={save.isPending}>
+          <Button onClick={() => save.mutate()} disabled={!valid} loading={save.isPending} data-testid="edit-user-save">
             Lưu
           </Button>
         </>
       }
     >
       {save.isError ? <div className="mb-3"><ErrorAlert>{toUserMessage(save.error)}</ErrorAlert></div> : null}
-      <BranchChecklist branches={branches} value={value} onChange={setValue} />
-      <p className="mt-3 text-xs text-slate-500">
-        Quyền xem báo cáo, chat và sự cố đổi theo ngay lần tải trang kế tiếp. Các bản ghi đã tạo không thay đổi.
-      </p>
+      <div className="space-y-3">
+        <label className="block text-sm font-medium text-slate-600">
+          Họ tên
+          <input className={`${inputClass} mt-1`} value={fullName} onChange={(e) => setFullName(e.target.value)} data-testid="edit-user-name" />
+        </label>
+        {needsBranch ? (
+          <label className="block text-sm font-medium text-slate-600">
+            Chi nhánh
+            <select aria-label="Chi nhánh" className={`${inputClass} mt-1`} value={branchId || ''} onChange={(e) => setBranchId(Number(e.target.value))}>
+              <option value="">— Chọn chi nhánh —</option>
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>{branchLabel(b)}</option>
+              ))}
+            </select>
+          </label>
+        ) : needsBranchSet ? (
+          <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
+        ) : (
+          <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{scopeNote(user.role)}</p>
+        )}
+        <p className="text-xs text-slate-500">
+          Quyền truy cập đổi theo ngay lần tải trang kế tiếp. Các bản ghi đã tạo không thay đổi.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+/** What a role without a branch field works on — said, not left blank. */
+function scopeNote(role: UserRole): string {
+  if (role === 'HOUSEKEEPING') return 'Bộ phận buồng phòng chọn chi nhánh mỗi khi “Vào ca” — tài khoản không thuộc chi nhánh cố định.';
+  if (role === 'RECEPTION_GENERAL_MANAGER') return 'Tổng quản lý lễ tân xem và quản lý hoạt động lễ tân của tất cả chi nhánh.';
+  return 'Tài khoản bộ phận làm việc trên tất cả chi nhánh, không thuộc chi nhánh nào.';
+}
+
+/**
+ * "XÓA" — permanent, Admin only, after typing the username. The account can no
+ * longer sign in and leaves the list; everything it recorded stays, under the
+ * names written on each record. The server refuses while it still holds live
+ * work (an open shift, an incident in hand, a booking claim) and says which.
+ */
+function DeleteUserModal({ user, onClose, onDeleted }: { user: ManagedUser; onClose: () => void; onDeleted: () => void }) {
+  const [typed, setTyped] = useState('');
+  const remove = useMutation({ mutationFn: () => adminUsersApi.remove(user.id), onSuccess: onDeleted });
+  return (
+    <Modal
+      open
+      title="Xóa tài khoản"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Hủy</Button>
+          <Button
+            onClick={() => remove.mutate()}
+            disabled={typed.trim() !== user.username}
+            loading={remove.isPending}
+            className="!bg-rose-600 hover:!bg-rose-700"
+            data-testid="delete-user-confirm"
+          >
+            Xóa vĩnh viễn
+          </Button>
+        </>
+      }
+    >
+      {remove.isError ? <div className="mb-3"><ErrorAlert>{toUserMessage(remove.error)}</ErrorAlert></div> : null}
+      <div className="space-y-3 text-sm text-slate-700">
+        <p>
+          Xóa vĩnh viễn tài khoản <span className="font-semibold">{user.fullName}</span> (
+          <span className="font-mono">{user.username}</span>)? Tài khoản sẽ không đăng nhập được nữa. Lịch sử và các bản ghi
+          đã tạo vẫn được giữ nguyên.
+        </p>
+        <label className="block font-medium text-slate-600">
+          Nhập tên đăng nhập để xác nhận
+          <input className={`${inputClass} mt-1`} value={typed} onChange={(e) => setTyped(e.target.value)} data-testid="delete-user-typed" />
+        </label>
+      </div>
     </Modal>
   );
 }
@@ -237,13 +338,15 @@ function DepartmentTable({
   users,
   togglingId,
   onToggle,
-  onEditBranches,
+  onEdit,
+  onDelete,
 }: {
   role: UserRole;
   users: ManagedUser[];
   togglingId: number | null;
   onToggle: (id: number, active: boolean) => void;
-  onEditBranches: (user: ManagedUser) => void;
+  onEdit: (user: ManagedUser) => void;
+  onDelete: (user: ManagedUser) => void;
 }) {
   const columns: DataColumn<ManagedUser>[] = [
     // Fixed shares, so the columns line up from one department's table to the next.
@@ -255,10 +358,12 @@ function DepartmentTable({
       secondary: true,
       className: 'w-[22%] whitespace-nowrap text-slate-600',
       // Technical, booking and admin accounts are global: no branch is the fact.
-      // A Quản lý lễ tân lists the branches it supervises.
+      // A Quản lý lễ tân / kỹ thuật lists its branches; Buồng phòng works by shift.
       render: (u) =>
-        u.role === 'RECEPTION_MANAGER' ? (
+        requiresBranchSet(u.role) ? (
           managedLabel(u)
+        ) : u.role === 'HOUSEKEEPING' ? (
+          <span className="text-slate-500">Theo ca làm việc</span>
         ) : (
           u.branch?.address ?? <span className="text-slate-400">Tất cả chi nhánh</span>
         ),
@@ -301,17 +406,23 @@ function DepartmentTable({
           <span className="text-xs text-slate-400">Chỉ xem</span>
         ) : (
           <div className="flex justify-end gap-2">
-            {role === 'RECEPTION_MANAGER' ? (
-              <Button variant="secondary" onClick={() => onEditBranches(u)} data-testid={`edit-branches-${u.id}`}>
-                Chi nhánh
-              </Button>
-            ) : null}
+            <Button variant="secondary" onClick={() => onEdit(u)} data-testid={`edit-user-${u.id}`}>
+              Sửa
+            </Button>
             <Button
               variant={u.active ? 'secondary' : 'primary'}
               onClick={() => onToggle(u.id, u.active)}
               loading={togglingId === u.id}
             >
               {u.active ? 'Khoá' : 'Mở khoá'}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => onDelete(u)}
+              className="!border-rose-300 !text-rose-700 hover:!bg-rose-50"
+              data-testid={`delete-user-${u.id}`}
+            >
+              Xóa
             </Button>
           </div>
         )
@@ -414,10 +525,9 @@ function CreateUserModal({
           </select>
         </label>
         {/*
-          A branch belongs to a receptionist and to Bộ phận buồng phòng, whose
-          room inspections are made in one hotel. A global department works
-          across every branch, so offering the field would imply a scope the
-          account does not have.
+          A branch belongs to a receptionist only. Bộ phận buồng phòng picks its
+          branch at each "Vào ca"; a global department works across every
+          branch, so offering the field would imply a scope it does not have.
         */}
         {needsBranch ? (
           <label className="block text-sm font-medium text-slate-600">
@@ -432,14 +542,8 @@ function CreateUserModal({
           </label>
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
-        ) : form.role === 'RECEPTION_GENERAL_MANAGER' ? (
-          <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
-            Tổng quản lý lễ tân xem và quản lý hoạt động lễ tân của tất cả chi nhánh — không cần chọn chi nhánh.
-          </p>
         ) : (
-          <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
-            Tài khoản bộ phận làm việc trên tất cả chi nhánh, không thuộc chi nhánh nào.
-          </p>
+          <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{scopeNote(form.role ?? 'RECEPTIONIST')}</p>
         )}
       </div>
     </Modal>

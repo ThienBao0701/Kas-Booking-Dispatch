@@ -37,9 +37,23 @@ async function loadSessionUser(req: Request): Promise<SessionUser | null> {
   });
   if (!user) return null;
   const { branchAssignments, ...rest } = user;
-  return user.role === 'RECEPTION_MANAGER'
-    ? { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) }
-    : rest;
+  if (user.role === 'RECEPTION_MANAGER' || user.role === 'TECHNICAL_MANAGER') {
+    return { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) };
+  }
+  /*
+    BỘ PHẬN BUỒNG PHÒNG HAS NO PERMANENT BRANCH. Where it works is the OPEN
+    segment of its open workday ("Vào ca" / "Đổi chi nhánh"), read here on every
+    request — so every branch check downstream (inspections, the room catalog,
+    notifications) follows the shift, and an account not on shift has no branch.
+  */
+  if (user.role === 'HOUSEKEEPING') {
+    const segment = await prisma.housekeepingWorkSegment.findFirst({
+      where: { endedAt: null, session: { userId: user.id, endedAt: null } },
+      include: { branch: true },
+    });
+    return { ...rest, branchId: segment?.branchId ?? null, branch: segment?.branch ?? null };
+  }
+  return rest;
 }
 
 /**
@@ -72,6 +86,20 @@ const RECEPTION_SUPERVISOR_ROUTES = [
  */
 const RECEPTION_SUPERVISOR_READ_ROUTES = [/^\/api\/bookings\/new$/, /^\/api\/bookings\/[^/]+$/];
 
+/**
+ * WHAT A QUẢN LÝ KỸ THUẬT MAY REACH — default deny: its incidents (scoped to its
+ * branches by the service), the branch list and room catalog, its notifications,
+ * and the technical export of the shared report.
+ */
+const TECHNICAL_MANAGER_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/issues(\/|$)/,
+  /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+];
+
 function supervisorMayReach(req: Request): boolean {
   const path = req.originalUrl.split('?')[0] ?? '';
   if (RECEPTION_SUPERVISOR_ROUTES.some((route) => route.test(path))) return true;
@@ -99,8 +127,10 @@ const HOUSEKEEPING_ROUTES = [
   /^\/api\/hotel-deliveries(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
-  // The room catalog of its own branch, for the inspection form's selector.
+  // The room catalog of its own branch, for the inspection form's selector,
+  // and the branch list "Vào ca" / "Đổi chi nhánh" chooses from.
   /^\/api\/branches\/\d+\/rooms$/,
+  /^\/api\/branches$/,
 ];
 
 function housekeepingMayReach(req: Request): boolean {
@@ -130,6 +160,13 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
       ) {
         next(ApiError.forbidden());
         return;
+      }
+      if (user.role === 'TECHNICAL_MANAGER') {
+        const path = req.originalUrl.split('?')[0] ?? '';
+        if (!TECHNICAL_MANAGER_ROUTES.some((route) => route.test(path))) {
+          next(ApiError.forbidden());
+          return;
+        }
       }
       await applyTestBranchOverride(req, user);
       req.currentUser = user;
@@ -222,7 +259,8 @@ export const requirePasswordChanged: RequestHandler = (req, _res, next) => {
  * widening its access would grant something nothing asked for.
  */
 export function seesAllBranches(role: UserRole): boolean {
-  return role === 'ADMIN' || role === 'TECHNICAL' || role === 'TECHNICAL_MANAGER';
+  // Quản lý kỹ thuật is scoped to its assigned branches (branchScope.ts) — not here.
+  return role === 'ADMIN' || role === 'TECHNICAL';
 }
 
 export function assertBranchAccess(

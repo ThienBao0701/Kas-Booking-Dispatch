@@ -56,7 +56,8 @@ export interface IssueSummary {
  * its own jobs (never the eight-branch totals). The branch ROWS are the scope's.
  */
 export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
-  const branchRows: Prisma.BranchWhereInput = isReceptionSupervisor(actor.role)
+  const branchRows: Prisma.BranchWhereInput =
+    isReceptionSupervisor(actor.role) || actor.role === 'TECHNICAL_MANAGER'
     ? scopedBranchRows(actor)
     : seesAllBranches(actor.role)
       ? { active: true }

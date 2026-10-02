@@ -18,5 +18,10 @@ export function useBranchRooms(branchId: number | null | undefined) {
     // The catalog changes with a release, not during a shift.
     staleTime: 60 * 60 * 1000,
   });
-  return { rooms: query.data?.rooms ?? null, isLoading: query.isLoading && typeof branchId === 'number' };
+  return {
+    rooms: query.data?.rooms ?? null,
+    /** The branch's floors ("Hành lang", "Cầu thang"); null without a floor catalog. */
+    floors: query.data?.floors ?? null,
+    isLoading: query.isLoading && typeof branchId === 'number',
+  };
 }

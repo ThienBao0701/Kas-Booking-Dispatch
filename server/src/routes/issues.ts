@@ -11,6 +11,7 @@ import {
   authorizeIssuePhoto,
   cannotRepairIssue,
   completeIssue,
+  recordRepairStage,
   createIssue,
   findSimilarIssues,
   getIssue,
@@ -109,8 +110,14 @@ const listSchema = z
     completedTo: isoDay.optional(),
     // The supervisors' to-do list: waiting incidents nobody holds.
     assignment: z.enum(['UNASSIGNED']).optional(),
+    // The technical report's filters: who holds it, where, and which fault.
+    technicianUserId: z.coerce.number().int().positive().optional(),
+    roomNumber: z.string().trim().min(1).max(50).optional(),
+    floorNumber: z.string().trim().min(1).max(50).optional(),
+    category: CATEGORY.optional(),
     page: z.coerce.number().int().positive().default(1),
-    pageSize: z.coerce.number().int().positive().max(100).default(50),
+    // Up to 500 for a report board that groups a period by branch and room.
+    pageSize: z.coerce.number().int().positive().max(500).default(50),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -202,14 +209,25 @@ const requireReporter = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER'
  * Who GIVES an incident to a technician: the Admin and the reception supervisors,
  * each within its branch scope (checked against the incident by the service).
  */
-const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
+// The reception supervisors and the Quản lý kỹ thuật — each within its branches (the service checks).
+const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER');
 
 const assignSchema = z.object({ technicianUserId: z.number().int().positive() });
 
+/** The structured key of the report being written — never its free text. */
 const similarSchema = z.object({
   branchId: z.coerce.number().int().positive().optional(),
-  roomNumber: z.string().trim().min(1).max(50),
+  areaCategory: AREA.optional(),
+  roomNumber: z.string().trim().max(50).optional(),
+  floorNumber: z.string().trim().max(50).optional(),
+  areaSubtype: SUBTYPE.optional(),
   category: CATEGORY.optional(),
+});
+
+/** "Đang trong quá trình theo dõi thêm": what this stage did, and what comes next. */
+const stageSchema = z.object({
+  workDone: z.string().trim().min(1, 'Vui lòng nhập công việc đã hoàn thành.').max(2000),
+  nextWork: z.string().trim().min(1, 'Vui lòng nhập các công việc cần xử lý tiếp.').max(2000),
 });
 
 /** Reception reports hotel incidents; Bộ phận kỹ thuật works them. */
@@ -252,6 +270,10 @@ export function createIssuesRouter(): Router {
         completedFrom: completed?.start,
         completedTo: completed?.end,
         assignment: q.assignment,
+        technicianUserId: q.technicianUserId,
+        roomNumber: q.roomNumber,
+        floorNumber: q.floorNumber,
+        category: q.category,
         now,
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
@@ -416,6 +438,17 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = completeSchema.parse(req.body ?? {});
       const issue = await completeIssue(req.params.id!, input, actor(user), getClock());
+      res.json({ issue: serializeIssue(issue) });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/stage — "Đang trong quá trình theo dõi thêm": one stage
+  // done, the repair still under way. Only the technician holding the job.
+  router.post('/issues/:id/stage', requireAuth, requirePasswordChanged, requireTechnical, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = stageSchema.parse(req.body ?? {});
+      const issue = await recordRepairStage(req.params.id!, input, actor(user), getClock());
       res.json({ issue: serializeIssue(issue) });
     })().catch(next);
   });

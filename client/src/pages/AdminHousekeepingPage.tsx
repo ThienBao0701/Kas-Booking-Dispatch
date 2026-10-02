@@ -12,10 +12,14 @@
  * Tổng quản lý lễ tân work the same page over their own branches, as Reception
  * does: they read and settle the collection; the void stays the Admin's. The
  * server scopes the list and checks the branch of every settlement.
+ *
+ * "Báo cáo vấn đề → Buồng phòng": the findings read Branch → Room → inspection
+ * (one table per branch, rooms in order), the housekeeping workdays sit below
+ * them ("Ca buồng phòng"), and the same period exports as PDF or Excel.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { RefreshCw } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
 import {
   ROOM_COLLECTION_STATUSES,
   ROOM_ISSUES_KEY,
@@ -24,7 +28,12 @@ import {
   type RoomCollectionStatus,
   type RoomIssue,
   type RoomIssueType,
+  type WorkSegment,
+  type WorkShift,
 } from '../api/housekeeping';
+import { operationalPdfUrl, operationalXlsxUrl } from '../api/receptionReports';
+import { branchLabel } from '../auth/types';
+import { DataTable, type DataColumn } from '../components/DataTable';
 import { adminBranchesApi } from '../api/adminBranches';
 import { branchesApi } from '../api/bookings';
 import { useAuth } from '../auth/AuthProvider';
@@ -39,7 +48,7 @@ import {
 } from '../components/RoomIssueViews';
 import { Toast } from '../components/Toast';
 import { branchOptionLabel } from '../lib/branchTone';
-import { hcmToday } from '../lib/format';
+import { formatDateTime, hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
 const selectClass =
@@ -81,16 +90,57 @@ export function AdminHousekeepingPage() {
 
   const summary = list.data?.summary ?? null;
 
+  /** Branch → its findings, rooms in order (newest first within a room). */
+  const byBranch = useMemo(() => {
+    const groups = new Map<number, RoomIssue[]>();
+    for (const issue of list.data?.issues ?? []) groups.set(issue.branchId, [...(groups.get(issue.branchId) ?? []), issue]);
+    return [...groups.values()]
+      .map((rows) => rows.sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, 'vi', { numeric: true })))
+      .sort((a, b) => a[0]!.branch.branchNumber - b[0]!.branch.branchNumber);
+  }, [list.data]);
+
+  const shifts = useQuery({
+    queryKey: [...ROOM_ISSUES_KEY, 'shifts', { range, branchId }],
+    queryFn: () =>
+      housekeepingApi.shifts({ from: range.from, to: range.to, branchId: branchId === '' ? undefined : branchId }),
+    enabled: rangeValid,
+  });
+  const segments = (shifts.data?.shifts ?? []).flatMap((day) => day.segments.map((seg) => ({ day, seg })));
+
+  const exportScope = {
+    from: range.from,
+    to: range.to,
+    branchId: branchId === '' ? undefined : branchId,
+    section: 'HOUSEKEEPING' as const,
+  };
+  const exportLink = (href: string, text: string, testId: string) => (
+    <a
+      href={rangeValid ? href : undefined}
+      aria-disabled={rangeValid ? undefined : true}
+      data-testid={testId}
+      className={`inline-flex items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 ${
+        rangeValid ? '' : 'pointer-events-none opacity-50'
+      }`}
+    >
+      <Download className="h-4 w-4" aria-hidden="true" />
+      {text}
+    </a>
+  );
+
   return (
     <div className="space-y-4">
       <PageHeader
         title="Buồng phòng — tình trạng sử dụng phòng & thu tiền"
         description={`Vấn đề Bộ phận buồng phòng ghi nhận và kết quả thu tiền của lễ tân, ${isAdmin ? 'tất cả chi nhánh' : 'các chi nhánh được phân công'}.`}
         actions={
-          <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
-            <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
-            Làm mới
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {exportLink(operationalPdfUrl(exportScope), 'Xuất PDF', 'housekeeping-export-pdf')}
+            {exportLink(operationalXlsxUrl(exportScope), 'Xuất Excel', 'housekeeping-export-xlsx')}
+            <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
+              <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
+              Làm mới
+            </Button>
+          </div>
         }
       />
 
@@ -161,25 +211,50 @@ export function AdminHousekeepingPage() {
               {summary.byType.map((t) => `${t.label}: ${t.count}`).join(' · ')}
             </p>
           ) : null}
-          <RoomIssueTable
-            mode="admin"
-            title="Vấn đề phòng"
-            issues={list.data?.issues ?? []}
-            isLoading={list.isLoading}
-            isError={list.isError}
-            error={list.error}
-            onRetry={() => void list.refetch()}
-            onCollect={setCollecting}
-            onVoid={isAdmin ? setVoiding : undefined}
-            emptyTitle="Không có vấn đề phòng"
-            emptyMessage="Không có vấn đề nào khớp với bộ lọc đang chọn."
-          />
+          {byBranch.length === 0 ? (
+            <RoomIssueTable
+              mode="admin"
+              title="Vấn đề phòng"
+              issues={[]}
+              isLoading={list.isLoading}
+              isError={list.isError}
+              error={list.error}
+              onRetry={() => void list.refetch()}
+              emptyTitle="Không có vấn đề phòng"
+              emptyMessage="Không có vấn đề nào khớp với bộ lọc đang chọn."
+            />
+          ) : (
+            byBranch.map((rows) => (
+              <RoomIssueTable
+                key={rows[0]!.branchId}
+                mode="admin"
+                testId={`room-issue-table-${rows[0]!.branchId}`}
+                title={`${branchLabel(rows[0]!.branch)} — ${rows.length} vấn đề`}
+                issues={rows}
+                onCollect={setCollecting}
+                onVoid={isAdmin ? setVoiding : undefined}
+              />
+            ))
+          )}
           {list.data?.truncated ? (
             <p data-testid="housekeeping-truncated" className="text-xs text-slate-500">
               Đang hiển thị {list.data.issues.length} trên tổng số {list.data.total} vấn đề mới nhất. Tổng hợp phía trên
               tính trên toàn bộ. Thu hẹp bộ lọc để xem đầy đủ.
             </p>
           ) : null}
+          <DataTable
+            title="Ca buồng phòng"
+            testId="housekeeping-shifts"
+            columns={SEGMENT_COLUMNS}
+            rows={segments}
+            rowKey={(r) => r.seg.id}
+            isLoading={shifts.isLoading}
+            isError={shifts.isError}
+            error={shifts.error}
+            onRetry={() => void shifts.refetch()}
+            emptyTitle="Chưa có ca buồng phòng"
+            emptyMessage="Các ca “Vào ca” của Bộ phận buồng phòng trong khoảng này sẽ hiện ở đây."
+          />
         </>
       )}
 
@@ -207,3 +282,24 @@ export function AdminHousekeepingPage() {
     </div>
   );
 }
+
+/** One row per branch segment of a workday: who, where, when, and what was found. */
+const SEGMENT_COLUMNS: DataColumn<{ day: WorkShift; seg: WorkSegment }>[] = [
+  { key: 'account', header: 'Tài khoản', render: (r) => r.day.user.fullName },
+  { key: 'branch', header: 'Chi nhánh', render: (r) => branchLabel(r.seg.branch) },
+  { key: 'staff', header: 'Người dọn buồng', render: (r) => r.seg.staffName },
+  {
+    key: 'time',
+    header: 'Thời gian',
+    render: (r) => `${formatDateTime(r.seg.startedAt)} – ${r.seg.endedAt ? formatDateTime(r.seg.endedAt) : 'đang làm'}`,
+  },
+  { key: 'rooms', header: 'Phòng', align: 'right', render: (r) => r.seg.rooms },
+  { key: 'inspections', header: 'Kiểm tra', align: 'right', render: (r) => r.seg.inspections },
+  { key: 'issues', header: 'Vấn đề', align: 'right', render: (r) => r.seg.issues },
+  {
+    key: 'types',
+    header: 'Theo loại',
+    secondary: true,
+    render: (r) => r.seg.byType.map((t) => `${t.label}: ${t.count}`).join(' · ') || '—',
+  },
+];

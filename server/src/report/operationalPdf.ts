@@ -24,7 +24,7 @@
  * already; it cannot ship again from this file.
  */
 import type { OperationalReportCategory } from '@prisma/client';
-import type { BranchOperationalReport, OperationalReportData } from '../reception/operationalReport';
+import type { BranchOperationalReport, OperationalReportData, ReportWorkSegment } from '../reception/operationalReport';
 import type { CashSummary } from '../reception/cashService';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import type { SerializedReport } from '../reception/reportService';
@@ -484,6 +484,116 @@ const COMPLETED_COLUMNS = checked<Numbered<SerializedReport>>('operational compl
   { header: 'Người hoàn thành', width: 110, value: (r) => archivedFinish(r).by ?? '—' },
 ]);
 
+/* ------------------------------ Kỹ thuật ------------------------------ */
+
+type TechnicalRow = BranchOperationalReport['technical'][number];
+
+/** Who holds or held the job, and since when. */
+function technicianOf(i: TechnicalRow): string {
+  const who = i.assignedTechnician?.name ?? i.attempts.at(-1)?.technicianName ?? i.technicianName;
+  if (!who) return '—';
+  return i.assignedAt ? `${who} · ${hcmDateTime(new Date(i.assignedAt))}` : who;
+}
+
+/** The state, plus the facts that change how it is read: rework, repeat, reassignment. */
+function technicalState(i: TechnicalRow): string {
+  const parts = [i.assignmentStateLabel];
+  if (i.needsRework) parts.push('Cần sửa lại');
+  if (i.repeatOf) parts.push('Báo lại sau lần hoàn thành trước');
+  const reassigned = i.assignments.filter((a) => a.reassigned).length;
+  if (reassigned > 0) parts.push(`Giao lại ${reassigned} lần`);
+  return parts.join(' · ');
+}
+
+/** Every stage, then every "Không sửa được" — the repair as it actually went. */
+function technicalWork(i: TechnicalRow): string {
+  const lines = i.stages.map(
+    (st) => `GĐ ${st.stageNumber}${st.final ? ' (xong)' : ''}: ${st.workDone}${st.nextWork ? ` | tiếp theo: ${st.nextWork}` : ''}`,
+  );
+  for (const a of i.attempts) {
+    if (a.outcome === 'CANNOT_REPAIR') lines.push(`Không sửa được (${a.technicianName}): ${a.reason ?? '—'}`);
+  }
+  if (lines.length === 0 && i.completedAt) lines.push('Đã hoàn thành');
+  return lines.join('\n') || '—';
+}
+
+const TECHNICAL_COLUMNS = checked<Numbered<TechnicalRow>>('operational technical', [
+  { header: 'STT', width: 24, value: (r) => String(r.stt) },
+  { header: 'Vị trí', width: 92, value: (r) => r.locationLabel },
+  { header: 'Loại', width: 56, value: (r) => (r.category ? ISSUE_CATEGORY_TEXT[r.category] ?? r.category : '—') },
+  { header: 'Sự cố', width: 150, value: (r) => r.description },
+  { header: 'Người báo', width: 86, value: (r) => `${r.reporterName ?? '—'} · ${hcmDateTime(new Date(r.createdAt))}` },
+  { header: 'Kỹ thuật viên', width: 96, value: technicianOf },
+  { header: 'Trạng thái', width: 92, value: technicalState },
+  { header: 'Giai đoạn / kết quả', width: 150, value: technicalWork },
+]);
+
+/** The fault types as the forms say them (the PDF has no access to the client's labels). */
+const ISSUE_CATEGORY_TEXT: Record<string, string> = {
+  DOOR: 'Cửa',
+  AIR_CONDITIONER: 'Máy lạnh',
+  TOILET: 'Nhà vệ sinh',
+  TV: 'TV',
+  WIFI: 'Wifi',
+  ELECTRICITY: 'Điện',
+  WATER: 'Nước',
+  FURNITURE: 'Nội thất',
+  HOUSEKEEPING: 'Buồng phòng',
+  GUEST_REQUEST: 'Yêu cầu của khách',
+  OTHER: 'Khác',
+};
+
+const WORK_SEGMENT_COLUMNS = checked<Numbered<ReportWorkSegment>>('operational work segments', [
+  { header: 'STT', width: 26, value: (r) => String(r.stt) },
+  { header: 'Tài khoản', width: 120, value: (r) => r.accountName },
+  { header: 'Người dọn buồng', width: 120, value: (r) => r.staffName },
+  { header: 'Bắt đầu', width: 86, value: (r) => hcmDateTime(new Date(r.startedAt)) },
+  { header: 'Kết thúc', width: 86, value: (r) => (r.endedAt ? hcmDateTime(new Date(r.endedAt)) : 'Đang làm') },
+  { header: 'Phòng', width: 50, value: (r) => String(r.rooms) },
+  { header: 'Lượt kiểm tra', width: 70, value: (r) => String(r.inspections) },
+  { header: 'Vấn đề', width: 56, value: (r) => String(r.issues) },
+]);
+
+/** A department's report, for one branch: its own tables, nothing of Reception's. */
+function sectionBranchBody(doc: PdfDoc, data: OperationalReportData, section: BranchOperationalReport): void {
+  if (data.section === 'TECHNICAL') {
+    sectionTitle(doc, `KỸ THUẬT — ${section.technical.length} sự cố báo trong kỳ`);
+    if (section.technicalTruncated) note(doc, 'CHÚ Ý: danh sách chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+    if (section.technical.length === 0) {
+      note(doc, NO_DATA);
+      return;
+    }
+    doc.x = doc.page.margins.left;
+    const table = numbered(section.technical);
+    ensureSpace(doc, tableLeadHeight(doc, TECHNICAL_COLUMNS, table));
+    drawTable(doc, TECHNICAL_COLUMNS, table, { frame: true });
+    doc.moveDown(0.8);
+    const done = section.technical.filter((i) => i.assignmentState === 'COMPLETED').length;
+    note(doc, `Tổng: ${section.technical.length} sự cố · đã hoàn thành ${done} · còn lại ${section.technical.length - done}`, true);
+    return;
+  }
+  sectionTitle(doc, `CA BUỒNG PHÒNG — ${section.workSegments.length} lượt làm việc tại chi nhánh`);
+  if (section.workSegments.length === 0) note(doc, NO_DATA);
+  else {
+    doc.x = doc.page.margins.left;
+    const shifts = numbered(section.workSegments);
+    ensureSpace(doc, tableLeadHeight(doc, WORK_SEGMENT_COLUMNS, shifts));
+    drawTable(doc, WORK_SEGMENT_COLUMNS, shifts, { frame: true });
+  }
+  doc.moveDown(0.8);
+  sectionTitle(doc, `VẤN ĐỀ PHÒNG — ${section.housekeeping.length} vấn đề`);
+  if (section.housekeepingTruncated) note(doc, 'CHÚ Ý: danh sách chỉ in phần đầu. Vui lòng thu hẹp khoảng thời gian.', true);
+  if (section.housekeeping.length === 0) note(doc, NO_DATA);
+  else {
+    doc.x = doc.page.margins.left;
+    // By room, so a room's findings sit together.
+    const rows = [...section.housekeeping].sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, 'vi', { numeric: true }));
+    const table = numbered(rows);
+    ensureSpace(doc, tableLeadHeight(doc, HOUSEKEEPING_COLUMNS, table));
+    drawTable(doc, HOUSEKEEPING_COLUMNS, table, { frame: true });
+  }
+}
+
 /** A section with nothing in it says so, rather than disappearing. */
 const NO_DATA = 'Không có dữ liệu';
 
@@ -645,7 +755,7 @@ const FILENAME_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
  * Anything a filesystem refuses ("/", ":", …) becomes "-".
  */
 export function operationalPdfFileName(
-  data: Pick<OperationalReportData, 'from' | 'to' | 'branches'> & Partial<Pick<OperationalReportData, 'shiftType'>>,
+  data: Pick<OperationalReportData, 'from' | 'to' | 'branches'> & Partial<Pick<OperationalReportData, 'shiftType' | 'section'>>,
   /** True when ONE branch was asked for — not merely when only one exists. */
   singleBranch: boolean,
   /** The PDF and the XLSX of one scope share one name. */
@@ -663,7 +773,9 @@ export function operationalPdfFileName(
   }
   // A one-shift file says which shift: "05_Truong Dinh_30-09-2026_Ca A".
   const shift = data.shiftType ? `_${asciiFold(shiftDefinition(data.shiftType).name)}` : '';
-  return `${`${who}_${dates}${shift}`.replace(FILENAME_UNSAFE, '-')}.${extension}`;
+  // A department's file says which: "…_Ky thuat", "…_Buong phong".
+  const department = data.section === 'TECHNICAL' ? '_Ky thuat' : data.section === 'HOUSEKEEPING' ? '_Buong phong' : '';
+  return `${`${who}_${dates}${shift}${department}`.replace(FILENAME_UNSAFE, '-')}.${extension}`;
 }
 
 export async function buildOperationalReportPdf(data: OperationalReportData): Promise<Buffer> {
@@ -677,9 +789,16 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
   const showArchive = data.category === undefined || ARCHIVE_SECTION_CATEGORIES.includes(data.category);
 
   const doc = createReportDocument({
-    title: 'KAS HOTEL & RESTAURANT — BÁO CÁO VẤN ĐỀ VẬN HÀNH LỄ TÂN',
+    title:
+      data.section === 'TECHNICAL'
+        ? 'KAS HOTEL & RESTAURANT — BÁO CÁO KỸ THUẬT'
+        : data.section === 'HOUSEKEEPING'
+          ? 'KAS HOTEL & RESTAURANT — BÁO CÁO BUỒNG PHÒNG'
+          : 'KAS HOTEL & RESTAURANT — BÁO CÁO VẤN ĐỀ VẬN HÀNH LỄ TÂN',
     // The period is of BUSINESS DATES, and only closed shifts are in it.
-    period: `${periodLabel(data.from, data.to)} (ngày nghiệp vụ của ca, chỉ gồm ca đã kết thúc)`,
+    period: data.section
+      ? `${periodLabel(data.from, data.to)} (theo ngày ghi nhận)`
+      : `${periodLabel(data.from, data.to)} (ngày nghiệp vụ của ca, chỉ gồm ca đã kết thúc)`,
     generatedAt: hcmDateTime(data.generatedAt),
     // The category is NAMED when the file is scoped to one, so a PDF of
     // payments alone cannot be read as "nothing else happened".
@@ -711,6 +830,12 @@ export async function buildOperationalReportPdf(data: OperationalReportData): Pr
     doc.font(FONT_BOLD).fontSize(12);
     doc.text(`CHI NHÁNH ${section.branch.branchNumber} — ${section.branch.address.toUpperCase()}`);
     doc.font(FONT_REGULAR).fontSize(8);
+    if (data.section) {
+      doc.text(section.branch.hotelName);
+      doc.moveDown(0.3);
+      sectionBranchBody(doc, data, section);
+      return;
+    }
     doc.text(`${section.branch.hotelName} · ${section.total} bản ghi · ${section.shifts.length} ca đã kết thúc`);
     if (section.truncated) {
       note(

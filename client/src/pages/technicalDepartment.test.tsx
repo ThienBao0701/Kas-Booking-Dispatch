@@ -7,13 +7,12 @@
  *      asks for the others.
  *   2. Bộ phận kỹ thuật has a queue per workflow stage and accepting one
  *      always names the technician doing the work. WHILE INSPECTION IS DORMANT
- *      (the default) "Hoàn thành" is the direct action it was before inspection
- *      and there is no "Chờ nghiệm thu" queue; with inspection switched on,
- *      finishing records a result and sends the incident to "Chờ nghiệm thu".
- *   3. Quản lý kỹ thuật, dormant, is told the feature is not yet active and has
- *      nothing to act on. Switched on, it judges finished repairs: a pass may
- *      carry a note, a fail must carry its reason. It has no technician's
- *      buttons, and the technician has none of its.
+ *      (the default) "Hoàn thành" asks "Tình trạng vấn đề" — finished, or one
+ *      stage of several — and there is no "Chờ nghiệm thu" queue; with
+ *      inspection switched on, finishing records a result and sends the
+ *      incident to "Chờ nghiệm thu".
+ *   3. Quản lý kỹ thuật no longer has the temporary "Nghiệm thu" screen: an
+ *      old queue link lands on its incident workspace.
  *   4. The Admin screen shows the same information and NO action buttons.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -311,6 +310,63 @@ describe('the form will not submit an incomplete report', () => {
   });
 });
 
+describe('structured floors and the duplicate warning', () => {
+  it('chooses a hallway floor from the branch’s floor catalog', async () => {
+    installApiMock({
+      ...receptionRoutes(),
+      'GET /api/branches/1/rooms': () => ({ status: 200, body: { branchId: 1, rooms: ['301'], floors: ['1', '2', '3'] } }),
+    });
+    const { user, dialog } = await openReportForm();
+    await user.selectOptions(within(dialog).getByLabelText('Khu vực'), 'HALLWAY');
+    const floor = await within(dialog).findByTestId('issue-floor');
+    expect(within(floor).getAllByRole('option').map((o) => o.textContent)).toEqual(['— Chọn tầng —', 'Tầng 1', 'Tầng 2', 'Tầng 3']);
+  });
+
+  /**
+   * "CÓ THỂ BỊ TRÙNG": a match on the structured key warns, with the match in
+   * full; "Hủy / quay lại" sends nothing, "Vẫn gửi báo cáo" sends.
+   */
+  it('warns of a possible duplicate at "Gửi báo cáo", and sends only on "Vẫn gửi báo cáo"', async () => {
+    let sent: FormData | null = null;
+    const open = issue({
+      id: 'dup1',
+      reporterName: 'Lễ tân Hai',
+      cause: 'Thiếu gas',
+      assignmentStateLabel: 'Đang sửa',
+      assignedTechnician: { id: 4, name: 'Kỹ thuật viên trực' },
+      shiftType: 'A',
+    });
+    installApiMock({
+      ...receptionRoutes((b) => (sent = b)),
+      'GET /api/issues/similar?areaCategory=ROOM&roomNumber=305&category=AIR_CONDITIONER': () => ({
+        status: 200,
+        body: { open: [open], recent: [] },
+      }),
+    });
+    const { user, dialog } = await openReportForm();
+    await user.type(within(dialog).getByText('Số phòng').querySelector('input')!, '305');
+    await user.type(within(dialog).getByLabelText('Sự cố'), 'Máy lạnh không lạnh');
+    await user.click(within(dialog).getByTestId('issue-submit'));
+
+    const warning = await within(dialog).findByTestId('similar-issues');
+    expect(warning).toHaveTextContent('Vấn đề này có thể bị trùng với một vấn đề đã được báo cáo.');
+    expect(warning).toHaveTextContent('Bạn chắc chắn muốn gửi báo cáo này chứ?');
+    expect(warning).toHaveTextContent('Lễ tân Hai');
+    expect(warning).toHaveTextContent('Thiếu gas');
+    expect(warning).toHaveTextContent('Kỹ thuật viên trực');
+    expect(warning).toHaveTextContent('Ca A');
+    expect(sent).toBeNull();
+
+    await user.click(within(dialog).getByTestId('duplicate-back'));
+    expect(within(dialog).queryByTestId('similar-issues')).not.toBeInTheDocument();
+    expect(sent).toBeNull();
+
+    await user.click(within(dialog).getByTestId('issue-submit'));
+    await user.click(await within(dialog).findByTestId('duplicate-send'));
+    await waitFor(() => expect(sent).not.toBeNull());
+  });
+});
+
 /* -------------------------------------------------------------------------- */
 /* The Technical queues                                                       */
 /* -------------------------------------------------------------------------- */
@@ -504,10 +560,10 @@ describe('Bộ phận kỹ thuật works the queues', () => {
   });
 
   /**
-   * DORMANT, "HOÀN THÀNH" IS THE DIRECT ACTION IT WAS BEFORE INSPECTION: one
-   * press, no dialog, nothing required — the server stamps the time.
+   * DORMANT, "HOÀN THÀNH" ASKS "TÌNH TRẠNG VẤN ĐỀ". "Đã xử lý xong" finishes it —
+   * what was done is optional — and the server stamps the time.
    */
-  it('completes an incident being worked with one press, as before inspection', async () => {
+  it('completes an incident through "Tình trạng vấn đề" → "Đã xử lý xong"', async () => {
     let sent: unknown = null;
     installApiMock(
       technicalRoutes({
@@ -526,9 +582,73 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     expect(within(queue).getAllByText(/0901234567/).length).toBeGreaterThan(0);
 
     await user.click(screen.getByTestId('complete-i2'));
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    expect(within(dialog).getByTestId('stage-confirm')).toBeDisabled();
+    await user.click(within(dialog).getByTestId('stage-status-done'));
+    await user.click(within(dialog).getByTestId('stage-confirm'));
     await waitFor(() => expect(sent).toEqual({}));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(await screen.findByText('Đã hoàn thành sự cố.')).toBeInTheDocument();
+  });
+
+  /**
+   * "ĐANG TRONG QUÁ TRÌNH THEO DÕI THÊM": both fields are required, the stage
+   * is recorded and the incident stays "Đang sửa" — nothing is completed.
+   */
+  it('records one stage of several, and keeps the repair open', async () => {
+    let staged: unknown = null;
+    let completed = false;
+    installApiMock(
+      technicalRoutes({
+        'POST /api/issues/i2/stage': (init: RequestInit) => {
+          staged = JSON.parse(String(init.body));
+          return { status: 200, body: { issue: issue({ id: 'i2', status: 'IN_PROGRESS' }) } };
+        },
+        'POST /api/issues/i2/complete': () => {
+          completed = true;
+          return { status: 200, body: { issue: issue({ id: 'i2', status: 'COMPLETED' }) } };
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp('/app/technical/in-progress');
+
+    await user.click(await screen.findByTestId('complete-i2'));
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    await user.click(within(dialog).getByTestId('stage-status-follow'));
+    const confirm = within(dialog).getByTestId('stage-confirm');
+    await user.type(within(dialog).getByTestId('stage-work-done'), 'Đã thay tụ');
+    expect(confirm).toBeDisabled();
+    await user.type(within(dialog).getByTestId('stage-next-work'), 'Chờ linh kiện block');
+    await user.click(confirm);
+    await waitFor(() => expect(staged).toEqual({ workDone: 'Đã thay tụ', nextWork: 'Chờ linh kiện block' }));
+    expect(completed).toBe(false);
+    expect(await screen.findByText('Đã ghi nhận giai đoạn — sự cố vẫn đang sửa.')).toBeInTheDocument();
+  });
+
+  it('shows the stage timeline: finished stages, and the one under way', async () => {
+    const stage = {
+      id: 'st1',
+      stageNumber: 1,
+      technicianName: 'Trần Văn B',
+      startedAt: '2026-09-17T03:00:00.000Z',
+      completedAt: '2026-09-17T05:00:00.000Z',
+      workDone: 'Đã thay tụ',
+      nextWork: 'Chờ linh kiện block',
+      final: false,
+    };
+    installApiMock(
+      technicalRoutes({
+        'GET /api/issues?stage=IN_PROGRESS&pageSize=100': () =>
+          listBody([issue({ id: 'i2', status: 'IN_PROGRESS', attempts: [ATTEMPT_OPEN], stages: [stage], currentStageNumber: 2 })]),
+      }),
+    );
+    renderApp('/app/technical/in-progress');
+
+    const timeline = await screen.findByTestId('issue-stages');
+    expect(within(timeline).getByTestId('issue-stage-1')).toHaveTextContent('Giai đoạn 1');
+    expect(within(timeline).getByTestId('issue-stage-1')).toHaveTextContent('Đã thay tụ');
+    expect(within(timeline).getByTestId('issue-stage-current')).toHaveTextContent('Giai đoạn 2');
+    expect(within(timeline).getByTestId('issue-stage-current')).toHaveTextContent('Chờ linh kiện block');
   });
 
   /**
@@ -715,139 +835,24 @@ describe('Bộ phận kỹ thuật works the queues', () => {
 /* Quản lý kỹ thuật                                                           */
 /* -------------------------------------------------------------------------- */
 
-describe('Quản lý kỹ thuật while inspection is dormant', () => {
-  it('lands on "Nghiệm thu", which says plainly that it is not yet active', async () => {
-    installApiMock(technicalRoutes({}, TECHNICAL_MANAGER_USER));
-    renderApp('/app');
+describe('Quản lý kỹ thuật — no "Nghiệm thu" screen any more', () => {
+  it('sends an old queue link to "Quản lý sự cố kỹ thuật"', async () => {
+    installApiMock(
+      technicalRoutes(
+        {
+          'GET /api/issues/technicians': () => ({ status: 200, body: { technicians: [] } }),
+          'GET /api/issues?pageSize=500': () => listBody([issue()]),
+        },
+        TECHNICAL_MANAGER_USER,
+      ),
+    );
+    renderApp('/app/technical/awaiting-inspection');
 
-    const notice = await screen.findByTestId('inspection-inactive');
-    expect(within(notice).getByRole('heading', { name: 'Chức năng nghiệm thu chưa được kích hoạt' })).toBeInTheDocument();
-    // The one menu entry, and nothing to act on.
+    expect(await screen.findByRole('heading', { name: 'Quản lý sự cố kỹ thuật' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Nghiệm thu']);
-    expect(screen.queryByRole('list')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('inspect-i3')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Nghiệm thu/ })).not.toBeInTheDocument();
-  });
-
-  it('shows the same notice on any queue address, with no queue behind it', async () => {
-    installApiMock(technicalRoutes({}, TECHNICAL_MANAGER_USER));
-    renderApp('/app/technical/new');
-
-    expect(await screen.findByTestId('inspection-inactive')).toBeInTheDocument();
-    expect(screen.queryByTestId('accept-i1')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('technical-tab-new')).not.toBeInTheDocument();
-  });
-});
-
-describe('Quản lý kỹ thuật, with inspection switched on, inspects from the same queues', () => {
-  const managerRoutes = (over: Record<string, (init: RequestInit) => { status: number; body?: unknown }> = {}) =>
-    technicalRoutes(over, TECHNICAL_MANAGER_USER, true);
-
-  it('lands on "Chờ nghiệm thu", with the repair, its cause and its result', async () => {
-    installApiMock(managerRoutes());
-    renderApp('/app');
-
-    const queue = await screen.findByRole('list', { name: 'Chờ nghiệm thu' });
-    expect(within(queue).getByTestId('issue-stage')).toHaveTextContent('Chờ nghiệm thu');
-    expect(within(queue).getByTestId('issue-inspection')).toHaveTextContent('Nghiệm thu: Chưa nghiệm thu');
-    expect(within(queue).getByTestId('cause-i3')).toHaveTextContent('Thiếu gas');
-    expect(within(queue).getByText(/Đã nạp gas/)).toBeInTheDocument();
-  });
-
-  /**
-   * A NEW REPAIR IS NOT JUDGED BY THE LAST ROUND'S VERDICT. Lần 1 failed; Lần 2
-   * waits. The inspection panel says "Chưa nghiệm thu" with nobody and no time
-   * beside it — the first round's inspector and reason stay in the history.
-   */
-  it('shows no earlier round\'s inspector or reason under "Chưa nghiệm thu"', async () => {
-    const failed = {
-      ...ATTEMPT_OPEN,
-      id: 'r1',
-      technicianName: 'Bảo',
-      outcome: 'COMPLETED',
-      outcomeAt: '2026-09-17T04:10:00.000Z',
-      cause: 'Thiếu gas',
-      result: 'Đã nạp gas',
-      inspection: { result: 'FAILED', resultLabel: 'Không đạt', inspectedByName: 'Hùng', inspectedAt: '2026-09-17T04:40:00.000Z', note: 'Vẫn chưa lạnh' },
-    };
-    const second = { ...failed, id: 'r2', attemptNumber: 2, technicianName: 'Minh', result: 'Đã hàn ống', inspection: null };
-    installApiMock(
-      managerRoutes({
-        'GET /api/issues?stage=AWAITING_INSPECTION&pageSize=100': () =>
-          listBody([AWAITING({ attempts: [failed, second], inspectionEnabled: true })]),
-      }),
-    );
-    const user = userEvent.setup();
-    renderApp('/app/technical/awaiting-inspection');
-
-    await user.click(await screen.findByTestId('inspect-i3'));
-    const dialog = await screen.findByRole('dialog', { name: 'Nghiệm thu sửa chữa' });
-    const panel = within(dialog).getByText('Người nghiệm thu').closest('section')!;
-    expect(within(panel).getByTestId('issue-inspection')).toHaveTextContent('Nghiệm thu: Chưa nghiệm thu');
-    expect(within(panel).queryByText('Hùng')).not.toBeInTheDocument();
-    expect(within(panel).queryByText(/Vẫn chưa lạnh/)).not.toBeInTheDocument();
-    // The first round is still there, in the history.
-    expect(within(within(dialog).getByTestId('issue-timeline')).getByText(/Vẫn chưa lạnh/)).toBeInTheDocument();
-  });
-
-  it("has none of the technician's buttons", async () => {
-    installApiMock(managerRoutes());
-    renderApp('/app/technical/new');
-    await screen.findByRole('list', { name: 'Sự cố khách sạn' });
-    expect(screen.queryByTestId('accept-i1')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Tiếp nhận' })).not.toBeInTheDocument();
-  });
-
-  it('passes a repair, with an optional note', async () => {
-    let sent: unknown = null;
-    installApiMock(
-      managerRoutes({
-        'POST /api/issues/i3/inspect': (init: RequestInit) => {
-          sent = JSON.parse(String(init.body));
-          return { status: 200, body: { issue: AWAITING({ status: 'COMPLETED', inspectionEnabled: true }) } };
-        },
-      }),
-    );
-    const user = userEvent.setup();
-    renderApp('/app/technical/awaiting-inspection');
-
-    await user.click(await screen.findByTestId('inspect-i3'));
-    const dialog = await screen.findByRole('dialog', { name: 'Nghiệm thu sửa chữa' });
-    // The whole lifecycle is in front of the manager before they judge it.
-    const lifecycle = within(dialog).getByTestId('issue-lifecycle');
-    expect(within(lifecycle).getByText('Báo cáo')).toBeInTheDocument();
-    expect(within(lifecycle).getByText('Sửa chữa')).toBeInTheDocument();
-    expect(within(lifecycle).getAllByText('Nghiệm thu').length).toBeGreaterThan(0);
-    expect(within(lifecycle).getAllByText('Đức').length).toBeGreaterThan(0);
-
-    await user.click(within(dialog).getByTestId('inspect-pass'));
-    await waitFor(() => expect(sent).toEqual({ result: 'PASSED' }));
-  });
-
-  it('will not fail a repair without a reason, and sends the reason when given', async () => {
-    let sent: unknown = null;
-    installApiMock(
-      managerRoutes({
-        'POST /api/issues/i3/inspect': (init: RequestInit) => {
-          sent = JSON.parse(String(init.body));
-          return { status: 200, body: { issue: AWAITING({ status: 'NEW', inspectionEnabled: true }) } };
-        },
-      }),
-    );
-    const user = userEvent.setup();
-    renderApp('/app/technical/awaiting-inspection');
-
-    await user.click(await screen.findByTestId('inspect-i3'));
-    const dialog = await screen.findByRole('dialog', { name: 'Nghiệm thu sửa chữa' });
-
-    await user.click(within(dialog).getByTestId('inspect-fail'));
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Vui lòng nhập lý do nghiệm thu không đạt.');
-    expect(sent).toBeNull();
-
-    await user.type(within(dialog).getByTestId('inspect-note'), 'Vẫn chưa lạnh');
-    await user.click(within(dialog).getByTestId('inspect-fail'));
-    await waitFor(() => expect(sent).toEqual({ result: 'FAILED', note: 'Vẫn chưa lạnh' }));
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Quản lý sự cố kỹ thuật']);
+    expect(screen.queryByTestId('inspection-inactive')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nghiệm thu/)).not.toBeInTheDocument();
   });
 });
 

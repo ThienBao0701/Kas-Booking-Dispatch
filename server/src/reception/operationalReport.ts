@@ -44,6 +44,27 @@ import {
 } from './businessDate';
 import { shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
 import { bookingsForReport, completionArchiveRows, type ReportBooking } from './reportSections';
+import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
+import { describeLocation } from '../issue/issueArea';
+
+/**
+ * A DEPARTMENT'S REPORT from the same engine: "Kỹ thuật" (the incidents of the
+ * period, by place, with assignment, stages and results) or "Buồng phòng" (the
+ * room findings and the housekeeping workdays). Absent: the full Reception report.
+ */
+export type ReportSection = 'TECHNICAL' | 'HOUSEKEEPING';
+
+/** One housekeeping work segment of the period at a branch, as the report prints it. */
+export interface ReportWorkSegment {
+  id: string;
+  accountName: string;
+  staffName: string;
+  startedAt: string;
+  endedAt: string | null;
+  rooms: number;
+  inspections: number;
+  issues: number;
+}
 
 /** One closed shift of the official report, with its own drawer. */
 export interface OfficialShift {
@@ -85,6 +106,11 @@ export interface BranchOperationalReport {
   bookingsTruncated: boolean;
   /** "Hoàn thành vấn đề": this report's rows the 12-hour rule has archived. */
   completed: SerializedReport[];
+  /** Section "Kỹ thuật": the incidents reported in the period, grouped by place. */
+  technical: ReturnType<typeof serializeIssue>[];
+  technicalTruncated: boolean;
+  /** Section "Buồng phòng": the workdays' segments at this branch in the period. */
+  workSegments: ReportWorkSegment[];
 }
 
 export interface OperationalReportData {
@@ -94,6 +120,8 @@ export interface OperationalReportData {
   category?: OperationalReportCategory;
   /** Set when the export was scoped to one shift type; the header names it. */
   shiftType?: ShiftType;
+  /** Set when the export is a department's report rather than Reception's. */
+  section?: ReportSection;
   branches: BranchOperationalReport[];
   generatedAt: Date;
 }
@@ -208,6 +236,93 @@ export async function branchOperationalReport(
     bookingsTotal: orders.total,
     bookingsTruncated: orders.truncated,
     completed: completionArchiveRows(byCategory, now),
+    technical: [],
+    technicalTruncated: false,
+    workSegments: [],
+  };
+}
+
+/** The empty Reception parts of a department's report — that report has none of them. */
+function emptyReceptionParts(): Omit<BranchOperationalReport, 'branch'> {
+  return {
+    cash: {
+      openingCash: null,
+      cashCollected: 0,
+      transferCollected: 0,
+      cardCollected: 0,
+      receivable: 0,
+      cashExpense: 0,
+      endingCash: null,
+      voidedCount: 0,
+      paymentCount: 0,
+    } as CashSummary,
+    counts: emptyCounts(),
+    byCategory: emptyGroups(),
+    total: 0,
+    truncated: false,
+    shifts: [],
+    openShifts: [],
+    housekeeping: [],
+    housekeepingTruncated: false,
+    bookings: [],
+    bookingsTotal: 0,
+    bookingsTruncated: false,
+    completed: [],
+    technical: [],
+    technicalTruncated: false,
+    workSegments: [],
+  };
+}
+
+/**
+ * ONE BRANCH OF A DEPARTMENT'S REPORT over the period's HCM days. "Kỹ thuật": every
+ * incident reported in the period, ordered by place so a room's problems sit
+ * together. "Buồng phòng": the findings (with the collection the reader may see)
+ * and the work segments. The branch was already checked against the scope.
+ */
+async function sectionBranchReport(
+  actor: ReportActor,
+  branch: BranchOperationalReport['branch'],
+  section: ReportSection,
+  window: { from: Date; to: Date },
+  client: PrismaClient,
+): Promise<BranchOperationalReport> {
+  const now = getClock().now();
+  const base = { branch, ...emptyReceptionParts() };
+  if (section === 'TECHNICAL') {
+    const where = { branchId: branch.id, createdAt: { gte: window.from, lt: window.to } };
+    const [rows, total] = await Promise.all([
+      client.hotelIssue.findMany({ where, include: ISSUE_INCLUDE, orderBy: { createdAt: 'asc' }, take: MAX_ROWS_PER_BRANCH }),
+      client.hotelIssue.count({ where }),
+    ]);
+    const ordered = [...rows].sort((a, b) => describeLocation(a).localeCompare(describeLocation(b), 'vi', { numeric: true }));
+    return { ...base, technical: ordered.map((row) => serializeIssue(row, now)), technicalTruncated: total > rows.length };
+  }
+  const [rooms, segments] = await Promise.all([
+    listRoomIssues(actor, { branchId: branch.id, from: window.from, to: window.to }, client),
+    client.housekeepingWorkSegment.findMany({
+      where: { branchId: branch.id, startedAt: { gte: window.from, lt: window.to } },
+      include: {
+        session: { select: { user: { select: { fullName: true } } } },
+        inspections: { select: { roomNumber: true, issues: { select: { voidedAt: true } } } },
+      },
+      orderBy: { startedAt: 'asc' },
+    }),
+  ]);
+  return {
+    ...base,
+    housekeeping: [...rooms.issues].reverse(),
+    housekeepingTruncated: rooms.truncated,
+    workSegments: segments.map((seg) => ({
+      id: seg.id,
+      accountName: seg.session.user.fullName,
+      staffName: seg.staffName,
+      startedAt: seg.startedAt.toISOString(),
+      endedAt: seg.endedAt ? seg.endedAt.toISOString() : null,
+      rooms: new Set(seg.inspections.map((i) => i.roomNumber)).size,
+      inspections: seg.inspections.length,
+      issues: seg.inspections.reduce((n, i) => n + i.issues.filter((x) => !x.voidedAt).length, 0),
+    })),
   };
 }
 
@@ -230,6 +345,8 @@ export async function operationalReport(
     category?: OperationalReportCategory;
     /** One shift type only ("Ca A"); every shift when absent. */
     shiftType?: ShiftType;
+    /** A department's report from the same engine; absent = Reception's. */
+    section?: ReportSection;
   },
   client: PrismaClient = prisma,
 ): Promise<OperationalReportData> {
@@ -255,6 +372,14 @@ export async function operationalReport(
       client,
     ),
   ]);
+  if (params.section) {
+    const range = hcmRange(params.from, params.to);
+    const sections: BranchOperationalReport[] = [];
+    for (const branch of branches) {
+      sections.push(await sectionBranchReport(actor, branch, params.section, { from: range.start, to: range.end }, client));
+    }
+    return { from: params.from, to: params.to, section: params.section, branches: sections, generatedAt: getClock().now() };
+  }
   const sessions = params.shiftType ? allSessions.filter((s) => s.shiftType === params.shiftType) : allSessions;
   // Shift-less supervisor rows join by their own HCM day — unless one shift was asked for.
   const window = hcmRange(params.from, params.to);

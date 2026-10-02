@@ -86,3 +86,48 @@ export function catalogRoom(branchCode: string, raw: string | null | undefined):
   }
   return room;
 }
+
+/* ------------------------------------------------------------------ *
+ * THE FLOOR CATALOG — the same idea for "Hành lang" and "Cầu thang".
+ *
+ * A floor is stored as the value below, and read everywhere as "Tầng <value>".
+ * Chi nhánh 4 has TWO buildings whose floor numbers overlap (Tầng 2 and Tầng 3
+ * exist in both), so its values carry the building: "2 (Khu Suite)" and
+ * "2 (Tòa bên cạnh)" are different places, in the label and in every duplicate
+ * or repeat check that groups by place. Keyed by branch code, like the rooms.
+ * ------------------------------------------------------------------ */
+
+const floorRange = (n: number): string[] => Array.from({ length: n }, (_, i) => String(i + 1));
+
+const FLOORS_BY_BRANCH_CODE: Record<string, readonly string[]> = {
+  TRUONG_DINH_05: floorRange(7),
+  LY_TU_TRONG_260: floorRange(8),
+  NGUYEN_TRAI_47A: floorRange(11),
+  NGUYEN_THAI_BINH_170: [
+    ...['1', '2', '3'].map((f) => `${f} (Khu Suite)`),
+    ...['2', '3', '4', '5', '6', '7', '8'].map((f) => `${f} (Tòa bên cạnh)`),
+  ],
+  LE_THANH_TON_278: floorRange(5),
+  BUI_THI_XUAN_40: floorRange(8),
+  BUI_THI_XUAN_13: floorRange(9),
+  LE_THANH_TON_191: floorRange(7),
+};
+
+/** The branch's floors in walking order — or null when the branch has no floor catalog. */
+export function floorsForBranchCode(code: string): readonly string[] | null {
+  return FLOORS_BY_BRANCH_CODE[code] ?? null;
+}
+
+/**
+ * The floor as it will be stored: trimmed, and — when the branch has a floor
+ * catalog — one of its floors, or refused. Mirrors `catalogRoom`.
+ */
+export function catalogFloor(branchCode: string, raw: string | null | undefined): string | null {
+  const floor = (raw ?? '').trim();
+  if (!floor) return null;
+  const floors = floorsForBranchCode(branchCode);
+  if (floors && !floors.includes(floor)) {
+    throw ApiError.validation(`Tầng ${floor} không thuộc chi nhánh này. Vui lòng chọn tầng trong danh sách.`);
+  }
+  return floor;
+}

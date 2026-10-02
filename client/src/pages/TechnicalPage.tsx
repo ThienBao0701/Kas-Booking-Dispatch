@@ -1,17 +1,14 @@
 /**
- * Bộ phận kỹ thuật and Quản lý kỹ thuật — the incident workflow queues.
+ * Bộ phận kỹ thuật — the incident workflow queues.
  *
- * ONE SCREEN, TWO ROLES. The technician works the queues (Tiếp nhận → sửa →
- * Hoàn thành); Quản lý kỹ thuật reads the very same queues and judges finished
- * repairs ("Nghiệm thu"). Which buttons a card offers depends on the role — and
- * the SERVER refuses the other role's actions anyway, so hiding them here is
- * convenience, not the control.
+ * The technician works the queues: Tiếp nhận → sửa → "Hoàn thành", which asks
+ * "Tình trạng vấn đề": finished ("Đã xử lý xong"), or one stage done and more
+ * to follow ("Đang trong quá trình theo dõi thêm") — the incident then stays
+ * "Đang sửa" and the stage is kept on its timeline. Quản lý kỹ thuật no longer
+ * works here: its screen is "Quản lý sự cố kỹ thuật" (/app/reports/technical).
  *
  * INSPECTION IS DORMANT until the server's `TECHNICAL_INSPECTION_ENABLED` is
- * switched on. Until then the technician's workflow is the operational one —
- * Tiếp nhận → sửa → a direct "Hoàn thành", or "Không sửa được" — there is no
- * "Chờ nghiệm thu" queue, and Quản lý kỹ thuật sees that the feature is not yet
- * active instead of a queue to judge.
+ * switched on; until then there is no "Chờ nghiệm thu" queue.
  *
  * WHY ONE ROUTE PER QUEUE AND NOT ONE PAGE WITH A FILTER
  *
@@ -34,12 +31,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Navigate, NavLink, useParams } from 'react-router-dom';
-import { CheckCircle2, ClipboardCheck, Eye, NotebookPen, RefreshCw, Wrench, XCircle } from 'lucide-react';
+import { CheckCircle2, NotebookPen, RefreshCw, Wrench, XCircle } from 'lucide-react';
 import {
   inspectionIsRelevant,
   issueCategoryLabel,
   issuesApi,
-  type InspectionResult,
   type Issue,
   type IssueStage,
   type TechnicalCounts,
@@ -63,7 +59,7 @@ import {
   IssueEditHistory,
   IssueEditedFlag,
   IssueInspectionBadge,
-  IssueLifecycleDetail,
+  IssueStageTimeline,
   IssueStageBadge,
   IssueRepeatNote,
   IssueThumb,
@@ -120,9 +116,8 @@ const QUEUES = {
   },
 } as const;
 
-/** Quản lý kỹ thuật reads every waiting incident, not an assignment of their own. */
-function queueTitle(key: QueueKey, isManager: boolean): string {
-  return isManager && key === 'new' ? 'Sự cố khách sạn' : QUEUES[key].title;
+function queueTitle(key: QueueKey): string {
+  return QUEUES[key].title;
 }
 
 type QueueKey = keyof typeof QUEUES;
@@ -140,10 +135,8 @@ function isQueueKey(value: string | undefined): value is QueueKey {
 export function TechnicalPage() {
   const { queue } = useParams();
   const { user } = useAuth();
-  const queryClient = useQueryClient();
-  const isManager = user?.role === 'TECHNICAL_MANAGER';
   const isTechnician = user?.role === 'TECHNICAL';
-  const key: QueueKey = isQueueKey(queue) ? queue : isManager ? 'awaiting-inspection' : 'new';
+  const key: QueueKey = isQueueKey(queue) ? queue : 'new';
   const config = QUEUES[key];
 
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
@@ -161,8 +154,7 @@ export function TechnicalPage() {
   const [failing, setFailing] = useState<Issue | null>(null);
   const [completing, setCompleting] = useState<Issue | null>(null);
   const [causing, setCausing] = useState<Issue | null>(null);
-  const [inspecting, setInspecting] = useState<Issue | null>(null);
-  const [viewing, setViewing] = useState<Issue | null>(null);
+  const [reporting, setReporting] = useState<Issue | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list() });
@@ -180,7 +172,6 @@ export function TechnicalPage() {
     act on. The server enforces the same; this only keeps the screen honest.
   */
   const inspectionOn = counts.data?.counts.inspectionEnabled ?? false;
-  const managerIdle = isManager && !inspectionOn;
 
   const list = useQuery({
     queryKey: ['issues', { technical: key, branchId: branchFilter, done: doneFiltered ? doneRange : null }],
@@ -194,50 +185,25 @@ export function TechnicalPage() {
       }),
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,
-    enabled: !managerIdle && !doneHalf,
+    enabled: !doneHalf,
   });
   const issues = list.data?.issues ?? [];
 
-  /*
-    The dormant "Hoàn thành" is the DIRECT action it was before inspection: it
-    needs nothing from the technician beyond the press, and a confirmation
-    dialog on the happy path is friction on the case that happens most. The
-    server stamps the time.
-  */
-  const completeNow = useMutation({
-    mutationFn: (id: string) => issuesApi.complete(id),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['issues'] });
-      setToast('Đã hoàn thành sự cố.');
-    },
-    onError: (e: unknown) => setToast(toUserMessage(e)),
-  });
-
-  if (managerIdle) {
-    return (
-      <QueryState isLoading={counts.isLoading} isError={counts.isError} error={counts.error}>
-        <InspectionInactive />
-      </QueryState>
-    );
-  }
   // An old link to the inspection queue lands on the technician's first queue.
   if (!inspectionOn && counts.data && key === 'awaiting-inspection') {
     return <Navigate to="/app/technical/new" replace />;
   }
 
-  // The manager's own queue leads their tab row, as it leads their menu.
-  const order: QueueKey[] = isManager
-    ? ['awaiting-inspection', 'new', 'rework', 'in-progress', 'completed']
-    : inspectionOn
-      ? ['new', 'rework', 'in-progress', 'awaiting-inspection', 'completed']
-      : ['new', 'rework', 'in-progress', 'completed'];
+  const order: QueueKey[] = inspectionOn
+    ? ['new', 'rework', 'in-progress', 'awaiting-inspection', 'completed']
+    : ['new', 'rework', 'in-progress', 'completed'];
   if (isTechnician) order.push('history');
 
   return (
     <div>
       <PageHeader
-        title={queueTitle(key, isManager)}
-        description={isManager && key === 'new' ? 'Sự cố lễ tân vừa báo, chưa có ai tiếp nhận.' : queueDescription(key, inspectionOn)}
+        title={queueTitle(key)}
+        description={queueDescription(key, inspectionOn)}
         actions={
           <div className="flex items-center gap-2">
             <select
@@ -280,7 +246,7 @@ export function TechnicalPage() {
               }`
             }
           >
-            {queueTitle(k, isManager)}
+            {queueTitle(k)}
             {QUEUES[k].count ? (
               <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold leading-none text-slate-700">
                 {counts.data?.counts[QUEUES[k].count] ?? 0}
@@ -331,11 +297,11 @@ export function TechnicalPage() {
                 ? 'Không có sự cố hoàn thành trong khoảng thời gian này.'
                 : key === 'history'
                   ? 'Bạn chưa được giao sự cố nào.'
-                  : `Không có sự cố nào ở trạng thái “${queueTitle(key, isManager)}”.`
+                  : `Không có sự cố nào ở trạng thái “${queueTitle(key)}”.`
             }
           />
         ) : (
-          <ul className="space-y-3" aria-label={queueTitle(key, isManager)}>
+          <ul className="space-y-3" aria-label={queueTitle(key)}>
             {issues.map((issue) => (
               <li key={issue.id}>
                 <article className="rounded-2xl border border-line bg-white p-4 shadow-sm">
@@ -387,6 +353,8 @@ export function TechnicalPage() {
                         </div>
                       ) : null}
 
+                      {/* The repair stage by stage, while it runs over several visits. */}
+                      <IssueStageTimeline issue={issue} />
                       {/* ASSIGNED + OUTCOME + the attempt history. */}
                       <IssueWorkTrail issue={issue} />
                       {(issue.edits ?? []).length > 0 ? (
@@ -404,27 +372,18 @@ export function TechnicalPage() {
                       {isTechnician && issue.status === 'IN_PROGRESS' ? (
                         <>
                           {/*
-                            With inspection on, "Hoàn thành" opens a short form:
-                            the result is what Quản lý kỹ thuật inspects, so it
-                            cannot be skipped. Dormant, it is direct. "Không sửa
+                            "Hoàn thành" asks "Tình trạng vấn đề" — finished, or
+                            one stage of several. With inspection on, it is the
+                            result form Quản lý kỹ thuật inspects. "Không sửa
                             được" always needs its reason.
                           */}
-                          {issue.inspectionEnabled ? (
-                            <Button onClick={() => setCompleting(issue)} data-testid={`complete-${issue.id}`}>
-                              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                              Hoàn thành
-                            </Button>
-                          ) : (
-                            <Button
-                              onClick={() => completeNow.mutate(issue.id)}
-                              loading={completeNow.isPending && completeNow.variables === issue.id}
-                              disabled={completeNow.isPending}
-                              data-testid={`complete-${issue.id}`}
-                            >
-                              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                              Hoàn thành
-                            </Button>
-                          )}
+                          <Button
+                            onClick={() => (issue.inspectionEnabled ? setCompleting(issue) : setReporting(issue))}
+                            data-testid={`complete-${issue.id}`}
+                          >
+                            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                            Hoàn thành
+                          </Button>
                           <Button
                             variant="secondary"
                             onClick={() => setCausing(issue)}
@@ -442,22 +401,6 @@ export function TechnicalPage() {
                             Không sửa được
                           </Button>
                         </>
-                      ) : null}
-                      {isManager && issue.status === 'AWAITING_INSPECTION' ? (
-                        <Button onClick={() => setInspecting(issue)} data-testid={`inspect-${issue.id}`}>
-                          <ClipboardCheck className="h-4 w-4" aria-hidden="true" />
-                          Nghiệm thu
-                        </Button>
-                      ) : null}
-                      {isManager && issue.status !== 'AWAITING_INSPECTION' ? (
-                        <Button
-                          variant="secondary"
-                          onClick={() => setViewing(issue)}
-                          data-testid={`detail-${issue.id}`}
-                        >
-                          <Eye className="h-4 w-4" aria-hidden="true" />
-                          Chi tiết
-                        </Button>
                       ) : null}
                     </div>
                   </div>
@@ -511,57 +454,17 @@ export function TechnicalPage() {
           }}
         />
       ) : null}
-      {inspecting ? (
-        <InspectModal
-          issue={inspecting}
-          onClose={() => setInspecting(null)}
-          onDone={(result) => {
-            setInspecting(null);
-            setToast(result === 'PASSED' ? 'Đã nghiệm thu đạt.' : 'Đã yêu cầu sửa lại.');
+      {reporting ? (
+        <StageStatusModal
+          issue={reporting}
+          onClose={() => setReporting(null)}
+          onDone={(finished) => {
+            setReporting(null);
+            setToast(finished ? 'Đã hoàn thành sự cố.' : 'Đã ghi nhận giai đoạn — sự cố vẫn đang sửa.');
           }}
         />
       ) : null}
-      {viewing ? (
-        <Modal open size="4xl" title="Chi tiết sự cố" onClose={() => setViewing(null)}>
-          <IssueLifecycleDetail issue={viewing} />
-        </Modal>
-      ) : null}
       <Toast message={toast} onDone={() => setToast(null)} />
-    </div>
-  );
-}
-
-/**
- * Quản lý kỹ thuật's screen while inspection is DORMANT — said plainly, with
- * the workflow that is running instead, and no queue to act on. The inspection
- * code, data and routes are all still there; the server refuses a verdict
- * until the feature is switched on.
- */
-function InspectionInactive() {
-  return (
-    <div>
-      <PageHeader title="Nghiệm thu" description="Nghiệm thu sửa chữa của quản lý kỹ thuật." />
-      <section
-        data-testid="inspection-inactive"
-        aria-labelledby="inspection-inactive-heading"
-        className="rounded-2xl border border-line bg-white p-5 shadow-sm"
-      >
-        <div className="flex items-start gap-3">
-          <span className="rounded-xl bg-slate-100 p-2 text-slate-500">
-            <ClipboardCheck className="h-5 w-5" aria-hidden="true" />
-          </span>
-          <div className="min-w-0 space-y-2">
-            <h2 id="inspection-inactive-heading" className="text-base font-semibold text-slate-900">
-              Chức năng nghiệm thu chưa được kích hoạt
-            </h2>
-            <p className="text-sm text-slate-600">
-              Sự cố hiện được xử lý theo quy trình: Lễ tân báo sự cố → Kỹ thuật tiếp nhận → sửa → Hoàn
-              thành hoặc Không sửa được. Sự cố hoàn thành không cần chờ nghiệm thu.
-            </p>
-            <p className="text-sm text-slate-500">Chức năng này sẽ được bật khi có yêu cầu vận hành.</p>
-          </div>
-        </div>
-      </section>
     </div>
   );
 }
@@ -724,103 +627,114 @@ function CompleteModal({ issue, onClose, onDone }: { issue: Issue; onClose: () =
 }
 
 /**
- * "Nghiệm thu" — Quản lý kỹ thuật judges the finished repair.
+ * "TÌNH TRẠNG VẤN ĐỀ" — what "Hoàn thành" means this time.
  *
- * The WHOLE lifecycle is shown first (report, repair, every earlier attempt and
- * verdict), because that is what the judgement is made on. A pass may carry a
- * note; a fail must carry its reason — the technician who picks the rework up
- * reads it to know what was still wrong. Refused here and on the server.
+ *   Đã xử lý xong — the repair is finished; what was done is optional, and is
+ *     kept as the last stage.
+ *   Đang trong quá trình theo dõi thêm — this stage is done and more work
+ *     follows (parts, a contractor, a second visit). Both fields are required;
+ *     the incident stays "Đang sửa" with the same technician, and the next
+ *     stage starts now. Stages are numbered by the server, never by this form.
  */
-function InspectModal({
+function StageStatusModal({
   issue,
   onClose,
   onDone,
 }: {
   issue: Issue;
   onClose: () => void;
-  onDone: (result: InspectionResult) => void;
+  onDone: (finished: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  const [note, setNote] = useState('');
-  const [missingReason, setMissingReason] = useState(false);
-  const inspect = useMutation({
-    mutationFn: (result: InspectionResult) =>
-      issuesApi.inspect(issue.id, { result, ...(note.trim() ? { note: note.trim() } : {}) }),
-    onSuccess: async (_data, result) => {
+  const [state, setState] = useState<'done' | 'follow' | null>(null);
+  const [workDone, setWorkDone] = useState('');
+  const [nextWork, setNextWork] = useState('');
+  const save = useMutation({
+    mutationFn: () =>
+      state === 'follow'
+        ? issuesApi.recordStage(issue.id, { workDone: workDone.trim(), nextWork: nextWork.trim() })
+        : issuesApi.complete(issue.id, workDone.trim() ? { result: workDone.trim() } : {}),
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['issues'] });
-      onDone(result);
+      onDone(state !== 'follow');
     },
   });
-
-  const fail = () => {
-    if (!note.trim()) {
-      setMissingReason(true);
-      return;
-    }
-    inspect.mutate('FAILED');
-  };
-
+  const ready = state === 'done' || (state === 'follow' && workDone.trim() !== '' && nextWork.trim() !== '');
+  const stage = issue.currentStageNumber ?? (issue.stages ?? []).length + 1;
+  const option = (value: 'done' | 'follow', label: string, hint: string) => (
+    <label
+      className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 text-sm ${
+        state === value ? 'border-brand-600 bg-brand-50' : 'border-line hover:bg-slate-50'
+      }`}
+    >
+      <input
+        type="radio"
+        name="stage-status"
+        className="mt-1"
+        checked={state === value}
+        onChange={() => setState(value)}
+        data-testid={`stage-status-${value}`}
+      />
+      <span>
+        <span className="block font-medium text-slate-900">{label}</span>
+        <span className="block text-slate-600">{hint}</span>
+      </span>
+    </label>
+  );
   return (
     <Modal
       open
-      size="4xl"
-      title="Nghiệm thu sửa chữa"
+      title="Tình trạng vấn đề"
       onClose={onClose}
       footer={
-        // Stacked full-width on a phone — the verdict first — because three
-        // buttons in one row squeezed "Không đạt / Yêu cầu sửa lại" onto three
-        // lines. One row again from `sm` up.
-        <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row sm:justify-end">
+        <>
           <Button variant="secondary" onClick={onClose}>
             Hủy
           </Button>
-          <Button
-            variant="secondary"
-            onClick={fail}
-            disabled={inspect.isPending}
-            className="!border-rose-300 !text-rose-700 hover:!bg-rose-50"
-            data-testid="inspect-fail"
-          >
-            <XCircle className="h-4 w-4" aria-hidden="true" />
-            Không đạt / Yêu cầu sửa lại
+          <Button onClick={() => save.mutate()} disabled={!ready} loading={save.isPending} data-testid="stage-confirm">
+            Xác nhận
           </Button>
-          <Button
-            onClick={() => inspect.mutate('PASSED')}
-            loading={inspect.isPending && inspect.variables === 'PASSED'}
-            disabled={inspect.isPending}
-            data-testid="inspect-pass"
-          >
-            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-            Nghiệm thu đạt
-          </Button>
-        </div>
+        </>
       }
     >
-      <div className="space-y-4">
-        <IssueLifecycleDetail issue={issue} />
-        <label className="block text-sm font-medium text-slate-700">
-          Ghi chú nghiệm thu / Lý do không đạt{' '}
-          <span className="font-normal text-slate-500">(bắt buộc khi không đạt)</span>
-          <textarea
-            className={`${FIELD} ${missingReason && !note.trim() ? 'border-rose-500 ring-1 ring-rose-500' : ''}`}
-            rows={3}
-            maxLength={1000}
-            value={note}
-            onChange={(e) => {
-              setNote(e.target.value);
-              if (e.target.value.trim()) setMissingReason(false);
-            }}
-            placeholder="Ví dụ: Máy lạnh vẫn chưa đủ lạnh sau 15 phút"
-            aria-invalid={missingReason && !note.trim() ? true : undefined}
-            data-testid="inspect-note"
-          />
-        </label>
-        {missingReason && !note.trim() ? (
-          <p className="text-sm font-medium text-rose-700" role="alert">
-            Vui lòng nhập lý do nghiệm thu không đạt.
-          </p>
+      <div className="space-y-3">
+        <IssueSummary issue={issue} />
+        <IssueStageTimeline issue={issue} />
+        <fieldset className="space-y-2">
+          <legend className="mb-1 text-sm font-medium text-slate-700">Giai đoạn {stage} — tình trạng hiện tại</legend>
+          {option('done', 'Đã xử lý xong', 'Sự cố được hoàn thành.')}
+          {option('follow', 'Đang trong quá trình theo dõi thêm', 'Ghi nhận giai đoạn này; sự cố vẫn ở trạng thái “Đang sửa”.')}
+        </fieldset>
+        {state ? (
+          <label className="block text-sm font-medium text-slate-700">
+            Công việc hoàn thành{' '}
+            {state === 'follow' ? <span className="text-rose-600">*</span> : <span className="font-normal text-slate-500">(không bắt buộc)</span>}
+            <textarea
+              className={FIELD}
+              rows={3}
+              maxLength={2000}
+              value={workDone}
+              onChange={(e) => setWorkDone(e.target.value)}
+              placeholder="Ví dụ: Đã kiểm tra, xác định hỏng block máy lạnh"
+              data-testid="stage-work-done"
+            />
+          </label>
         ) : null}
-        {inspect.isError ? <ErrorAlert>{toUserMessage(inspect.error)}</ErrorAlert> : null}
+        {state === 'follow' ? (
+          <label className="block text-sm font-medium text-slate-700">
+            Các công việc cần xử lý tiếp <span className="text-rose-600">*</span>
+            <textarea
+              className={FIELD}
+              rows={3}
+              maxLength={2000}
+              value={nextWork}
+              onChange={(e) => setNextWork(e.target.value)}
+              placeholder="Ví dụ: Chờ linh kiện, thay block vào ngày mai"
+              data-testid="stage-next-work"
+            />
+          </label>
+        ) : null}
+        {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );

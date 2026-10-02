@@ -118,7 +118,8 @@ export interface InspectionSummary {
 
 export interface NewInspectionInput {
   roomNumber: string;
-  staffName: string;
+  /** Optional: the shift's cleaner ("Tên người dọn buồng") is used when absent. */
+  staffName?: string;
   issues: { type: RoomIssueType; note?: string }[];
 }
 
@@ -148,6 +149,32 @@ function query(params: Record<string, string | number | undefined>): string {
 }
 
 export const ROOM_ISSUES_KEY = ['housekeeping', 'issues'] as const;
+export const HOUSEKEEPING_SHIFT_KEY = ['housekeeping', 'shift'] as const;
+
+/** One branch within a workday — where, who cleaned, when, and what was found. */
+export interface WorkSegment {
+  id: string;
+  branch: { id: number; code: string; hotelName: string; address: string; branchNumber: number };
+  staffName: string;
+  startedAt: string;
+  endedAt: string | null;
+  rooms: number;
+  inspections: number;
+  issues: number;
+  byType: { type: RoomIssueType; label: string; count: number }[];
+}
+
+/** A housekeeping workday: "Vào ca" → segments (one per branch) → "Kết thúc ca". */
+export interface WorkShift {
+  id: string;
+  user: { id: number; fullName: string };
+  startedAt: string;
+  endedAt: string | null;
+  segments: WorkSegment[];
+  /** Where the account works now; null once the day has ended. */
+  current: WorkSegment | null;
+  totals: { rooms: number; inspections: number; issues: number; byType: WorkSegment['byType'] };
+}
 
 export const housekeepingApi = {
   createInspection: (input: NewInspectionInput) =>
@@ -164,4 +191,18 @@ export const housekeepingApi = {
 
   voidIssue: (issueId: string, reason: string) =>
     api.post<{ issue: RoomIssue }>(`/housekeeping/issues/${issueId}/void`, { reason }),
+
+  /** The account's open workday, or null. */
+  shift: () => api.get<{ shift: WorkShift | null }>('/housekeeping/shift'),
+  /** "Vào ca". */
+  startShift: (input: { branchId: number; staffName: string }) =>
+    api.post<{ shift: WorkShift }>('/housekeeping/shift/start', input),
+  /** "Đổi chi nhánh". */
+  switchBranch: (input: { branchId: number; staffName?: string }) =>
+    api.post<{ shift: WorkShift }>('/housekeeping/shift/switch', input),
+  /** "Kết thúc ca": the day's summary comes back. */
+  endShift: () => api.post<{ shift: WorkShift }>('/housekeeping/shift/end', {}),
+  /** Workdays on record: one's own, or a supervisor's scope. */
+  shifts: (filter: { from?: string; to?: string; branchId?: number } = {}) =>
+    api.get<{ shifts: WorkShift[] }>(`/housekeeping/shifts${query({ ...filter })}`),
 };

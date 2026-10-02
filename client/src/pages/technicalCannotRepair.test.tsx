@@ -140,10 +140,10 @@ describe('the two outcomes of a repair', () => {
   });
 
   /**
-   * While inspection is DORMANT, "Hoàn thành" is the bare press it was before
-   * inspection: no result is asked for, and the incident is finished.
+   * While inspection is DORMANT, "Hoàn thành" asks "Tình trạng vấn đề"; "Đã xử
+   * lý xong" needs no result, and the incident is finished.
    */
-  it('finishes the repair with one press while inspection is dormant', async () => {
+  it('finishes the repair through "Đã xử lý xong" while inspection is dormant', async () => {
     let sent: Record<string, unknown> | null = null;
     installApiMock(
       routes('IN_PROGRESS', [issue()], {
@@ -157,8 +157,10 @@ describe('the two outcomes of a repair', () => {
     renderApp(`/app/technical/${QUEUE_PATH.IN_PROGRESS}`);
 
     await user.click(await screen.findByTestId('complete-i1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    await user.click(within(dialog).getByTestId('stage-status-done'));
+    await user.click(within(dialog).getByTestId('stage-confirm'));
     await waitFor(() => expect(sent).toEqual({}));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   /**

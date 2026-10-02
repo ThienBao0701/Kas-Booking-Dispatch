@@ -3,7 +3,7 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { serializeBranch } from '../auth/serialize';
 import { branchScopeOf, scopeIncludes, scopedBranchRows } from '../auth/branchScope';
-import { roomsForBranchCode } from '../room/branchRooms';
+import { floorsForBranchCode, roomsForBranchCode } from '../room/branchRooms';
 import {
   requireAuth,
   requirePasswordChanged,
@@ -37,7 +37,18 @@ export function createBranchesRouter(): Router {
 
       // Quản lý lễ tân: the branches it supervises; Tổng quản lý lễ tân: all.
       // The shared scope, so this list and every scoped query agree.
-      if (user.role === 'RECEPTION_MANAGER' || user.role === 'RECEPTION_GENERAL_MANAGER') {
+      // Bộ phận buồng phòng chooses where it works at "Vào ca": every active branch.
+      if (user.role === 'HOUSEKEEPING') {
+        const branches = await prisma.branch.findMany({ where: { active: true }, orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }] });
+        res.json({ branches: branches.map((b) => serializeBranch(b)) });
+        return;
+      }
+
+      if (
+        user.role === 'RECEPTION_MANAGER' ||
+        user.role === 'RECEPTION_GENERAL_MANAGER' ||
+        user.role === 'TECHNICAL_MANAGER'
+      ) {
         const branches = await prisma.branch.findMany({
           where: scopedBranchRows(user),
           orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }],
@@ -95,7 +106,8 @@ export function createBranchesRouter(): Router {
       }
       const branch = await prisma.branch.findFirst({ where: { id, active: true } });
       if (!branch) throw ApiError.notFound('Không tìm thấy chi nhánh.');
-      res.json({ branchId: branch.id, rooms: roomsForBranchCode(branch.code) });
+      // The branch's rooms and floors — the one location catalog every selector reads.
+      res.json({ branchId: branch.id, rooms: roomsForBranchCode(branch.code), floors: floorsForBranchCode(branch.code) });
     })().catch(next);
   });
 

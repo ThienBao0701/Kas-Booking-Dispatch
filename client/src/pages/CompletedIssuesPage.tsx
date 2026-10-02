@@ -23,6 +23,8 @@
  * "Đã hoàn thành". Deliveries (VI) follow the same rule and are the fourth section.
  * Payments (I) and room services (V) are not part of this rule and never appear here.
  *
+ * THE ADMIN reads every branch's archive, with the same branch picker.
+ *
  * A RECEPTION MANAGER reads the same archive over its branches (all eight for
  * the general manager): one more control, the branch, from the server's scoped
  * list — "Tất cả" meaning every branch it manages. The server scopes every read.
@@ -32,8 +34,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, isReceptionSupervisor } from '../auth/types';
 import { branchesApi } from '../api/bookings';
-import { RefreshCw } from 'lucide-react';
-import { reportsApi } from '../api/receptionReports';
+import { Download, RefreshCw } from 'lucide-react';
+import { operationalPdfUrl, operationalXlsxUrl, reportsApi } from '../api/receptionReports';
 import { issuesApi } from '../api/issues';
 import { Button } from '../components/Button';
 import { PageHeader } from '../components/PageState';
@@ -61,8 +63,10 @@ export function CompletedIssuesPage() {
   // Both ends or nothing: a half range is never sent (the server refuses it too).
   const rangeValid = range.from !== '' && range.to !== '';
   const { user } = useAuth();
-  const manager = !!user && isReceptionSupervisor(user.role) && user.role !== 'ADMIN';
-  // The manager's branches, from the server's scope; undefined = all of them.
+  // A supervisor picks a branch: the Admin any of the eight, a manager its own.
+  const manager = !!user && isReceptionSupervisor(user.role);
+  const isAdmin = user?.role === 'ADMIN';
+  // The reader's branches, from the server's scope; undefined = all of them.
   const [branchId, setBranchId] = useState<number | undefined>(undefined);
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), enabled: manager });
   const period = { from: range.from, to: range.to, ...(branchId !== undefined ? { branchId } : {}) };
@@ -109,6 +113,27 @@ export function CompletedIssuesPage() {
       <PageHeader
         title="Hoàn thành vấn đề"
         description={`Vấn đề đã hoàn thành, từ ${hours} giờ trở lên kể từ lúc lễ tân tiếp nhận.`}
+        actions={
+          // Supervisors export the same period and branch through the one report engine.
+          manager && rangeValid ? (
+            <div className="flex flex-wrap gap-2">
+              {[
+                [operationalPdfUrl(period), 'Xuất PDF', 'completed-export-pdf'],
+                [operationalXlsxUrl(period), 'Xuất Excel', 'completed-export-xlsx'],
+              ].map(([href, text, testId]) => (
+                <a
+                  key={testId}
+                  href={href}
+                  data-testid={testId}
+                  className="inline-flex items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  <Download className="h-4 w-4" aria-hidden="true" />
+                  {text}
+                </a>
+              ))}
+            </div>
+          ) : undefined
+        }
       />
 
       {/* The same filter block as the Admin's reports: one frame, one row of choices. */}
@@ -131,7 +156,7 @@ export function CompletedIssuesPage() {
                 onChange={(e) => setBranchId(e.target.value === '' ? undefined : Number(e.target.value))}
                 className="mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-800 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
               >
-                <option value="">Tất cả chi nhánh được giao</option>
+                <option value="">{isAdmin ? 'Tất cả chi nhánh' : 'Tất cả chi nhánh được giao'}</option>
                 {(branches.data?.branches ?? []).map((b) => (
                   <option key={b.id} value={b.id}>
                     {branchLabel(b)}

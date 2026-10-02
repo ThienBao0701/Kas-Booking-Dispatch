@@ -642,7 +642,9 @@ export const branchesApi = {
    * The branch's room catalog — the ONE list every room selector reads.
    * `rooms: null` means the branch has no catalog: the form falls back to a typed room.
    */
-  rooms: (branchId: number) => api.get<{ branchId: number; rooms: string[] | null }>(`/branches/${branchId}/rooms`),
+  /** The branch's room and floor catalog (floors read as "Tầng <value>"). */
+  rooms: (branchId: number) =>
+    api.get<{ branchId: number; rooms: string[] | null; floors?: string[] | null }>(`/branches/${branchId}/rooms`),
 };
 
 export interface DashboardSummary {

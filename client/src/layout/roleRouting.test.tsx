@@ -37,7 +37,7 @@ const MANAGER_USER = {
 };
 
 describe('role-based shell and routing', () => {
-  it('shows the full admin menu (13 items)', async () => {
+  it('shows the full admin menu — "Báo cáo vấn đề" a folded group', async () => {
     mockShell(ADMIN_USER);
     renderApp('/app/new');
 
@@ -50,14 +50,15 @@ describe('role-based shell and routing', () => {
       'Chờ kiểm tra',
       'Cần tạo lại',
       'Lịch sử',
-      'Báo cáo vấn đề',
-      'Buồng phòng',
+      'Hoàn thành vấn đề',
       'Gửi lại đơn',
       'Chứng từ',
       'Nhắc nhở',
       'Khách sạn & chi nhánh',
       'Quản lý tài khoản',
     ]);
+    // The group: Lễ tân (with its categories), Kỹ thuật, Buồng phòng — folded off the reports.
+    expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toHaveAttribute('aria-expanded', 'false');
     /*
       "Sự cố khách sạn" is the "Sự cố cơ sở vật chất đang xử lý" category of "Báo cáo
       vấn đề" now, and "Bàn giao ca" is gone from the menu. Both addresses
@@ -117,12 +118,9 @@ describe('role-based shell and routing', () => {
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual([
-      'Đơn mới',
-      'Báo cáo vấn đề',
-      'Hoàn thành vấn đề',
-      'Buồng phòng',
-    ]);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới', 'Hoàn thành vấn đề']);
+    // "Báo cáo vấn đề" is the same folded group as the Admin's (Lễ tân, Kỹ thuật, Buồng phòng).
+    expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
     // The orders of its branches — the branch picker is the server's scoped list.
     expect((await screen.findAllByRole('heading', { name: 'Đơn mới' })).length).toBeGreaterThan(0);
     const picker = await screen.findByLabelText('Lọc theo chi nhánh');

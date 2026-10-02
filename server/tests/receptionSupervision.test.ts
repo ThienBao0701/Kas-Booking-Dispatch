@@ -431,6 +431,11 @@ describe('a Quản lý lễ tân has Reception’s whole picture of its branches
   });
 
   it('settles a room finding of its branches, as Reception does — never another branch’s', async () => {
+    // Each housekeeping account is on shift at its branch.
+    for (const [agent, branchId] of [[hk1, cn1], [hk3, cn3]] as const) {
+      await agent.post('/api/housekeeping/shift/end').send({});
+      expect((await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan' })).status).toBe(201);
+    }
     const inspect = (agent: Agent) =>
       agent.post('/api/housekeeping/inspections').send({ roomNumber: '301', staffName: 'Chị Lan', issues: [{ type: 'SMOKING' }] });
     const mine = (await inspect(hk1)).body.inspection.issues[0].id as string;

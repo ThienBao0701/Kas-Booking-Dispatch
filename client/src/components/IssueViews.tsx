@@ -521,6 +521,7 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
         ) : null}
       </div>
 
+      <IssueStageTimeline issue={issue} />
       <IssueRepeatNote issue={issue} />
       <IssueAssignmentHistory issue={issue} />
       <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
@@ -545,7 +546,50 @@ export function IssueRepeatNote({ issue }: { issue: Pick<Issue, 'repeatOf' | 'cr
       {' · hoàn thành '}
       {prev.completedAt ? formatDateTime(prev.completedAt) : '—'}
       {prev.technicianName ? ` · ${prev.technicianName}` : ''}. Lần này báo {formatDateTime(issue.createdAt)}.
+      {(prev.stages ?? []).length > 0 ? (
+        <span className="mt-1 block" data-testid="issue-repeat-stages">
+          Lần trước đã làm:{' '}
+          {(prev.stages ?? []).map((st) => `Giai đoạn ${st.stageNumber}: ${st.workDone}`).join(' · ')}
+        </span>
+      ) : null}
     </p>
+  );
+}
+
+/**
+ * THE REPAIR, STAGE BY STAGE — "Giai đoạn 1 ✓, Giai đoạn 2 ✓, Giai đoạn 3 ●".
+ *
+ * Each finished stage is kept as it was recorded (who, when, what was done,
+ * what was left); the stage under way is the next number while the repair is
+ * worked. Renders nothing for a repair finished in one go with no stage on
+ * record — the ordinary case needs no timeline.
+ */
+export function IssueStageTimeline({ issue }: { issue: Pick<Issue, 'stages' | 'currentStageNumber' | 'status'> }) {
+  const stages = issue.stages ?? [];
+  const current = issue.currentStageNumber ?? null;
+  if (stages.length === 0 || (stages.length === 1 && stages[0]!.final && current === null)) return null;
+  const last = stages[stages.length - 1];
+  return (
+    <section data-testid="issue-stages" className="mt-2">
+      <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Các giai đoạn sửa chữa</h4>
+      <ol className="space-y-1.5 border-l-2 border-line pl-3">
+        {stages.map((st) => (
+          <li key={st.id} className="text-xs text-slate-700" data-testid={`issue-stage-${st.stageNumber}`}>
+            <span className="font-semibold text-green-700">✓ Giai đoạn {st.stageNumber}</span>
+            {' · '}
+            {st.technicianName} · {formatDateTime(st.startedAt)} → {formatDateTime(st.completedAt)}
+            <span className="block">Công việc hoàn thành: {st.workDone}</span>
+            {st.nextWork ? <span className="block text-slate-600">Cần xử lý tiếp: {st.nextWork}</span> : null}
+          </li>
+        ))}
+        {current !== null ? (
+          <li className="text-xs font-semibold text-blue-700" data-testid="issue-stage-current">
+            ● Giai đoạn {current} — đang thực hiện
+            {last?.nextWork ? <span className="block font-normal text-slate-600">Tiếp theo: {last.nextWork}</span> : null}
+          </li>
+        ) : null}
+      </ol>
+    </section>
   );
 }
 

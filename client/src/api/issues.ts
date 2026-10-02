@@ -267,6 +267,10 @@ export interface Issue {
   sourceLabel?: string | null;
   /** The earlier completed incident at this room with this fault, if any. */
   repeatOf?: IssueRepeat | null;
+  /** The repair, stage by stage, oldest first ("Giai đoạn 1", "Giai đoạn 2", …). */
+  stages?: RepairStage[];
+  /** The stage under way while the repair is worked; null otherwise. */
+  currentStageNumber?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -298,6 +302,23 @@ export interface IssueRepeat {
   reportedAt: string;
   completedAt: string | null;
   technicianName: string | null;
+  /** What was done last time, stage by stage. */
+  stages?: { stageNumber: number; workDone: string; nextWork: string | null; completedAt: string; technicianName: string; final: boolean }[];
+}
+
+/** One stage of a repair, recorded when it was finished — never overwritten. */
+export interface RepairStage {
+  id: string;
+  stageNumber: number;
+  technicianName: string;
+  startedAt: string;
+  completedAt: string;
+  /** "Công việc hoàn thành". */
+  workDone: string;
+  /** "Các công việc cần xử lý tiếp" — null on the final stage. */
+  nextWork: string | null;
+  /** The stage that finished the repair ("Đã xử lý xong"). */
+  final: boolean;
 }
 
 /** One corrected field: the words that were there, the words that replaced them, who and when. */
@@ -487,6 +508,11 @@ export const issuesApi = {
       completedTo?: string;
       /** Waiting incidents nobody holds — the supervisors' to-do list. */
       assignment?: 'UNASSIGNED';
+      /** The technical report's filters. */
+      technicianUserId?: number;
+      roomNumber?: string;
+      floorNumber?: string;
+      category?: IssueCategory;
       page?: number;
       pageSize?: number;
     } = {},
@@ -529,9 +555,23 @@ export const issuesApi = {
   /** Active technicians by full name, for the assignment picker. */
   technicians: () => api.get<{ technicians: { id: number; fullName: string }[] }>('/issues/technicians'),
 
-  /** Open duplicates and recent completions at a room — a warning, never a block. */
-  similar: (params: { branchId?: number; roomNumber: string; category?: IssueCategory }) =>
-    api.get<{ open: Issue[]; recent: Issue[] }>(`/issues/similar${query(params)}`),
+  /**
+   * "Có thể bị trùng": open incidents and recent completions with the same
+   * structured key (branch, area, room/floor/fixture, fault type) — a warning,
+   * never a block.
+   */
+  similar: (params: {
+    branchId?: number;
+    areaCategory?: IssueAreaCategory;
+    roomNumber?: string;
+    floorNumber?: string;
+    areaSubtype?: IssueAreaSubtype;
+    category?: IssueCategory;
+  }) => api.get<{ open: Issue[]; recent: Issue[] }>(`/issues/similar${query(params)}`),
+
+  /** "Đang trong quá trình theo dõi thêm": this stage done, the repair continues. */
+  recordStage: (id: string, input: { workDone: string; nextWork: string }) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/stage`, input),
 
   accept: (id: string, input: AcceptIssueInput) =>
     api.post<{ issue: Issue }>(`/issues/${id}/accept`, input),

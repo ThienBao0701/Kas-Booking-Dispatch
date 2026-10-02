@@ -209,6 +209,11 @@ describe('one record, four views', () => {
   });
 
   it('shows Housekeeping only its own branch’s Buồng phòng items', async () => {
+    // A housekeeping account works where its shift is ("Vào ca").
+    for (const [agent, branchId] of [[housekeeping, cn1], [housekeeping2, cn2]] as const) {
+      await agent.post('/api/housekeeping/shift/end').send({});
+      expect((await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan' })).status).toBe(201);
+    }
     expect(await names(housekeeping)).toEqual(['Khăn']);
     expect(await names(housekeeping2)).toEqual(['Ga giường']);
   });

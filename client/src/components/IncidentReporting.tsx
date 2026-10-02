@@ -15,6 +15,8 @@ import { Download, ImageUp, X } from 'lucide-react';
 import {
   AREA_FIELDS,
   ISSUE_AREAS,
+  ISSUE_AREA_LABEL,
+  ISSUE_CATEGORY_LABEL,
   ISSUE_AREA_SUBTYPES,
   ISSUE_CATEGORIES,
   issuesApi,
@@ -108,6 +110,7 @@ function IssueFormFields({
   value,
   onChange,
   rooms,
+  floors,
 }: {
   value: IssueFormValue;
   onChange: (patch: Partial<IssueFormValue>) => void;
@@ -117,6 +120,8 @@ function IssueFormFields({
    * null (no catalog, or still loading) keeps the typed field.
    */
   rooms?: string[] | null;
+  /** The branch's floors (Hành lang, Cầu thang) — chosen, never typed, like the rooms. */
+  floors?: string[] | null;
 }) {
   const fields = AREA_FIELDS[value.areaCategory];
   const detailRequired = requiresLocationDetail(value.areaCategory, value.areaSubtype);
@@ -185,7 +190,29 @@ function IssueFormFields({
         )
       ) : null}
 
-      {fields.floorNumber ? (
+      {fields.floorNumber && floors ? (
+        <label className="block text-sm font-medium text-slate-700">
+          Tầng
+          <select
+            className={`${inputClass} mt-1`}
+            value={value.floorNumber}
+            aria-label="Tầng"
+            data-testid="issue-floor"
+            onChange={(e) => onChange({ floorNumber: e.target.value })}
+          >
+            <option value="">— Chọn tầng —</option>
+            {/* A legacy floor typed before the catalog stays selectable on its own report. */}
+            {value.floorNumber && !floors.includes(value.floorNumber) ? (
+              <option value={value.floorNumber}>Tầng {value.floorNumber} (cũ)</option>
+            ) : null}
+            {floors.map((floor) => (
+              <option key={floor} value={floor}>
+                Tầng {floor}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : fields.floorNumber ? (
         <label className="block text-sm font-medium text-slate-700">
           Số tầng
           <input
@@ -284,45 +311,57 @@ export function TargetBranchBanner({ label }: { label: string }) {
 }
 
 /**
- * "CÓ THỂ ĐÃ ĐƯỢC BÁO" — what is already on file for this room, stated plainly.
- * Amber, with words (not colour alone), and never a block.
+ * "CÓ THỂ BỊ TRÙNG" — asked when "Gửi báo cáo" is pressed, if the server has an
+ * open incident (or one finished recently) with the SAME structured key: branch,
+ * area, room / floor / fixture and fault type — never the free text. Every
+ * match is shown in full so the receptionist can tell whether it is the same
+ * fault. A warning, never a block: "Vẫn gửi báo cáo" always sends.
  */
-function SimilarIssuesNote({ open, recent }: { open: Issue[]; recent: Issue[] }) {
-  if (open.length === 0 && recent.length === 0) return null;
+function DuplicateConfirm({ open, recent }: { open: Issue[]; recent: Issue[] }) {
+  const row = (i: Issue) => {
+    const last = i.attempts[i.attempts.length - 1];
+    return (
+      <li key={i.id} className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs text-slate-700">
+        <p className="font-semibold text-slate-900">
+          {i.areaCategory ? ISSUE_AREA_LABEL[i.areaCategory] : '—'} · {i.locationLabel}
+          {i.category ? ` · ${ISSUE_CATEGORY_LABEL[i.category]}` : ''}
+        </p>
+        {i.locationDetail ? <p>Chi tiết: {i.locationDetail}</p> : null}
+        <p className="whitespace-pre-wrap break-words">Mô tả: {i.description}</p>
+        <p>Nguyên nhân: {i.cause ?? 'Chưa xác định'}</p>
+        <p>
+          Người báo: {i.reporterName ?? '—'} · {formatDateTime(i.createdAt)}
+          {i.shiftType ? ` · Ca ${i.shiftType}` : ''}
+        </p>
+        <p>
+          Trạng thái: {i.assignmentStateLabel ?? i.stageLabel}
+          {' · Kỹ thuật: '}
+          {i.assignedTechnician?.name ?? i.repairerName ?? 'Chưa giao'}
+        </p>
+        {last?.result ? <p>Kết quả lần trước: {last.result}</p> : null}
+      </li>
+    );
+  };
   return (
     <div
-      role="note"
+      role="alert"
       data-testid="similar-issues"
-      className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900"
+      className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-3 text-sm text-amber-900"
     >
+      <p className="font-semibold">Vấn đề này có thể bị trùng với một vấn đề đã được báo cáo.</p>
       {open.length > 0 ? (
         <>
-          <p className="font-semibold">Có thể đã được báo — sự cố đang xử lý tại phòng này:</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            {open.map((i) => (
-              <li key={i.id}>
-                {i.description} · {formatDateTime(i.createdAt)} · {i.assignmentStateLabel ?? i.stageLabel}
-              </li>
-            ))}
-          </ul>
+          <p className="text-xs font-medium">Đang xử lý:</p>
+          <ul className="space-y-1.5">{open.map(row)}</ul>
         </>
       ) : null}
       {recent.length > 0 ? (
         <>
-          <p className={`font-semibold ${open.length > 0 ? 'mt-2' : ''}`}>
-            Vấn đề tương tự đã từng được xử lý gần đây:
-          </p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            {recent.map((i) => (
-              <li key={i.id}>
-                {i.description} · hoàn thành {i.completedAt ? formatDateTime(i.completedAt) : '—'}
-                {i.repairerName ? ` · ${i.repairerName}` : ''}
-              </li>
-            ))}
-          </ul>
+          <p className="text-xs font-medium">Đã xử lý gần đây:</p>
+          <ul className="space-y-1.5">{recent.map(row)}</ul>
         </>
       ) : null}
-      <p className="mt-1.5 text-xs text-amber-800">Nếu đây là lần xảy ra mới, vẫn gửi báo cáo bình thường.</p>
+      <p className="font-semibold">Bạn chắc chắn muốn gửi báo cáo này chứ?</p>
     </div>
   );
 }
@@ -348,7 +387,7 @@ export function NewIssueModal({
   // The rooms of the branch this report is FOR: the supervisor's chosen branch,
   // or the receptionist's own.
   const roomBranchId = branchId ?? user?.branch?.id ?? null;
-  const { rooms } = useBranchRooms(roomBranchId);
+  const { rooms, floors } = useBranchRooms(roomBranchId);
   const inputRef = useRef<HTMLInputElement>(null);
   const [form, setForm] = useState<IssueFormValue>(EMPTY_ISSUE_FORM);
   // Optional: Reception often does not know why yet. The technician can fill
@@ -361,22 +400,26 @@ export function NewIssueModal({
   const fields = AREA_FIELDS[form.areaCategory];
 
   /*
-    "CÓ THỂ ĐÃ ĐƯỢC BÁO" — a warning, never a block. Once a room (and fault type)
-    is chosen, the server lists open incidents there (likely duplicates) and ones
-    finished recently (this would be a repeat). The receptionist can still send:
-    a genuine new occurrence must always be reportable.
+    "CÓ THỂ BỊ TRÙNG" — checked when "Gửi báo cáo" is pressed, by the structured
+    key the server compares. A match shows the warning; nothing found sends at
+    once. A failed check never stops a report — it is only a warning.
   */
-  const similarRoom = fields.roomNumber ? form.roomNumber.trim() : '';
-  const similar = useQuery({
-    queryKey: ['issues', 'similar', roomBranchId, similarRoom, fields.category ? form.category : null],
-    queryFn: () =>
+  const [duplicates, setDuplicates] = useState<{ open: Issue[]; recent: Issue[] } | null>(null);
+  const check = useMutation({
+    mutationFn: () =>
       issuesApi.similar({
-        branchId: branchId,
-        roomNumber: similarRoom,
+        branchId,
+        areaCategory: form.areaCategory,
+        roomNumber: fields.roomNumber ? form.roomNumber.trim() : undefined,
+        floorNumber: fields.floorNumber ? form.floorNumber.trim() : undefined,
+        areaSubtype: fields.areaSubtype && form.areaSubtype ? form.areaSubtype : undefined,
         category: fields.category ? form.category : undefined,
       }),
-    enabled: similarRoom.length > 0 && roomBranchId !== null,
-    staleTime: 30_000,
+    onSuccess: (found) => {
+      if (found.open.length + found.recent.length > 0) setDuplicates(found);
+      else create.mutate();
+    },
+    onError: () => create.mutate(),
   });
 
   const create = useMutation({
@@ -433,20 +476,45 @@ export function NewIssueModal({
       onClose={onClose}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
-            Hủy
-          </Button>
-          <Button onClick={() => create.mutate()} loading={create.isPending} disabled={!ready}>
-            Gửi báo cáo
-          </Button>
+          {duplicates ? (
+            <>
+              <Button variant="secondary" onClick={() => setDuplicates(null)} data-testid="duplicate-back">
+                Hủy / quay lại
+              </Button>
+              <Button onClick={() => create.mutate()} loading={create.isPending} data-testid="duplicate-send">
+                Vẫn gửi báo cáo
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={onClose}>
+                Hủy
+              </Button>
+              <Button
+                onClick={() => check.mutate()}
+                loading={check.isPending || create.isPending}
+                disabled={!ready}
+                data-testid="issue-submit"
+              >
+                Gửi báo cáo
+              </Button>
+            </>
+          )}
         </>
       }
     >
       <div className="space-y-3">
         {branchLabel ? <TargetBranchBanner label={branchLabel} /> : null}
-        <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} rooms={rooms} />
-
-        <SimilarIssuesNote open={similar.data?.open ?? []} recent={similar.data?.recent ?? []} />
+        {duplicates ? <DuplicateConfirm open={duplicates.open} recent={duplicates.recent} /> : null}
+        <IssueFormFields
+          value={form}
+          onChange={(patch) => {
+            setDuplicates(null);
+            setForm((f) => ({ ...f, ...patch }));
+          }}
+          rooms={rooms}
+          floors={floors}
+        />
 
         <label className="block text-sm font-medium text-slate-700">
           Nguyên nhân <span className="font-normal text-slate-500">(không bắt buộc)</span>
@@ -534,7 +602,7 @@ export function EditIssueModal({
   const [form, setForm] = useState<IssueFormValue>(initial);
   const fields = AREA_FIELDS[form.areaCategory];
   // The incident's OWN branch's rooms — a correction can never move it elsewhere.
-  const { rooms } = useBranchRooms(issue.branchId);
+  const { rooms, floors } = useBranchRooms(issue.branchId);
 
   const save = useMutation({
     mutationFn: () =>
@@ -599,7 +667,12 @@ export function EditIssueModal({
             />
           </label>
         ) : (
-          <IssueFormFields value={form} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} rooms={rooms} />
+          <IssueFormFields
+            value={form}
+            onChange={(patch) => setForm((f) => ({ ...f, ...patch }))}
+            rooms={rooms}
+            floors={floors}
+          />
         )}
         {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
