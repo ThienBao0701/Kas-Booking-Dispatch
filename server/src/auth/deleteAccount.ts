@@ -53,7 +53,7 @@ async function placeholderId(tx: Prisma.TransactionClient): Promise<number> {
 /** Live work that would be orphaned by the deletion, in words, or null. */
 async function liveWork(userId: number): Promise<string | null> {
   const now = getClock().now();
-  const [shift, issues, housekeeping, claims] = await Promise.all([
+  const [shift, issues, housekeeping, cleaning, claims] = await Promise.all([
     prisma.receptionShiftSession.count({ where: { userId, closedAt: null } }),
     prisma.hotelIssue.count({
       where: {
@@ -65,11 +65,14 @@ async function liveWork(userId: number): Promise<string | null> {
       },
     }),
     prisma.housekeepingWorkSession.count({ where: { userId, endedAt: null } }),
+    // A room being cleaned right now ("đang dọn") — counted with the shift.
+    prisma.housekeepingRoomTask.count({ where: { assigneeUserId: userId, state: 'IN_PROGRESS', voidedAt: null } }),
     prisma.booking.count({ where: { claimedByUserId: userId, claimExpiresAt: { gt: now } } }),
   ]);
   if (shift > 0) return 'Tài khoản đang trong ca lễ tân. Hãy kết thúc ca trước khi xóa.';
   if (issues > 0) return `Tài khoản đang được giao hoặc đang sửa ${issues} sự cố. Hãy giao lại cho kỹ thuật viên khác trước khi xóa.`;
   if (housekeeping > 0) return 'Tài khoản đang trong ca buồng phòng. Hãy kết thúc ca trước khi xóa.';
+  if (cleaning > 0) return `Tài khoản đang dọn ${cleaning} phòng. Hãy giao lại cho nhân viên khác trước khi xóa.`;
   if (claims > 0) return 'Tài khoản đang nhận một đơn. Hãy đợi đơn được xử lý trước khi xóa.';
   return null;
 }

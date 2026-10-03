@@ -1,90 +1,143 @@
 /**
- * "BUỒNG PHÒNG" — Bộ phận buồng phòng's inspection workspace.
+ * "BUỒNG PHÒNG" — the worker's home.
  *
- * TWO HALVES, ONE SCREEN. On the left, recording: who cleaned it, which room —
- * CHOSEN from the branch's room catalog, never typed — then the conditions found
- * (one checkbox each, a description where it needs one) and Lưu. On the right,
- * what this person has recorded: a few facts for the period (inspections,
- * findings, rooms with findings, the most frequent condition), filters by day,
- * room and condition, and the history itself.
+ *   [Ca hiện tại · Chi nhánh: …]            Đổi chi nhánh · Kết thúc ca
+ *   Tình trạng phòng ngày dd/mm/yyyy
+ *   OUT   101  102 …                        (the rooms given to THIS account)
  *
- * NOTHING ABOUT MONEY. Whether Reception collected, how much and how, belongs to
- * the front desk; the server sends this role none of it, and nothing here asks.
+ * THE PERSON IS THE ACCOUNT. Nobody types a name: "Vào ca" asks only where, and
+ * offers first the branch the manager gave today's rooms in. A room opens its
+ * work page (Kiểm phòng | Dọn phòng); the board shows where each stands — gray
+ * not started, blue being cleaned, green underline done.
  *
- * THE WORKDAY. The account has no permanent branch: "Vào ca" picks the branch
- * and the cleaner, "Đổi chi nhánh" starts a new segment elsewhere, "Kết thúc
- * ca" closes the day and shows its summary. The server stamps every inspection
- * with the shift's branch and refuses one off shift.
+ * NOTHING ABOUT MONEY HERE. The worker's own collections are on "KPI & Thu tiền".
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  ArrowLeftRight,
-  BedDouble,
-  ClipboardCheck,
-  ClipboardList,
-  DoorOpen,
-  LogIn,
-  LogOut,
-  RefreshCw,
-  TriangleAlert,
-} from 'lucide-react';
-import {
-  HOUSEKEEPING_SHIFT_KEY,
-  ROOM_ISSUES_KEY,
-  ROOM_ISSUE_TYPES,
-  housekeepingApi,
-  type RoomIssueType,
-  type WorkShift,
-} from '../api/housekeeping';
+import { ArrowLeftRight, BedDouble, LogIn, LogOut, RefreshCw } from 'lucide-react';
+import { HOUSEKEEPING_SHIFT_KEY, ROOM_ISSUES_KEY, housekeepingApi, type WorkShift } from '../api/housekeeping';
+import { ROOM_WORK_KEY, roomWorkApi, type RoomTask } from '../api/roomWork';
 import { branchesApi } from '../api/bookings';
-import { branchLabel } from '../auth/types';
-import { Modal } from '../components/Modal';
-import { QueryState } from '../components/PageState';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
+import { branchLabel } from '../auth/types';
 import { Button } from '../components/Button';
+import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
-import { Input } from '../components/Input';
-import { PageHeader } from '../components/PageState';
-import { RoomIssueTable } from '../components/RoomIssueViews';
-import { Toast } from '../components/Toast';
-import { StatCard } from '../components/StatCard';
-import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
-import { PeriodQuickPicks } from '../components/PeriodQuickPicks';
-import { usePersistentState } from '../hooks/usePersistentState';
-import { useBranchRooms } from '../hooks/useBranchRooms';
-import { formatDateTime, hcmToday } from '../lib/format';
-import { daysBefore } from '../lib/shiftGroups';
-
-type Checked = Partial<Record<RoomIssueType, string>>;
+import { Modal } from '../components/Modal';
+import { PageHeader, QueryState } from '../components/PageState';
+import { RoomBoard, RoomStateLegend } from '../components/RoomBoard';
+import { formatDate, formatDateTime, hcmToday } from '../lib/format';
 
 const FIELD =
-  'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+  'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
 
 export function HousekeepingInspectionPage() {
+  const today = hcmToday();
+  const navigate = useNavigate();
   const shift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift() });
+  const tasks = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'mine', today],
+    queryFn: () => roomWorkApi.myTasks(today),
+    refetchInterval: 30_000,
+  });
+  const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
   const [ended, setEnded] = useState<WorkShift | null>(null);
   const current = shift.data?.shift?.current ?? null;
+
+  /** Today's rooms, by branch — the branch of the open shift first. */
+  const byBranch = useMemo(() => {
+    const groups = new Map<number, { branch: RoomTask['branch']; tasks: RoomTask[] }>();
+    for (const t of tasks.data?.tasks ?? []) {
+      const g = groups.get(t.branchId) ?? { branch: t.branch, tasks: [] };
+      g.tasks.push(t);
+      groups.set(t.branchId, g);
+    }
+    return [...groups.values()].sort(
+      (a, b) => Number(b.branch.id === current?.branch.id) - Number(a.branch.id === current?.branch.id) || a.branch.branchNumber - b.branch.branchNumber,
+    );
+  }, [tasks.data, current?.branch.id]);
+
   return (
-    <QueryState isLoading={shift.isLoading} isError={shift.isError} error={shift.error} onRetry={() => void shift.refetch()}>
-      {current && shift.data?.shift ? (
-        <InspectionWorkspace shift={shift.data.shift} onEnded={setEnded} />
-      ) : (
-        <StartShift />
-      )}
+    <div>
+      <PageHeader
+        title="Buồng phòng"
+        description="Phòng được giao trong ngày. Chọn một phòng để kiểm phòng và dọn phòng."
+        actions={
+          <Button variant="secondary" onClick={() => void tasks.refetch()} aria-label="Làm mới">
+            <RefreshCw className={`h-4 w-4 ${tasks.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
+            Làm mới
+          </Button>
+        }
+      />
+      <QueryState isLoading={shift.isLoading} isError={shift.isError} error={shift.error} onRetry={() => void shift.refetch()}>
+        {current && shift.data?.shift ? (
+          <ShiftStrip shift={shift.data.shift} onEnded={setEnded} />
+        ) : (
+          <StartShift suggested={byBranch[0]?.branch.id} />
+        )}
+      </QueryState>
+
+      <section className="mt-5 space-y-4" aria-labelledby="room-board-title">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 id="room-board-title" className="text-lg font-bold text-slate-900">
+            Tình trạng phòng ngày {formatDate(today)}
+          </h2>
+          <RoomStateLegend />
+        </div>
+        <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
+          {byBranch.length === 0 ? (
+            <EmptyState
+              icon={<BedDouble className="h-6 w-6" aria-hidden="true" />}
+              title="Chưa có phòng được giao"
+              message="Quản lý buồng phòng sẽ giao phòng cho bạn trong ngày."
+            />
+          ) : (
+            byBranch.map((g) => {
+              const here = g.branch.id === current?.branch.id;
+              return (
+                <section
+                  key={g.branch.id}
+                  data-testid={`work-branch-${g.branch.id}`}
+                  className={`rounded-2xl border p-4 ${here ? 'border-brand-200 bg-white' : 'border-line bg-slate-50'}`}
+                >
+                  <h3 className="mb-3 flex flex-wrap items-center gap-2 text-base font-semibold text-slate-900">
+                    {branchLabel(g.branch)}
+                    <span className="text-sm font-normal text-slate-600">
+                      · {g.tasks.filter((t) => t.state === 'COMPLETED').length}/{g.tasks.length} phòng xong
+                    </span>
+                    {!here ? (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                        {current ? 'Khác chi nhánh đang làm — Đổi chi nhánh để làm' : 'Vào ca tại chi nhánh này để làm'}
+                      </span>
+                    ) : null}
+                  </h3>
+                  <RoomBoard
+                    tasks={g.tasks}
+                    codes={catalog.data?.statusCodes ?? []}
+                    onSelect={(t) => navigate(`/app/inspections/room/${t.id}`)}
+                    testId={`work-board-${g.branch.id}`}
+                  />
+                </section>
+              );
+            })
+          )}
+        </QueryState>
+      </section>
       {ended ? <ShiftSummaryModal shift={ended} onClose={() => setEnded(null)} /> : null}
-    </QueryState>
+    </div>
   );
 }
 
-/** After any shift change: the shift, the header's branch and the history follow. */
+/** After any shift change: the shift, the header's branch and the lists follow. */
 function useShiftChanged() {
   const queryClient = useQueryClient();
   const { refreshUser } = useAuth();
   return async () => {
     await queryClient.invalidateQueries({ queryKey: HOUSEKEEPING_SHIFT_KEY });
     await queryClient.invalidateQueries({ queryKey: ROOM_ISSUES_KEY });
+    await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
     await refreshUser();
   };
 }
@@ -115,55 +168,109 @@ function BranchSelect({ value, onChange, exclude }: { value: number | ''; onChan
   );
 }
 
-/** "VÀO CA" — where today's work is, and who cleans. */
-function StartShift() {
+/** "VÀO CA" — where today's work is. The person is the account: no name to type. */
+function StartShift({ suggested }: { suggested?: number }) {
   const changed = useShiftChanged();
-  const [branchId, setBranchId] = useState<number | ''>('');
-  const [staffName, setStaffName] = usePersistentState('kas.housekeeping.staffName', '');
+  const [picked, setPicked] = useState<number | '' | null>(null);
+  // The branch of today's assigned rooms, until the worker picks another.
+  const branchId = picked ?? suggested ?? '';
   const start = useMutation({
-    mutationFn: () => housekeepingApi.startShift({ branchId: Number(branchId), staffName: staffName.trim() }),
+    mutationFn: () => housekeepingApi.startShift({ branchId: Number(branchId) }),
     onSuccess: changed,
   });
   return (
-    <div>
-      <PageHeader title="Buồng phòng" description="Chọn chi nhánh làm việc và người dọn buồng để bắt đầu ca." />
-      <form
-        data-testid="shift-start"
-        onSubmit={(e) => {
-          e.preventDefault();
-          start.mutate();
-        }}
-        className="max-w-md space-y-4 rounded-2xl border-section border-line bg-white p-4 shadow-sm"
-      >
-        <BranchSelect value={branchId} onChange={setBranchId} />
-        <Input
-          label="Tên người dọn buồng"
-          value={staffName}
-          onChange={(e) => setStaffName(e.target.value)}
-          maxLength={100}
-          data-testid="shift-staff"
-        />
-        {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
-        <div className="flex justify-end">
-          <Button type="submit" disabled={branchId === '' || !staffName.trim()} loading={start.isPending} data-testid="shift-start-submit">
-            <LogIn className="h-4 w-4" aria-hidden="true" />
-            Vào ca
-          </Button>
-        </div>
-      </form>
-    </div>
+    <form
+      data-testid="shift-start"
+      onSubmit={(e) => {
+        e.preventDefault();
+        start.mutate();
+      }}
+      className="max-w-md space-y-4 rounded-2xl border-section border-line bg-white p-4 shadow-sm"
+    >
+      <h2 className="text-base font-semibold text-slate-900">Vào ca</h2>
+      {suggested ? <p className="text-sm text-slate-600">Đã chọn sẵn chi nhánh của các phòng được giao hôm nay.</p> : null}
+      <BranchSelect value={branchId} onChange={setPicked} />
+      {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
+      <div className="flex justify-end">
+        <Button type="submit" disabled={branchId === ''} loading={start.isPending} data-testid="shift-start-submit">
+          <LogIn className="h-4 w-4" aria-hidden="true" />
+          Vào ca
+        </Button>
+      </div>
+    </form>
   );
 }
 
-/** One line per branch of the day: where, who, when, and what was found. */
+/** "CA HIỆN TẠI · CHI NHÁNH: …" — always in view, with the two shift actions. */
+function ShiftStrip({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: WorkShift) => void }) {
+  const changed = useShiftChanged();
+  const current = shift.current!;
+  const [switching, setSwitching] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const end = useMutation({
+    mutationFn: () => housekeepingApi.endShift(),
+    onSuccess: async ({ shift: day }) => {
+      setConfirmEnd(false);
+      onEnded(day);
+      await changed();
+    },
+  });
+  return (
+    <>
+      <section
+        data-testid="shift-current"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-3"
+      >
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">Ca hiện tại</p>
+          <p className="text-base font-bold text-brand-900">Chi nhánh: {branchLabel(current.branch)}</p>
+          <p className="text-sm text-slate-700">
+            Từ {formatDateTime(current.startedAt)} · {current.inspections} lượt kiểm phòng
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => setSwitching(true)} data-testid="shift-switch">
+            <ArrowLeftRight className="h-4 w-4" aria-hidden="true" />
+            Đổi chi nhánh
+          </Button>
+          <Button variant="secondary" onClick={() => setConfirmEnd(true)} data-testid="shift-end">
+            <LogOut className="h-4 w-4" aria-hidden="true" />
+            Kết thúc ca
+          </Button>
+        </div>
+      </section>
+      {switching ? <SwitchBranchModal shift={shift} onClose={() => setSwitching(false)} /> : null}
+      {confirmEnd ? (
+        <Modal
+          open
+          title="Kết thúc ca"
+          onClose={() => setConfirmEnd(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirmEnd(false)}>
+                Hủy
+              </Button>
+              <Button onClick={() => end.mutate()} loading={end.isPending} data-testid="shift-end-confirm">
+                Kết thúc ca
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-700">Kết thúc ca làm việc hôm nay? Sau khi kết thúc, cần “Vào ca” lại để làm phòng.</p>
+          {end.isError ? <ErrorAlert>{toUserMessage(end.error)}</ErrorAlert> : null}
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
+/** One line per branch of the day: where, when, and what was found. */
 function SegmentList({ shift }: { shift: WorkShift }) {
   return (
     <ul className="space-y-1.5" data-testid="shift-segments">
       {shift.segments.map((seg) => (
         <li key={seg.id} className="rounded-lg border border-line px-3 py-2 text-sm text-slate-700">
-          <p className="font-medium text-slate-900">
-            {branchLabel(seg.branch)} · {seg.staffName}
-          </p>
+          <p className="font-medium text-slate-900">{branchLabel(seg.branch)}</p>
           <p className="text-xs text-slate-600">
             {formatDateTime(seg.startedAt)} – {seg.endedAt ? formatDateTime(seg.endedAt) : 'đang làm'} · {seg.rooms} phòng ·{' '}
             {seg.inspections} lượt kiểm tra · {seg.issues} vấn đề
@@ -204,13 +311,12 @@ function ShiftSummaryModal({ shift, onClose }: { shift: WorkShift; onClose: () =
   );
 }
 
-/** "ĐỔI CHI NHÁNH" — a new segment elsewhere; the cleaner may change with it. */
+/** "ĐỔI CHI NHÁNH" — a new segment elsewhere. */
 function SwitchBranchModal({ shift, onClose }: { shift: WorkShift; onClose: () => void }) {
   const changed = useShiftChanged();
   const [branchId, setBranchId] = useState<number | ''>('');
-  const [staffName, setStaffName] = useState(shift.current?.staffName ?? '');
   const move = useMutation({
-    mutationFn: () => housekeepingApi.switchBranch({ branchId: Number(branchId), staffName: staffName.trim() || undefined }),
+    mutationFn: () => housekeepingApi.switchBranch({ branchId: Number(branchId) }),
     onSuccess: async () => {
       await changed();
       onClose();
@@ -234,330 +340,8 @@ function SwitchBranchModal({ shift, onClose }: { shift: WorkShift; onClose: () =
     >
       <div className="space-y-3">
         <BranchSelect value={branchId} onChange={setBranchId} exclude={shift.current?.branch.id} />
-        <Input label="Tên người dọn buồng" value={staffName} onChange={(e) => setStaffName(e.target.value)} maxLength={100} />
         {move.isError ? <ErrorAlert>{toUserMessage(move.error)}</ErrorAlert> : null}
       </div>
     </Modal>
-  );
-}
-
-function InspectionWorkspace({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: WorkShift) => void }) {
-  const queryClient = useQueryClient();
-  const changed = useShiftChanged();
-  const current = shift.current!;
-  const { rooms } = useBranchRooms(current.branch.id);
-  const today = hcmToday();
-  const [switching, setSwitching] = useState(false);
-  const [confirmEnd, setConfirmEnd] = useState(false);
-  const end = useMutation({
-    mutationFn: () => housekeepingApi.endShift(),
-    onSuccess: async ({ shift: day }) => {
-      setConfirmEnd(false);
-      onEnded(day);
-      await changed();
-    },
-  });
-
-  const [roomNumber, setRoomNumber] = useState('');
-  // Optional: the shift's cleaner is recorded when this is left empty.
-  const [staffName, setStaffName] = useState('');
-  const [checked, setChecked] = useState<Checked>({});
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-
-  // The history's filters: the last seven days by default, "Hôm nay" one tap away.
-  const [range, setRange] = useState<DateRangeValue>({ from: daysBefore(today, 6), to: today });
-  const [roomFilter, setRoomFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState<RoomIssueType | ''>('');
-  const rangeValid = range.from !== '' && range.to !== '' && range.from <= range.to;
-  const filter = {
-    from: rangeValid ? range.from : undefined,
-    to: rangeValid ? range.to : undefined,
-    roomNumber: roomFilter || undefined,
-    type: typeFilter || undefined,
-  };
-
-  const history = useQuery({
-    queryKey: [...ROOM_ISSUES_KEY, 'mine', filter],
-    queryFn: () => housekeepingApi.issues(filter),
-    enabled: rangeValid,
-    refetchInterval: 30_000,
-  });
-  const facts = history.data?.inspectionSummary;
-
-  const selected = ROOM_ISSUE_TYPES.filter((t) => checked[t.code] !== undefined);
-  // "Vấn đề khác" says nothing on its own: it needs its description.
-  const otherMissing = checked.OTHER !== undefined && checked.OTHER.trim().length === 0;
-  const ready = roomNumber.trim().length > 0 && selected.length > 0 && !otherMissing;
-
-  const save = useMutation({
-    mutationFn: () =>
-      housekeepingApi.createInspection({
-        roomNumber: roomNumber.trim(),
-        staffName: staffName.trim() || undefined,
-        issues: selected.map((t) => ({ type: t.code, note: checked[t.code]?.trim() || undefined })),
-      }),
-    onSuccess: async ({ inspection }) => {
-      setError(null);
-      setRoomNumber('');
-      setChecked({});
-      setToast(`Đã lưu kiểm tra phòng ${inspection.roomNumber} (${inspection.issues.length} vấn đề).`);
-      await queryClient.invalidateQueries({ queryKey: ROOM_ISSUES_KEY });
-    },
-    onError: (e) => setError(toUserMessage(e)),
-  });
-
-  function toggle(type: RoomIssueType, on: boolean) {
-    setChecked((prev) => {
-      const next = { ...prev };
-      if (on) next[type] = '';
-      else delete next[type];
-      return next;
-    });
-  }
-
-  return (
-    <div>
-      <PageHeader
-        title="Buồng phòng"
-        description="Ghi nhận tình trạng phòng sau khi dọn. Mỗi tình trạng được lưu thành một vấn đề riêng để lễ tân xử lý."
-        actions={
-          <Button variant="secondary" onClick={() => void history.refetch()} aria-label="Làm mới">
-            <RefreshCw className={`h-4 w-4 ${history.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
-            Làm mới
-          </Button>
-        }
-      />
-
-      {/* WHERE TODAY'S WORK IS — always in view, with the two shift actions. */}
-      <section
-        data-testid="shift-current"
-        className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-3"
-      >
-        <div className="text-sm">
-          <p className="font-semibold text-brand-800">Đang làm tại: {branchLabel(current.branch)}</p>
-          <p className="text-slate-700">
-            Người dọn buồng: {current.staffName} · từ {formatDateTime(current.startedAt)} · {current.inspections} lượt kiểm tra
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => setSwitching(true)} data-testid="shift-switch">
-            <ArrowLeftRight className="h-4 w-4" aria-hidden="true" />
-            Đổi chi nhánh
-          </Button>
-          <Button variant="secondary" onClick={() => setConfirmEnd(true)} data-testid="shift-end">
-            <LogOut className="h-4 w-4" aria-hidden="true" />
-            Kết thúc ca
-          </Button>
-        </div>
-      </section>
-      {shift.segments.length > 1 ? (
-        <details className="mb-4 rounded-xl border border-line bg-white px-4 py-2 text-sm">
-          <summary className="cursor-pointer font-medium text-slate-800">Các chi nhánh trong ca ({shift.segments.length})</summary>
-          <div className="mt-2">
-            <SegmentList shift={shift} />
-          </div>
-        </details>
-      ) : null}
-      {switching ? <SwitchBranchModal shift={shift} onClose={() => setSwitching(false)} /> : null}
-      {confirmEnd ? (
-        <Modal
-          open
-          title="Kết thúc ca"
-          onClose={() => setConfirmEnd(false)}
-          footer={
-            <>
-              <Button variant="secondary" onClick={() => setConfirmEnd(false)}>
-                Hủy
-              </Button>
-              <Button onClick={() => end.mutate()} loading={end.isPending} data-testid="shift-end-confirm">
-                Kết thúc ca
-              </Button>
-            </>
-          }
-        >
-          <p className="text-sm text-slate-700">Kết thúc ca làm việc hôm nay? Sau khi kết thúc, cần “Vào ca” lại để ghi nhận kiểm tra.</p>
-          {end.isError ? <ErrorAlert>{toUserMessage(end.error)}</ErrorAlert> : null}
-        </Modal>
-      ) : null}
-
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
-        {/* ---------------- Recording ---------------- */}
-        <form
-          data-testid="inspection-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (ready) save.mutate();
-          }}
-          className="h-fit space-y-4 rounded-2xl border-section border-line bg-white p-4 shadow-sm"
-        >
-          <h2 className="text-sm font-semibold text-slate-900">Kiểm tra phòng</h2>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-            <Input
-              label="Người dọn phòng (nếu khác)"
-              value={staffName}
-              onChange={(e) => setStaffName(e.target.value)}
-              maxLength={100}
-              placeholder={current.staffName}
-              data-testid="inspection-staff"
-            />
-            {rooms && rooms.length > 0 ? (
-              <label className="block text-sm font-medium text-slate-700">
-                Số phòng
-                <select
-                  className={FIELD}
-                  value={roomNumber}
-                  aria-label="Số phòng"
-                  onChange={(e) => setRoomNumber(e.target.value)}
-                  data-testid="inspection-room"
-                >
-                  <option value="">— Chọn phòng —</option>
-                  {rooms.map((room) => (
-                    <option key={room} value={room}>
-                      {room}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <Input
-                label="Số phòng"
-                value={roomNumber}
-                onChange={(e) => setRoomNumber(e.target.value)}
-                maxLength={50}
-                placeholder="Ví dụ: 302"
-                data-testid="inspection-room"
-              />
-            )}
-          </div>
-
-          <fieldset>
-            <legend className="mb-2 text-sm font-medium text-slate-700">Tình trạng phòng</legend>
-            <ul className="grid gap-2">
-              {ROOM_ISSUE_TYPES.map((t) => {
-                const on = checked[t.code] !== undefined;
-                return (
-                  <li
-                    key={t.code}
-                    className={`rounded-xl border px-3 py-2 ${on ? 'border-brand-600 bg-brand-50/40' : 'border-line'}`}
-                  >
-                    <label className="flex cursor-pointer items-center gap-2.5 text-sm font-medium text-slate-800">
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={(e) => toggle(t.code, e.target.checked)}
-                        data-testid={`inspection-type-${t.code}`}
-                        className="h-4 w-4 accent-brand-600"
-                      />
-                      {t.label}
-                    </label>
-                    {on ? (
-                      <input
-                        value={checked[t.code] ?? ''}
-                        onChange={(e) => setChecked((prev) => ({ ...prev, [t.code]: e.target.value }))}
-                        maxLength={2000}
-                        placeholder={t.code === 'OTHER' ? 'Mô tả vấn đề (bắt buộc)' : 'Mô tả thêm (không bắt buộc)'}
-                        aria-label={`Mô tả — ${t.label}`}
-                        data-testid={`inspection-note-${t.code}`}
-                        className="mt-2 w-full rounded-lg border border-line-strong px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-                      />
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          </fieldset>
-
-          {error ? <ErrorAlert>{error}</ErrorAlert> : null}
-          <div className="flex justify-end">
-            <Button type="submit" disabled={!ready} loading={save.isPending} data-testid="inspection-save">
-              <ClipboardCheck className="h-4 w-4" aria-hidden="true" />
-              Lưu kiểm tra
-            </Button>
-          </div>
-        </form>
-
-        {/* ---------------- What I recorded ---------------- */}
-        <div className="min-w-0 space-y-4">
-          <section
-            aria-label="Lọc lịch sử kiểm tra"
-            data-testid="inspection-filters"
-            className="flex flex-wrap items-end gap-x-4 gap-y-3 rounded-xl border-section border-line bg-white px-4 py-3 shadow-sm"
-          >
-            <div className="min-w-[17rem] max-w-full">
-              <DateRangeField legend="Ngày kiểm tra" value={range} onChange={setRange} max={today} testId="inspection-range" />
-            </div>
-            <PeriodQuickPicks value={range} onChange={setRange} today={today} testId="inspection-range" />
-            <label className="block min-w-[8rem] text-xs font-medium text-slate-500">
-              Phòng
-              <select
-                className={FIELD}
-                value={roomFilter}
-                aria-label="Lọc theo phòng"
-                data-testid="inspection-filter-room"
-                onChange={(e) => setRoomFilter(e.target.value)}
-              >
-                <option value="">Tất cả phòng</option>
-                {(rooms ?? []).map((room) => (
-                  <option key={room} value={room}>
-                    {room}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block min-w-[12rem] text-xs font-medium text-slate-500">
-              Tình trạng
-              <select
-                className={FIELD}
-                value={typeFilter}
-                aria-label="Lọc theo tình trạng"
-                data-testid="inspection-filter-type"
-                onChange={(e) => setTypeFilter(e.target.value as RoomIssueType | '')}
-              >
-                <option value="">Tất cả tình trạng</option>
-                {ROOM_ISSUE_TYPES.map((t) => (
-                  <option key={t.code} value={t.code}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </section>
-
-          {!rangeValid ? (
-            <p className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900">
-              Hãy chọn đủ ngày bắt đầu và ngày kết thúc.
-            </p>
-          ) : (
-            <>
-              {/* Counted by the server over every matching finding — facts, not a score. */}
-              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4" data-testid="inspection-facts">
-                <StatCard label="Lượt kiểm tra" value={facts?.inspections ?? 0} icon={ClipboardList} />
-                <StatCard label="Vấn đề ghi nhận" value={facts?.issues ?? 0} icon={TriangleAlert} tone="amber" />
-                <StatCard label="Phòng có vấn đề" value={facts?.rooms ?? 0} icon={DoorOpen} />
-                <StatCard
-                  label={facts?.byType[0] ? `Nhiều nhất: ${facts.byType[0].label}` : 'Nhiều nhất: —'}
-                  value={facts?.byType[0]?.count ?? 0}
-                  icon={BedDouble}
-                />
-              </div>
-
-              <RoomIssueTable
-                mode="housekeeping"
-                title="Lịch sử kiểm tra của tôi"
-                issues={history.data?.issues ?? []}
-                isLoading={history.isLoading}
-                isError={history.isError}
-                error={history.error}
-                onRetry={() => void history.refetch()}
-                emptyTitle="Chưa có kiểm tra nào trong khoảng này"
-                emptyMessage="Các phòng bạn kiểm tra sẽ hiện ở đây. Đổi khoảng ngày hoặc bỏ bộ lọc để xem thêm."
-              />
-            </>
-          )}
-        </div>
-      </div>
-      <Toast message={toast} onDone={() => setToast(null)} />
-    </div>
   );
 }

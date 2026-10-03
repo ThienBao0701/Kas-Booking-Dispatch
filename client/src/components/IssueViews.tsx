@@ -492,6 +492,10 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
           <Field label="Số lần sửa" value={String(issue.attempts.length)} wrap />
           <Field label="Tiếp nhận" value={acceptedAt ? formatDateTime(acceptedAt) : null} wrap empty="—" />
           <Field label="Hoàn thành" value={finishedAt ? formatDateTime(finishedAt) : null} wrap empty="—" />
+          {/* The account that pressed "Hoàn thành" — "Hệ thống" on an older record without one. */}
+          {issue.status === 'COMPLETED' || issue.status === 'AWAITING_INSPECTION' ? (
+            <Field label="Người hoàn thành" value={issue.completedByName ?? 'Hệ thống'} wrap />
+          ) : null}
           <Field label="Thời gian xử lý" value={duration} wrap />
           <div className="sm:col-span-2">
             <Field label="Nguyên nhân" value={issue.cause} wrap empty="Chưa xác định" />

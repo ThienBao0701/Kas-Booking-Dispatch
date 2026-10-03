@@ -120,12 +120,20 @@ export function RoomIssueTable({
       className: 'whitespace-nowrap font-semibold text-slate-900',
       render: (i) => i.roomNumber,
     },
+    /*
+      THE ACCOUNT THAT SAVED THE INSPECTION — the worker a collection is credited
+      to (its KPI). A name typed on an older form, when different, beside it.
+    */
     {
       key: 'staff',
-      header: 'Người dọn phòng',
-      secondary: true,
+      header: 'Người kiểm phòng',
       className: 'whitespace-nowrap',
-      render: (i) => i.staffName,
+      render: (i) => (
+        <>
+          <span className="font-medium text-slate-800">{i.recordedByName}</span>
+          {i.staffName && i.staffName !== i.recordedByName ? <span className="block text-xs text-slate-500">Người dọn: {i.staffName}</span> : null}
+        </>
+      ),
     },
     {
       key: 'issue',

@@ -54,7 +54,8 @@ const voidSchema = z.object({ reason: z.string() });
 /** "Vào ca" / "Đổi chi nhánh": where, and who cleans. */
 const shiftBranchSchema = z.object({
   branchId: z.number().int().positive(),
-  staffName: z.string().trim().min(1, 'Vui lòng nhập tên người dọn buồng.').max(100),
+  // Optional: the account is the person; a name is kept only when one is sent.
+  staffName: z.string().trim().max(100).optional(),
 });
 
 const shiftListSchema = z.object({
@@ -89,7 +90,7 @@ export function createHousekeepingRouter(): Router {
     requirePasswordChanged,
     // The reception supervisors READ (their scope); only Reception and the
     // Admin settle a collection, and only the Admin voids — per route below.
-    requireRole('ADMIN', 'RECEPTIONIST', 'HOUSEKEEPING', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
+    requireRole('ADMIN', 'RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'),
   );
 
   const actorOf = (req: {

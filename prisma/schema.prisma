@@ -79,6 +79,32 @@ enum UserRole {
   /// "Tổng quản lý lễ tân" — the same supervision over every branch. No
   /// assignment rows: the scope is all branches by definition.
   RECEPTION_GENERAL_MANAGER
+  /// "Quản lý buồng phòng" — runs the housekeeping of exactly ONE branch, held in
+  /// `User.branchId`: the day's room statuses, who cleans which room, the
+  /// workers' inspections, cleaning and KPI. Confined by `requireAuth` to the
+  /// housekeeping endpoints, scoped to that branch by `branchScopeOf`.
+  HOUSEKEEPING_MANAGER
+}
+
+/// Where a daily room work item stands — separate from the room's operational
+/// code (`HousekeepingRoomTask.statusCode`): "chưa bắt đầu" → "đang dọn" (from
+/// the saved "Kiểm phòng") → "hoàn thành".
+enum RoomWorkState {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+/// One line of a room work item's history — who did what, when.
+enum RoomTaskEventType {
+  CREATED
+  UPDATED
+  ASSIGNED
+  OPENED
+  INSPECTED
+  CLEANING_SAVED
+  COMPLETED
+  VOIDED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -605,6 +631,11 @@ model User {
   repairStages             TechnicalRepairStage[]        @relation("RepairStageTechnician")
   issuesVoided             HotelIssue[]                  @relation("IssueVoidedBy")
   issueAssignmentsReturned HotelIssueAssignment[]        @relation("IssueAssignmentReturnedBy")
+  roomTasksAssigned        HousekeepingRoomTask[]        @relation("RoomTaskAssignee")
+  roomTasksCreated         HousekeepingRoomTask[]        @relation("RoomTaskCreatedBy")
+  roomTasksCleaned         HousekeepingRoomTask[]        @relation("RoomTaskCleanedBy")
+  roomTasksVoided          HousekeepingRoomTask[]        @relation("RoomTaskVoidedBy")
+  roomTaskEvents           HousekeepingRoomTaskEvent[]   @relation("RoomTaskEventActor")
   housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
 
   @@index([branchId])
@@ -722,6 +753,7 @@ model Branch {
   roomInspectionIssues    RoomInspectionIssue[]
   managerAssignments      UserBranchAssignment[]        @relation("UserBranchAssignmentBranch")
   housekeepingSegments    HousekeepingWorkSegment[]
+  housekeepingRoomTasks   HousekeepingRoomTask[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -3103,6 +3135,8 @@ model RoomInspection {
   createdBy   User                     @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
   issues      RoomInspectionIssue[]
   workSegment HousekeepingWorkSegment? @relation(fields: [workSegmentId], references: [id], onDelete: SetNull)
+  /// The daily room work item this "Kiểm phòng" started, when it came from one.
+  roomTask    HousekeepingRoomTask?
 
   @@index([branchId, createdAt])
   @@index([createdAt])
@@ -3238,4 +3272,82 @@ model RoomIssueCollectionEvent {
   actor User                @relation("RoomCollectionEventActor", fields: [actorUserId], references: [id])
 
   @@index([issueId, createdAt])
+}
+
+/// "TÌNH TRẠNG PHÒNG NGÀY …" — one room of one branch on one business date, as
+/// the Quản lý buồng phòng set it up and the worker carried it out.
+///
+/// TWO SEPARATE QUESTIONS: `statusCode` is the room's operational code for the
+/// day (OUT / OC / CC / VC — the board's rows); `state` is where the cleaning
+/// stands (chưa bắt đầu / đang dọn / hoàn thành). The timer starts at the saved
+/// "Kiểm phòng" (`startedAt` = that inspection's time), never at opening the room.
+///
+/// NOTHING IS DELETED: "Xóa" voids the item; its inspection, findings, collections
+/// and events stay. One LIVE item per branch, date and room (a partial unique
+/// index in the migration).
+model HousekeepingRoomTask {
+  id                    String        @id @default(cuid())
+  branchId              Int
+  /// "YYYY-MM-DD", Asia/Ho_Chi_Minh — the business date of the board.
+  workDate              String
+  roomNumber            String
+  /// The room's operational code for the day (catalog: `ROOM_STATUS_CODES`).
+  statusCode            String
+  /// "Ưu tiên" — clean first.
+  priority              Boolean       @default(false)
+  /// The manager's instruction ("dọn trước 14:00").
+  note                  String?
+  /// The CURRENT assignee; every assignment is an ASSIGNED event.
+  assigneeUserId        Int?
+  assigneeNameSnapshot  String?
+  state                 RoomWorkState @default(NOT_STARTED)
+  /// The saved "Kiểm phòng" that started the cleaning.
+  inspectionId          String?       @unique
+  startedAt             DateTime?
+  completedAt           DateTime?
+  durationSeconds       Int?
+  /// The "Dọn phòng" form as last saved (validated against the catalog).
+  cleaning              Json?
+  cleanedByUserId       Int?
+  cleanedByNameSnapshot String?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdAt             DateTime
+  updatedAt             DateTime      @updatedAt
+  voidedAt              DateTime?
+  voidedByUserId        Int?
+  voidedByNameSnapshot  String?
+  voidReason            String?
+
+  branch     Branch                      @relation(fields: [branchId], references: [id])
+  assignee   User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
+  inspection RoomInspection?             @relation(fields: [inspectionId], references: [id])
+  createdBy  User                        @relation("RoomTaskCreatedBy", fields: [createdByUserId], references: [id])
+  cleanedBy  User?                       @relation("RoomTaskCleanedBy", fields: [cleanedByUserId], references: [id])
+  voidedBy   User?                       @relation("RoomTaskVoidedBy", fields: [voidedByUserId], references: [id])
+  events     HousekeepingRoomTaskEvent[]
+
+  @@index([branchId, workDate])
+  @@index([assigneeUserId, workDate])
+  @@index([workDate])
+}
+
+/// Everything that happened to a room work item, oldest first — assignment and
+/// reassignment, edits (before → after), opening, the inspection, cleaning saves,
+/// completion, void. Never edited, never deleted.
+model HousekeepingRoomTaskEvent {
+  id                String            @id @default(cuid())
+  taskId            String
+  type              RoomTaskEventType
+  actorUserId       Int
+  actorNameSnapshot String
+  actorRole         UserRole
+  detail            Json?
+  createdAt         DateTime
+
+  task  HousekeepingRoomTask @relation(fields: [taskId], references: [id])
+  actor User                 @relation("RoomTaskEventActor", fields: [actorUserId], references: [id])
+
+  @@index([taskId, createdAt])
+  @@index([actorUserId, createdAt])
 }

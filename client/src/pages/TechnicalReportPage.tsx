@@ -423,6 +423,12 @@ function IssueRow({
               <dt className="inline text-slate-500">Nguyên nhân: </dt>
               <dd className="inline">{issue.cause ?? 'Chưa xác định'}</dd>
             </div>
+            {issue.status === 'COMPLETED' ? (
+              <div>
+                <dt className="inline text-slate-500">Người hoàn thành: </dt>
+                <dd className="inline">{issue.completedByName ?? 'Hệ thống'}</dd>
+              </div>
+            ) : null}
             {last?.result ? (
               <div>
                 <dt className="inline text-slate-500">Kết quả: </dt>

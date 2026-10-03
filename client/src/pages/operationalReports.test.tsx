@@ -2620,7 +2620,7 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
   const doneRequest = () =>
     requestRow(
       { id: 'g-old', createdAt: '2026-09-18T01:00:00.000Z' },
-      { guestName: 'Khách Cũ', completed: true, completedAt: '2026-09-18T02:00:00.000Z', resolution: 'Đã trả balo' },
+      { guestName: 'Khách Cũ', completed: true, completedAt: '2026-09-18T02:00:00.000Z', completedByName: 'Lễ tân Hai', resolution: 'Đã trả balo' },
     );
   const doneComplaint = () =>
     report({
@@ -2639,6 +2639,8 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
       reportedCause: 'Hết tuổi thọ',
       technicianName: 'Bảo',
       technicianPhone: '0909000111',
+      reporterName: 'Lễ tân Ba',
+      completedByName: 'Kỹ thuật Bảo',
       completedAt: '2026-09-18T04:00:00.000Z',
       createdAt: '2026-09-18T01:00:00.000Z',
       updatedAt: '2026-09-18T04:00:00.000Z',
@@ -2705,18 +2707,26 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     const page = await screen.findByTestId('completed-issues');
     const requests = within(page).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách Cũ')).toBeInTheDocument();
-    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(requests).getByText('Đã hoàn thành')).toBeInTheDocument();
+    // Who entered it and who completed it — from the accounts.
+    expect(within(requests).getByText('Nguyễn Văn A')).toBeInTheDocument();
+    expect(within(requests).getByText('Lễ tân Hai')).toBeInTheDocument();
 
     const facility = within(page).getByTestId('completed-facility');
     expect(await within(facility).findByText('Bóng đèn cháy')).toBeInTheDocument();
-    expect(headersOf(facility)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
+    expect(headersOf(facility)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(facility).getByText('Đã hoàn thành')).toBeInTheDocument();
+    expect(within(facility).getByText('Lễ tân Ba')).toBeInTheDocument();
+    expect(within(facility).getByText('Kỹ thuật Bảo')).toBeInTheDocument();
 
     const quality = within(page).getByTestId('service-quality-table');
     expect(within(quality).getByText('Khách Phàn Nàn')).toBeInTheDocument();
-    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Trạng thái']);
+    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(quality).getByText('Đã hoàn thành')).toBeInTheDocument();
+    // Nobody recorded as completing it: "Hệ thống", never a blank.
+    expect(within(quality).getByText('Nguyễn Văn A')).toBeInTheDocument();
+    expect(within(quality).getByText('Hệ thống')).toBeInTheDocument();
 
     // A read-only list: nothing to press — the filter and "Làm mới" sit above it —
     // but, on a phone only, each row's expander for the column folded into it.

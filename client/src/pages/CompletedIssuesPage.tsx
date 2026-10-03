@@ -204,6 +204,7 @@ export function CompletedIssuesPage() {
               {...journalState}
               canEdit={false}
               variant="summary"
+              showActors
               compact
               section={{ marker: CATEGORY_MARKERS.GUEST_REQUEST }}
               emptyTitle={EMPTY_IN_RANGE}
@@ -217,6 +218,7 @@ export function CompletedIssuesPage() {
               title="Sự cố cơ sở vật chất"
               rows={issues}
               summary
+              showActors
               compact
               section={{ marker: CATEGORY_MARKERS.FACILITY_ISSUE }}
               isLoading={incidents.isLoading}
@@ -238,6 +240,7 @@ export function CompletedIssuesPage() {
               {...journalState}
               canEdit={false}
               variant="summary"
+              showActors
               compact
               section={{ marker: CATEGORY_MARKERS.CUSTOMER_COMPLAINT }}
               emptyTitle={EMPTY_IN_RANGE}

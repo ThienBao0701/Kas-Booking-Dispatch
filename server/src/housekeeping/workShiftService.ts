@@ -120,13 +120,14 @@ export async function currentShift(actor: ShiftActor, client: PrismaClient = def
 /** "Vào ca": the workday and its first branch. One open workday per account. */
 export async function startShift(
   actor: ShiftActor,
-  input: { branchId: unknown; staffName: unknown },
+  input: { branchId: unknown; staffName?: unknown },
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
   assertHousekeeping(actor);
   const branchId = await activeBranch(input.branchId, client);
-  const staffName = cleanerName(input.staffName);
+  // THE PERSON IS THE ACCOUNT: nobody types their own name any more.
+  const staffName = cleanerName(input.staffName === undefined || input.staffName === '' ? actor.fullName : input.staffName);
   if (await openSession(actor.id, client)) throw ApiError.conflict('Bạn đang trong ca. Hãy đổi chi nhánh hoặc kết thúc ca.');
   const now = clock.now();
   try {
@@ -159,7 +160,7 @@ export async function switchShiftBranch(
   const open = session.segments.find((s) => s.endedAt === null);
   if (open && open.branchId === branchId) throw ApiError.validation('Bạn đang làm ở chi nhánh này.');
   const staffName =
-    input.staffName !== undefined && input.staffName !== '' ? cleanerName(input.staffName) : (open?.staffName ?? cleanerName(''));
+    input.staffName !== undefined && input.staffName !== '' ? cleanerName(input.staffName) : (open?.staffName ?? cleanerName(actor.fullName));
   const now = clock.now();
   await client.$transaction(async (tx) => {
     if (open) {
@@ -202,7 +203,7 @@ export async function listShifts(
   if (actor.role === 'HOUSEKEEPING') {
     where = { ...window, userId: actor.id };
     if (filter.branchId !== undefined) segmentScope = { branchId: filter.branchId };
-  } else if (isReceptionSupervisor(actor.role)) {
+  } else if (isReceptionSupervisor(actor.role) || actor.role === 'HOUSEKEEPING_MANAGER') {
     segmentScope = scopedBranchFilter(actor, filter.branchId);
     where = { ...window, segments: { some: segmentScope } };
   } else {

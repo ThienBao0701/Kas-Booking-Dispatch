@@ -47,7 +47,8 @@ export function createBranchesRouter(): Router {
       if (
         user.role === 'RECEPTION_MANAGER' ||
         user.role === 'RECEPTION_GENERAL_MANAGER' ||
-        user.role === 'TECHNICAL_MANAGER'
+        user.role === 'TECHNICAL_MANAGER' ||
+        user.role === 'HOUSEKEEPING_MANAGER'
       ) {
         const branches = await prisma.branch.findMany({
           where: scopedBranchRows(user),

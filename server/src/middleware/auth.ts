@@ -136,6 +136,20 @@ const HOUSEKEEPING_ROUTES = [
   /^\/api\/branches$/,
 ];
 
+/**
+ * WHAT A QUẢN LÝ BUỒNG PHÒNG MAY REACH — default deny: the housekeeping module
+ * (its branch's room work, staff, inspections, KPI and reports — every service
+ * scopes to the account's one branch), its branch and room catalog, and its own
+ * notifications.
+ */
+const HOUSEKEEPING_MANAGER_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+];
+
 function housekeepingMayReach(req: Request): boolean {
   const path = req.originalUrl.split('?')[0] ?? '';
   return HOUSEKEEPING_ROUTES.some((route) => route.test(path));
@@ -163,6 +177,13 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
       ) {
         next(ApiError.forbidden());
         return;
+      }
+      if (user.role === 'HOUSEKEEPING_MANAGER') {
+        const path = req.originalUrl.split('?')[0] ?? '';
+        if (!HOUSEKEEPING_MANAGER_ROUTES.some((route) => route.test(path))) {
+          next(ApiError.forbidden());
+          return;
+        }
       }
       if (user.role === 'TECHNICAL_MANAGER') {
         const path = req.originalUrl.split('?')[0] ?? '';

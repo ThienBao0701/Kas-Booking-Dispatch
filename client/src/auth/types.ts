@@ -30,7 +30,9 @@ export type UserRole =
   | 'TECHNICAL_MANAGER'
   | 'HOUSEKEEPING'
   | 'RECEPTION_MANAGER'
-  | 'RECEPTION_GENERAL_MANAGER';
+  | 'RECEPTION_GENERAL_MANAGER'
+  /** "Quản lý buồng phòng" — the housekeeping of exactly one branch (`branch`). */
+  | 'HOUSEKEEPING_MANAGER';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -42,7 +44,13 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   HOUSEKEEPING: 'Bộ phận buồng phòng',
   RECEPTION_MANAGER: 'Quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
+  HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
 };
+
+/** Who runs the daily room work: the Admin (every branch), the Quản lý buồng phòng (its one). */
+export function isRoomWorkManager(role: UserRole | undefined): boolean {
+  return role === 'ADMIN' || role === 'HOUSEKEEPING_MANAGER';
+}
 
 /**
  * THE RECEPTION SUPERVISORS — Admin, Quản lý lễ tân (its assigned branches) and

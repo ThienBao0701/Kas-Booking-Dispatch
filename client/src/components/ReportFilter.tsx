@@ -40,6 +40,7 @@ export function ReportFilterBar({
   branches,
   branchCounts,
   allowAll = true,
+  showShifts = true,
   testId = 'report-filter',
 }: {
   value: ReportFilterValue;
@@ -51,6 +52,8 @@ export function ReportFilterBar({
   branchCounts?: Map<number, number>;
   /** Offer "Tất cả chi nhánh". */
   allowAll?: boolean;
+  /** The "Ca" choices — off where the data has no reception shift (housekeeping). */
+  showShifts?: boolean;
   testId?: string;
 }) {
   const period = reportPeriod(value, today);
@@ -59,7 +62,7 @@ export function ReportFilterBar({
   const shifts = useQuery({
     queryKey: ['report-shifts', period?.from ?? null, period?.to ?? null, branchId ?? null],
     queryFn: () => shiftsApi.available({ ...period!, branchId }),
-    enabled: period !== null && (!showBranch || value.branch !== null),
+    enabled: showShifts && period !== null && (!showBranch || value.branch !== null),
     staleTime: 30_000,
   });
   const available = shifts.data?.shifts ?? [];

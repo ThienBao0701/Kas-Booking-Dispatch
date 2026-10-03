@@ -59,6 +59,26 @@ const COMPLETED_GROUP: NavItem = {
   ],
 };
 
+/**
+ * "QUẢN LÝ BUỒNG PHÒNG" — six focused screens over one branch's housekeeping.
+ * The Quản lý buồng phòng's whole menu; for the Admin, a group (every branch).
+ */
+const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = [
+  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard },
+  { to: '/app/hk/rooms', label: 'Tình trạng phòng', icon: BedDouble },
+  { to: '/app/hk/assign', label: 'Phân công công việc', icon: ClipboardCheck },
+  { to: '/app/hk/staff', label: 'Theo dõi nhân viên', icon: Users },
+  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet },
+  { to: '/app/hk/report', label: 'Báo cáo', icon: FileText },
+];
+
+const HOUSEKEEPING_MANAGER_GROUP: NavItem = {
+  to: '/app/hk',
+  label: 'Quản lý buồng phòng',
+  icon: BedDouble,
+  children: HOUSEKEEPING_MANAGER_ITEMS,
+};
+
 const REPORT_GROUP: NavItem = {
   to: '/app/reports',
   label: 'Báo cáo vấn đề',
@@ -96,6 +116,7 @@ export const ADMIN_NAV: NavItem[] = [
   // "Đã xác nhận đúng" is gone too (its address redirects to "Lịch sử"), and
   // "Chat box" is the bubble in the corner of every page, not a menu entry.
   REPORT_GROUP,
+  HOUSEKEEPING_MANAGER_GROUP,
   // The 12-hour completion archive, every branch.
   COMPLETED_GROUP,
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
@@ -185,8 +206,14 @@ export const TECHNICAL_NAV: NavItem[] = [
  * and screens are untouched). The server confines the role to its routes.
  */
 export const HOUSEKEEPING_NAV: NavItem[] = [
+  // The rooms given to this account today — "Kiểm phòng" and "Dọn phòng".
   { to: '/app/inspections', label: 'Buồng phòng', icon: ClipboardCheck },
+  // Its own findings and the money collected against them — nobody else's.
+  { to: '/app/my-kpi', label: 'KPI & Thu tiền', icon: Wallet },
 ];
+
+/** Quản lý buồng phòng: its one branch's housekeeping, nothing else. */
+export const HOUSEKEEPING_MANAGER_NAV: NavItem[] = HOUSEKEEPING_MANAGER_ITEMS;
 
 /**
  * Quản lý kỹ thuật: the incidents of its ticked branches — who holds each one,
@@ -203,6 +230,7 @@ export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'TECHNICAL') return TECHNICAL_NAV;
   if (role === 'TECHNICAL_MANAGER') return TECHNICAL_MANAGER_NAV;
   if (role === 'HOUSEKEEPING') return HOUSEKEEPING_NAV;
+  if (role === 'HOUSEKEEPING_MANAGER') return HOUSEKEEPING_MANAGER_NAV;
   if (role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER') return RECEPTION_MANAGER_NAV;
   // Receptionist, and anything unrecognised: never the Chứng từ menu.
   return RECEPTIONIST_NAV;
@@ -215,6 +243,7 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith('/app/chat')) return 'Chat box';
   if (pathname.startsWith('/app/reminders')) return 'Nhắc nhở';
   if (pathname.startsWith('/app/resend-orders')) return 'Gửi lại đơn';
+  if (pathname.startsWith('/app/inspections/room/')) return 'Phòng';
   const all = [
     ...ADMIN_NAV,
     ...RECEPTIONIST_NAV,
@@ -222,6 +251,7 @@ export function titleForPath(pathname: string): string {
     ...TECHNICAL_NAV,
     ...TECHNICAL_MANAGER_NAV,
     ...HOUSEKEEPING_NAV,
+    ...HOUSEKEEPING_MANAGER_NAV,
     ...RECEPTION_MANAGER_NAV,
   ];
   const flat = (items: NavItem[]): NavItem[] => items.flatMap((i) => [i, ...flat(i.children ?? [])]);

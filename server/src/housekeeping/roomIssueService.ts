@@ -150,15 +150,28 @@ export interface InspectionInput {
   issues: { type: unknown; note?: unknown }[];
 }
 
+/** How a room work item's "Kiểm phòng" uses the shared inspection. */
+export interface InspectionOptions {
+  /** A clean room is a finding too: "Kiểm phòng" may save no condition at all. */
+  allowNoFindings?: boolean;
+  /** The room's branch: the open shift must be there. */
+  branchId?: number;
+  /** Runs in the same transaction, after the inspection row exists. */
+  onCreated?: (tx: Prisma.TransactionClient, inspection: { id: string; createdAt: Date }) => Promise<void>;
+}
+
 /**
  * Saves one inspection and every finding on it, atomically: either the room and
- * all its issues are on file or none of them are.
+ * all its issues are on file or none of them are. THE PERSON IS THE ACCOUNT:
+ * `createdByUserId` is the authenticated worker, and the name kept beside it is
+ * the shift's (the account's own, unless an older shift named another).
  */
 export async function createInspection(
   input: InspectionInput,
   actor: HousekeepingActor,
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
+  options: InspectionOptions = {},
 ) {
   if (actor.role !== 'HOUSEKEEPING') {
     throw ApiError.forbidden('Chỉ bộ phận buồng phòng mới ghi nhận được kiểm tra phòng.');
@@ -169,6 +182,9 @@ export async function createInspection(
     permanent account branch — and it is recorded against that segment.
   */
   const segment = await openSegmentFor(actor.id, client);
+  if (options.branchId !== undefined && segment.branchId !== options.branchId) {
+    throw ApiError.conflict('Bạn đang trong ca ở chi nhánh khác. Hãy "Đổi chi nhánh" sang chi nhánh của phòng này.');
+  }
   const typedRoom = trimmed(input.roomNumber);
   if (!typedRoom) throw ApiError.validation('Vui lòng nhập số phòng.');
   if (typedRoom.length > 50) throw ApiError.validation('Số phòng quá dài.');
@@ -179,7 +195,7 @@ export async function createInspection(
   if (!staffName) throw ApiError.validation('Vui lòng nhập tên người dọn phòng.');
   if (staffName.length > 100) throw ApiError.validation('Tên người dọn phòng quá dài.');
 
-  if (input.issues.length === 0) {
+  if (input.issues.length === 0 && !options.allowNoFindings) {
     throw ApiError.validation('Vui lòng chọn ít nhất một tình trạng của phòng.');
   }
   if (input.issues.length > MAX_ISSUES_PER_INSPECTION) {
@@ -199,18 +215,22 @@ export async function createInspection(
 
   const now = clock.now();
   const branchId = segment.branchId;
-  const created = await client.roomInspection.create({
-    data: {
-      branchId,
-      roomNumber,
-      staffName,
-      workSegmentId: segment.id,
-      createdByUserId: actor.id,
-      createdByNameSnapshot: actor.fullName,
-      createdAt: now,
-      issues: { create: issues.map((i) => ({ ...i, branchId, createdAt: now })) },
-    },
-    include: { issues: { include: ISSUE_INCLUDE } },
+  const created = await client.$transaction(async (tx) => {
+    const row = await tx.roomInspection.create({
+      data: {
+        branchId,
+        roomNumber,
+        staffName,
+        workSegmentId: segment.id,
+        createdByUserId: actor.id,
+        createdByNameSnapshot: actor.fullName,
+        createdAt: now,
+        issues: { create: issues.map((i) => ({ ...i, branchId, createdAt: now })) },
+      },
+      include: { issues: { include: ISSUE_INCLUDE } },
+    });
+    if (options.onCreated) await options.onCreated(tx, row);
+    return row;
   });
 
   /*
@@ -222,7 +242,7 @@ export async function createInspection(
     where: { role: 'RECEPTIONIST', active: true, branchId },
     select: { id: true },
   });
-  if (receptionists.length > 0) {
+  if (receptionists.length > 0 && issues.length > 0) {
     const what = issues.map((i) => ROOM_ISSUE_TYPE_LABELS[i.type]).join(', ');
     await client.notification.createMany({
       data: receptionists.map((r) => ({
@@ -276,8 +296,9 @@ export function roomIssueWhere(
     where.voidedAt = null;
     inspection.createdByUserId = actor.id;
     if (filter.branchId !== undefined) where.branchId = filter.branchId;
-  } else if (isReceptionSupervisor(actor.role)) {
-    // Admin: every branch; a Quản lý lễ tân: its branches; the general manager: all.
+  } else if (isReceptionSupervisor(actor.role) || actor.role === 'HOUSEKEEPING_MANAGER') {
+    // Admin: every branch; a Quản lý lễ tân: its branches; the general manager: all;
+    // a Quản lý buồng phòng: its one branch.
     Object.assign(where, scopedBranchFilter(actor, filter.branchId));
   } else {
     throw ApiError.forbidden('Bạn không có quyền xem kiểm tra phòng.');
@@ -395,7 +416,7 @@ export async function summariseRoomIssues(
   filter: ListRoomIssuesFilter = {},
   client: PrismaClient = defaultPrisma,
 ): Promise<RoomIssueSummary> {
-  if (actor.role !== 'RECEPTIONIST' && !isReceptionSupervisor(actor.role)) {
+  if (actor.role !== 'RECEPTIONIST' && actor.role !== 'HOUSEKEEPING_MANAGER' && !isReceptionSupervisor(actor.role)) {
     throw ApiError.forbidden('Bạn không có quyền xem tổng hợp thu tiền phòng.');
   }
   const base = roomIssueWhere(actor, { ...filter, status: undefined });

@@ -24,7 +24,8 @@ export type ManageableRole =
   | 'TECHNICAL_MANAGER'
   | 'HOUSEKEEPING'
   | 'RECEPTION_MANAGER'
-  | 'RECEPTION_GENERAL_MANAGER';
+  | 'RECEPTION_GENERAL_MANAGER'
+  | 'HOUSEKEEPING_MANAGER';
 
 /**
  * The accounts with NO single branch — the global departments, and the two
@@ -47,6 +48,11 @@ export const GLOBAL_ROLES: readonly ManageableRole[] = [
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
   return !GLOBAL_ROLES.includes(role ?? 'RECEPTIONIST');
+}
+
+/** Quản lý buồng phòng: exactly ONE branch, chosen in the same checkbox list. */
+export function requiresSingleBranchChoice(role: UserRole | undefined): boolean {
+  return role === 'HOUSEKEEPING_MANAGER';
 }
 
 /** Quản lý lễ tân and Quản lý kỹ thuật pick their branches — one or more, with checkboxes. */

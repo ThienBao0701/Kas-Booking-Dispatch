@@ -36,6 +36,19 @@ import { HistoryPage } from '../pages/HistoryPage';
 import { OperationalReportsPage } from '../pages/OperationalReportsPage';
 import { CompletedIssuesPage } from '../pages/CompletedIssuesPage';
 import { TechnicalReportPage } from '../pages/TechnicalReportPage';
+import { HousekeepingRoomPage } from '../pages/HousekeepingRoomPage';
+import { HousekeepingKpiPage } from '../pages/HousekeepingKpiPage';
+import {
+  HkAssignPage,
+  HkKpiPage,
+  HkOverviewPage,
+  HkReportPage,
+  HkRoomBoardPage,
+  HkStaffPage,
+} from '../pages/HousekeepingManagerPages';
+
+/** "Quản lý buồng phòng" — its branch; the Admin, every branch. The server scopes. */
+const HK_MANAGER_ROLES: readonly UserRole[] = ['ADMIN', 'HOUSEKEEPING_MANAGER'];
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -83,6 +96,7 @@ function RoleLanding() {
   if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/reports/technical" replace />;
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
+  if (user?.role === 'HOUSEKEEPING_MANAGER') return <Navigate to="/app/hk/overview" replace />;
   // The supervision layer opens on its reports.
   if (user?.role === 'RECEPTION_MANAGER' || user?.role === 'RECEPTION_GENERAL_MANAGER') {
     return <Navigate to="/app/reports" replace />;
@@ -245,6 +259,16 @@ export function AppRoutes() {
             The server is the boundary; these gates only render a forbidden page.
           */}
           <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
+          <Route path="inspections/room/:id" element={<RequireRole role="HOUSEKEEPING"><HousekeepingRoomPage /></RequireRole>} />
+          <Route path="my-kpi" element={<RequireRole role="HOUSEKEEPING"><HousekeepingKpiPage /></RequireRole>} />
+          {/* "Quản lý buồng phòng": six focused screens. */}
+          <Route path="hk" element={<Navigate to="/app/hk/overview" replace />} />
+          <Route path="hk/overview" element={<RequireRole role={HK_MANAGER_ROLES}><HkOverviewPage /></RequireRole>} />
+          <Route path="hk/rooms" element={<RequireRole role={HK_MANAGER_ROLES}><HkRoomBoardPage /></RequireRole>} />
+          <Route path="hk/assign" element={<RequireRole role={HK_MANAGER_ROLES}><HkAssignPage /></RequireRole>} />
+          <Route path="hk/staff" element={<RequireRole role={HK_MANAGER_ROLES}><HkStaffPage /></RequireRole>} />
+          <Route path="hk/kpi" element={<RequireRole role={HK_MANAGER_ROLES}><HkKpiPage /></RequireRole>} />
+          <Route path="hk/report" element={<RequireRole role={HK_MANAGER_ROLES}><HkReportPage /></RequireRole>} />
           <Route path="room-collections" element={<RequireRole role="RECEPTIONIST"><RoomCollectionsPage /></RequireRole>} />
           {/* The old address of the supervisors' Buồng phòng: under "Báo cáo vấn đề" now. */}
           <Route path="housekeeping" element={<Navigate to="/app/reports/housekeeping" replace />} />

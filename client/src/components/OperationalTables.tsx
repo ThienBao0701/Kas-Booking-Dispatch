@@ -30,6 +30,7 @@ import {
   VoidedNote,
 } from './RecordDialogs';
 import { formatVnd } from '../lib/money';
+import { actorColumns } from '../lib/issueActors';
 import { completionText } from '../lib/completionVerdict';
 import { formatDateTime } from '../lib/format';
 import { ROOM_SERVICE_PRICE_LABEL, reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
@@ -57,6 +58,8 @@ interface TableProps {
    * the category's own complete table.
    */
   variant?: 'detail' | 'summary';
+  /** "Hoàn thành vấn đề": who entered it and who completed it, beside the status. */
+  showActors?: boolean;
   /** The empty state's line, where the default ("nothing recorded yet") does not fit. */
   emptyTitle?: string;
 }
@@ -204,6 +207,7 @@ export function GuestRequestTable({
   compact,
   section,
   variant = 'detail',
+  showActors = false,
   emptyTitle = 'Chưa có yêu cầu nào',
 }: TableProps) {
   const { editing, setEditing, setVoiding, voidNode } = useRowActions(onChanged, onToast);
@@ -242,6 +246,7 @@ export function GuestRequestTable({
       render: (r) => summaryStatus(r.guestRequest?.completed),
     },
   ];
+  if (showActors) summaryColumns.splice(-1, 0, ...actorColumns<OperationalReport>((r) => r.createdByName, (r) => r.guestRequest?.completedByName));
 
   const detailColumns: DataColumn<OperationalReport>[] = [
     stt(),
@@ -415,6 +420,7 @@ export function ServiceQualityTable({
   section,
   canEdit,
   variant = 'detail',
+  showActors = false,
   emptyTitle = 'Chưa có ghi nhận nào',
 }: TableProps) {
   const [completing, setCompleting] = useState<string | null>(null);
@@ -511,6 +517,7 @@ export function ServiceQualityTable({
     when('createdAt', 'Thời gian', (r) => r.createdAt),
   ];
   const summary = variant === 'summary';
+  if (showActors) summaryColumns.splice(-1, 0, ...actorColumns<OperationalReport>((r) => r.createdByName, (r) => r.complaint?.completedByName));
   const columns = summary ? summaryColumns : detailColumns;
 
   return (

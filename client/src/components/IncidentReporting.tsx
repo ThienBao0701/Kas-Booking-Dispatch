@@ -45,6 +45,7 @@ import {
 } from './IssueViews';
 import { useAuth } from '../auth/AuthProvider';
 import { useBranchRooms } from '../hooks/useBranchRooms';
+import { actorColumns } from '../lib/issueActors';
 import { reportsApi } from '../api/reports';
 import { formatDateTime, hcmToday } from '../lib/format';
 
@@ -867,6 +868,7 @@ function inspectionCell(i: Issue): ReactNode {
  * them. The table stores nothing and decides nothing.
  */
 export function IncidentTable({
+  showActors = false,
   rows,
   title,
   testId,
@@ -884,6 +886,8 @@ export function IncidentTable({
   error,
   onRetry,
 }: {
+  /** "Hoàn thành vấn đề": who reported it and who completed it, beside the status. */
+  showActors?: boolean;
   rows: Issue[];
   title: string;
   testId: string;
@@ -1027,6 +1031,7 @@ export function IncidentTable({
       ),
     },
     cause,
+    ...(showActors ? actorColumns<Issue>((i) => i.reporterName, (i) => i.completedByName) : []),
     { ...status, render: (i) => <IssueStageBadge issue={i} /> },
   ];
 

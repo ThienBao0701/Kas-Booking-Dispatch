@@ -195,7 +195,7 @@ export const housekeepingApi = {
   /** The account's open workday, or null. */
   shift: () => api.get<{ shift: WorkShift | null }>('/housekeeping/shift'),
   /** "Vào ca". */
-  startShift: (input: { branchId: number; staffName: string }) =>
+  startShift: (input: { branchId: number; staffName?: string }) =>
     api.post<{ shift: WorkShift }>('/housekeeping/shift/start', input),
   /** "Đổi chi nhánh". */
   switchBranch: (input: { branchId: number; staffName?: string }) =>

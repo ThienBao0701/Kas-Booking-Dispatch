@@ -20,6 +20,7 @@ import { createNavBadgesRouter } from './navBadges';
 import { createIssuesRouter } from './issues';
 import { createHotelDeliveriesRouter } from './hotelDeliveries';
 import { createHousekeepingRouter } from './housekeeping';
+import { createHousekeepingWorkRouter } from './housekeepingWork';
 import { createReceptionShiftsRouter } from './receptionShifts';
 import { createReceptionReportsRouter } from './receptionReports';
 import { createDevTestRouter } from './devTest';
@@ -59,6 +60,8 @@ export function createApiRouter(): Router {
   router.use(createReceptionReportsRouter());
   router.use(createIssuesRouter());
   router.use(createHotelDeliveriesRouter());
+  // The daily room work, KPI and report — before the older housekeeping routes.
+  router.use(createHousekeepingWorkRouter());
   router.use(createHousekeepingRouter());
   router.use(createDevTestRouter());
 

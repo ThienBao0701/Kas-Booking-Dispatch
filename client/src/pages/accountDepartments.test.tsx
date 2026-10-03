@@ -273,6 +273,39 @@ describe('locking and unlocking, from every section', () => {
     expect(posted[0]).toMatchObject({ role: 'RECEPTION_MANAGER', branchIds: [1], username: 'quanly1' });
   });
 
+  it('creates a Quản lý buồng phòng with exactly one ticked branch, sent as its branch', async () => {
+    const BRANCH_2 = { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 };
+    const posted: Record<string, unknown>[] = [];
+    mount({
+      'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH_2] } }),
+      'POST /api/admin/users': (init) => {
+        posted.push(JSON.parse(String(init.body)));
+        return { status: 201, body: { user: user(9, 'HOUSEKEEPING_MANAGER', { branch: BRANCH_2 }) } };
+      },
+    });
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByRole('button', { name: /Thêm bộ phận/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Thêm tài khoản' });
+    await userEvent.type(within(dialog).getByLabelText('Tên đăng nhập'), 'qlbp1');
+    await userEvent.type(within(dialog).getByLabelText('Họ tên'), 'Quản lý Buồng');
+    await userEvent.type(within(dialog).getByLabelText(/Mật khẩu tạm/), 'Matkhau123');
+    await userEvent.selectOptions(within(dialog).getByLabelText('Vai trò'), 'HOUSEKEEPING_MANAGER');
+
+    const create = within(dialog).getByRole('button', { name: 'Tạo' });
+    expect(create).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('manager-branch-1'));
+    // Ticking another moves the one choice — never two.
+    await userEvent.click(within(dialog).getByTestId('manager-branch-2'));
+    expect(within(dialog).getByTestId('manager-branch-1')).not.toBeChecked();
+    expect(within(dialog).getByTestId('manager-branch-2')).toBeChecked();
+    await userEvent.click(create);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING_MANAGER', branchId: 2, username: 'qlbp1' });
+    expect(posted[0]!.branchIds).toBeUndefined();
+  });
+
   it('changes a Quản lý lễ tân’s branches on the same account — no new account', async () => {
     const BRANCH_2 = { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 };
     const put: Record<string, unknown>[] = [];

@@ -7,6 +7,7 @@ import {
   type ManagedUser,
   requiresBranch,
   requiresBranchSet,
+  requiresSingleBranchChoice,
 } from '../api/adminUsers';
 import { branchesApi } from '../api/bookings';
 import { branchLabel, type Branch, type UserRole } from '../auth/types';
@@ -134,6 +135,7 @@ const DEPARTMENTS: UserRole[] = [
   'RECEPTIONIST',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
+  'HOUSEKEEPING_MANAGER',
   'HOUSEKEEPING',
   'TECHNICAL',
   'TECHNICAL_MANAGER',
@@ -149,6 +151,7 @@ const DEPARTMENT_TITLE: Record<UserRole, string> = {
   RECEPTION_MANAGER: 'Quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
   HOUSEKEEPING: 'Buồng phòng',
+  HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
   TECHNICAL: 'Kỹ thuật',
   TECHNICAL_MANAGER: 'Quản lý kỹ thuật',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
@@ -171,14 +174,19 @@ function BranchChecklist({
   branches,
   value,
   onChange,
+  single = false,
 }: {
   branches: Branch[];
   value: number[];
   onChange: (next: number[]) => void;
+  /** Quản lý buồng phòng: ticking a branch replaces the one ticked before. */
+  single?: boolean;
 }) {
   return (
     <fieldset>
-      <legend className="text-sm font-medium text-slate-600">Chi nhánh quản lý</legend>
+      <legend className="text-sm font-medium text-slate-600">
+        Chi nhánh quản lý{single ? <span className="font-normal text-slate-500"> (chọn đúng một chi nhánh)</span> : null}
+      </legend>
       <div className="mt-1 grid gap-1.5 sm:grid-cols-2" data-testid="manager-branches">
         {branches.map((b) => {
           const checked = value.includes(b.id);
@@ -193,7 +201,9 @@ function BranchChecklist({
                 type="checkbox"
                 className="h-4 w-4 accent-brand-600"
                 checked={checked}
-                onChange={() => onChange(checked ? value.filter((id) => id !== b.id) : [...value, b.id])}
+                onChange={() =>
+                  onChange(checked ? value.filter((id) => id !== b.id) : single ? [b.id] : [...value, b.id])
+                }
                 data-testid={`manager-branch-${b.id}`}
               />
               {branchLabel(b)}
@@ -228,16 +238,19 @@ function EditUserModal({
   const [branchSet, setBranchSet] = useState<number[]>((user.managedBranches ?? []).map((b) => b.id));
   const needsBranch = user.role === 'RECEPTIONIST';
   const needsBranchSet = requiresBranchSet(user.role);
+  // Quản lý buồng phòng: one branch, in the checkbox list.
+  const single = requiresSingleBranchChoice(user.role);
   const save = useMutation({
     mutationFn: () =>
       adminUsersApi.update(user.id, {
         ...(fullName.trim() !== user.fullName ? { fullName: fullName.trim() } : {}),
-        ...(needsBranch && branchId !== user.branch?.id ? { branchId } : {}),
+        ...((needsBranch || single) && branchId !== user.branch?.id ? { branchId } : {}),
         ...(needsBranchSet ? { branchIds: branchSet } : {}),
       }),
     onSuccess: onSaved,
   });
-  const valid = fullName.trim().length > 0 && (!needsBranch || branchId > 0) && (!needsBranchSet || branchSet.length > 0);
+  const valid =
+    fullName.trim().length > 0 && (!(needsBranch || single) || branchId > 0) && (!needsBranchSet || branchSet.length > 0);
   return (
     <Modal
       open
@@ -268,6 +281,8 @@ function EditUserModal({
               ))}
             </select>
           </label>
+        ) : single ? (
+          <BranchChecklist branches={branches} value={branchId ? [branchId] : []} onChange={(ids) => setBranchId(ids[0] ?? 0)} single />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
         ) : (
@@ -451,7 +466,9 @@ function CreateUserModal({
   };
   const [form, setForm] = useState<CreateUserInput>(EMPTY);
   // Derived from the shared list, not from a negative test against one role.
-  const needsBranch = requiresBranch(form.role);
+  // A receptionist's branch is a select; a Quản lý buồng phòng's the one-branch checklist.
+  const single = requiresSingleBranchChoice(form.role);
+  const needsBranch = requiresBranch(form.role) && !single;
   const needsBranchSet = requiresBranchSet(form.role);
   const [branchSet, setBranchSet] = useState<number[]>([]);
 
@@ -462,7 +479,7 @@ function CreateUserModal({
     mutationFn: () =>
       adminUsersApi.create({
         ...form,
-        branchId: needsBranch ? form.branchId : undefined,
+        branchId: needsBranch || single ? form.branchId : undefined,
         branchIds: needsBranchSet ? branchSet : undefined,
       }),
     onSuccess: () => {
@@ -476,7 +493,7 @@ function CreateUserModal({
     form.username.trim() &&
     form.fullName.trim() &&
     form.temporaryPassword.length >= 8 &&
-    (!needsBranch || (form.branchId ?? 0) > 0) &&
+    (!(needsBranch || single) || (form.branchId ?? 0) > 0) &&
     (!needsBranchSet || branchSet.length > 0);
 
   return (
@@ -520,6 +537,7 @@ function CreateUserModal({
             <option value="TECHNICAL">Bộ phận kỹ thuật</option>
             <option value="TECHNICAL_MANAGER">Quản lý kỹ thuật</option>
             <option value="HOUSEKEEPING">Bộ phận buồng phòng</option>
+            <option value="HOUSEKEEPING_MANAGER">Quản lý buồng phòng</option>
             <option value="RECEPTION_MANAGER">Quản lý lễ tân</option>
             <option value="RECEPTION_GENERAL_MANAGER">Tổng quản lý lễ tân</option>
           </select>
@@ -540,6 +558,13 @@ function CreateUserModal({
               ))}
             </select>
           </label>
+        ) : single ? (
+          <BranchChecklist
+            branches={branches}
+            value={form.branchId ? [form.branchId] : []}
+            onChange={(ids) => setForm({ ...form, branchId: ids[0] ?? 0 })}
+            single
+          />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
         ) : (

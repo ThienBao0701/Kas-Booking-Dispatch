@@ -67,6 +67,9 @@ export async function resetIssueData(): Promise<void> {
  * RESTRICT reference to Branch or User, so `resetAll` calls this before either.
  */
 export async function resetHousekeepingData(): Promise<void> {
+  // The daily room work first: its items hold references to inspections and accounts.
+  await testPrisma.housekeepingRoomTaskEvent.deleteMany();
+  await testPrisma.housekeepingRoomTask.deleteMany();
   await testPrisma.roomIssueCollectionEvent.deleteMany();
   await testPrisma.roomIssueCollection.deleteMany();
   await testPrisma.roomInspectionIssue.deleteMany();
