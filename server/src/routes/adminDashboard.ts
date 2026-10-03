@@ -229,9 +229,9 @@ export function createAdminDashboardRouter(): Router {
           "open right now". One shared function serving two different questions is
           how a badge starts disagreeing with the page it links to.
         */
-        prisma.hotelIssue.count({ where: { createdAt: { gte: start, lt: end } } }),
+        prisma.hotelIssue.count({ where: { voidedAt: null, createdAt: { gte: start, lt: end } } }),
         prisma.hotelIssue.count({
-          where: { createdAt: { gte: start, lt: end }, status: { in: outstandingStatuses() } },
+          where: { voidedAt: null, createdAt: { gte: start, lt: end }, status: { in: outstandingStatuses() } },
         }),
       ]);
 

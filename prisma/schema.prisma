@@ -481,6 +481,15 @@ enum IssueCategory {
 /// This value was called RESOLVED until the maintenance lifecycle landed. It was
 /// RENAMED in place (`ALTER TYPE ... RENAME VALUE`) rather than replaced, so
 /// every historical row kept its identity and no data was rewritten.
+/// "HOÀN THÀNH VẤN ĐỀ": was the report right? Recorded at every "Hoàn thành"
+/// (an incident, a guest request, a service-quality report) — "Đúng" with an
+/// optional "Cách xử lý", "Sai" with its required "Lý do báo cáo sai". Null on
+/// records completed before the question existed, which read as "Đúng".
+enum ReportVerdict {
+  CORRECT
+  INCORRECT
+}
+
 enum IssueStatus {
   NEW
   IN_PROGRESS
@@ -594,6 +603,8 @@ model User {
   issueAssignmentsReceived HotelIssueAssignment[]        @relation("IssueAssignmentTechnician")
   issueAssignmentsMade     HotelIssueAssignment[]        @relation("IssueAssignmentAssigner")
   repairStages             TechnicalRepairStage[]        @relation("RepairStageTechnician")
+  issuesVoided             HotelIssue[]                  @relation("IssueVoidedBy")
+  issueAssignmentsReturned HotelIssueAssignment[]        @relation("IssueAssignmentReturnedBy")
   housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
 
   @@index([branchId])
@@ -709,7 +720,7 @@ model Branch {
   operationalReportAudits ReceptionReportAudit[]
   roomInspections         RoomInspection[]
   roomInspectionIssues    RoomInspectionIssue[]
-  managerAssignments      UserBranchAssignment[]       @relation("UserBranchAssignmentBranch")
+  managerAssignments      UserBranchAssignment[]        @relation("UserBranchAssignmentBranch")
   housekeepingSegments    HousekeepingWorkSegment[]
 }
 
@@ -1846,6 +1857,18 @@ model HotelIssue {
   shiftSessionId String?
   shiftType      ShiftType?
 
+  /// "Đúng" / "Sai", set at "Hoàn thành"; "Lý do báo cáo sai" when "Sai".
+  reportVerdict   ReportVerdict?
+  incorrectReason String?
+
+  /// "XÓA" — the operational journal's void, never a physical delete: the row,
+  /// its attempts, assignments and stages stay; every operational read filters
+  /// `voidedAt: null`.
+  voidedAt             DateTime?
+  voidedByUserId       Int?
+  voidedByNameSnapshot String?
+  voidReason           String?
+
   /// Development demo marker (dev-test tools only). Real issues are always false.
   isDemo      Boolean @default(false)
   demoBatchId String?
@@ -1875,6 +1898,7 @@ model HotelIssue {
   repeatedBy         HotelIssue[]             @relation("IssueRepeatOf")
   /// The repair, stage by stage, oldest first when read.
   stages             TechnicalRepairStage[]   @relation("IssueRepairStages")
+  voidedBy           User?                    @relation("IssueVoidedBy", fields: [voidedByUserId], references: [id])
 
   @@index([assignedTechnicianUserId, status])
   @@index([branchId, roomNumber])
@@ -1892,6 +1916,8 @@ model HotelIssue {
   @@index([areaCategory])
   @@index([completedAt])
   @@index([shiftSessionId])
+  @@index([voidedAt])
+  @@index([reportVerdict])
 }
 
 /// What a Chat box submission is ABOUT.
@@ -2183,27 +2209,27 @@ model ReceptionShiftSession {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  branch                Branch                       @relation(fields: [branchId], references: [id])
-  user                  User                         @relation("ShiftSessionUser", fields: [userId], references: [id])
+  branch                 Branch                       @relation(fields: [branchId], references: [id])
+  user                   User                         @relation("ShiftSessionUser", fields: [userId], references: [id])
   /// Every order created during this shift.
-  proofs                BookingCreationProof[]       @relation("ProofShiftSession")
+  proofs                 BookingCreationProof[]       @relation("ProofShiftSession")
   /// Incidents reported during this shift, and questions raised during it.
-  issues                HotelIssue[]                 @relation("IssueShiftSession")
-  chatThreads           ChatConversation[]           @relation("ChatShiftSession")
+  issues                 HotelIssue[]                 @relation("IssueShiftSession")
+  chatThreads            ChatConversation[]           @relation("ChatShiftSession")
   /// The handover that ENDED this session, and the one that STARTED it. At most
   /// one of each — see the `@unique` on ShiftHandover's two session columns.
-  handedOver            ShiftHandover?               @relation("HandoverOutgoing")
-  receivedFrom          ShiftHandover?               @relation("HandoverIncoming")
+  handedOver             ShiftHandover?               @relation("HandoverOutgoing")
+  receivedFrom           ShiftHandover?               @relation("HandoverIncoming")
   /// Notes written during this session for whoever takes over.
-  handoverNotes         ShiftHandoverNote[]          @relation("HandoverNoteSession")
+  handoverNotes          ShiftHandoverNote[]          @relation("HandoverNoteSession")
   /// "Báo cáo vấn đề" — everything the desk recorded during this shift.
-  operationalReports    ReceptionOperationalReport[] @relation("OperationalReportSession")
+  operationalReports     ReceptionOperationalReport[] @relation("OperationalReportSession")
   /// Guest requests COMPLETED during this session, which is usually a different
   /// shift from the one that created them.
-  guestRequestsCompleted GuestRequestReport[]        @relation("GuestRequestCompletedSession")
+  guestRequestsCompleted GuestRequestReport[]         @relation("GuestRequestCompletedSession")
   /// Service-quality reports COMPLETED during this session — same reasoning.
-  complaintsCompleted   CustomerComplaintReport[]    @relation("ComplaintCompletedSession")
-  reportAudits          ReceptionReportAudit[]       @relation("ReportAuditSession")
+  complaintsCompleted    CustomerComplaintReport[]    @relation("ComplaintCompletedSession")
+  reportAudits           ReceptionReportAudit[]       @relation("ReportAuditSession")
 
   /// "Is this person checked in?" — the query every protected request makes.
   @@index([userId, closedAt])
@@ -2690,13 +2716,15 @@ model GuestRequestReport {
   /// THE COLUMNS KEEP THEIR V3 NAMES (`accepted…`). In V3 the second actor was
   /// called "tiếp nhận"; V4 uses that word for the moment a request is recorded,
   /// so the fields were renamed here without rewriting the table.
-  completedByUserId       Int?       @map("acceptedByUserId")
-  completedByNameSnapshot String?    @map("acceptedByNameSnapshot")
-  completedAt             DateTime?  @map("acceptedAt")
-  completedShiftSessionId String?    @map("acceptedShiftSessionId")
-  completedShiftType      ShiftType? @map("acceptedShiftType")
+  completedByUserId       Int?           @map("acceptedByUserId")
+  completedByNameSnapshot String?        @map("acceptedByNameSnapshot")
+  completedAt             DateTime?      @map("acceptedAt")
+  completedShiftSessionId String?        @map("acceptedShiftSessionId")
+  completedShiftType      ShiftType?     @map("acceptedShiftType")
   /// Cách xử lý (nếu có) — optional, and never set without the completion event.
   resolution              String?
+  reportVerdict           ReportVerdict?
+  incorrectReason         String?
 
   report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   completedBy      User?                      @relation("GuestRequestCompletedBy", fields: [completedByUserId], references: [id])
@@ -2763,6 +2791,8 @@ model CustomerComplaintReport {
   completedShiftType      ShiftType?
   /// Hướng xử lý (nếu có) — optional, set only with the completion event.
   resolution              String?
+  reportVerdict           ReportVerdict?
+  incorrectReason         String?
 
   report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   completedBy      User?                      @relation("ComplaintCompletedBy", fields: [completedByUserId], references: [id])
@@ -2885,7 +2915,7 @@ model ReceptionReportAudit {
 /// when, and who had it before (a reassignment). Outcomes are not repeated here —
 /// they live on `TechnicalRepairAttempt`, which already names the technician.
 model HotelIssueAssignment {
-  id                             String   @id @default(cuid())
+  id                             String    @id @default(cuid())
   issueId                        String
   technicianUserId               Int
   technicianNameSnapshot         String
@@ -2897,10 +2927,16 @@ model HotelIssueAssignment {
   assignedByRole                 UserRole
   /// Server time, from the business clock.
   createdAt                      DateTime
+  /// "Chuyển về chờ giao kỹ thuật": the assignment ended without a repair. The
+  /// row stays (who was given it, by whom, when); these say who took it back.
+  returnedAt                     DateTime?
+  returnedByUserId               Int?
+  returnedByNameSnapshot         String?
 
   issue      HotelIssue @relation("IssueAssignments", fields: [issueId], references: [id], onDelete: Cascade)
   technician User       @relation("IssueAssignmentTechnician", fields: [technicianUserId], references: [id])
   assignedBy User       @relation("IssueAssignmentAssigner", fields: [assignedByUserId], references: [id])
+  returnedBy User?      @relation("IssueAssignmentReturnedBy", fields: [returnedByUserId], references: [id])
 
   @@index([issueId, createdAt])
   @@index([technicianUserId, createdAt])
@@ -3061,7 +3097,7 @@ model RoomInspection {
 
   /// The housekeeping work segment (shift at one branch) it was recorded in.
   /// Null on inspections recorded before shifts existed.
-  workSegmentId         String?
+  workSegmentId String?
 
   branch      Branch                   @relation(fields: [branchId], references: [id])
   createdBy   User                     @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])

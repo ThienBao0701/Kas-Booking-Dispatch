@@ -167,7 +167,7 @@ describe('date, branch and status compose in the database', () => {
     setClock({ now: () => hcm('2026-09-17', '11:00') });
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
-    await tech.post(`/api/issues/${done}/complete`);
+    await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
   });
 
   it('narrows to one branch inside the period', async () => {
@@ -214,7 +214,7 @@ describe('the outstanding view ignores the period, deliberately', () => {
     setClock({ now: () => hcm('2026-09-17', '10:00') });
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
-    await tech.post(`/api/issues/${done}/complete`);
+    await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
 
     // Scoped to today, the fortnight-old one is invisible…
     const scoped = await admin.get('/api/issues?from=2026-09-17&to=2026-09-17&pageSize=100');
@@ -252,7 +252,7 @@ describe('the range summary', () => {
     await tech.post(`/api/issues/${working}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
-    await tech.post(`/api/issues/${done}/complete`);
+    await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
 
     const res = await admin.get('/api/admin/reports/incidents/summary?from=2026-09-17&to=2026-09-17');
     expect(res.status).toBe(200);
@@ -413,7 +413,7 @@ describe('the incident export', () => {
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     setClock({ now: () => hcm('2026-09-17', '09:05') });
-    await tech.post(`/api/issues/${id}/complete`);
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
 
     const res = await admin.get('/api/admin/reports/incidents?from=2026-09-17&to=2026-09-17');
     expect(res.body.issues[0].acceptedAt).not.toBeNull();

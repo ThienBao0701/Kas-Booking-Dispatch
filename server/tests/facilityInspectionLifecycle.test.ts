@@ -151,7 +151,7 @@ async function accept(agent: Agent, id: string, name = 'Bảo', phone = '0369852
 }
 
 async function complete(agent: Agent, id: string, body: Record<string, unknown> = { result: 'Đã nạp gas' }) {
-  const res = await agent.post(`/api/issues/${id}/complete`).send(body);
+  const res = await agent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', ...body });
   expect(res.status).toBe(200);
   return res.body.issue;
 }
@@ -306,7 +306,7 @@ describe('the technician repairs', () => {
     const id = await report();
     await accept(tech, id);
     for (const body of [{}, { result: '   ' }]) {
-      const res = await tech.post(`/api/issues/${id}/complete`).send(body);
+      const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', ...body });
       expect(res.status).toBe(422);
     }
     const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
@@ -646,7 +646,7 @@ describe('Quản lý kỹ thuật does not do the technician’s work, or anyone
     ).toBe(403);
     await accept(tech, id);
     expect((await manager.post(`/api/issues/${id}/cause`).send({ cause: 'x' })).status).toBe(403);
-    expect((await manager.post(`/api/issues/${id}/complete`).send({ result: 'x' })).status).toBe(403);
+    expect((await manager.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'x' })).status).toBe(403);
     expect((await manager.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'x' })).status).toBe(403);
 
     const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
@@ -796,7 +796,7 @@ describe('incidents accepted before repair attempts existed', () => {
    */
   it('with no acceptance on file, "Hoàn thành" closes it rather than leaving it uninspectable', async () => {
     const id = await legacyInProgress({ acceptedAt: null, technicianName: null });
-    const res = await tech.post(`/api/issues/${id}/complete`).send({ result: 'Đã sửa' });
+    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã sửa' });
     expect(res.status).toBe(200);
     expect(res.body.issue).toMatchObject({
       status: 'COMPLETED',
@@ -954,7 +954,7 @@ describe('while inspection is dormant (the operational default)', () => {
     at('10:30');
     await accept(tech, id);
     at('11:10');
-    const res = await tech.post(`/api/issues/${id}/complete`).send({});
+    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(res.status).toBe(200);
     expect(res.body.issue).toMatchObject({
       status: 'COMPLETED',
@@ -980,7 +980,7 @@ describe('while inspection is dormant (the operational default)', () => {
   it('refuses every inspection, so no verdict can change an incident', async () => {
     const id = await report();
     await accept(tech, id);
-    await tech.post(`/api/issues/${id}/complete`).send({});
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     for (const body of [{ result: 'PASSED' }, { result: 'FAILED', note: 'x' }]) {
       const res = await inspect(id, body);
       expect(res.status).toBe(403);

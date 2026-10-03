@@ -172,7 +172,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
     expect(accepted.body.issue.technicianPhone).toBe('0901234567');
     expect(accepted.body.issue.acceptedAt).not.toBeNull();
 
-    const completed = await techAgent.post(`/api/issues/${id}/complete`).send({});
+    const completed = await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(completed.status).toBe(200);
     expect(completed.body.issue.status).toBe('COMPLETED');
     expect(completed.body.issue.completedBy.id).toBe(techId);
@@ -199,7 +199,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
 
     await assignTo(adminAgent, id, techAgent);
     await techAgent.post(`/api/issues/${id}/accept`).send(ACCEPT);
-    expect((await adminAgent.post(`/api/issues/${id}/complete`).send({})).status).toBe(403);
+    expect((await adminAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
 
     const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
     expect(stored.status).toBe('IN_PROGRESS');
@@ -209,7 +209,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
   it('forbids a receptionist from changing status', async () => {
     const id = await newIssue();
     expect((await ownAgent.post(`/api/issues/${id}/accept`).send(ACCEPT)).status).toBe(403);
-    expect((await ownAgent.post(`/api/issues/${id}/complete`).send({})).status).toBe(403);
+    expect((await ownAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
   });
 
   /**
@@ -220,7 +220,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
     const id = await newIssue();
     // Given to the technician, but not yet taken.
     await assignTo(adminAgent, id, techAgent);
-    const res = await techAgent.post(`/api/issues/${id}/complete`).send({});
+    const res = await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(res.status).toBe(409);
 
     const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
@@ -250,7 +250,7 @@ describe('receptionist edit rules', () => {
     expect(whileWorked.status).toBe(200);
     expect(whileWorked.body.issue.status).toBe('IN_PROGRESS');
 
-    await techAgent.post(`/api/issues/${id}/complete`).send({});
+    await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     const afterComplete = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa sau khi xong' });
     expect(afterComplete.status).toBe(409);
   });

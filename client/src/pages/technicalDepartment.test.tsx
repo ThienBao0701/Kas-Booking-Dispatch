@@ -465,6 +465,51 @@ function AWAITING(over: Record<string, unknown> = {}) {
   });
 }
 
+describe('the technician’s queue, by room — and "Sai"', () => {
+  it('shows a room’s three assigned faults as ONE room group', async () => {
+    const at = (id: string, category: string, description: string) =>
+      issue({ ...MINE, id, roomNumber: '206', category, description, locationLabel: `Phòng · Phòng 206 · ${description}` });
+    installApiMock(
+      technicalRoutes({
+        'GET /api/issues?stage=WAITING&pageSize=100': () =>
+          listBody([at('r1', 'TV', 'Trần nhà thấm'), at('r2', 'DOOR', 'Cửa kêu'), at('r3', 'WATER', 'Hôi cống')]),
+      }),
+    );
+    renderApp('/app/technical/new');
+
+    const queue = await screen.findByRole('list', { name: 'Được giao' });
+    const rooms = within(queue).getAllByTestId(/^queue-room-/);
+    expect(rooms).toHaveLength(1);
+    expect(rooms[0]).toHaveTextContent('Phòng 206');
+    expect(rooms[0]).toHaveTextContent('3 vấn đề cần sửa');
+    for (const id of ['r1', 'r2', 'r3']) expect(within(rooms[0]!).getByTestId(`accept-${id}`)).toBeInTheDocument();
+  });
+
+  it('finishes as "Sai" only with "Lý do báo cáo sai"', async () => {
+    let sent: unknown = null;
+    installApiMock(
+      technicalRoutes({
+        'POST /api/issues/i2/complete': (init: RequestInit) => {
+          sent = JSON.parse(String(init.body));
+          return { status: 200, body: { issue: issue({ id: 'i2', status: 'COMPLETED' }) } };
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp('/app/technical/in-progress');
+
+    await user.click(await screen.findByTestId('complete-i2'));
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    await user.click(within(dialog).getByTestId('stage-status-done'));
+    await user.click(within(dialog).getByTestId('verdict-INCORRECT'));
+    const confirm = within(dialog).getByTestId('stage-confirm');
+    expect(confirm).toBeDisabled();
+    await user.type(within(dialog).getByTestId('verdict-reason'), 'Máy lạnh vẫn chạy tốt');
+    await user.click(confirm);
+    await waitFor(() => expect(sent).toEqual({ verdict: 'INCORRECT', incorrectReason: 'Máy lạnh vẫn chạy tốt' }));
+  });
+});
+
 describe('Bộ phận kỹ thuật works the queues', () => {
   it('shows every workflow stage with server-side counts — and, dormant, no "Chờ nghiệm thu"', async () => {
     installApiMock(technicalRoutes());
@@ -585,8 +630,11 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
     expect(within(dialog).getByTestId('stage-confirm')).toBeDisabled();
     await user.click(within(dialog).getByTestId('stage-status-done'));
+    // "Hoàn thành" needs its verdict.
+    expect(within(dialog).getByTestId('stage-confirm')).toBeDisabled();
+    await user.click(within(dialog).getByTestId('verdict-CORRECT'));
     await user.click(within(dialog).getByTestId('stage-confirm'));
-    await waitFor(() => expect(sent).toEqual({}));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT' }));
     expect(await screen.findByText('Đã hoàn thành sự cố.')).toBeInTheDocument();
   });
 
@@ -684,11 +732,14 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     expect(confirm).toBeDisabled();
 
     await user.type(within(dialog).getByTestId('complete-cause'), 'Thiếu gas');
-    await user.type(within(dialog).getByTestId('complete-result'), 'Đã nạp gas');
+    await user.click(within(dialog).getByTestId('verdict-CORRECT'));
+    // "Đúng" with inspection on: the result is what gets inspected — required.
+    expect(confirm).toBeDisabled();
+    await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã nạp gas');
     expect(confirm).toBeEnabled();
     await user.click(confirm);
 
-    await waitFor(() => expect(sent).toEqual({ result: 'Đã nạp gas', cause: 'Thiếu gas' }));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã nạp gas', cause: 'Thiếu gas' }));
   });
 
   /**
@@ -729,9 +780,10 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     await user.click(await screen.findByTestId('complete-i2'));
     const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
     expect(within(dialog).getByTestId('complete-cause')).toHaveValue('Hết gas');
-    await user.type(within(dialog).getByTestId('complete-result'), 'Đã nạp gas');
+    await user.click(within(dialog).getByTestId('verdict-CORRECT'));
+    await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã nạp gas');
     await user.click(within(dialog).getByTestId('complete-confirm'));
-    await waitFor(() => expect(sent).toEqual({ result: 'Đã nạp gas' }));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã nạp gas' }));
   });
 
   it('records the cause during the repair, on its own', async () => {
@@ -890,9 +942,10 @@ describe('the Admin monitors and does not act', () => {
     renderApp('/app/issues');
 
     await screen.findByText('Trần Văn B');
-    expect(screen.queryByRole('button', { name: 'Tiếp nhận' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Hoàn thành/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Đã xử lý' })).not.toBeInTheDocument();
+    const view = screen.getByTestId('admin-incident-view');
+    expect(within(view).queryByRole('button', { name: 'Tiếp nhận' })).not.toBeInTheDocument();
+    expect(within(view).queryByRole('button', { name: /Hoàn thành/ })).not.toBeInTheDocument();
+    expect(within(view).queryByRole('button', { name: 'Đã xử lý' })).not.toBeInTheDocument();
   });
 
   it('shows the technician, the phone and the timestamps', async () => {

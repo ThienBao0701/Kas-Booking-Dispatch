@@ -130,8 +130,21 @@ export interface EndShiftResult {
   cash: CashSummary | null;
 }
 
+/** A shift that actually ran in a report period — the filter's "Ca". */
+export interface AvailableShift {
+  code: ShiftType;
+  name: string;
+  window: string;
+}
+
 export const shiftsApi = {
   options: () => api.get<{ shifts: ShiftOption[] }>('/reception/shifts/options'),
+
+  /** The shifts that ran on those business dates, in the reader's branches. */
+  available: (params: { from: string; to: string; branchId?: number }) =>
+    api.get<{ shifts: AvailableShift[] }>(
+      `/reception/shifts/available?from=${params.from}&to=${params.to}${params.branchId ? `&branchId=${params.branchId}` : ''}`,
+    ),
 
   /** The open session, or null when nobody is checked in yet. */
   current: () => api.get<{ session: ShiftSession | null }>('/reception/shifts/current'),

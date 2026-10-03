@@ -109,7 +109,7 @@ describe('with incidents', () => {
     await assignTo(admin, a, tech);
     await tech.post(`/api/issues/${a}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
     setClock({ now: () => hcm('2026-09-20', '09:30') });
-    await tech.post(`/api/issues/${a}/complete`).send({});
+    await tech.post(`/api/issues/${a}/complete`).send({ verdict: 'CORRECT' });
 
     const s = await stats();
     expect(s.totals).toMatchObject({ total: 3, newCount: 2, inProgressCount: 0, completedCount: 1 });
@@ -165,7 +165,7 @@ describe('a technician reads their own work', () => {
     setClock({ now: () => hcm('2026-09-20', '09:00') });
     await assignTo(admin, mine, tech);
     await tech.post(`/api/issues/${mine}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
-    await tech.post(`/api/issues/${mine}/complete`).send({});
+    await tech.post(`/api/issues/${mine}/complete`).send({ verdict: 'CORRECT' });
 
     const s = await stats(tech);
     expect(s.totals).toMatchObject({ total: 1, completedCount: 1 });
@@ -183,7 +183,7 @@ describe('a technician reads their own work', () => {
     setClock({ now: () => hcm('2026-09-15', '09:00') });
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
-    await tech.post(`/api/issues/${done}/complete`).send({});
+    await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
 
     // The same room, the same fault, days later: a repeat, stored at creation.
     const again = await report('2026-09-19T09:00', { category: 'DOOR' });

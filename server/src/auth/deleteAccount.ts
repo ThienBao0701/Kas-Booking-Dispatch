@@ -57,6 +57,7 @@ async function liveWork(userId: number): Promise<string | null> {
     prisma.receptionShiftSession.count({ where: { userId, closedAt: null } }),
     prisma.hotelIssue.count({
       where: {
+        voidedAt: null,
         OR: [
           { status: 'IN_PROGRESS', acceptedByUserId: userId },
           { status: 'NEW', assignedTechnicianUserId: userId },

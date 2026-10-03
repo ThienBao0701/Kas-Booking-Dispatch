@@ -338,7 +338,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
-    const res = await tech.post(`/api/issues/${id}/complete`).send({});
+    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(res.status).toBe(200);
     expect(res.body.issue).toMatchObject({
       status: 'COMPLETED',
@@ -359,7 +359,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
     await assignTo(admin, id, tech);
 
-    const res = await tech.post(`/api/issues/${id}/complete`).send({});
+    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(res.status).toBe(409);
     expect(res.body.error.message).toContain('tiếp nhận');
 
@@ -387,9 +387,9 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
-    await tech.post(`/api/issues/${id}/complete`).send({});
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
 
-    const again = await tech.post(`/api/issues/${id}/complete`).send({});
+    const again = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(again.status).toBe(409);
     expect(again.body.error.message).toContain('đã hoàn thành');
   });
@@ -398,7 +398,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     const id = await report({ areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Hỏng cửa' });
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
-    await tech.post(`/api/issues/${id}/complete`).send({});
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
 
     const stored = await testPrisma.hotelIssue.findUnique({ where: { id } });
     expect(stored).not.toBeNull();
@@ -436,7 +436,7 @@ describe('an Admin monitors and cannot perform technical transitions', () => {
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
-    const res = await admin.post(`/api/issues/${id}/complete`).send({});
+    const res = await admin.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
 
     expect(res.status).toBe(403);
     const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
@@ -450,7 +450,7 @@ describe('an Admin monitors and cannot perform technical transitions', () => {
     expect(
       (await letan1.post(`/api/issues/${id}/accept`).send({ technicianName: 'X', technicianPhone: '1' })).status,
     ).toBe(403);
-    expect((await letan1.post(`/api/issues/${id}/complete`).send({})).status).toBe(403);
+    expect((await letan1.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
   });
 
   it('an anonymous caller cannot transition anything', async () => {

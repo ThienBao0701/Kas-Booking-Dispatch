@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
+import { assignTo } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -382,6 +383,8 @@ describe('"việc đang tồn" is live context, not note content', () => {
       .field('description', 'Tắc');
     const id = reported.body.issue.id as string;
 
+    // A technician works only what was given to it.
+    await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'Không có linh kiện' });
 

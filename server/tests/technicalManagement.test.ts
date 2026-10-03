@@ -214,7 +214,7 @@ describe('a repair in stages', () => {
     });
 
     setClock({ now: () => hcm('2026-10-03', '10:00') });
-    const done = await tech.post(`/api/issues/${id}/complete`).send({ result: 'Đã sơn lại, tường khô' });
+    const done = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã sơn lại, tường khô' });
     expect(done.status).toBe(200);
     expect(done.body.issue.status).toBe('COMPLETED');
     expect(done.body.issue.currentStageNumber).toBeNull();
@@ -261,7 +261,7 @@ describe('account management', () => {
     expect(blocked.status).toBe(409);
 
     await goneAgent.post(`/api/issues/${id}/accept`).send({ technicianName: 'Kỹ thuật Xóa', technicianPhone: '0900' });
-    await goneAgent.post(`/api/issues/${id}/complete`).send({ result: 'Đã thay bản lề' });
+    await goneAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã thay bản lề' });
 
     // Not by a manager, not the Admin itself.
     expect((await techManager.delete(`/api/admin/users/${gone.id}`)).status).toBe(403);

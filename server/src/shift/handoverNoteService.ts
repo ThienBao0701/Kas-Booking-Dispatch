@@ -241,7 +241,7 @@ export async function pendingWork(
 ): Promise<PendingWork> {
   const [issues, awaitingCreation, awaitingReview, needsRecreation] = await Promise.all([
     client.hotelIssue.findMany({
-      where: { branchId, status: { in: outstandingStatuses() } },
+      where: { branchId, voidedAt: null, status: { in: outstandingStatuses() } },
       select: {
         id: true,
         status: true,

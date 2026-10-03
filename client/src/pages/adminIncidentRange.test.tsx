@@ -23,6 +23,7 @@ import { ADMIN_USER, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
+import { pickRange } from '../test/reportFilter';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -161,10 +162,9 @@ describe('the incident period controls', () => {
   it('sends the chosen period to the SERVER', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
-    const user = userEvent.setup();
     await openIncidents();
 
-    await user.click(await screen.findByTestId('admin-range-6'));
+    await pickRange(WEEK_FROM, TODAY);
 
     await waitFor(() =>
       expect(seen).toContain(`/api/issues?from=${WEEK_FROM}&to=${TODAY}&pageSize=100`),
@@ -312,7 +312,7 @@ describe('the incident table', () => {
     installMocks();
     await openIncidents();
 
-    expect(await screen.findByTestId('branch-select')).toHaveValue('ALL');
+    expect(await screen.findByTestId('branch-select')).toHaveTextContent('Tất cả chi nhánh');
     expect(screen.getByRole('button', { name: /Xuất báo cáo/ })).toBeInTheDocument();
     // The separate "by branch" table is gone: the selector carries the numbers.
     expect(screen.queryByText('Sự cố chưa xử lý theo chi nhánh')).not.toBeInTheDocument();
@@ -400,7 +400,7 @@ describe('the export', () => {
     const user = userEvent.setup();
     await openIncidents();
 
-    await user.click(await screen.findByTestId('admin-range-6'));
+    await pickRange(WEEK_FROM, TODAY);
     await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Xuất báo cáo sự cố' });
 

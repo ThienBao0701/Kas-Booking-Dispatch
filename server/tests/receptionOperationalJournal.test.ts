@@ -518,7 +518,7 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
   }
 
   const complete = (agent: Agent, id: string, body: Record<string, unknown>) =>
-    agent.post(`/api/reception/reports/${id}/complete`).send(body);
+    agent.post(`/api/reception/reports/${id}/complete`).send({ verdict: 'CORRECT', ...body });
 
   it('is "đã tiếp nhận" from creation: Mã EZ and content recorded, no completion time and no handling yet', async () => {
     setClock({ now: () => hcm('2026-09-19', '10:05') });
@@ -713,7 +713,7 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
 
 describe('vấn đề về chất lượng và dịch vụ: đã tiếp nhận → đã hoàn thành', () => {
   const complete = (agent: Agent, id: string, body: Record<string, unknown>) =>
-    agent.post(`/api/reception/reports/${id}/complete`).send(body);
+    agent.post(`/api/reception/reports/${id}/complete`).send({ verdict: 'CORRECT', ...body });
 
   it('completes on a later shift with "Hướng xử lý", keeping the creator untouched', async () => {
     setClock({ now: () => hcm('2026-09-19', '10:05') });
@@ -960,7 +960,7 @@ describe('branch isolation and roles', () => {
     expect((await tech.patch(`/api/reception/reports/${id}`).send({ payment: { amount: 1 } })).status).toBe(403);
     expect((await tech.post(`/api/reception/reports/${id}/void`).send({ reason: 'x' })).status).toBe(403);
     expect(
-      (await tech.post(`/api/reception/reports/${id}/complete`).send({ resolution: 'x' })).status,
+      (await tech.post(`/api/reception/reports/${id}/complete`).send({ verdict: 'CORRECT', resolution: 'x' })).status,
     ).toBe(403);
     expect((await tech.get('/api/reception/reports')).status).toBe(403);
 

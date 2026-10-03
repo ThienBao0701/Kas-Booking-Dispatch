@@ -90,6 +90,9 @@ export interface GuestRequestDetail {
   completedShiftName: string | null;
   /** "Cách xử lý (nếu có)". Optional, so null on many completed requests too. */
   resolution: string | null;
+  /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
+  reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
+  incorrectReason?: string | null;
 }
 
 /**
@@ -121,6 +124,9 @@ export interface ComplaintDetail {
   completedShiftName: string | null;
   /** "Hướng xử lý (nếu có)". */
   resolution: string | null;
+  /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
+  reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
+  incorrectReason?: string | null;
 }
 
 export interface RoomServiceDetail {
@@ -347,7 +353,9 @@ export const reportsApi = {
    * optionally only those RECEIVED between `from` and `to` (inclusive days).
    */
   /** `branchId`: a reception manager narrowing to one branch of its scope. */
-  archive: (params: { from?: string; to?: string; branchId?: number } = {}) =>
+  archive: (
+    params: { from?: string; to?: string; branchId?: number; shiftType?: string; verdict?: 'CORRECT' | 'INCORRECT' } = {},
+  ) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
   /**
@@ -372,8 +380,9 @@ export const reportsApi = {
    * "Hoàn thành" on a guest request or a service-quality report. The handling
    * text is optional; the server stamps who, when and which shift.
    */
-  complete: (id: string, resolution?: string) =>
-    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/complete`, { resolution }),
+  /** "Hoàn thành": the verdict is required ("Đúng" + optional handling, or "Sai" + its reason). */
+  complete: (id: string, input: { verdict: 'CORRECT' | 'INCORRECT'; resolution?: string; incorrectReason?: string }) =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/complete`, input),
 
   cash: () => api.get<{ cash: CashSummary }>('/reception/shifts/cash'),
 
@@ -387,7 +396,7 @@ export const reportsApi = {
  * the working list; `archived` is "Hoàn thành vấn đề".
  */
 export const deliveriesApi = {
-  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string } = {}) =>
+  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string; shiftType?: string } = {}) =>
     api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[]; total?: number }>(
       `/hotel-deliveries${query({ scope, ...params })}`,
     ),

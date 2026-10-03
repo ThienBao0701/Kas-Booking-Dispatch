@@ -173,7 +173,7 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
     await techAgent
       .post(`/api/issues/${issue.id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
-    await techAgent.post(`/api/issues/${issue.id}/complete`).send({});
+    await techAgent.post(`/api/issues/${issue.id}/complete`).send({ verdict: 'CORRECT' });
     const after = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     expect(after).toBe(before - 1);
   });

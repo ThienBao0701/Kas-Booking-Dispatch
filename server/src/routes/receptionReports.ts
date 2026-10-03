@@ -36,6 +36,7 @@ import { setOpeningCash, shiftCashSummary, sumPayments, withEndingCash } from '.
 import { MAX_VND } from '../reception/reportService';
 import { captureShiftContext, requireOpenSession } from '../shift/shiftService';
 import { COMPLETION_ARCHIVE_HOURS } from '../reception/completionArchive';
+import { resolveReportPeriod } from '../reception/businessDate';
 import { HOTEL_DELIVERY_ARCHIVE_HOURS } from '../reception/deliveryLifecycle';
 import {
   CATEGORIES,
@@ -110,9 +111,15 @@ const guestRequestSchema = z.object({
   note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
 });
 
-/** "Cách xử lý / Hướng xử lý (nếu có)" — optional; blank is stored as nothing. */
+/**
+ * "Hoàn thành": the verdict ("Đúng" / "Sai") and its text — "Cách xử lý / Hướng
+ * xử lý (nếu có)" for "Đúng", "Lý do báo cáo sai" for "Sai". The rule itself
+ * (which is required when) is the service's, shared with the incidents.
+ */
 const completeSchema = z.object({
+  verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
   resolution: text(2000).optional(),
+  incorrectReason: text(2000).optional(),
 });
 
 const facilitySchema = z.object({ issueId: z.string().min(1) });
@@ -204,7 +211,14 @@ const listSchema = z
  */
 const archiveSchema = z
   // `branchId`: a reception manager narrowing to one branch of its scope.
-  .object({ from: isoDay.optional(), to: isoDay.optional(), branchId: z.coerce.number().int().positive().optional() })
+  .object({
+    from: isoDay.optional(),
+    to: isoDay.optional(),
+    branchId: z.coerce.number().int().positive().optional(),
+    // The shared report filter's "Ca" and the two completion views.
+    shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
+    verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
+  })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
     path: ['to'],
@@ -323,18 +337,27 @@ export function createReceptionReportsRouter(): Router {
     completed AND were received at least 12 hours ago. A query over the same
     rows, not a copy of them.
 
-    `from`/`to` (YYYY-MM-DD, inclusive Vietnamese calendar days) narrow it to
-    the records RECEIVED on those days — the original reception time, the same
-    instant the 12-hour rule is measured from; never the completion.
+    `from`/`to` are BUSINESS dates (the shared report period): a record taken
+    on Ca C of the 2nd at 01:30 on the 3rd is the 2nd's; `shiftType` narrows it to
+    one shift. The 12-hour rule itself still runs from the reception time.
+    `verdict` is "Vấn đề báo cáo đúng" / "sai".
   */
   // Reception's own branch; a supervisor's scope (one branch of it, or all of it).
   router.get('/reception/reports/archive', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const q = archiveSchema.parse(req.query);
-      const received = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      // Visibility is the service's; the period only resolves the shifts.
+      const period =
+        q.from && q.to
+          ? await resolveReportPeriod('ALL', { from: q.from, to: q.to, shiftType: q.shiftType, branchId: q.branchId })
+          : null;
       const now = getClock().now();
-      const { reports, totals } = await listArchivedJournal(actor(user), now, received, undefined, q.branchId);
+      const { reports, totals } = await listArchivedJournal(actor(user), now, {
+        period,
+        verdict: q.verdict,
+        branchId: q.branchId,
+      });
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),
         totals,
@@ -395,9 +418,9 @@ export function createReceptionReportsRouter(): Router {
   router.post('/reception/reports/:id/complete', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
-      const { resolution } = completeSchema.parse(req.body ?? {});
+      const input = completeSchema.parse(req.body ?? {});
       const clock = getClock();
-      const completed = await completeReport(req.params.id!, resolution, actor(user), clock);
+      const completed = await completeReport(req.params.id!, input, actor(user), clock);
       res.json({ report: serializeReport(completed, clock.now()) });
     })().catch(next);
   });

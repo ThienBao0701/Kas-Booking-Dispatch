@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { pickBranch } from '../test/reportFilter';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
 import { hcmToday } from '../lib/format';
@@ -183,21 +184,27 @@ describe('Issue counters — the branch selector carries them', () => {
     installAdminIssues();
     // The old address, which now lands here.
     renderApp('/app/issues');
-    const select = await screen.findByTestId('branch-select');
-    await screen.findByRole('option', { name: '05 Trương Định - Chi nhánh 01 (3)' });
-    const options = within(select).getAllByRole('option').map((o) => o.textContent);
-    expect(options).toEqual([
-      '— Chọn chi nhánh —',
-      'Tất cả chi nhánh',
-      '05 Trương Định - Chi nhánh 01 (3)',
-      '260 Lý Tự Trọng - Chi nhánh 02 (1)',
-      '47A Nguyễn Trãi - Chi nhánh 03 (0)',
-      '170 Nguyễn Thái Bình - Chi nhánh 04 (0)',
-      '278 Lê Thánh Tôn - Chi nhánh 05 (0)',
-      '40 Bùi Thị Xuân - Chi nhánh 06 (0)',
-      '13 Bùi Thị Xuân - Chi nhánh 07 (0)',
-      '191 Lê Thánh Tôn - Chi nhánh 08 (0)',
+    await userEvent.click(await screen.findByTestId('branch-select'));
+    const list = await screen.findByRole('listbox', { name: 'Chi nhánh' });
+    await within(list).findByText('05 Trương Định - Chi nhánh 01');
+    expect(within(list).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'Tất cả chi nhánh(4)',
+      '05 Trương Định - Chi nhánh 01(3)',
+      '260 Lý Tự Trọng - Chi nhánh 02(1)',
+      '47A Nguyễn Trãi - Chi nhánh 03(0)',
+      '170 Nguyễn Thái Bình - Chi nhánh 04(0)',
+      '278 Lê Thánh Tôn - Chi nhánh 05(0)',
+      '40 Bùi Thị Xuân - Chi nhánh 06(0)',
+      '13 Bùi Thị Xuân - Chi nhánh 07(0)',
+      '191 Lê Thánh Tôn - Chi nhánh 08(0)',
     ]);
+    // The count sits at the far right of its row — red when anything is unresolved.
+    const busy = screen.getByTestId('branch-option-1');
+    expect(busy).toHaveClass('justify-between');
+    expect(within(busy).getByText('(3)')).toHaveClass('text-red-600');
+    expect(within(screen.getByTestId('branch-option-3')).getByText('(0)')).not.toHaveClass('text-red-600');
+    // No explanation line under the control any more.
+    expect(screen.queryByText(/Số trong ngoặc/)).not.toBeInTheDocument();
   });
 
   it('has no second table of counts any more', async () => {
@@ -216,32 +223,32 @@ describe('Issue counters — the branch selector carries them', () => {
       byBranch: [...BY_BRANCH, branch(9, '99 Đường Mới', 2, 0)],
     });
     renderApp('/app/issues');
-    expect(await screen.findByRole('option', { name: '99 Đường Mới - Chi nhánh 09 (2)' })).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId('branch-select'));
+    expect(await screen.findByTestId('branch-option-9')).toHaveTextContent('99 Đường Mới - Chi nhánh 09(2)');
   });
 
   it('reads 0 for a branch the summary has no row for, rather than hiding it', async () => {
     const ninth = { id: 9, code: 'B9', hotelName: 'Hotel 9', address: '99 Đường Mới', branchNumber: 9, active: true };
     installAdminIssues([...BRANCHES, ninth]);
     renderApp('/app/issues');
-    expect(await screen.findByRole('option', { name: '99 Đường Mới - Chi nhánh 09 (0)' })).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId('branch-select'));
+    expect(await screen.findByTestId('branch-option-9')).toHaveTextContent('99 Đường Mới - Chi nhánh 09(0)');
   });
 
   it('choosing a branch from the selector narrows the page to it, and "Tất cả chi nhánh" widens it again', async () => {
     installAdminIssues();
-    const user = userEvent.setup();
     renderApp('/app/issues');
 
-    await screen.findByRole('option', { name: '05 Trương Định - Chi nhánh 01 (3)' });
-    await user.selectOptions(screen.getByTestId('branch-select'), '1');
+    await screen.findByTestId('admin-incident-view');
+    await pickBranch(1);
     // The list follows the selector.
-    await user.click(await screen.findByTestId('admin-category-FACILITY_ISSUE'));
     expect(await screen.findByText('Chỉ chi nhánh 1')).toBeInTheDocument();
-    expect(screen.getByTestId('branch-select')).toHaveValue('1');
+    expect(screen.getByTestId('branch-select')).toHaveTextContent('05 Trương Định - Chi nhánh 01');
 
-    await user.selectOptions(screen.getByTestId('branch-select'), 'ALL');
-    await user.click(await screen.findByTestId('admin-category-FACILITY_ISSUE'));
+    await pickBranch('ALL');
     expect(await screen.findByTestId('admin-incident-view')).toBeInTheDocument();
-    expect(screen.getByTestId('branch-select')).toHaveValue('ALL');
+    expect(screen.getByTestId('branch-select')).toHaveTextContent('Tất cả chi nhánh');
+
   });
 });
 

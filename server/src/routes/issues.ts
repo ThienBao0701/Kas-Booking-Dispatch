@@ -5,9 +5,13 @@ import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/
 import { proofUpload } from '../middleware/upload';
 import { readIssuePhoto } from '../issue/issueStorage';
 import { hcmRange } from '../booking/recreationReport';
+import { resolveReportPeriod } from '../reception/businessDate';
 import {
   acceptIssue,
   assignIssue,
+  assignIssues,
+  unassignIssue,
+  voidIssue,
   authorizeIssuePhoto,
   cannotRepairIssue,
   completeIssue,
@@ -115,6 +119,9 @@ const listSchema = z
     roomNumber: z.string().trim().min(1).max(50).optional(),
     floorNumber: z.string().trim().min(1).max(50).optional(),
     category: CATEGORY.optional(),
+    // The shared report filter's "Ca", and "Hoàn thành vấn đề → đúng / sai".
+    shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
+    verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
     page: z.coerce.number().int().positive().default(1),
     // Up to 500 for a report board that groups a period by branch and room.
     pageSize: z.coerce.number().int().positive().max(500).default(50),
@@ -165,6 +172,9 @@ const completeSchema = z.object({
   cause: z.string().trim().max(1000).nullable().optional(),
   // Required by the SERVICE while inspection is active; optional while dormant.
   result: z.string().trim().max(2000).nullable().optional(),
+  // "Đúng" / "Sai" — required by the SERVICE (the shared completion rule).
+  verdict: z.enum(['CORRECT', 'INCORRECT']).nullable().optional(),
+  incorrectReason: z.string().trim().max(2000).nullable().optional(),
 });
 
 /** "Nguyên nhân" recorded during the repair — required when sent at all. */
@@ -213,6 +223,13 @@ const requireReporter = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER'
 const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER');
 
 const assignSchema = z.object({ technicianUserId: z.number().int().positive() });
+/** A room's chosen incidents, given to one technician together. */
+const bulkAssignSchema = z.object({
+  issueIds: z.array(z.string().min(1)).min(1, 'Vui lòng chọn ít nhất một sự cố.').max(50),
+  technicianUserId: z.number().int().positive(),
+});
+/** "Xóa": the reason is optional; the confirmation is the dialog's. */
+const voidIssueSchema = z.object({ reason: z.string().trim().max(1000).nullable().optional() });
 
 /** The structured key of the report being written — never its free text. */
 const similarSchema = z.object({
@@ -256,9 +273,20 @@ export function createIssuesRouter(): Router {
       // dashboard and the accountability report use — one definition of what a
       // Vietnamese calendar day is, for every screen that asks for one.
       const range = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      /*
+        THE SHARED REPORT PERIOD: `from`/`to` are business dates, resolved to the
+        shifts that ran on them (and the shiftless reports of those days) — the
+        journal's rule. Visibility stays `issueVisibilityWhere`'s.
+      */
+      const period =
+        q.from && q.to
+          ? await resolveReportPeriod('ALL', { from: q.from, to: q.to, shiftType: q.shiftType, branchId: q.branchId })
+          : undefined;
       const completed = q.completedFrom && q.completedTo ? hcmRange(q.completedFrom, q.completedTo) : null;
       const now = getClock().now();
       const { issues, total } = await listIssues(actor(user), {
+        period,
+        verdict: q.verdict,
         branchId: q.branchId,
         status: q.status,
         stage: q.stage,
@@ -376,6 +404,35 @@ export function createIssuesRouter(): Router {
   });
 
   // POST /api/issues/:id/assign — give the incident to a technician, or move it.
+  // POST /api/issues/assign — "Giao kỹ thuật" for a room's chosen incidents, together.
+  router.post('/issues/assign', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const { issueIds, technicianUserId } = bulkAssignSchema.parse(req.body ?? {});
+      const issues = await assignIssues(issueIds, { technicianUserId }, actor(user), getClock());
+      res.json({ issues: issues.map((i) => serializeIssue(i)) });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/unassign — "Chuyển về chờ giao kỹ thuật" (service-checked).
+  router.post('/issues/:id/unassign', requireAuth, requirePasswordChanged, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const issue = await unassignIssue(req.params.id!, actor(user), getClock());
+      res.json({ issue: serializeIssue(issue) });
+    })().catch(next);
+  });
+
+  // POST /api/issues/:id/void — "Xóa" (a void; service-checked by role and branch).
+  router.post('/issues/:id/void', requireAuth, requirePasswordChanged, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const { reason } = voidIssueSchema.parse(req.body ?? {});
+      await voidIssue(req.params.id!, { reason }, actor(user), getClock());
+      res.json({ voided: true, id: req.params.id });
+    })().catch(next);
+  });
+
   router.post('/issues/:id/assign', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;

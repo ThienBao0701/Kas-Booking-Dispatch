@@ -24,6 +24,7 @@ import {
   Users,
   Wrench,
   type LucideIcon,
+  XCircle,
 } from 'lucide-react';
 import type { UserRole } from '../auth/types';
 import { CATEGORY_FALLBACK_LABELS, GUEST_REQUEST_TITLE, HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
@@ -44,6 +45,20 @@ export interface NavItem {
  *   Kỹ thuật → incidents by branch and room, with assignment and stages
  *   Buồng phòng → findings, collection and the housekeeping workdays
  */
+/**
+ * "HOÀN THÀNH VẤN ĐỀ" — the 12-hour archive in two views, by the verdict given
+ * at "Hoàn thành": reports that were right, and reports that were wrong.
+ */
+const COMPLETED_GROUP: NavItem = {
+  to: '/app/completed-issues',
+  label: 'Hoàn thành vấn đề',
+  icon: CheckCircle2,
+  children: [
+    { to: '/app/completed-issues?verdict=CORRECT', label: 'Vấn đề báo cáo đúng', icon: CheckCircle2 },
+    { to: '/app/completed-issues?verdict=INCORRECT', label: 'Vấn đề báo cáo sai', icon: XCircle },
+  ],
+};
+
 const REPORT_GROUP: NavItem = {
   to: '/app/reports',
   label: 'Báo cáo vấn đề',
@@ -82,7 +97,7 @@ export const ADMIN_NAV: NavItem[] = [
   // "Chat box" is the bubble in the corner of every page, not a menu entry.
   REPORT_GROUP,
   // The 12-hour completion archive, every branch.
-  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
+  COMPLETED_GROUP,
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
   { to: '/app/charge-documents', label: 'Chứng từ', icon: FileText },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
@@ -124,7 +139,7 @@ export const RECEPTIONIST_NAV: NavItem[] = [
   // Requests, facility incidents, service-quality reports and deliveries
   // completed 12 hours or more after they were received — the same records, by
   // query.
-  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
+  COMPLETED_GROUP,
   // Collection on what Bộ phận buồng phòng found — its own screen, apart from
   // the payment ledger inside "Báo cáo vấn đề". "Chat box" is the bubble in the
   // corner of every page, not a menu entry.
@@ -142,7 +157,7 @@ export const RECEPTIONIST_NAV: NavItem[] = [
 export const RECEPTION_MANAGER_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
   REPORT_GROUP,
-  { to: '/app/completed-issues', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
+  COMPLETED_GROUP,
 ];
 
 /**

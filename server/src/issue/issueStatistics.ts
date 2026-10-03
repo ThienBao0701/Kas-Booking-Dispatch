@@ -23,7 +23,7 @@ import { getClock, hcmDateOnly } from '../lib/clock';
 import { durationSeconds, formatDuration } from '../lib/duration';
 import { hcmRange } from '../booking/recreationReport';
 import { ISSUE_AREA_LABELS } from './issueArea';
-import { ISSUE_CATEGORY_LABELS, technicianHistoryWhere } from './issueService';
+import { ISSUE_CATEGORY_LABELS, LIVE_ISSUE, technicianHistoryWhere } from './issueService';
 import { completedStatuses, outstandingStatuses, stageWhere } from './issueLifecycle';
 
 /** The periods the screen offers. A closed list, so the query cannot be made huge. */
@@ -120,6 +120,8 @@ export async function computeIncidentStatistics(
 
   const tech = filter.technicianUserId;
   const branch: Prisma.HotelIssueWhereInput = {
+    // Deleted ("Xóa") incidents are in no figure.
+    ...LIVE_ISSUE,
     ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}),
     ...(tech !== undefined ? { OR: technicianHistoryWhere(tech) } : {}),
   };
@@ -160,7 +162,7 @@ export async function computeIncidentStatistics(
     attempts: await tx.technicalRepairAttempt.findMany({
       where: {
         acceptedAt: { gte: start, lt: end },
-        ...(filter.branchId !== undefined ? { issue: { branchId: filter.branchId } } : {}),
+        issue: { ...LIVE_ISSUE, ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}) },
         ...(tech !== undefined ? { technicianUserId: tech } : {}),
       },
       select: { technicianNameSnapshot: true, outcome: true, acceptedAt: true, outcomeAt: true },
@@ -170,8 +172,8 @@ export async function computeIncidentStatistics(
         ? null
         : {
             user: await tx.user.findUnique({ where: { id: tech }, select: { id: true, fullName: true } }),
-            assignedNow: await tx.hotelIssue.count({ where: { assignedTechnicianUserId: tech, status: 'NEW' } }),
-            inProgressNow: await tx.hotelIssue.count({ where: { acceptedByUserId: tech, status: 'IN_PROGRESS' } }),
+            assignedNow: await tx.hotelIssue.count({ where: { ...LIVE_ISSUE, assignedTechnicianUserId: tech, status: 'NEW' } }),
+            inProgressNow: await tx.hotelIssue.count({ where: { ...LIVE_ISSUE, acceptedByUserId: tech, status: 'IN_PROGRESS' } }),
             completed: await tx.technicalRepairAttempt.count({
               where: { technicianUserId: tech, outcome: 'COMPLETED', outcomeAt: { gte: start, lt: end } },
             }),

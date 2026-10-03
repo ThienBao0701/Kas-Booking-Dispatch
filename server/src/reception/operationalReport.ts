@@ -290,7 +290,7 @@ async function sectionBranchReport(
   const now = getClock().now();
   const base = { branch, ...emptyReceptionParts() };
   if (section === 'TECHNICAL') {
-    const where = { branchId: branch.id, createdAt: { gte: window.from, lt: window.to } };
+    const where = { branchId: branch.id, voidedAt: null, createdAt: { gte: window.from, lt: window.to } };
     const [rows, total] = await Promise.all([
       client.hotelIssue.findMany({ where, include: ISSUE_INCLUDE, orderBy: { createdAt: 'asc' }, take: MAX_ROWS_PER_BRANCH }),
       client.hotelIssue.count({ where }),

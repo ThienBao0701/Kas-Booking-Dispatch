@@ -256,9 +256,11 @@ describe('the hotel incident report', () => {
     expect(created.status).toBe(201);
 
     const id = created.body.issue.id;
+    // `createdAt` is the database's now(), not the test clock: pin it inside RANGE.
+    await testPrisma.hotelIssue.update({ where: { id }, data: { createdAt: NOW } });
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn Bảo', technicianPhone: '0901234567' });
-    await tech.post(`/api/issues/${id}/complete`).send({});
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
   }
 
   it('returns the incidents in the period with the technician information', async () => {

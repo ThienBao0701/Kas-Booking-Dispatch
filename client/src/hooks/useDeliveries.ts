@@ -19,11 +19,13 @@ export function useDeliveries(
   enabled = true,
   /** A reception manager's one branch; absent, the caller's whole scope. */
   branchId?: number,
+  /** The shared report filter's "Ca". */
+  shiftType?: string,
 ) {
   return useQuery({
-    // The received-day window is part of the key: another period is another list.
-    queryKey: [...DELIVERIES_KEY, scope, received ?? null, branchId ?? null],
-    queryFn: () => deliveriesApi.list(scope, { ...(received ?? {}), branchId }),
+    // The period is part of the key: another period is another list.
+    queryKey: [...DELIVERIES_KEY, scope, received ?? null, branchId ?? null, shiftType ?? null],
+    queryFn: () => deliveriesApi.list(scope, { ...(received ?? {}), branchId, shiftType }),
     enabled,
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,

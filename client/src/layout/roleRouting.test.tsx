@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 
 afterEach(() => {
@@ -50,7 +51,6 @@ describe('role-based shell and routing', () => {
       'Chờ kiểm tra',
       'Cần tạo lại',
       'Lịch sử',
-      'Hoàn thành vấn đề',
       'Gửi lại đơn',
       'Chứng từ',
       'Nhắc nhở',
@@ -59,6 +59,8 @@ describe('role-based shell and routing', () => {
     ]);
     // The group: Lễ tân (with its categories), Kỹ thuật, Buồng phòng — folded off the reports.
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toHaveAttribute('aria-expanded', 'false');
+    // "Hoàn thành vấn đề": a group of two views — đúng / sai.
+    expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
     /*
       "Sự cố khách sạn" is the "Sự cố cơ sở vật chất đang xử lý" category of "Báo cáo
       vấn đề" now, and "Bàn giao ca" is gone from the menu. Both addresses
@@ -83,7 +85,11 @@ describe('role-based shell and routing', () => {
     const labels = within(nav).getAllByRole('link').map((l) => l.textContent);
     // "Hoàn thành vấn đề" is the 12-hour completion archive of II, III and IV;
     // "Buồng phòng" is the room-issue collection (address unchanged). The chat is the bubble.
-    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Hoàn thành vấn đề', 'Buồng phòng', 'Nhắc nhở']);
+    expect(labels).toEqual(['Đơn mới', 'Báo cáo vấn đề', 'Buồng phòng', 'Nhắc nhở']);
+    // "Hoàn thành vấn đề" is a group: "Vấn đề báo cáo đúng" / "Vấn đề báo cáo sai".
+    await userEvent.click(within(nav).getByTestId('nav-group-Hoàn thành vấn đề'));
+    expect(within(nav).getByRole('link', { name: 'Vấn đề báo cáo đúng' })).toHaveAttribute('href', '/app/completed-issues?verdict=CORRECT');
+    expect(within(nav).getByRole('link', { name: 'Vấn đề báo cáo sai' })).toHaveAttribute('href', '/app/completed-issues?verdict=INCORRECT');
     expect(within(nav).queryByRole('link', { name: 'Chat box' })).not.toBeInTheDocument();
     /*
       Removed from the MENU only. Their routes, records and APIs are untouched;
@@ -118,7 +124,8 @@ describe('role-based shell and routing', () => {
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới', 'Hoàn thành vấn đề']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới']);
+    expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
     // "Báo cáo vấn đề" is the same folded group as the Admin's (Lễ tân, Kỹ thuật, Buồng phòng).
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
     // The orders of its branches — the branch picker is the server's scoped list.
@@ -136,7 +143,7 @@ describe('role-based shell and routing', () => {
   it('opens "Hoàn thành vấn đề" to a Quản lý lễ tân, with a branch picker', async () => {
     mockShell(MANAGER_USER);
     renderApp('/app/completed-issues');
-    expect(await screen.findByTestId('completed-branch')).toBeInTheDocument();
+    expect(await screen.findByTestId('branch-select')).toHaveTextContent('Tất cả chi nhánh');
     expect(screen.queryByText('Không có quyền truy cập')).not.toBeInTheDocument();
   });
 
@@ -183,8 +190,8 @@ describe('the retired addresses', () => {
     renderApp('/app/issues');
 
     expect(await screen.findByTestId('admin-incident-view')).toBeInTheDocument();
-    expect(await screen.findByTestId('branch-select')).toHaveValue('ALL');
-    expect(screen.getByTestId('admin-category-FACILITY_ISSUE')).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('branch-select')).toHaveTextContent('Tất cả chi nhánh');
+    expect(screen.getByTestId('report-title')).toHaveTextContent('Sự cố cơ sở vật chất đang xử lý');
   });
 
   it('sends the Admin from the old "Bàn giao ca" to "Báo cáo vấn đề"', async () => {

@@ -25,7 +25,7 @@ import { getClock } from '../lib/clock';
 import { requireAuth, requirePasswordChanged } from '../middleware/auth';
 import { REPORT_INCLUDE, serializeReport } from '../reception/reportService';
 import { lifecycleWhere } from '../reception/deliveryLifecycle';
-import { hcmRange } from '../booking/recreationReport';
+import { journalPeriodWhere, resolveReportPeriod } from '../reception/businessDate';
 import { scopedBranchFilter } from '../auth/branchScope';
 
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -34,11 +34,11 @@ const querySchema = z
   .object({
     scope: z.enum(['active', 'archived']).default('active'),
     branchId: z.coerce.number().int().positive().optional(),
-    // The days a delivery was RECEIVED on (inclusive Vietnamese calendar days) —
-    // the same instant the 12-hour rule runs from. A window narrows a list; it
-    // never admits a row the rule keeps on the other side.
+    // BUSINESS dates (the shared report period) and an optional shift. A window
+    // narrows a list; it never admits a row the rule keeps on the other side.
     from: isoDay.optional(),
     to: isoDay.optional(),
+    shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -92,7 +92,11 @@ export function createHotelDeliveriesRouter(): Router {
       const q = querySchema.parse(req.query);
       const now = getClock().now();
       const visible = deliveryVisibilityWhere(user, { branchId: q.branchId });
-      const received = q.from && q.to ? hcmRange(q.from, q.to) : null;
+      // Visibility is `visible`; the period only resolves the shifts.
+      const period =
+        q.from && q.to
+          ? await resolveReportPeriod('ALL', { from: q.from, to: q.to, shiftType: q.shiftType, branchId: q.branchId })
+          : null;
 
       const where: Prisma.ReceptionOperationalReportWhereInput = {
         ...visible,
@@ -100,7 +104,7 @@ export function createHotelDeliveriesRouter(): Router {
         // Combined with the role's own `delivery` filter, never replacing it.
         AND: [
           { delivery: { is: lifecycleWhere(q.scope, now) } },
-          ...(received ? [{ createdAt: { gte: received.start, lt: received.end } }] : []),
+          ...(period ? [journalPeriodWhere(period)] : []),
         ],
       };
       const [rows, total] = await Promise.all([

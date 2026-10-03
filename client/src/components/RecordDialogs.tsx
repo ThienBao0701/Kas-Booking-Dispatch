@@ -17,6 +17,8 @@
  */
 import { useState, type ReactNode } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { CompletionVerdictFields } from './CompletionVerdict';
+import { EMPTY_VERDICT, verdictPayload, verdictReady, type VerdictValue } from '../lib/completionVerdict';
 import { reportsApi, type OperationalReport, type UpdateReportInput } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
@@ -98,12 +100,12 @@ export function VoidDialog({
 }
 
 /**
- * "Hoàn thành" on a guest request or a service-quality report: optionally, how
- * it was handled — and nothing else.
+ * "Hoàn thành" on a guest request or a service-quality report: was the report
+ * right ("Đúng" / "Sai", the rule every completion shares), and how it was
+ * handled or why it was wrong.
  *
- * THE HANDLING TEXT IS OPTIONAL, so the button is never disabled for an empty
- * box: plenty of completions need no explanation. Left blank, nothing is sent
- * and nothing is stored — no placeholder sentence standing in for one.
+ * "Đúng" keeps the handling text OPTIONAL — plenty of completions need no
+ * explanation, and blank sends nothing. "Sai" needs its reason.
  *
  * The completion time is not shown as an input because it is not one — the
  * server stamps it, together with who completed it and on which shift.
@@ -123,11 +125,11 @@ export function CompleteRecordDialog({
   onClose: () => void;
   onCompleted: () => void | Promise<void>;
 }) {
-  const [resolution, setResolution] = useState('');
+  const [verdict, setVerdict] = useState<VerdictValue>(EMPTY_VERDICT);
   const [error, setError] = useState<string | null>(null);
 
   const run = useMutation({
-    mutationFn: () => reportsApi.complete(id, resolution.trim() || undefined),
+    mutationFn: () => reportsApi.complete(id, verdictPayload(verdict)),
     onSuccess: async () => {
       setError(null);
       await onCompleted();
@@ -145,24 +147,19 @@ export function CompleteRecordDialog({
           <Button variant="secondary" onClick={onClose}>
             Đóng
           </Button>
-          <Button onClick={() => run.mutate()} loading={run.isPending} data-testid="complete-confirm">
+          <Button
+            onClick={() => run.mutate()}
+            loading={run.isPending}
+            disabled={!verdictReady(verdict)}
+            data-testid="complete-confirm"
+          >
             Hoàn thành
           </Button>
         </>
       }
     >
       <div className="space-y-3">
-        <label className="block text-sm font-medium text-slate-700">
-          {fieldLabel}
-          <textarea
-            value={resolution}
-            onChange={(e) => setResolution(e.target.value)}
-            rows={3}
-            maxLength={2000}
-            data-testid="complete-resolution"
-            className="mt-1 w-full rounded-lg border border-line-strong bg-white px-3 py-2 text-sm hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-          />
-        </label>
+        <CompletionVerdictFields value={verdict} onChange={setVerdict} resolutionLabel={fieldLabel} />
         <p className="text-xs text-slate-500">Thời gian hoàn thành do hệ thống ghi nhận.</p>
         {error ? <ErrorAlert>{error}</ErrorAlert> : null}
       </div>

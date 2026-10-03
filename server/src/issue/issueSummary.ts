@@ -16,7 +16,7 @@ import { prisma } from '../db/prisma';
 import { seesAllBranches } from '../middleware/auth';
 import { inspectionEnabled, outstandingStatuses, stageWhere, type IssueStage } from './issueLifecycle';
 import { isReceptionSupervisor, scopedBranchRows } from '../auth/branchScope';
-import { issueVisibilityWhere, technicianStageWhere } from './issueService';
+import { LIVE_ISSUE, issueVisibilityWhere, technicianStageWhere } from './issueService';
 
 // The full role enum, not a two-member union: a new role must not silently fail
 // to compile here. Which roles are ALLOWED is decided by the checks below and
@@ -70,7 +70,7 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
     actor.role === 'BOOKING_DEPARTMENT' || actor.role === 'HOUSEKEEPING'
       ? { branchId: actor.branchId ?? -1 }
       : issueVisibilityWhere(actor);
-  const where: Prisma.HotelIssueWhereInput = { AND: [visibility], status: { in: outstandingStatuses() } };
+  const where: Prisma.HotelIssueWhereInput = { AND: [visibility, LIVE_ISSUE], status: { in: outstandingStatuses() } };
 
   const groups = await prisma.hotelIssue.groupBy({
     by: ['branchId', 'status'],
@@ -150,7 +150,7 @@ export async function computeTechnicalCounts(
   const visibility = issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : branchId);
   /** One queue's count, with a technician's own part in that stage applied. */
   const inQueue = (stage: IssueStage, extra: Prisma.HotelIssueWhereInput) => ({
-    AND: [visibility, actor.role === 'TECHNICAL' ? technicianStageWhere(actor.id, stage) : {}, extra],
+    AND: [visibility, LIVE_ISSUE, actor.role === 'TECHNICAL' ? technicianStageWhere(actor.id, stage) : {}, extra],
   });
 
   /*
@@ -257,7 +257,8 @@ export interface IncidentRangeFilter {
 export async function computeIncidentRangeSummary(
   filter: IncidentRangeFilter,
 ): Promise<IncidentRangeSummary> {
-  const branch = filter.branchId !== undefined ? { branchId: filter.branchId } : {};
+  // Deleted ("Xóa") incidents are in no figure.
+  const branch = { ...LIVE_ISSUE, ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}) };
   const reportedInRange: Prisma.HotelIssueWhereInput = {
     ...branch,
     createdAt: { gte: filter.start, lt: filter.end },
@@ -283,7 +284,7 @@ export async function computeIncidentRangeSummary(
         where: {
           outcome: 'CANNOT_REPAIR',
           outcomeAt: { gte: filter.start, lt: filter.end },
-          ...(filter.branchId !== undefined ? { issue: { branchId: filter.branchId } } : {}),
+          issue: branch,
         },
       }),
       // DISTINCT incidents, because this counts rows of HotelIssue and not of
@@ -298,7 +299,7 @@ export async function computeIncidentRangeSummary(
         where: {
           inspectionResult: 'FAILED',
           inspectedAt: { gte: filter.start, lt: filter.end },
-          ...(filter.branchId !== undefined ? { issue: { branchId: filter.branchId } } : {}),
+          issue: branch,
         },
       }),
       outstandingTotal: await tx.hotelIssue.count({

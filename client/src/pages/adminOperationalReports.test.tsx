@@ -24,6 +24,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
+import { pickRange } from '../test/reportFilter';
 import { hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
@@ -500,11 +501,17 @@ function incidentRoutes(issues: unknown[] = [ISSUE]) {
 
 /** Choose a branch the way an Admin does now: one control, one choice. */
 async function chooseBranch(id = '11') {
-  await userEvent.selectOptions(await screen.findByTestId('branch-select'), id);
+  await userEvent.click(await screen.findByTestId('branch-select'));
+  await userEvent.click(await screen.findByTestId(`branch-option-${id === '' ? 'ALL' : id}`));
 }
 
+/** The menu's "Báo cáo vấn đề → Lễ tân → <danh mục>" — the category is the address. */
 async function openCategory(code: string) {
-  await userEvent.click(await screen.findByTestId(`admin-category-${code}`));
+  const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+  const href = code === 'ALL' ? '/app/reports' : `/app/reports?category=${code}`;
+  const find = () => within(nav).queryAllByRole('link').find((l) => l.getAttribute('href') === href);
+  if (!find()) await userEvent.click(within(nav).getByTestId('nav-group-Lễ tân'));
+  await userEvent.click(find()!);
 }
 
 /** The heading of the shift frame a table sits in — "Ca A · 06:00 – 14:00 · …". */
@@ -525,28 +532,31 @@ describe('choosing a branch', () => {
     renderApp('/app/reports');
 
     const select = await screen.findByTestId('branch-select');
-    // One combobox, named — not eight tiles taking a third of the screen.
+    // One control, named — not eight tiles taking a third of the screen.
     expect(select).toHaveAccessibleName('Chi nhánh');
-    const options = within(select).getAllByRole('option');
-    // Nine branches, plus "choose one" and "every branch". A hardcoded list of
-    // the eight properties the business has today would fail this.
-    expect(options).toHaveLength(11);
-    expect(options[1]).toHaveTextContent('Tất cả chi nhánh');
-    expect(options[2]).toHaveTextContent('05 Trương Định');
-    expect(options[10]).toHaveTextContent('09 Ngô Đức Kế');
+    expect(select).toHaveTextContent('-Chọn chi nhánh-');
+    // The old explanatory line is gone; the counts speak for themselves.
+    expect(screen.queryByText(/Số trong ngoặc/)).not.toBeInTheDocument();
+    await userEvent.click(select);
+    const options = within(await screen.findByRole('listbox', { name: 'Chi nhánh' })).getAllByRole('option');
+    // Nine branches, plus "every branch". A hardcoded list of the eight
+    // properties the business has today would fail this.
+    expect(options).toHaveLength(10);
+    expect(options[0]).toHaveTextContent('Tất cả chi nhánh');
+    expect(options[1]).toHaveTextContent('05 Trương Định');
+    expect(options[9]).toHaveTextContent('09 Ngô Đức Kế');
     // Addressed by the branch's own id, whatever that happens to be.
-    expect(options.map((o) => (o as HTMLOptionElement).value)).toEqual([
-      '',
-      'ALL',
-      '11',
-      '12',
-      '13',
-      '14',
-      '15',
-      '16',
-      '17',
-      '18',
-      '19',
+    expect(options.map((o) => o.getAttribute('data-testid'))).toEqual([
+      'branch-option-ALL',
+      'branch-option-11',
+      'branch-option-12',
+      'branch-option-13',
+      'branch-option-14',
+      'branch-option-15',
+      'branch-option-16',
+      'branch-option-17',
+      'branch-option-18',
+      'branch-option-19',
     ]);
   });
 
@@ -570,26 +580,35 @@ describe('choosing a branch', () => {
     );
   });
 
-  it('shows the six categories with their counts, in the server’s words', async () => {
+  it('"Tổng" is the overview: the six categories with their counts, each opening its own page', async () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
 
     await chooseBranch();
-    const menu = await screen.findByTestId('admin-category-menu');
-    // "Tất cả" plus the six.
-    expect(within(menu).getAllByRole('button')).toHaveLength(7);
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent)).toEqual([
-      'Tất cả',
-      'Theo dõi thanh toán1',
-      'Vấn đề khách yêu cầu1',
-      // No count: this tab lists the incidents themselves, not journal entries,
-      // so a journal count on it would describe something else.
-      'Sự cố cơ sở vật chất đang xử lý',
-      'Vấn đề về chất lượng và dịch vụ1',
-      'Dịch vụ phòng, KPI2',
-      // The sixth category, printed in full on this screen.
-      'Giao nhận hàng hóa của khách sạn1',
+    expect(screen.getByTestId('report-title')).toHaveTextContent('Tổng quan');
+    const overview = await screen.findByTestId('report-overview');
+    expect(within(overview).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
+      '/app/reports?category=PAYMENT',
+      '/app/reports?category=GUEST_REQUEST',
+      '/app/reports?category=FACILITY_ISSUE',
+      '/app/reports?category=CUSTOMER_COMPLAINT',
+      '/app/reports?category=ROOM_SERVICE',
+      '/app/reports?category=HOTEL_DELIVERY',
     ]);
+    expect(screen.getByTestId('overview-PAYMENT')).toHaveTextContent('Theo dõi thanh toán');
+    expect(screen.getByTestId('overview-ROOM_SERVICE')).toHaveTextContent(/Dịch vụ phòng, KPI.*2$/);
+    // The incident card counts what is unresolved — the branch selector's number.
+    expect(screen.getByTestId('overview-FACILITY_ISSUE')).toHaveTextContent('sự cố chưa xử lý');
+    // The sixth category, printed in full on this screen.
+    expect(screen.getByTestId('overview-HOTEL_DELIVERY')).toHaveTextContent('Giao nhận hàng hóa của khách sạn');
+
+    // A card opens its category: that category alone, nothing of the overview.
+    await userEvent.click(screen.getByTestId('overview-PAYMENT'));
+    expect(await screen.findByTestId('report-title')).toHaveTextContent('Theo dõi thanh toán');
+    expect(await screen.findByTestId('admin-table-PAYMENT')).toBeInTheDocument();
+    expect(screen.queryByTestId('report-overview')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('admin-table-GUEST_REQUEST')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('admin-category-menu')).not.toBeInTheDocument();
   });
 
   it('never offers KPI as a category of its own', async () => {
@@ -597,10 +616,10 @@ describe('choosing a branch', () => {
     renderApp('/app/reports');
 
     await chooseBranch();
-    const menu = await screen.findByTestId('admin-category-menu');
-    const labels = within(menu).getAllByRole('button').map((b) => b.textContent);
-    expect(labels.filter((l) => l === 'KPI')).toHaveLength(0);
-    expect(labels.some((l) => l?.startsWith('Dịch vụ phòng, KPI'))).toBe(true);
+    const overview = await screen.findByTestId('report-overview');
+    const labels = within(overview).getAllByRole('link').map((b) => b.textContent ?? '');
+    expect(labels.filter((l) => /^\S*KPI\d*$/.test(l))).toHaveLength(0);
+    expect(labels.some((l) => l.includes('Dịch vụ phòng, KPI'))).toBe(true);
   });
 });
 
@@ -648,7 +667,7 @@ describe('each category is a table', () => {
     // Titled with the SERVER's word for the category.
     // The category is the chosen tab, in the server's word, and heads the table;
     // the SHIFT and the PERSON head the frame it sits in — DATE → SHIFT → EMPLOYEE.
-    expect(screen.getByTestId('admin-category-PAYMENT')).toHaveTextContent('Theo dõi thanh toán');
+    expect(screen.getByTestId('report-title')).toHaveTextContent('Theo dõi thanh toán');
     expect(within(table).getByRole('heading')).toHaveTextContent('Theo dõi thanh toán');
     expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
@@ -695,7 +714,7 @@ describe('each category is a table', () => {
     await openCategory('GUEST_REQUEST');
 
     const table = await screen.findByTestId('admin-table-GUEST_REQUEST');
-    expect(screen.getByTestId('admin-category-GUEST_REQUEST')).toHaveTextContent('Vấn đề khách yêu cầu');
+    expect(screen.getByTestId('report-title')).toHaveTextContent('Vấn đề khách yêu cầu');
     expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
@@ -740,7 +759,7 @@ describe('each category is a table', () => {
     await openCategory('FACILITY_ISSUE');
 
     const view = await screen.findByTestId('admin-incident-view');
-    expect(screen.getByTestId('admin-category-FACILITY_ISSUE')).toHaveTextContent('Sự cố cơ sở vật chất đang xử lý');
+    expect(screen.getByTestId('report-title')).toHaveTextContent('Sự cố cơ sở vật chất đang xử lý');
     // The period's counts, as the old screen had them.
     expect(await within(view).findByTestId('incident-range-summary')).toHaveTextContent('Tổng sự cố phát sinh');
 
@@ -847,7 +866,7 @@ describe('each category is a table', () => {
     await openCategory('CUSTOMER_COMPLAINT');
 
     const table = await screen.findByTestId('admin-table-CUSTOMER_COMPLAINT');
-    expect(screen.getByTestId('admin-category-CUSTOMER_COMPLAINT')).toHaveTextContent(
+    expect(screen.getByTestId('report-title')).toHaveTextContent(
       'Vấn đề về chất lượng và dịch vụ',
     );
     expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
@@ -1285,7 +1304,7 @@ describe('the row cap is declared, never silent', () => {
     expect(screen.queryByTestId('operational-truncated')).not.toBeInTheDocument();
   });
 
-  it('names the true total once, above the tables, and keeps the real counts on the tabs', async () => {
+  it('names the true total once, above the tables, and keeps the real counts on the overview', async () => {
     installApiMock(
       shellRoutes({
         [`GET /api/admin/reports/operational?branchId=11&${PERIOD}`]: () => ({
@@ -1302,8 +1321,8 @@ describe('the row cap is declared, never silent', () => {
     expect(notices).toHaveLength(1);
     expect(notices[0]).toHaveTextContent('trong tổng số 1500');
     expect(notices[0]).toHaveTextContent('xuất báo cáo');
-    // The counts on the tabs are the branch's real ones, not the page's.
-    expect(screen.getByTestId('admin-category-PAYMENT')).toHaveTextContent('1496');
+    // The overview's counts are the branch's real ones, not the page's.
+    expect(screen.getByTestId('overview-PAYMENT')).toHaveTextContent('1496');
   });
 });
 
@@ -1354,15 +1373,14 @@ describe('deliberately few controls', () => {
     installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
-    await screen.findByTestId('admin-category-menu');
+    await screen.findByTestId('report-overview');
 
     for (const absent of [/nhân viên:/i, /trạng thái:/i, /nguồn:/i]) {
       expect(screen.queryByLabelText(absent)).not.toBeInTheDocument();
     }
-    // Exactly one combobox on the page, and it is the branch picker.
-    const selects = screen.getAllByRole('combobox');
-    expect(selects).toHaveLength(1);
-    expect(selects[0]).toHaveAccessibleName('Chi nhánh');
+    // No select of any other kind: the branch picker and the period are the filter.
+    expect(screen.queryAllByRole('combobox')).toHaveLength(0);
+    expect(screen.getByTestId('branch-select')).toHaveAccessibleName('Chi nhánh');
   });
 
   /**
@@ -1404,9 +1422,10 @@ describe('deliberately few controls', () => {
       }
       // The reception and technician verbs, by name, anywhere on the page.
       for (const label of [
-        // "Sửa" is the supervisor's correction, through Reception's own dialog.
+        // "Sửa" is the supervisor's correction, through Reception's own dialog;
+        // on the incident page "Xóa" is the supervisors' own (a void).
         /^Hủy$/,
-        /^Xóa$/,
+        ...(code === 'FACILITY_ISSUE' ? [] : [/^Xóa$/]),
         /^Tiếp nhận$/,
         /^Thêm$/,
         /^Lưu$/,
@@ -1748,15 +1767,64 @@ describe('an unfinished shift', () => {
   });
 });
 
+describe('"Ca" — the shifts that actually ran', () => {
+  it('offers only the shifts of the period (A4 / C4 here), and asks the server for the one chosen', async () => {
+    const fetchMock = installApiMock(
+      shellRoutes({
+        [`GET /api/reception/shifts/available?from=${TODAY}&to=${TODAY}&branchId=11`]: () => ({
+          status: 200,
+          body: {
+            shifts: [
+              { code: 'A4', name: 'Ca A4', window: '06:00 – 18:00' },
+              { code: 'C4', name: 'Ca C4', window: '18:00 – 06:00' },
+            ],
+          },
+        }),
+        [`GET /api/admin/reports/operational?branchId=11&${PERIOD}&shiftType=C4`]: () => ({ status: 200, body: body([PAYMENT]) }),
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+
+    const shifts = await screen.findByTestId('shift-filter');
+    expect(within(shifts).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Tất cả ca',
+      'Ca A4 (06:00 – 18:00)',
+      'Ca C4 (18:00 – 06:00)',
+    ]);
+    // Never a fixed list: no A, B or C on a day that did not run them.
+    expect(within(shifts).queryByText(/^Ca A \(/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('shift-filter-C4'));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain(
+        `/api/admin/reports/operational?branchId=11&${PERIOD}&shiftType=C4`,
+      ),
+    );
+  });
+
+  it('shows no "Ca" choice for a period no shift ran', async () => {
+    installApiMock(
+      shellRoutes({
+        [`GET /api/reception/shifts/available?from=${TODAY}&to=${TODAY}&branchId=11`]: () => ({ status: 200, body: { shifts: [] } }),
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+    await screen.findByTestId('row-p1');
+    expect(screen.queryByTestId('shift-filter')).not.toBeInTheDocument();
+  });
+});
+
 describe('the period', () => {
   it('opens on today, and asks the server for today', async () => {
     const fetchMock = installApiMock(shellRoutes());
     renderApp('/app/reports');
     await chooseBranch();
 
-    expect(screen.getByTestId('admin-range-from')).toHaveValue(TODAY);
-    expect(screen.getByTestId('admin-range-to')).toHaveValue(TODAY);
-    expect(screen.getByTestId('admin-range-0')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('period-TODAY')).toHaveAttribute('aria-pressed', 'true');
+    // "Hôm nay" shows no dates at all.
+    expect(screen.queryByTestId('period-range')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('period-day')).not.toBeInTheDocument();
     await waitFor(() =>
       expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain(
         `/api/admin/reports/operational?branchId=11&${PERIOD}`,
@@ -1764,11 +1832,29 @@ describe('the period', () => {
     );
   });
 
-  it.each([
-    [6, '7 ngày'],
-    [29, '30 ngày'],
-  ])('asks for the last %i days + today when "%s" is chosen', async (back, text) => {
-    const from = daysBefore(TODAY, back);
+  it('asks for one exact business date with "Ngày cụ thể" — one date box, not two', async () => {
+    const day = daysBefore(TODAY, 3);
+    const fetchMock = installApiMock(
+      shellRoutes({
+        [`GET /api/admin/reports/operational?branchId=11&from=${day}&to=${day}`]: () => ({ status: 200, body: body([PAYMENT]) }),
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+
+    await userEvent.click(screen.getByTestId('period-DAY'));
+    expect(screen.getAllByLabelText('Ngày cụ thể')).toHaveLength(1);
+    fireEvent.change(screen.getByTestId('period-day'), { target: { value: day } });
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain(
+        `/api/admin/reports/operational?branchId=11&from=${day}&to=${day}`,
+      ),
+    );
+    expect(await screen.findByTestId('row-p1')).toBeInTheDocument();
+  });
+
+  it('asks for a range chosen in ONE calendar with "Khoảng ngày"', async () => {
+    const from = daysBefore(TODAY, 6);
     const fetchMock = installApiMock(
       shellRoutes({
         [`GET /api/admin/reports/operational?branchId=11&from=${from}&to=${TODAY}`]: () => ({
@@ -1780,12 +1866,7 @@ describe('the period', () => {
     renderApp('/app/reports');
     await chooseBranch();
 
-    const shortcut = screen.getByTestId(`admin-range-${back}`);
-    expect(shortcut).toHaveTextContent(text);
-    await userEvent.click(shortcut);
-
-    expect(shortcut).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('admin-range-from')).toHaveValue(from);
+    await pickRange(from, TODAY);
     // The FILTER is applied by the server: the page only names the range.
     await waitFor(() =>
       expect(fetchMock.mock.calls.map(([u]) => String(u))).toContain(
@@ -1802,7 +1883,8 @@ describe('the period', () => {
     await screen.findByTestId('row-p1');
     const before = fetchMock.mock.calls.length;
 
-    await userEvent.clear(screen.getByTestId('admin-range-from'));
+    // "Khoảng ngày" with no range picked yet.
+    await userEvent.click(screen.getByTestId('period-RANGE'));
 
     expect(await screen.findByTestId('admin-range-invalid')).toBeInTheDocument();
     expect(
@@ -1904,7 +1986,7 @@ describe('the export opens on what is on screen', () => {
     );
     renderApp('/app/reports');
     await chooseBranch();
-    await userEvent.click(screen.getByTestId('admin-range-6'));
+    await pickRange(from, TODAY);
     await screen.findByTestId('row-p1');
     await userEvent.click(screen.getByTestId('operational-export-open'));
 

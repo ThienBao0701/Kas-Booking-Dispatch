@@ -10,6 +10,8 @@ import type {
 import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
+import { parseCompletionVerdict, verdictWhere } from '../completion/verdict';
+import { issuePeriodWhere, type ReportPeriod } from '../reception/businessDate';
 import { getClock, type Clock } from '../lib/clock';
 import { durationSeconds, formatDuration } from '../lib/duration';
 import { captureShiftContext } from '../shift/shiftService';
@@ -90,6 +92,13 @@ export function issueVisibilityWhere(actor: Actor, requestedBranchId?: number): 
       throw ApiError.forbidden('Bạn không có quyền xem sự cố.');
   }
 }
+
+/**
+ * "XÓA" IS A VOID. A deleted incident keeps its row, attempts, assignments and
+ * stages — the history and every reference to it — and leaves the operational
+ * world: every list, count, queue, duplicate check and report reads through this.
+ */
+export const LIVE_ISSUE = { voidedAt: null } satisfies Prisma.HotelIssueWhereInput;
 
 /** Everything a technician has touched: assigned now, accepted, attempted, or ever assigned. */
 export function technicianHistoryWhere(userId: number): Prisma.HotelIssueWhereInput[] {
@@ -374,6 +383,9 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
       assignedByName: a.assignedByNameSnapshot,
       assignedByRole: a.assignedByRole,
       createdAt: a.createdAt.toISOString(),
+      /** "Chuyển về chờ giao kỹ thuật": who took it back, and when. */
+      returnedAt: a.returnedAt ? a.returnedAt.toISOString() : null,
+      returnedByName: a.returnedByNameSnapshot,
     })),
     ...assignmentState(issue, cannotRepairCount),
     /** The repair, stage by stage, oldest first — never overwritten. */
@@ -383,6 +395,14 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
      * thực hiện") — the next number after the stages already finished.
      */
     currentStageNumber: issue.status === 'IN_PROGRESS' ? issue.stages.length + 1 : null,
+    /** "Đúng" / "Sai" from "Hoàn thành" — null before it, and on older completions. */
+    reportVerdict: issue.reportVerdict,
+    incorrectReason: issue.incorrectReason,
+    /** "Xóa": the void, as the journal records one. */
+    voided: issue.voidedAt !== null,
+    voidedAt: issue.voidedAt ? issue.voidedAt.toISOString() : null,
+    voidedByName: issue.voidedByNameSnapshot,
+    voidReason: issue.voidReason,
     /** The reporter's role, and "Admin tạo" when a supervisor filed it. */
     reportedByRole: issue.reportedByRole,
     sourceLabel: supervisorSourceLabel(issue.reportedByRole),
@@ -467,7 +487,8 @@ function assignmentState(
 
 async function loadIssue(id: string): Promise<IssueDetail> {
   const issue = await prisma.hotelIssue.findUnique({ where: { id }, include: ISSUE_INCLUDE });
-  if (!issue) throw ApiError.notFound('Không tìm thấy báo cáo sự cố.');
+  // A deleted ("Xóa") incident is gone from every operational action.
+  if (!issue || issue.voidedAt) throw ApiError.notFound('Không tìm thấy báo cáo sự cố.');
   return issue;
 }
 
@@ -647,6 +668,8 @@ export function incidentKeyWhere(
 ): Prisma.HotelIssueWhereInput {
   const rules = AREA_FIELDS[area.areaCategory];
   return {
+    // A deleted incident is neither a duplicate nor a repeat.
+    ...LIVE_ISSUE,
     branchId,
     areaCategory: area.areaCategory,
     ...(rules.roomNumber ? { roomNumber: area.roomNumber } : {}),
@@ -924,76 +947,239 @@ export async function assignIssue(
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
+  const [updated] = await assignIssues([id], input, actor, clock);
+  return updated!;
+}
+
+/**
+ * "GIAO KỸ THUẬT" FOR SEVERAL INCIDENTS AT ONCE — a room's chosen subset.
+ *
+ * Exactly the incidents named, never their room-mates: the dialog lists every
+ * waiting incident of the room and the assigner ticks the ones to give. Every
+ * incident is checked by the single-incident rule (scope, still waiting, not
+ * already this technician's) BEFORE anything is written, then all of them are
+ * assigned in ONE transaction — guarded per row on the state that was judged —
+ * so the batch lands whole or not at all. One notification names them together.
+ */
+export async function assignIssues(
+  ids: readonly string[],
+  input: { technicianUserId: number },
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail[]> {
   if (!isTechnicalAssigner(actor.role)) {
     throw ApiError.forbidden('Chỉ Admin, quản lý lễ tân hoặc quản lý kỹ thuật mới giao được kỹ thuật.');
   }
-  const issue = await loadIssue(id);
-  if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
-  if (issue.status !== 'NEW') {
-    throw ApiError.conflict(
-      issue.status === 'IN_PROGRESS'
-        ? 'Kỹ thuật đang sửa sự cố này, không thể giao lại.'
-        : 'Sự cố đã hoàn thành, không thể giao kỹ thuật.',
-      { status: issue.status },
-    );
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) throw ApiError.validation('Vui lòng chọn ít nhất một sự cố.');
+  const issues = await Promise.all(unique.map((id) => loadIssue(id)));
+  const scope = branchScopeOf(actor);
+  for (const issue of issues) {
+    if (!scopeIncludes(scope, issue.branchId)) throw ApiError.branchAccessDenied();
+    if (issue.status !== 'NEW') {
+      throw ApiError.conflict(
+        issue.status === 'IN_PROGRESS'
+          ? 'Kỹ thuật đang sửa sự cố này, không thể giao lại.'
+          : 'Sự cố đã hoàn thành, không thể giao kỹ thuật.',
+        { status: issue.status, issueId: issue.id },
+      );
+    }
   }
   const technician = await prisma.user.findFirst({
     where: { id: input.technicianUserId, role: 'TECHNICAL', active: true },
     select: { id: true, fullName: true },
   });
   if (!technician) throw ApiError.validation('Kỹ thuật viên không hợp lệ hoặc đã ngừng hoạt động.');
-  if (issue.assignedTechnicianUserId === technician.id) {
-    throw ApiError.conflict('Sự cố đã được giao cho kỹ thuật viên này.');
+  const already = issues.find((i) => i.assignedTechnicianUserId === technician.id);
+  if (already) {
+    throw ApiError.conflict(
+      issues.length === 1
+        ? 'Sự cố đã được giao cho kỹ thuật viên này.'
+        : `"${already.description}" đã được giao cho kỹ thuật viên này. Bỏ chọn sự cố đó rồi giao lại.`,
+    );
   }
 
   const now = clock.now();
   await prisma.$transaction(async (tx) => {
-    // Guarded on the state that was judged above: a technician accepting at the
-    // same instant, or another manager reassigning, wins cleanly or loses with a 409.
-    const { count } = await tx.hotelIssue.updateMany({
-      where: { id, status: 'NEW', assignedTechnicianUserId: issue.assignedTechnicianUserId },
-      data: {
-        assignedTechnicianUserId: technician.id,
-        assignedTechnicianNameSnapshot: technician.fullName,
-        assignedAt: now,
-        assignedByUserId: actor.id,
-        assignedByNameSnapshot: actor.fullName,
-      },
-    });
-    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
-    await tx.hotelIssueAssignment.create({
-      data: {
-        issueId: id,
-        technicianUserId: technician.id,
-        technicianNameSnapshot: technician.fullName,
-        previousTechnicianUserId: issue.assignedTechnicianUserId,
-        previousTechnicianNameSnapshot: issue.assignedTechnicianNameSnapshot,
-        assignedByUserId: actor.id,
-        assignedByNameSnapshot: actor.fullName,
-        assignedByRole: actor.role,
-        createdAt: now,
-      },
-    });
+    for (const issue of issues) {
+      // Guarded on the state that was judged above: a technician accepting at the
+      // same instant, or another manager reassigning, wins cleanly or loses with a 409.
+      const { count } = await tx.hotelIssue.updateMany({
+        where: { id: issue.id, ...LIVE_ISSUE, status: 'NEW', assignedTechnicianUserId: issue.assignedTechnicianUserId },
+        data: {
+          assignedTechnicianUserId: technician.id,
+          assignedTechnicianNameSnapshot: technician.fullName,
+          assignedAt: now,
+          assignedByUserId: actor.id,
+          assignedByNameSnapshot: actor.fullName,
+        },
+      });
+      if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+      await tx.hotelIssueAssignment.create({
+        data: {
+          issueId: issue.id,
+          technicianUserId: technician.id,
+          technicianNameSnapshot: technician.fullName,
+          previousTechnicianUserId: issue.assignedTechnicianUserId,
+          previousTechnicianNameSnapshot: issue.assignedTechnicianNameSnapshot,
+          assignedByUserId: actor.id,
+          assignedByNameSnapshot: actor.fullName,
+          assignedByRole: actor.role,
+          createdAt: now,
+        },
+      });
+    }
   });
 
-  const updated = await loadIssue(id);
+  const updated = await Promise.all(unique.map((id) => loadIssue(id)));
   await notifyAssigned(updated, technician.id, actor.fullName);
   return updated;
 }
 
 /**
- * "Bạn được giao xử lý sự cố TV tại Phòng 302 — 260 Lý Tự Trọng (giao bởi …)".
- * The existing notification table, one row, to the one technician.
+ * "Bạn được giao xử lý sự cố TV tại Phòng 302 — 260 Lý Tự Trọng (giao bởi …)",
+ * or, for a room's batch, "3 sự cố tại Phòng 206 — …: …". One row, to the one
+ * technician, in the existing notification table.
  */
-async function notifyAssigned(issue: IssueDetail, technicianUserId: number, assignedBy: string): Promise<void> {
-  const what = issue.category ? ISSUE_CATEGORY_LABELS[issue.category] : 'sự cố';
+async function notifyAssigned(issues: IssueDetail[], technicianUserId: number, assignedBy: string): Promise<void> {
+  const first = issues[0]!;
+  const what = (i: IssueDetail) => (i.category ? ISSUE_CATEGORY_LABELS[i.category] : i.description);
   await prisma.notification.create({
     data: {
       userId: technicianUserId,
       title: 'Bạn được giao xử lý sự cố',
-      body: `Sự cố ${what} tại ${describeLocation(issue)} — ${issue.branch.address}. Giao bởi ${assignedBy}.`,
+      body:
+        issues.length === 1
+          ? `Sự cố ${first.category ? ISSUE_CATEGORY_LABELS[first.category] : 'sự cố'} tại ${describeLocation(first)} — ${first.branch.address}. Giao bởi ${assignedBy}.`
+          : `${issues.length} sự cố — ${first.branch.address}: ${issues
+              .map((i) => `${describeLocation(i)} (${what(i)})`)
+              .join('; ')}. Giao bởi ${assignedBy}.`,
     },
   });
+}
+
+/**
+ * WHO MAY DELETE AN INCIDENT OR TAKE IT BACK FROM A TECHNICIAN: Reception of its
+ * branch, and the supervisors (Admin, the two reception managers, Quản lý kỹ
+ * thuật) inside their scope. Checked here, on every request — a visible button
+ * is never the permission.
+ */
+function assertIssueManager(issue: IssueDetail, actor: Actor): void {
+  if (actor.role === 'RECEPTIONIST') {
+    if (actor.branchId !== issue.branchId) throw ApiError.branchAccessDenied();
+    return;
+  }
+  if (isTechnicalAssigner(actor.role)) {
+    if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
+    return;
+  }
+  throw ApiError.forbidden('Bạn không có quyền thực hiện thao tác này với sự cố.');
+}
+
+/**
+ * "CHUYỂN VỀ CHỜ GIAO KỸ THUẬT" — an assigned incident the technician has not
+ * accepted goes back to the waiting queue. The assignment row stays (who was
+ * given it, by whom, when) and is marked as taken back; the incident can be
+ * given again. Once accepted, the technician owns the open repair and gives it
+ * back with "Không sửa được" — the attempt then records why.
+ */
+export async function unassignIssue(id: string, actor: Actor, clock: Clock = getClock()): Promise<IssueDetail> {
+  const issue = await loadIssue(id);
+  assertIssueManager(issue, actor);
+  if (issue.status !== 'NEW' || issue.assignedTechnicianUserId === null) {
+    throw ApiError.conflict(
+      issue.status === 'IN_PROGRESS'
+        ? 'Kỹ thuật đã tiếp nhận sự cố này; kỹ thuật viên trả lại bằng "Không sửa được".'
+        : issue.status === 'NEW'
+          ? 'Sự cố chưa được giao kỹ thuật.'
+          : 'Sự cố đã hoàn thành.',
+      { status: issue.status },
+    );
+  }
+  const technicianUserId = issue.assignedTechnicianUserId;
+  const now = clock.now();
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.hotelIssue.updateMany({
+      where: { id, ...LIVE_ISSUE, status: 'NEW', assignedTechnicianUserId: technicianUserId },
+      data: {
+        assignedTechnicianUserId: null,
+        assignedTechnicianNameSnapshot: null,
+        assignedAt: null,
+        assignedByUserId: null,
+        assignedByNameSnapshot: null,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    const current = await tx.hotelIssueAssignment.findFirst({
+      where: { issueId: id, technicianUserId, returnedAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (current) {
+      await tx.hotelIssueAssignment.update({
+        where: { id: current.id },
+        data: { returnedAt: now, returnedByUserId: actor.id, returnedByNameSnapshot: actor.fullName },
+      });
+    }
+  });
+  await prisma.notification.create({
+    data: {
+      userId: technicianUserId,
+      title: 'Sự cố đã được chuyển về chờ giao',
+      body: `${describeLocation(issue)} — ${issue.branch.address}: ${issue.description}. Thực hiện bởi ${actor.fullName}.`,
+    },
+  });
+  return loadIssue(id);
+}
+
+/**
+ * "XÓA" — an open incident leaves every operational list, as a journal entry is
+ * voided: the row, its attempts, assignments, stages and edits stay for the
+ * record; the journal entries that point at it are voided with it, so the
+ * facility journal and the incident never disagree. A finished incident is
+ * history and is not deleted.
+ */
+export async function voidIssue(
+  id: string,
+  input: { reason?: string | null },
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<void> {
+  const issue = await loadIssue(id);
+  assertIssueManager(issue, actor);
+  if (issue.status !== 'NEW' && issue.status !== 'IN_PROGRESS') {
+    throw ApiError.conflict('Sự cố đã hoàn thành, không thể xóa.', { status: issue.status });
+  }
+  const reason = optionalText(input.reason);
+  if (reason && reason.length > 1000) throw ApiError.validation('Lý do quá dài.');
+  const now = clock.now();
+  const holder = issue.acceptedByUserId ?? issue.assignedTechnicianUserId;
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.hotelIssue.updateMany({
+      where: { id, ...LIVE_ISSUE, status: { in: ['NEW', 'IN_PROGRESS'] } },
+      data: { voidedAt: now, voidedByUserId: actor.id, voidedByNameSnapshot: actor.fullName, voidReason: reason },
+    });
+    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await tx.receptionOperationalReport.updateMany({
+      where: { voidedAt: null, facility: { is: { issueId: id } } },
+      data: {
+        voidedAt: now,
+        voidedByUserId: actor.id,
+        voidedByNameSnapshot: actor.fullName,
+        voidReason: reason ?? 'Sự cố đã bị xóa',
+      },
+    });
+  });
+  // The technician holding it is told it is gone, not left looking for it.
+  if (holder !== null) {
+    await prisma.notification.create({
+      data: {
+        userId: holder,
+        title: 'Sự cố đã bị xóa',
+        body: `${describeLocation(issue)} — ${issue.branch.address}: ${issue.description}. Xóa bởi ${actor.fullName}.`,
+      },
+    });
+  }
 }
 
 /** The active technicians an incident can be given to — full names, never usernames. */
@@ -1120,9 +1306,13 @@ export interface CompleteIssueInput {
   /**
    * "Kết quả sửa chữa" — what was done. Required while inspection is active (it
    * is what gets inspected); optional while it is dormant, when "Hoàn thành" is
-   * the single press it has always been.
+   * the single press it has always been. With "Đúng" this is "Cách xử lý (nếu có)".
    */
   result?: string | null;
+  /** "Đúng" / "Sai" — required, the rule every "Hoàn thành" shares. */
+  verdict?: 'CORRECT' | 'INCORRECT' | null;
+  /** "Lý do báo cáo sai" — required with "Sai". */
+  incorrectReason?: string | null;
 }
 
 /**
@@ -1141,8 +1331,14 @@ export async function completeIssue(
 ): Promise<IssueDetail> {
   assertTechnicalActor(actor);
 
-  // Trimmed BEFORE the check: "   " is not a description of a repair.
-  const result = optionalText(input.result);
+  /*
+    "ĐÚNG" OR "SAI" FIRST — the shared rule. "Sai" closes the incident with its
+    reason (there is no repair to inspect); "Đúng" carries "Cách xử lý (nếu có)"
+    as the repair result, required only while inspection is active.
+  */
+  const verdict = parseCompletionVerdict({ verdict: input.verdict, resolution: input.result, incorrectReason: input.incorrectReason });
+  const incorrect = verdict.reportVerdict === 'INCORRECT';
+  const result = incorrect ? `Báo cáo sai: ${verdict.incorrectReason}` : verdict.resolution;
   if (!result && inspectionEnabled()) throw ApiError.validation('Vui lòng nhập kết quả sửa chữa.');
   const cause = optionalText(input.cause);
 
@@ -1163,7 +1359,9 @@ export async function completeIssue(
     reads "Chưa có dữ liệu" — true, and not invented.
   */
   const inspectable =
-    inspectionEnabled() && (issue.attempts.some((a) => a.outcomeAt === null) || issue.acceptedAt !== null);
+    !incorrect &&
+    inspectionEnabled() &&
+    (issue.attempts.some((a) => a.outcomeAt === null) || issue.acceptedAt !== null);
 
   await prisma.$transaction(async (tx) => {
     const { count } = await tx.hotelIssue.updateMany({
@@ -1173,6 +1371,8 @@ export async function completeIssue(
         completedByUserId: actor.id,
         completedByNameSnapshot: actor.fullName,
         completedAt: now,
+        reportVerdict: verdict.reportVerdict,
+        incorrectReason: verdict.incorrectReason,
       },
     });
     if (count === 0) {
@@ -1798,6 +1998,14 @@ export interface ListIssuesFilter {
   roomNumber?: string;
   floorNumber?: string;
   category?: IssueCategory;
+  /**
+   * THE SHARED REPORT PERIOD (business dates and an optional shift), resolved by
+   * `resolveReportPeriod`. Replaces `from`/`to` when given: an incident filed on
+   * Ca C of the 2nd at 01:30 on the 3rd is the 2nd's, like the journal.
+   */
+  period?: ReportPeriod;
+  /** "Hoàn thành vấn đề → Vấn đề báo cáo đúng / sai". */
+  verdict?: 'CORRECT' | 'INCORRECT';
   now?: Date;
   skip: number;
   take: number;
@@ -1833,8 +2041,10 @@ export function technicianStageWhere(userId: number, stage: IssueStage | undefin
  */
 export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promise<{ issues: IssueDetail[]; total: number }> {
   let where: Prisma.HotelIssueWhereInput = {
-    AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : filter.branchId)],
+    AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : filter.branchId), LIVE_ISSUE],
   };
+  if (filter.period) (where.AND as Prisma.HotelIssueWhereInput[]).push(issuePeriodWhere(filter.period));
+  if (filter.verdict) (where.AND as Prisma.HotelIssueWhereInput[]).push(verdictWhere(filter.verdict));
   if (actor.role === 'TECHNICAL') {
     (where.AND as Prisma.HotelIssueWhereInput[]).push(technicianStageWhere(actor.id, filter.stage));
   }
@@ -1869,7 +2079,7 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
       the days the incidents were REPORTED on. The 12-hour rule above still
       decides eligibility; this only intersects with it.
     */
-    if (filter.from || filter.to) {
+    if (!filter.period && (filter.from || filter.to)) {
       where.createdAt = {
         ...(filter.from ? { gte: filter.from } : {}),
         ...(filter.to ? { lt: filter.to } : {}),
@@ -1881,7 +2091,7 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
     // that would silently return nothing.
     where.status = { in: outstandingStatuses() };
     delete where.attempts;
-  } else if (filter.from || filter.to) {
+  } else if (!filter.period && (filter.from || filter.to)) {
     where.createdAt = {
       ...(filter.from ? { gte: filter.from } : {}),
       ...(filter.to ? { lt: filter.to } : {}),

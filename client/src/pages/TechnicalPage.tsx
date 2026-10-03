@@ -66,6 +66,9 @@ import {
   IssueWorkTrail,
 } from '../components/IssueViews';
 import { formatDateTime, hcmToday } from '../lib/format';
+import { groupIssuesByBranchRoom } from '../lib/issueGroups';
+import { CompletionVerdictFields } from '../components/CompletionVerdict';
+import { EMPTY_VERDICT, verdictPayload, verdictReady, type VerdictValue } from '../lib/completionVerdict';
 
 const POLL_MS = 20_000;
 
@@ -301,113 +304,134 @@ export function TechnicalPage() {
             }
           />
         ) : (
-          <ul className="space-y-3" aria-label={queueTitle(key)}>
-            {issues.map((issue) => (
-              <li key={issue.id}>
-                <article className="rounded-2xl border border-line bg-white p-4 shadow-sm">
-                  {/*
-                    Side by side from `sm` up. Below it the actions move UNDER the
-                    content: beside it they kept their width and squeezed the
-                    description and the repair history into a third of a phone.
-                  */}
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0 flex-1">
-                      {/* WHERE — branch, place, state. The first question. */}
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-lg bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
-                          {issue.branch?.address ?? '—'}
-                        </span>
-                        <span className="font-medium text-slate-900">{issue.locationLabel}</span>
-                        {issue.category ? (
-                          <span className="text-sm text-slate-600">{issueCategoryLabel(issue)}</span>
-                        ) : null}
-                        <IssueStageBadge issue={issue} />
-                        {inspectionIsRelevant(issue) ? <IssueInspectionBadge issue={issue} /> : null}
-                        {/* The desk corrected this report after it was filed — see the history below. */}
-                        <IssueEditedFlag issue={issue} />
-                      </div>
+          /*
+            BRANCH → ROOM → the incidents: a room's faults are one group ("Phòng
+            206 · 3 vấn đề"), each still its own card with its own state.
+          */
+          <ul className="space-y-5" aria-label={queueTitle(key)}>
+            {groupIssuesByBranchRoom(issues).flatMap((branchGroup) =>
+              branchGroup.rooms.map((room) => (
+                <li key={room.key} data-testid={`queue-room-${room.key}`}>
+                  <section className="rounded-2xl border border-line-strong bg-slate-50/70 p-3">
+                    <h3 className="mb-2.5 flex flex-wrap items-baseline gap-x-2 px-1 text-base font-bold text-slate-900">
+                      {room.label}
+                      <span className="text-sm font-medium text-slate-600">
+                        {branchGroup.branch?.address ?? '—'} · {room.issues.length} vấn đề
+                        {key === 'new' || key === 'rework' || key === 'in-progress' ? ' cần sửa' : ''}
+                      </span>
+                    </h3>
+                    <ul className="space-y-3">
+                      {room.issues.map((issue) => (
+                        <li key={issue.id}>
+                      <article className="rounded-2xl border border-line bg-white p-4 shadow-sm">
+                        {/*
+                          Side by side from `sm` up. Below it the actions move UNDER the
+                          content: beside it they kept their width and squeezed the
+                          description and the repair history into a third of a phone.
+                        */}
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0 flex-1">
+                            {/* WHERE — branch, place, state. The first question. */}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-lg bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                                {issue.branch?.address ?? '—'}
+                              </span>
+                              <span className="font-medium text-slate-900">{issue.locationLabel}</span>
+                              {issue.category ? (
+                                <span className="text-sm text-slate-600">{issueCategoryLabel(issue)}</span>
+                              ) : null}
+                              <IssueStageBadge issue={issue} />
+                              {inspectionIsRelevant(issue) ? <IssueInspectionBadge issue={issue} /> : null}
+                              {/* The desk corrected this report after it was filed — see the history below. */}
+                              <IssueEditedFlag issue={issue} />
+                            </div>
 
-                      {/* WHAT — the fault, and why it happened when anybody knows. */}
-                      <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-slate-800">
-                        {issue.description}
-                      </p>
-                      <p className="mt-1 text-sm text-slate-700" data-testid={`cause-${issue.id}`}>
-                        <span className="text-slate-500">Nguyên nhân: </span>
-                        {issue.cause ?? <span className="italic text-slate-500">Chưa xác định</span>}
-                      </p>
+                            {/* WHAT — the fault, and why it happened when anybody knows. */}
+                            <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-slate-800">
+                              {issue.description}
+                            </p>
+                            <p className="mt-1 text-sm text-slate-700" data-testid={`cause-${issue.id}`}>
+                              <span className="text-slate-500">Nguyên nhân: </span>
+                              {issue.cause ?? <span className="italic text-slate-500">Chưa xác định</span>}
+                            </p>
 
-                      {/* REPORTED — the employee's name, composed by the server. */}
-                      <p className="mt-1.5 text-xs text-slate-600">
-                        Người báo: {issue.reporterName ?? '—'} · {formatDateTime(issue.createdAt)}
-                      </p>
-                      {/* ASSIGNMENT — who gave it, to whom, when; the server's own state label. */}
-                      <p className="mt-0.5 text-xs text-slate-600" data-testid={`assignment-${issue.id}`}>
-                        {issue.assignmentStateLabel ?? '—'}
-                        {issue.assignedTechnician ? ` · ${issue.assignedTechnician.name}` : ''}
-                        {issue.assignedByName ? ` · giao bởi ${issue.assignedByName}` : ''}
-                        {issue.assignedAt ? ` · ${formatDateTime(issue.assignedAt)}` : ''}
-                      </p>
-                      {issue.repeatOf ? (
-                        <div className="mt-2">
-                          <IssueRepeatNote issue={issue} />
+                            {/* REPORTED — the employee's name, composed by the server. */}
+                            <p className="mt-1.5 text-xs text-slate-600">
+                              Người báo: {issue.reporterName ?? '—'} · {formatDateTime(issue.createdAt)}
+                            </p>
+                            {/* ASSIGNMENT — who gave it, to whom, when; the server's own state label. */}
+                            <p className="mt-0.5 text-xs text-slate-600" data-testid={`assignment-${issue.id}`}>
+                              {issue.assignmentStateLabel ?? '—'}
+                              {issue.assignedTechnician ? ` · ${issue.assignedTechnician.name}` : ''}
+                              {issue.assignedByName ? ` · giao bởi ${issue.assignedByName}` : ''}
+                              {issue.assignedAt ? ` · ${formatDateTime(issue.assignedAt)}` : ''}
+                            </p>
+                            {issue.repeatOf ? (
+                              <div className="mt-2">
+                                <IssueRepeatNote issue={issue} />
+                              </div>
+                            ) : null}
+
+                            {/* The repair stage by stage, while it runs over several visits. */}
+                            <IssueStageTimeline issue={issue} />
+                            {/* ASSIGNED + OUTCOME + the attempt history. */}
+                            <IssueWorkTrail issue={issue} />
+                            {(issue.edits ?? []).length > 0 ? (
+                              <div className="mt-3">
+                                <IssueEditHistory edits={issue.edits} />
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col sm:flex-nowrap sm:items-end">
+                            {isTechnician && issue.status === 'NEW' && issue.assignedTechnician?.id === user?.id ? (
+                              <Button onClick={() => setAccepting(issue)} data-testid={`accept-${issue.id}`}>
+                                Tiếp nhận
+                              </Button>
+                            ) : null}
+                            {isTechnician && issue.status === 'IN_PROGRESS' ? (
+                              <>
+                                {/*
+                                  "Hoàn thành" asks "Tình trạng vấn đề" — finished, or
+                                  one stage of several. With inspection on, it is the
+                                  result form Quản lý kỹ thuật inspects. "Không sửa
+                                  được" always needs its reason.
+                                */}
+                                <Button
+                                  onClick={() => (issue.inspectionEnabled ? setCompleting(issue) : setReporting(issue))}
+                                  data-testid={`complete-${issue.id}`}
+                                >
+                                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                                  Hoàn thành
+                                </Button>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => setCausing(issue)}
+                                  data-testid={`cause-edit-${issue.id}`}
+                                >
+                                  <NotebookPen className="h-4 w-4" aria-hidden="true" />
+                                  Nguyên nhân
+                                </Button>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => setFailing(issue)}
+                                  data-testid={`cannot-repair-${issue.id}`}
+                                >
+                                  <XCircle className="h-4 w-4" aria-hidden="true" />
+                                  Không sửa được
+                                </Button>
+                              </>
+                            ) : null}
+                          </div>
                         </div>
-                      ) : null}
-
-                      {/* The repair stage by stage, while it runs over several visits. */}
-                      <IssueStageTimeline issue={issue} />
-                      {/* ASSIGNED + OUTCOME + the attempt history. */}
-                      <IssueWorkTrail issue={issue} />
-                      {(issue.edits ?? []).length > 0 ? (
-                        <div className="mt-3">
-                          <IssueEditHistory edits={issue.edits} />
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col sm:flex-nowrap sm:items-end">
-                      {isTechnician && issue.status === 'NEW' && issue.assignedTechnician?.id === user?.id ? (
-                        <Button onClick={() => setAccepting(issue)} data-testid={`accept-${issue.id}`}>
-                          Tiếp nhận
-                        </Button>
-                      ) : null}
-                      {isTechnician && issue.status === 'IN_PROGRESS' ? (
-                        <>
-                          {/*
-                            "Hoàn thành" asks "Tình trạng vấn đề" — finished, or
-                            one stage of several. With inspection on, it is the
-                            result form Quản lý kỹ thuật inspects. "Không sửa
-                            được" always needs its reason.
-                          */}
-                          <Button
-                            onClick={() => (issue.inspectionEnabled ? setCompleting(issue) : setReporting(issue))}
-                            data-testid={`complete-${issue.id}`}
-                          >
-                            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                            Hoàn thành
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            onClick={() => setCausing(issue)}
-                            data-testid={`cause-edit-${issue.id}`}
-                          >
-                            <NotebookPen className="h-4 w-4" aria-hidden="true" />
-                            Nguyên nhân
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            onClick={() => setFailing(issue)}
-                            data-testid={`cannot-repair-${issue.id}`}
-                          >
-                            <XCircle className="h-4 w-4" aria-hidden="true" />
-                            Không sửa được
-                          </Button>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                  {issue.photoUrl ? <IssueThumb url={issue.photoUrl} /> : null}
-                </article>
-              </li>
-            ))}
+                        {issue.photoUrl ? <IssueThumb url={issue.photoUrl} /> : null}
+                      </article>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                </li>
+              )),
+            )}
           </ul>
         )}
       </QueryState>
@@ -553,11 +577,13 @@ function CauseModal({ issue, onClose, onDone }: { issue: Issue; onClose: () => v
 function CompleteModal({ issue, onClose, onDone }: { issue: Issue; onClose: () => void; onDone: () => void }) {
   const queryClient = useQueryClient();
   const [cause, setCause] = useState(issue.cause ?? '');
-  const [result, setResult] = useState('');
+  const [verdict, setVerdict] = useState<VerdictValue>(EMPTY_VERDICT);
+  const result = verdict.resolution;
   const complete = useMutation({
     mutationFn: () =>
       issuesApi.complete(issue.id, {
-        result: result.trim(),
+        verdict: verdict.verdict ?? 'CORRECT',
+        ...(verdict.verdict === 'INCORRECT' ? { incorrectReason: verdict.reason.trim() } : { result: result.trim() }),
         // Sent only when the technician CHANGED it: the prefill is the cause on
         // file (Reception's, or an earlier attempt's), and echoing it back would
         // record it as this technician's own finding.
@@ -580,7 +606,8 @@ function CompleteModal({ issue, onClose, onDone }: { issue: Issue; onClose: () =
           </Button>
           <Button
             onClick={() => complete.mutate()}
-            disabled={!result.trim()}
+            // "Đúng" needs the result (it is what gets inspected); "Sai" its reason.
+            disabled={!verdictReady(verdict) || (verdict.verdict === 'CORRECT' && !result.trim())}
             loading={complete.isPending}
             data-testid="complete-confirm"
           >
@@ -608,18 +635,12 @@ function CompleteModal({ issue, onClose, onDone }: { issue: Issue; onClose: () =
             data-testid="complete-cause"
           />
         </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Kết quả sửa chữa <span className="text-rose-600">*</span>
-          <textarea
-            className={FIELD}
-            rows={3}
-            maxLength={2000}
-            value={result}
-            onChange={(e) => setResult(e.target.value)}
-            placeholder="Ví dụ: Đã nạp gas, máy lạnh chạy ổn định"
-            data-testid="complete-result"
-          />
-        </label>
+        <CompletionVerdictFields
+          value={verdict}
+          onChange={setVerdict}
+          resolutionLabel="Kết quả sửa chữa *"
+          resolutionPlaceholder="Ví dụ: Đã nạp gas, máy lạnh chạy ổn định"
+        />
         {complete.isError ? <ErrorAlert>{toUserMessage(complete.error)}</ErrorAlert> : null}
       </div>
     </Modal>
@@ -649,17 +670,23 @@ function StageStatusModal({
   const [state, setState] = useState<'done' | 'follow' | null>(null);
   const [workDone, setWorkDone] = useState('');
   const [nextWork, setNextWork] = useState('');
+  // "Đã xử lý xong" is a "Hoàn thành": Đúng (with "Cách xử lý") or Sai (with its reason).
+  const [verdict, setVerdict] = useState<VerdictValue>(EMPTY_VERDICT);
   const save = useMutation({
-    mutationFn: () =>
-      state === 'follow'
-        ? issuesApi.recordStage(issue.id, { workDone: workDone.trim(), nextWork: nextWork.trim() })
-        : issuesApi.complete(issue.id, workDone.trim() ? { result: workDone.trim() } : {}),
+    mutationFn: () => {
+      if (state === 'follow') {
+        return issuesApi.recordStage(issue.id, { workDone: workDone.trim(), nextWork: nextWork.trim() });
+      }
+      const { verdict: v, resolution, incorrectReason } = verdictPayload(verdict);
+      return issuesApi.complete(issue.id, { verdict: v, ...(resolution ? { result: resolution } : {}), ...(incorrectReason ? { incorrectReason } : {}) });
+    },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['issues'] });
       onDone(state !== 'follow');
     },
   });
-  const ready = state === 'done' || (state === 'follow' && workDone.trim() !== '' && nextWork.trim() !== '');
+  const ready =
+    (state === 'done' && verdictReady(verdict)) || (state === 'follow' && workDone.trim() !== '' && nextWork.trim() !== '');
   const stage = issue.currentStageNumber ?? (issue.stages ?? []).length + 1;
   const option = (value: 'done' | 'follow', label: string, hint: string) => (
     <label
@@ -705,10 +732,16 @@ function StageStatusModal({
           {option('done', 'Đã xử lý xong', 'Sự cố được hoàn thành.')}
           {option('follow', 'Đang trong quá trình theo dõi thêm', 'Ghi nhận giai đoạn này; sự cố vẫn ở trạng thái “Đang sửa”.')}
         </fieldset>
-        {state ? (
+        {state === 'done' ? (
+          <CompletionVerdictFields
+            value={verdict}
+            onChange={setVerdict}
+            resolutionPlaceholder="Ví dụ: Đã nạp gas, máy lạnh chạy ổn định"
+          />
+        ) : null}
+        {state === 'follow' ? (
           <label className="block text-sm font-medium text-slate-700">
-            Công việc hoàn thành{' '}
-            {state === 'follow' ? <span className="text-rose-600">*</span> : <span className="font-normal text-slate-500">(không bắt buộc)</span>}
+            Công việc hoàn thành <span className="text-rose-600">*</span>
             <textarea
               className={FIELD}
               rows={3}

@@ -159,8 +159,9 @@ describe('the two outcomes of a repair', () => {
     await user.click(await screen.findByTestId('complete-i1'));
     const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
     await user.click(within(dialog).getByTestId('stage-status-done'));
+    await user.click(within(dialog).getByTestId('verdict-CORRECT'));
     await user.click(within(dialog).getByTestId('stage-confirm'));
-    await waitFor(() => expect(sent).toEqual({}));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT' }));
   });
 
   /**
@@ -185,13 +186,14 @@ describe('the two outcomes of a repair', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
     expect(sent).toBeNull();
     expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
+    await user.click(within(dialog).getByTestId('verdict-CORRECT'));
     // Whitespace is not a result.
-    await user.type(within(dialog).getByTestId('complete-result'), '   ');
+    await user.type(within(dialog).getByTestId('verdict-resolution'), '   ');
     expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
 
-    await user.type(within(dialog).getByTestId('complete-result'), 'Đã thông tắc');
+    await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã thông tắc');
     await user.click(within(dialog).getByTestId('complete-confirm'));
-    await waitFor(() => expect(sent).toEqual({ result: 'Đã thông tắc' }));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã thông tắc' }));
   });
 
   it('asks for a reason before it will return an incident to the queue', async () => {

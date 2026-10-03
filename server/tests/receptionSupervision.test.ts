@@ -321,7 +321,7 @@ describe('a technician works only what was assigned to them', () => {
     const first = await incident(letan1, '302', 'AIR_CONDITIONER');
     await assignTo(admin, first, tech);
     await tech.post(`/api/issues/${first}/accept`).send({ technicianName: 'A', technicianPhone: '1' });
-    await tech.post(`/api/issues/${first}/complete`).send({});
+    await tech.post(`/api/issues/${first}/complete`).send({ verdict: 'CORRECT' });
 
     const similar = await letan1.get(`/api/issues/similar?roomNumber=302&category=AIR_CONDITIONER`);
     expect(similar.status).toBe(200);

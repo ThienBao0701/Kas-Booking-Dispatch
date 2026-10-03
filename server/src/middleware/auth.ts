@@ -68,8 +68,9 @@ const RECEPTION_SUPERVISOR_ROUTES = [
   /^\/api\/branches(\/|$)/,
   /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
   /^\/api\/reception\/reports(\/|$)/,
-  // The five shifts and their clock times — the export's shift choices.
-  /^\/api\/reception\/shifts\/options$/,
+  // The five shifts and their clock times — the export's shift choices — and
+  // the shifts that actually ran in a period, for the report filter's "Ca".
+  /^\/api\/reception\/shifts\/(options|available)$/,
   /^\/api\/issues(\/|$)/,
   /^\/api\/chat\/channels(\/|$)/,
   /^\/api\/chat\/attachments(\/|$)/,
@@ -95,6 +96,8 @@ const TECHNICAL_MANAGER_ROUTES = [
   /^\/api\/auth(\/|$)/,
   /^\/api\/branches(\/|$)/,
   /^\/api\/issues(\/|$)/,
+  // The report filter's "Ca" — the shifts that ran in the period.
+  /^\/api\/reception\/shifts\/available$/,
   /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,

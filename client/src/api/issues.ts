@@ -271,6 +271,9 @@ export interface Issue {
   stages?: RepairStage[];
   /** The stage under way while the repair is worked; null otherwise. */
   currentStageNumber?: number | null;
+  /** "Đúng" / "Sai" from "Hoàn thành"; null before it (and on older completions — read as "Đúng"). */
+  reportVerdict?: ReportVerdict | null;
+  incorrectReason?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -284,6 +287,35 @@ export type AssignmentState =
   | 'COMPLETED';
 
 /** One assignment: who got the job, from whom, by whom, when. */
+/** "Hoàn thành": was the report right? */
+export type ReportVerdict = 'CORRECT' | 'INCORRECT';
+
+/**
+ * WHERE AN INCIDENT IS, AS A PLACE — the room (or floor, or fixture) without the
+ * free-text detail, so the four faults of Phòng 206 are one group however each
+ * was described. Same fields as the server's structured key.
+ */
+export function issuePlace(issue: Pick<Issue, 'branchId' | 'areaCategory' | 'roomNumber' | 'floorNumber' | 'areaSubtype' | 'locationLabel'>): {
+  key: string;
+  label: string;
+} {
+  if (!issue.areaCategory) {
+    return {
+      key: `${issue.branchId}|legacy|${issue.roomNumber ?? issue.locationLabel}`,
+      label: issue.roomNumber ? `Phòng ${issue.roomNumber}` : issue.locationLabel,
+    };
+  }
+  const parts: string[] = [];
+  if (issue.roomNumber) parts.push(`Phòng ${issue.roomNumber}`);
+  else parts.push(ISSUE_AREA_LABEL[issue.areaCategory]);
+  if (issue.floorNumber) parts.push(`Tầng ${issue.floorNumber}`);
+  if (issue.areaSubtype) parts.push(ISSUE_AREA_SUBTYPE_LABEL[issue.areaSubtype]);
+  return {
+    key: [issue.branchId, issue.areaCategory, issue.roomNumber ?? '', issue.floorNumber ?? '', issue.areaSubtype ?? ''].join('|'),
+    label: parts.join(' · '),
+  };
+}
+
 export interface IssueAssignment {
   id: string;
   technicianId: number;
@@ -293,6 +325,9 @@ export interface IssueAssignment {
   assignedByName: string;
   assignedByRole: string;
   createdAt: string;
+  /** "Chuyển về chờ giao kỹ thuật": who took it back, and when. */
+  returnedAt?: string | null;
+  returnedByName?: string | null;
 }
 
 /** "Báo lại sau lần hoàn thành trước" — the previous completion, stated neutrally. */
@@ -508,6 +543,10 @@ export const issuesApi = {
       completedTo?: string;
       /** Waiting incidents nobody holds — the supervisors' to-do list. */
       assignment?: 'UNASSIGNED';
+      /** The shared report filter's "Ca"; with `from`/`to` as business dates. */
+      shiftType?: string;
+      /** "Hoàn thành vấn đề → Vấn đề báo cáo đúng / sai". */
+      verdict?: ReportVerdict;
       /** The technical report's filters. */
       technicianUserId?: number;
       roomNumber?: string;
@@ -577,8 +616,22 @@ export const issuesApi = {
     api.post<{ issue: Issue }>(`/issues/${id}/accept`, input),
 
   /** "Hoàn thành": the result is required; the cause only when the technician changed it. */
-  complete: (id: string, input: { result?: string; cause?: string } = {}) =>
-    api.post<{ issue: Issue }>(`/issues/${id}/complete`, input),
+  /** "Hoàn thành": the verdict is required ("Đúng" + optional result, or "Sai" + its reason). */
+  complete: (
+    id: string,
+    input: { verdict: ReportVerdict; result?: string; incorrectReason?: string; cause?: string },
+  ) => api.post<{ issue: Issue }>(`/issues/${id}/complete`, input),
+
+  /** "Giao kỹ thuật" for a room's chosen incidents, together. */
+  assignMany: (issueIds: string[], technicianUserId: number) =>
+    api.post<{ issues: Issue[] }>('/issues/assign', { issueIds, technicianUserId }),
+
+  /** "Chuyển về chờ giao kỹ thuật". */
+  unassign: (id: string) => api.post<{ issue: Issue }>(`/issues/${id}/unassign`, {}),
+
+  /** "Xóa" — a void; the record and its history stay. */
+  voidIssue: (id: string, reason?: string) =>
+    api.post<{ voided: true; id: string }>(`/issues/${id}/void`, reason ? { reason } : {}),
 
   /** "Nguyên nhân" found during the repair, on the attempt still open. */
   updateCause: (id: string, input: { cause: string }) =>

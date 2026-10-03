@@ -236,7 +236,7 @@ describe('the drill-down returns records, not counts', () => {
     setClock({ now: () => hcm('2026-09-19', '13:00') });
     const completed = await letan
       .post(`/api/reception/reports/${requestId}/complete`)
-      .send({ resolution: 'Đã trả hành lý' });
+      .send({ verdict: 'CORRECT', resolution: 'Đã trả hành lý' });
     expect(completed.status).toBe(200);
 
     const res = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&category=GUEST_REQUEST`);

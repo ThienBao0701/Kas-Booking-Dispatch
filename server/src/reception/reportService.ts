@@ -27,9 +27,11 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { HotelDeliveryDepartment, Prisma, PrismaClient, ShiftType, UserRole } from '@prisma/client';
+import type { HotelDeliveryDepartment, Prisma, PrismaClient, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
+import { parseCompletionVerdict, verdictWhere, type CompletionVerdictInput } from '../completion/verdict';
+import { journalPeriodWhere, type ReportPeriod } from './businessDate';
 import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
 import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
@@ -41,7 +43,6 @@ import {
   ARCHIVABLE_CATEGORIES,
   activeJournalWhere,
   archivedJournalWhere,
-  type ReceivedWindow,
 } from './completionArchive';
 import {
   CATEGORY_LABELS,
@@ -316,6 +317,8 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
             ? shiftDefinition(row.guestRequest.completedShiftType).name
             : null,
           resolution: row.guestRequest.resolution,
+          reportVerdict: row.guestRequest.reportVerdict,
+          incorrectReason: row.guestRequest.incorrectReason,
         }
       : null,
 
@@ -340,6 +343,8 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
             : null,
           /** "Hướng xử lý (nếu có)". */
           resolution: row.complaint.resolution,
+          reportVerdict: row.complaint.reportVerdict,
+          incorrectReason: row.complaint.incorrectReason,
         }
       : null,
 
@@ -857,9 +862,10 @@ async function buildCreateData(
       */
       const issue = await client.hotelIssue.findUnique({
         where: { id: input.facility.issueId },
-        select: { id: true, branchId: true },
+        select: { id: true, branchId: true, voidedAt: true },
       });
-      if (!issue) throw ApiError.validation('Không tìm thấy sự cố được tham chiếu.');
+      // A deleted ("Xóa") incident is not something the journal can point at.
+      if (!issue || issue.voidedAt) throw ApiError.validation('Không tìm thấy sự cố được tham chiếu.');
       if (issue.branchId !== base.branchId) {
         throw ApiError.branchAccessDenied('Sự cố không thuộc chi nhánh của bạn.');
       }
@@ -1033,13 +1039,34 @@ export async function listActiveJournal(
 export async function listArchivedJournal(
   actor: ReportActor,
   now: Date,
-  received: ReceivedWindow | null = null,
+  options: {
+    /** The shared report period (business dates, shift); every archived record when absent. */
+    period?: ReportPeriod | null;
+    /** "Vấn đề báo cáo đúng" / "sai"; both when absent. */
+    verdict?: ReportVerdict;
+    /** A supervisor's one branch (inside its scope); a receptionist's is always its own. */
+    branchId?: number;
+  } = {},
   client: PrismaClient = prisma,
-  /** A supervisor's one branch (inside its scope); a receptionist's is always its own. */
-  branchId?: number,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
+  const where = archivedJournalWhere(reportVisibilityWhere(actor, { branchId: options.branchId }), now);
   return pageByCategory(
-    archivedJournalWhere(reportVisibilityWhere(actor, { branchId }), now, received),
+    {
+      AND: [
+        where,
+        ...(options.period ? [journalPeriodWhere(options.period)] : []),
+        ...(options.verdict
+          ? [
+              {
+                OR: [
+                  { guestRequest: { is: verdictWhere(options.verdict) } },
+                  { complaint: { is: verdictWhere(options.verdict) } },
+                ],
+              },
+            ]
+          : []),
+      ],
+    },
     ARCHIVE_PAGE_SIZE,
     client,
   );
@@ -1547,10 +1574,11 @@ export async function voidReport(
  * two names on it afterwards, and the first one is still the answer to "who
  * took it?".
  *
- * THE HANDLING TEXT IS OPTIONAL ("Cách xử lý / Hướng xử lý (nếu có)"). Plenty
- * of completions need no explanation — the bag was collected — so an empty or
- * blank one is stored as null, never as a placeholder sentence. The time, the
- * person and the shift are the server's; nothing in the request sets them.
+ * THE VERDICT IS REQUIRED ("Đúng" / "Sai", `parseCompletionVerdict`, the rule
+ * every "Hoàn thành" shares). "Đúng" takes an optional handling text ("Cách xử
+ * lý / Hướng xử lý (nếu có)") — blank is stored as null, never a placeholder
+ * sentence; "Sai" requires "Lý do báo cáo sai". The time, the person and the
+ * shift are the server's; nothing in the request sets them.
  *
  * Guarded by `completedAt: null` and a live report in the update itself, so two
  * receptionists completing at once produce one completion, and a void racing a
@@ -1558,12 +1586,12 @@ export async function voidReport(
  */
 export async function completeReport(
   id: string,
-  resolution: string | null | undefined,
+  input: CompletionVerdictInput,
   actor: ReportActor,
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ReportDetail> {
-  const handled = optional(resolution);
+  const verdict = parseCompletionVerdict(input);
   const now = clock.now();
   const current = await loadOwn(id, actor, client);
   const detail =
@@ -1586,7 +1614,9 @@ export async function completeReport(
     completedAt: now,
     completedShiftSessionId: writer.shiftSessionId,
     completedShiftType: writer.shiftType,
-    resolution: handled,
+    resolution: verdict.resolution,
+    reportVerdict: verdict.reportVerdict,
+    incorrectReason: verdict.incorrectReason,
   };
   const { count } =
     current.category === 'GUEST_REQUEST'

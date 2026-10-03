@@ -13,6 +13,8 @@ import {
   serializeHandoverNote,
 } from '../shift/handoverNoteService';
 import { SHIFT_DEFINITIONS } from '../shift/shiftTypes';
+import { availableShifts } from '../reception/businessDate';
+import { branchScopeOf, scopeIncludes } from '../auth/branchScope';
 import type { UserWithBranch } from '../auth/serialize';
 
 const SHIFT = z.enum(['A', 'B', 'C', 'A4', 'C4']);
@@ -83,6 +85,25 @@ export function createReceptionShiftsRouter(): Router {
   // Served rather than hardcoded in the client so the times exist ONCE.
   router.get('/reception/shifts/options', requireAuth, requirePasswordChanged, (_req, res) => {
     res.json({ shifts: SHIFT_DEFINITIONS });
+  });
+
+  /*
+    GET /api/reception/shifts/available?from&to[&branchId] — the report filter's
+    "Ca": the shifts that actually ran on those BUSINESS dates, in the reader's
+    branches (one branch when asked). Never a fixed list.
+  */
+  router.get('/reception/shifts/available', requireAuth, requirePasswordChanged, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Ngày không hợp lệ.');
+      const q = z
+        .object({ from: day, to: day, branchId: z.coerce.number().int().positive().optional() })
+        .refine((v) => v.from <= v.to, { message: 'Khoảng ngày không hợp lệ.', path: ['to'] })
+        .parse(req.query);
+      const scope = branchScopeOf(user);
+      if (q.branchId !== undefined && !scopeIncludes(scope, q.branchId)) throw ApiError.branchAccessDenied();
+      res.json({ shifts: await availableShifts(scope, q) });
+    })().catch(next);
   });
 
   // GET /api/reception/shifts/current — the open session, or null.

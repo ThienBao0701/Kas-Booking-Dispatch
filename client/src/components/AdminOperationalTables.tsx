@@ -39,6 +39,7 @@ import { IssueStageBadge } from './IssueViews';
 import type { SectionFrame } from './ReportSection';
 import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
+import { completionText } from '../lib/completionVerdict';
 import { ROOM_SERVICE_PRICE_LABEL, reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
 
 export interface AdminTableProps {
@@ -431,7 +432,7 @@ export function AdminGuestRequestTable({ rows, title, grouped, onEdit, ...state 
       header: 'Cách xử lý (nếu có)',
       secondary: true,
       className: 'min-w-[9rem] max-w-[18rem]',
-      render: (r) => handling(r.guestRequest?.resolution),
+      render: (r) => handling(r.guestRequest ? completionText(r.guestRequest) : null),
     },
     {
       key: 'lifecycle',
@@ -497,7 +498,7 @@ export function AdminServiceQualityTable({ rows, title, grouped, onEdit, ...stat
       header: 'Hướng xử lý (nếu có)',
       secondary: true,
       className: 'min-w-[9rem] max-w-[18rem]',
-      render: (r) => handling(r.complaint?.resolution),
+      render: (r) => handling(r.complaint ? completionText(r.complaint) : null),
     },
     staff('Người tạo'),
     shift(),

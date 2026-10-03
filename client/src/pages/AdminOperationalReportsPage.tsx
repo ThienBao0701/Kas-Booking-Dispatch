@@ -13,9 +13,14 @@
  * "Sự cố cơ sở vật chất đang xử lý" here is the incident monitor that used to be the
  * separate "Sự cố khách sạn" screen: the HotelIssue rows themselves.
  *
- * THREE FILTERS, NO MORE: a period, a branch, a category. All three are applied
- * by the SERVER — this page never filters rows itself — and the export uses the
- * same three, so a PDF always contains exactly what the screen was showing.
+ * ONE PAGE PER CATEGORY. The menu ("Báo cáo vấn đề → Lễ tân → …") is the
+ * category, as `?category=`: "Tổng" is the overview of every category; each
+ * category page shows that category and nothing else.
+ *
+ * THE SHARED REPORT FILTER (`ReportFilterBar`): Hôm nay / Ngày cụ thể / Khoảng
+ * ngày over BUSINESS dates, the branch, and the shifts that actually ran. All of
+ * it is applied by the SERVER — this page never filters rows itself — and the
+ * export starts from the same choices.
  * There is still no employee filter, no status filter and no query builder:
  * every filter added between the branch and the rows is one more way to be
  * looking at a subset while believing you are looking at everything.
@@ -27,8 +32,8 @@
  * A TABLE, NOT A STACK OF CARDS. The full record, correction history and all,
  * is one click down inside the row.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Building2, Download, Plus } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
@@ -59,6 +64,9 @@ import { EmptyState } from '../components/EmptyState';
 import { Modal } from '../components/Modal';
 import { QueryState } from '../components/PageState';
 import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
+import { ReportFilterBar } from '../components/ReportFilter';
+import { initialReportFilter, reportBranchId, reportPeriod, type ReportFilterValue } from '../lib/reportFilter';
+import { DeleteIssueDialog, UnassignIssueDialog } from '../components/IssueManageDialogs';
 import {
   AdminAllCategoriesTable,
   AdminDeliveryTable,
@@ -78,9 +86,7 @@ import {
   CATEGORY_ORDER,
   HOTEL_DELIVERY_TITLE,
 } from '../lib/reportCategories';
-import { branchOptionLabel } from '../lib/branchTone';
 import { groupByBranch, type ShiftGroup } from '../lib/shiftGroups';
-import { PeriodQuickPicks } from '../components/PeriodQuickPicks';
 import { issuesApi } from '../api/issues';
 import {
   EditIssueModal,
@@ -90,9 +96,6 @@ import {
   NewIssueModal,
 } from '../components/IncidentReporting';
 import { useIssueSummary } from '../hooks/useIssueSummary';
-
-/** Not chosen yet · every branch · one branch. */
-type BranchChoice = number | 'ALL' | null;
 
 type TableState = {
   isLoading: boolean;
@@ -105,36 +108,29 @@ type TableState = {
 
 export function AdminOperationalReportsPage() {
   const today = hcmToday();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   /*
     THE CATEGORY IS THE ADDRESS: "Báo cáo vấn đề → Lễ tân → <danh mục>" in the
-    menu links to `?category=…`, and a tab here writes the same, so the menu,
-    the tabs and a shared link always agree. A linked category opens on every
+    menu links to `?category=…` (so do the overview's cards), so the menu and a
+    shared link always agree. A linked category opens on every
     branch rather than asking for one first.
   */
   const category = CATEGORY_ORDER.find((c) => c === searchParams.get('category')) ?? null;
-  const setCategory = (next: ReportCategory | null) =>
-    setSearchParams(
-      (prev) => {
-        const params = new URLSearchParams(prev);
-        if (next) params.set('category', next);
-        else params.delete('category');
-        return params;
-      },
-      { replace: true },
-    );
-  const [branch, setBranch] = useState<BranchChoice>(category ? 'ALL' : null);
+  /*
+    THE SHARED FILTER. TODAY BY DEFAULT: an unbounded default read a branch's
+    entire history beside a cash strip that covered one day. It survives moving
+    between categories in the menu — the same period, branch and shift.
+  */
+  const [filter, setFilter] = useState<ReportFilterValue>(() =>
+    initialReportFilter(today, { branch: category ? 'ALL' : null }),
+  );
+  const branch = filter.branch;
   // A category picked from the menu with no branch yet reads every branch.
   useEffect(() => {
-    if (category && branch === null) setBranch('ALL');
-  }, [category, branch]);
-  /*
-    TODAY BY DEFAULT. An unbounded default read a branch's entire history —
-    capped at 500 rows, so the screen quietly showed a fraction of it — beside a
-    cash strip that covered one day. The period is now the first thing chosen
-    and both the rows and the drawer follow it.
-  */
-  const [range, setRange] = useState<DateRangeValue>({ from: today, to: today });
+    if (category && filter.branch === null) setFilter((f) => ({ ...f, branch: 'ALL' }));
+  }, [category, filter.branch]);
+  const period = reportPeriod(filter, today);
+  const range: DateRangeValue = period ?? { from: '', to: '' };
   const [exportOpen, setExportOpen] = useState(false);
   /** "+ Báo cáo vấn đề": the branch → category → form dialog. */
   const [creating, setCreating] = useState(false);
@@ -147,7 +143,7 @@ export function AdminOperationalReportsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'ADMIN';
 
-  const rangeValid = range.from !== '' && range.to !== '' && range.from <= range.to;
+  const rangeValid = period !== null;
 
   const options = useQuery({
     queryKey: ['reception', 'reports', 'options'],
@@ -179,14 +175,15 @@ export function AdminOperationalReportsPage() {
   };
 
   const filters = {
-    branchId: branch === 'ALL' || branch === null ? undefined : branch,
+    branchId: reportBranchId(filter),
     category: category ?? undefined,
     from: range.from,
     to: range.to,
+    shiftType: filter.shiftType || undefined,
   };
 
   const data = useQuery({
-    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to],
+    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to, filter.shiftType],
     queryFn: () => adminReportsApi.operational(filters),
     enabled: branch !== null && rangeValid,
   });
@@ -228,9 +225,14 @@ export function AdminOperationalReportsPage() {
     <div>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
         <div className="min-w-0 max-w-[40rem]">
-          <h1 className="text-xl font-bold leading-snug tracking-tight text-slate-900">Báo cáo vấn đề</h1>
+          <p className="text-xs font-medium text-slate-500">Báo cáo vấn đề › Lễ tân</p>
+          <h1 className="text-xl font-bold leading-snug tracking-tight text-slate-900" data-testid="report-title">
+            {category ? label(category) : 'Tổng quan'}
+          </h1>
           <p className="mt-0.5 text-sm text-slate-500">
-            Chọn khoảng thời gian, chi nhánh và danh mục. Bản ghi được xếp theo ngày, ca và nhân viên.
+            {category
+              ? 'Bản ghi của danh mục này, xếp theo ngày, ca và nhân viên.'
+              : 'Toàn cảnh các danh mục lễ tân trong kỳ đang xem.'}
           </p>
         </div>
         <div className="ml-auto flex flex-wrap gap-2">
@@ -259,55 +261,14 @@ export function AdminOperationalReportsPage() {
         error={branches.error}
         onRetry={() => void branches.refetch()}
       >
-        {/*
-          THE THREE FILTERS, as one block. Each is one decision, made once; every
-          control is the same 44px tall so the row reads as one line of choices.
-        */}
-        <section
-          data-testid="admin-filters"
-          aria-label="Bộ lọc báo cáo"
-          className="mb-4 overflow-hidden rounded-xl border-section border-line bg-white shadow-sm"
-        >
-          <p className="border-b-rule border-line bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-            Bộ lọc báo cáo
-          </p>
-          <div className="flex flex-wrap items-end gap-x-4 gap-y-3 px-4 py-3">
-            <div className="min-w-[17rem]">
-              <DateRangeField
-                legend="Khoảng thời gian"
-                value={range}
-                onChange={setRange}
-                max={today}
-                testId="admin-range"
-              />
-            </div>
-            <PeriodQuickPicks value={range} onChange={setRange} today={today} testId="admin-range" />
-            <div className="min-w-[16rem] flex-1">
-              <label htmlFor="admin-branch" className="mb-1 block text-xs font-medium text-slate-500">
-                Chi nhánh
-              </label>
-              <select
-                id="admin-branch"
-                data-testid="branch-select"
-                value={branch === null ? '' : String(branch)}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setBranch(v === '' ? null : v === 'ALL' ? 'ALL' : Number(v));
-                }}
-                className="min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-800 hover:border-slate-600 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600"
-              >
-                <option value="">— Chọn chi nhánh —</option>
-                <option value="ALL">Tất cả chi nhánh</option>
-                {(branches.data?.branches ?? []).map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {branchOptionLabel(b)} ({unresolvedByBranch.get(b.id) ?? 0})
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-[11px] text-slate-500">Số trong ngoặc: sự cố chưa xử lý của chi nhánh.</p>
-            </div>
-          </div>
-        </section>
+        <ReportFilterBar
+          value={filter}
+          onChange={setFilter}
+          today={today}
+          branches={branches.data?.branches ?? []}
+          branchCounts={unresolvedByBranch}
+          testId="admin-filters"
+        />
       </QueryState>
 
       {branch === null ? (
@@ -323,36 +284,19 @@ export function AdminOperationalReportsPage() {
       ) : (
         <div className="space-y-4">
           {/*
-            ONE SEGMENTED STRIP. On a phone it scrolls sideways inside itself
-            rather than stacking six buttons into a wall; wider, it wraps within
-            the same track so no category is ever hidden off the edge.
+            "TỔNG" IS THE OVERVIEW: every category's count for the period, each a
+            way into its own page; the unfinished shifts; the drawer.
           */}
-          <nav aria-label="Danh mục báo cáo" className="overflow-x-auto" data-testid="admin-category-menu">
-            <div className="flex w-max gap-1 rounded-xl border border-slate-300 bg-slate-100 p-1 sm:w-auto sm:flex-wrap">
-              <CategoryTab testId="admin-category-ALL" active={category === null} onClick={() => setCategory(null)}>
-                Tất cả
-              </CategoryTab>
-              {CATEGORY_ORDER.map((c) => (
-                <CategoryTab
-                  key={c}
-                  testId={`admin-category-${c}`}
-                  active={category === c}
-                  onClick={() => setCategory(c)}
-                  // The incident tab lists HotelIssue rows, not journal entries, so a
-                  // journal count on it would describe something else.
-                  count={c === 'FACILITY_ISSUE' ? undefined : (data.data?.counts[c] ?? 0)}
-                >
-                  {label(c)}
-                </CategoryTab>
-              ))}
-            </div>
-          </nav>
-
-          {/*
-            AN UNFINISHED DAY SAYS SO. Shifts of this period that have not pressed
-            "Kết thúc ca" are on screen, flagged, but not in the official export.
-          */}
-          {category !== 'FACILITY_ISSUE' && data.data && data.data.openShifts.length > 0 ? (
+          {category === null && data.data ? (
+            <ReportOverview
+              counts={data.data.counts}
+              unresolvedIncidents={
+                typeof branch === 'number' ? (unresolvedByBranch.get(branch) ?? 0) : [...unresolvedByBranch.values()].reduce((a, b) => a + b, 0)
+              }
+              label={label}
+            />
+          ) : null}
+          {category === null && data.data && data.data.openShifts.length > 0 ? (
             <OpenShiftWarning notices={data.data.openShifts} warning={data.data.openShiftWarning} />
           ) : null}
 
@@ -377,7 +321,13 @@ export function AdminOperationalReportsPage() {
           ) : null}
 
           {category === 'FACILITY_ISSUE' ? (
-            <AdminIncidentView branchId={filters.branchId} range={range} isAdmin={isAdmin} onToast={setToast} />
+            <AdminIncidentView
+              branchId={filters.branchId}
+              range={range}
+              shiftType={filters.shiftType}
+              isAdmin={isAdmin}
+              onToast={setToast}
+            />
           ) : (
             <CategoryView
               category={category}
@@ -465,63 +415,6 @@ export function AdminOperationalReportsPage() {
 
       <Toast message={toast} onDone={() => setToast(null)} />
     </div>
-  );
-}
-
-function CategoryTab({
-  children,
-  count,
-  active,
-  onClick,
-  testId,
-}: {
-  children: React.ReactNode;
-  count?: number;
-  active: boolean;
-  onClick: () => void;
-  testId: string;
-}) {
-  const ref = useRef<HTMLButtonElement>(null);
-  /*
-    On a phone the strip scrolls sideways, so a category opened from a link
-    (the old "Sự cố khách sạn" address) could be chosen yet out of sight. The
-    strip — never the page — scrolls just far enough to show it.
-  */
-  useEffect(() => {
-    const tab = ref.current;
-    const strip = tab?.closest('nav');
-    if (!active || !tab || !strip) return;
-    const s = strip.getBoundingClientRect();
-    const t = tab.getBoundingClientRect();
-    if (t.left < s.left) strip.scrollLeft -= s.left - t.left + 8;
-    else if (t.right > s.right) strip.scrollLeft += t.right - s.right + 8;
-  }, [active]);
-
-  return (
-    <button
-      ref={ref}
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      data-testid={testId}
-      className={`inline-flex min-h-[2.5rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 sm:flex-auto ${
-        active
-          ? 'bg-white font-semibold text-brand-700 shadow-sm ring-1 ring-slate-300'
-          : 'font-medium text-slate-600 hover:bg-white/70 hover:text-slate-900'
-      }`}
-    >
-      {children}
-      {/* A convenience for choosing; never a substitute for the rows. */}
-      {count !== undefined ? (
-        <span
-          className={`inline-flex min-w-[1.5rem] justify-center rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums ${
-            active ? 'bg-brand-600 text-white' : 'bg-slate-200 text-slate-600'
-          }`}
-        >
-          {count}
-        </span>
-      ) : null}
-    </button>
   );
 }
 
@@ -741,7 +634,7 @@ function ShiftBlock({
           </h3>
         </div>
         <div className="basis-full sm:ml-auto sm:basis-auto">
-          <ShiftSummary group={group} label={label} />
+          <ShiftSummary group={group} label={label} only={category} />
         </div>
       </header>
       <div className="space-y-3 bg-slate-50/60 p-3">
@@ -783,8 +676,17 @@ function shiftCode(group: ShiftGroup): string | undefined {
  * What the person on this shift recorded, by category — and whether the shift
  * has ended. An open shift is on screen but not yet in the official report.
  */
-function ShiftSummary({ group, label }: { group: ShiftGroup; label: (c: ReportCategory) => string }) {
-  const parts = CATEGORY_ORDER.filter((c) => (group.counts[c] ?? 0) > 0).map(
+function ShiftSummary({
+  group,
+  label,
+  only,
+}: {
+  group: ShiftGroup;
+  label: (c: ReportCategory) => string;
+  /** A category page counts its own category only. */
+  only: ReportCategory | null;
+}) {
+  const parts = (only ? [only] : CATEGORY_ORDER).filter((c) => (group.counts[c] ?? 0) > 0).map(
     (c) => `${label(c)}: ${group.counts[c]}`,
   );
   return (
@@ -799,6 +701,49 @@ function ShiftSummary({ group, label }: { group: ShiftGroup; label: (c: ReportCa
         </span>
       )}
     </span>
+  );
+}
+
+/**
+ * "TỔNG" — the overview: each category's count for the period, each a way into
+ * its own page. The incidents count what is still unresolved (the branch
+ * selector's number), since the incident page lists the incidents themselves.
+ */
+function ReportOverview({
+  counts,
+  unresolvedIncidents,
+  label,
+}: {
+  counts: Record<ReportCategory, number>;
+  unresolvedIncidents: number;
+  label: (c: ReportCategory) => string;
+}) {
+  return (
+    <section aria-label="Tổng quan danh mục" data-testid="report-overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {CATEGORY_ORDER.map((c) => {
+        const facility = c === 'FACILITY_ISSUE';
+        const n = facility ? unresolvedIncidents : (counts[c] ?? 0);
+        return (
+          <Link
+            key={c}
+            to={`/app/reports?category=${c}`}
+            data-testid={`overview-${c}`}
+            className="group flex items-center justify-between gap-3 rounded-2xl border border-line bg-white px-4 py-3 shadow-sm transition-colors hover:border-brand-600 hover:bg-brand-50/40"
+          >
+            <span className="min-w-0">
+              <span className="block text-xs font-semibold text-slate-500">{CATEGORY_MARKERS[c]}</span>
+              <span className="block text-sm font-semibold leading-snug text-slate-900">{label(c)}</span>
+              <span className="block text-xs text-slate-500">{facility ? 'sự cố chưa xử lý' : 'bản ghi trong kỳ'}</span>
+            </span>
+            <span
+              className={`shrink-0 text-2xl font-bold tabular-nums ${facility && n > 0 ? 'text-red-600' : 'text-slate-900'}`}
+            >
+              {n}
+            </span>
+          </Link>
+        );
+      })}
+    </section>
   );
 }
 
@@ -842,11 +787,14 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
 function AdminIncidentView({
   branchId,
   range,
+  shiftType,
   isAdmin,
   onToast,
 }: {
   branchId?: number;
   range: DateRangeValue;
+  /** The shared filter's "Ca" — the incidents reported on that shift. */
+  shiftType?: string;
   /** The period summary is the Admin's incident report; the managers do without it. */
   isAdmin: boolean;
   onToast: (message: string) => void;
@@ -856,14 +804,17 @@ function AdminIncidentView({
   const outstanding = view === 'outstanding';
   const [assigning, setAssigning] = useState<Issue | null>(null);
   const [editingIssue, setEditingIssue] = useState<Issue | null>(null);
+  const [returning, setReturning] = useState<Issue | null>(null);
+  const [deleting, setDeleting] = useState<Issue | null>(null);
   const list = useQuery({
-    queryKey: ['issues', { admin: true, branchId, range, view }],
+    queryKey: ['issues', { admin: true, branchId, range, view, shiftType }],
     queryFn: () =>
       issuesApi.list({
         branchId,
         // "Tồn đọng" and "Chưa giao" are states with no date: the server refuses a date with them.
         from: view === 'period' ? range.from : undefined,
         to: view === 'period' ? range.to : undefined,
+        shiftType: view === 'period' ? shiftType : undefined,
         outstanding: outstanding || undefined,
         assignment: view === 'unassigned' ? 'UNASSIGNED' : undefined,
         pageSize: 100,
@@ -931,8 +882,16 @@ function AdminIncidentView({
                   {issue.assignedTechnician ? 'Giao lại' : 'Giao kỹ thuật'}
                 </RowAction>
               ) : null}
+              {issue.status === 'NEW' && issue.assignedTechnician ? (
+                <RowAction onClick={() => setReturning(issue)} testId={`unassign-${issue.id}`}>
+                  Chuyển về chờ giao
+                </RowAction>
+              ) : null}
               <RowAction onClick={() => setEditingIssue(issue)} testId={`admin-edit-issue-${issue.id}`}>
                 Sửa vấn đề
+              </RowAction>
+              <RowAction onClick={() => setDeleting(issue)} testId={`delete-issue-${issue.id}`}>
+                Xóa
               </RowAction>
             </div>
           ) : (
@@ -959,6 +918,28 @@ function AdminIncidentView({
             setEditingIssue(null);
             void list.refetch();
             onToast('Đã lưu chỉnh sửa sự cố.');
+          }}
+        />
+      ) : null}
+      {returning ? (
+        <UnassignIssueDialog
+          issue={returning}
+          onClose={() => setReturning(null)}
+          onDone={() => {
+            setReturning(null);
+            void list.refetch();
+            onToast('Đã chuyển sự cố về chờ giao kỹ thuật.');
+          }}
+        />
+      ) : null}
+      {deleting ? (
+        <DeleteIssueDialog
+          issue={deleting}
+          onClose={() => setDeleting(null)}
+          onDone={() => {
+            setDeleting(null);
+            void list.refetch();
+            onToast('Đã xóa sự cố.');
           }}
         />
       ) : null}
@@ -1086,7 +1067,7 @@ function ExportDialog({
   /** Every branch of the reader's scope — from the server, never a typed list. */
   branches: Branch[];
   /** The screen's filters: where the dialog starts. */
-  initial: { from: string; to: string; branchId?: number; category?: ReportCategory };
+  initial: { from: string; to: string; branchId?: number; category?: ReportCategory; shiftType?: string };
   /** The screen's category, by name, when one is chosen. */
   categoryName: string | null;
   /** Shifts of the screen's period still running — left out of the file, and named. */
@@ -1099,7 +1080,7 @@ function ExportDialog({
   const startTo = initial.to || today;
   const [hotel, setHotel] = useState<number | 'ALL'>(initial.branchId ?? 'ALL');
   const [picked, setPicked] = useState<number[]>(() => branches.map((b) => b.id));
-  const [shiftType, setShiftType] = useState('');
+  const [shiftType, setShiftType] = useState(initial.shiftType ?? '');
   const [mode, setMode] = useState<DateMode>(startFrom === startTo ? 'DAY' : 'RANGE');
   const [day, setDay] = useState(startTo);
   const [range, setRange] = useState<DateRangeValue>({ from: startFrom, to: startTo });

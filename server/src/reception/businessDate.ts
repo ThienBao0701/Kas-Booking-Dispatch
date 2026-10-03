@@ -18,10 +18,10 @@
  * [D-1, D+2) and then keeping exactly those whose computed business date is in
  * range is a cheap indexed read; it never DECIDES membership.
  */
-import type { PrismaClient, ShiftType } from '@prisma/client';
+import type { Prisma, PrismaClient, ShiftType } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { hcmWallClockToUtc, nextHcmDay } from '../lib/clock';
-import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
+import { SHIFT_DEFINITIONS, shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -104,3 +104,97 @@ export function openShiftNotices(sessions: BusinessDateSession[]): OpenShiftNoti
 
 /** The one sentence every surface uses to say the day is not finished. */
 export const OPEN_SHIFT_WARNING = 'Ca chưa kết thúc chưa được đưa vào báo cáo chính thức.';
+
+/* ------------------------------------------------------------------------ *
+ * THE SHARED REPORT PERIOD — one resolution for every report screen.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * What every report filter sends: a period of BUSINESS dates ("Hôm nay",
+ * "Ngày cụ thể" = one day, "Khoảng ngày" = a range), an optional shift, and the
+ * branch narrowing the reader's scope allows.
+ */
+export interface ReportPeriodQuery {
+  from: string;
+  to: string;
+  shiftType?: ShiftType;
+  branchId?: number;
+  branchIds?: readonly number[];
+}
+
+/**
+ * The period, resolved once: the SHIFTS of those business dates (inside the
+ * reader's scope, the branch and the shift asked for) and — unless one shift
+ * was asked for — the window for records written with NO shift (supervisors,
+ * a technician, a report filed off shift), matched by their own HCM day.
+ *
+ * Every report reads its rows through `journalPeriodWhere` / `issuePeriodWhere`
+ * on this, so a Ca C entry at 02:15 is the 23rd's on the journal, on the
+ * incident list and in the archive alike — never the 24th's on one of them.
+ */
+export interface ReportPeriod {
+  sessions: BusinessDateSession[];
+  sessionIds: string[];
+  unshiftedWindow: { start: Date; end: Date } | null;
+}
+
+export async function resolveReportPeriod(
+  scope: 'ALL' | readonly number[],
+  q: ReportPeriodQuery,
+  client: PrismaClient = prisma,
+): Promise<ReportPeriod> {
+  const sessions = (await sessionsForBusinessDates({ from: q.from, to: q.to, branchId: q.branchId }, client)).filter(
+    (s) =>
+      (scope === 'ALL' || scope.includes(s.branchId)) &&
+      (!q.branchIds || q.branchIds.includes(s.branchId)) &&
+      (!q.shiftType || s.shiftType === q.shiftType),
+  );
+  return {
+    sessions,
+    sessionIds: sessions.map((s) => s.id),
+    unshiftedWindow: q.shiftType
+      ? null
+      : {
+          start: hcmWallClockToUtc(q.from, '00:00'),
+          end: hcmWallClockToUtc(nextHcmDay(q.to), '00:00'),
+        },
+  };
+}
+
+/** A row written on one of the period's shifts, or shiftless within its days. */
+function periodWhere(p: ReportPeriod) {
+  return {
+    OR: [
+      { shiftSessionId: { in: p.sessionIds } },
+      ...(p.unshiftedWindow
+        ? [{ shiftSessionId: null, createdAt: { gte: p.unshiftedWindow.start, lt: p.unshiftedWindow.end } }]
+        : []),
+    ],
+  };
+}
+
+export function journalPeriodWhere(p: ReportPeriod): Prisma.ReceptionOperationalReportWhereInput {
+  return periodWhere(p);
+}
+
+export function issuePeriodWhere(p: ReportPeriod): Prisma.HotelIssueWhereInput {
+  return periodWhere(p);
+}
+
+/**
+ * "CA" — the shifts that actually RAN in the period, never a fixed list: a day
+ * worked A/B/C offers A, B, C; a day worked A4/C4 offers A4, C4. In the
+ * declared order, with the names and windows every screen already uses.
+ */
+export async function availableShifts(
+  scope: 'ALL' | readonly number[],
+  q: Omit<ReportPeriodQuery, 'shiftType'>,
+): Promise<{ code: ShiftType; name: string; window: string }[]> {
+  const { sessions } = await resolveReportPeriod(scope, q);
+  const present = new Set(sessions.map((s) => s.shiftType));
+  return SHIFT_DEFINITIONS.filter((d) => present.has(d.code)).map((d) => ({
+    code: d.code,
+    name: d.name,
+    window: shiftWindowLabel(d.code),
+  }));
+}

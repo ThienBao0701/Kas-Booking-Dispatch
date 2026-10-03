@@ -5,7 +5,7 @@ import { ApiError } from '../lib/errors';
 import { prisma } from '../db/prisma';
 import { getClock } from '../lib/clock';
 import { requireAuth, requireAdmin, requirePasswordChanged, requireRole } from '../middleware/auth';
-import { branchScopeOf, scopeIncludes } from '../auth/branchScope';
+import { branchScopeOf } from '../auth/branchScope';
 import {
   buildRecreationReport,
   hcmRange,
@@ -31,7 +31,7 @@ import { sessionsCashSummary } from '../reception/cashService';
 import {
   OPEN_SHIFT_WARNING,
   openShiftNotices,
-  sessionsForBusinessDates,
+  resolveReportPeriod,
 } from '../reception/businessDate';
 import { hcmDateOnly } from '../lib/clock';
 import { buildOperationalReportPdf, operationalPdfFileName } from '../report/operationalPdf';
@@ -461,19 +461,14 @@ export function createAdminReportsRouter(): Router {
       */
       const today = hcmDateOnly(now);
       const period = q.from && q.to ? { from: q.from, to: q.to } : null;
-      const sessions = (
-        await sessionsForBusinessDates({
-          ...(period ?? { from: today, to: today }),
-          branchId: oneBranch,
-        })
-      ).filter(
-        // Only the actor's branches (a manager never sees another branch's open
-        // shift named), the chosen set, and the chosen shift type.
-        (s) =>
-          scopeIncludes(scope, s.branchId) &&
-          (!branchIds || branchIds.includes(s.branchId)) &&
-          (!q.shiftType || s.shiftType === q.shiftType),
-      );
+      // The shared resolver: only the actor's branches (a manager never sees
+      // another branch's open shift named), the chosen set and shift type.
+      const { sessions } = await resolveReportPeriod(scope, {
+        ...(period ?? { from: today, to: today }),
+        branchId: oneBranch,
+        branchIds,
+        shiftType: q.shiftType,
+      });
       const sessionIds = sessions.map((s) => s.id);
       const window = period ? hcmRange(period.from, period.to) : null;
       /*
@@ -598,7 +593,7 @@ export function createAdminReportsRouter(): Router {
  */
 async function loadIssues(q: { from: string; to: string; branchId?: number }) {
   const { start, end } = hcmRange(q.from, q.to);
-  const where: Prisma.HotelIssueWhereInput = { createdAt: { gte: start, lt: end } };
+  const where: Prisma.HotelIssueWhereInput = { voidedAt: null, createdAt: { gte: start, lt: end } };
   if (q.branchId !== undefined) where.branchId = q.branchId;
   return prisma.hotelIssue.findMany({
     where,

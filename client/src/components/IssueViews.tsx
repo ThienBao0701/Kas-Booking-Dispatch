@@ -416,11 +416,11 @@ export function IssueEditedFlag({ issue }: { issue: Pick<Issue, 'edits'> }) {
 /** A titled block of the lifecycle panel. */
 function LifecyclePanel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="min-w-0 rounded-xl border border-line bg-white">
-      <h4 className="border-b border-line-subtle bg-slate-50 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+    <section className="min-w-0 rounded-xl border border-line-strong bg-white">
+      <h4 className="border-b border-line bg-slate-100 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-700">
         {title}
       </h4>
-      <dl className="grid gap-x-4 gap-y-2 px-3 py-2.5 sm:grid-cols-2">{children}</dl>
+      <dl className="grid gap-x-5 gap-y-3 px-4 py-3 sm:grid-cols-2">{children}</dl>
     </section>
   );
 }
@@ -448,7 +448,16 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
   const duration = last?.durationLabel ?? issue.durationLabel;
 
   return (
-    <div data-testid="issue-lifecycle" className="space-y-3">
+    /*
+      THE DETAIL READS LARGER THAN THE CARDS. The same pieces render compact on
+      the queue cards; here, opened on purpose, every label, value and history
+      line steps up one size and gets more air — through these descendant rules,
+      so the cards elsewhere stay exactly as they are.
+    */
+    <div
+      data-testid="issue-lifecycle"
+      className="space-y-4 [&_dd]:text-[15px] [&_dd]:leading-relaxed [&_dt]:text-xs [&_dt]:font-medium [&_h4]:text-xs [&_li]:text-sm [&_li]:leading-relaxed [&_li_p]:text-sm [&_section>p]:text-sm"
+    >
       {/*
         Three across only from `xl`: at 1100 the Admin record is ~730px wide,
         and three panels of two columns each truncated dates and names. Every
@@ -490,6 +499,16 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
           <div className="sm:col-span-2">
             <Field label="Kết quả sửa chữa" value={last?.result} wrap />
           </div>
+          {/* "Hoàn thành": was the report right? */}
+          {issue.reportVerdict ? (
+            <div className="sm:col-span-2">
+              <Field
+                label="Kết luận báo cáo"
+                value={issue.reportVerdict === 'INCORRECT' ? `Báo cáo sai — ${issue.incorrectReason ?? '—'}` : 'Báo cáo đúng'}
+                wrap
+              />
+            </div>
+          ) : null}
         </LifecyclePanel>
 
         {/* Only while inspection is part of the workflow — dormant, it is not shown at all. */}
@@ -623,6 +642,11 @@ export function IssueAssignmentHistory({
               : `Giao cho ${a.technicianName}`}
             {' · bởi '}
             {a.assignedByName}
+            {a.returnedAt ? (
+              <span className="block text-amber-800">
+                ↩ Chuyển về chờ giao kỹ thuật · {formatDateTime(a.returnedAt)} · bởi {a.returnedByName ?? '—'}
+              </span>
+            ) : null}
           </li>
         ))}
       </ul>

@@ -30,6 +30,7 @@ import {
   VoidedNote,
 } from './RecordDialogs';
 import { formatVnd } from '../lib/money';
+import { completionText } from '../lib/completionVerdict';
 import { formatDateTime } from '../lib/format';
 import { ROOM_SERVICE_PRICE_LABEL, reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
 
@@ -155,7 +156,7 @@ function RequestHandling({
   return (
     <div className="space-y-1.5">
       {request.completed ? (
-        <p className="whitespace-pre-wrap break-words text-slate-700">{request.resolution || '—'}</p>
+        <p className="whitespace-pre-wrap break-words text-slate-700">{completionText(request) || '—'}</p>
       ) : (
         <RowAction onClick={onComplete} testId={`complete-${row.id}`}>
           <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
@@ -493,8 +494,8 @@ export function ServiceQualityTable({
       className: 'min-w-[8rem] max-w-xs',
       render: (r) => (
         <div className="space-y-1.5">
-          {r.complaint?.completed && r.complaint.resolution ? (
-            <p className="whitespace-pre-wrap break-words text-slate-700">{r.complaint.resolution}</p>
+          {r.complaint?.completed && completionText(r.complaint) ? (
+            <p className="whitespace-pre-wrap break-words text-slate-700">{completionText(r.complaint)}</p>
           ) : (
             <p className="text-slate-300">—</p>
           )}

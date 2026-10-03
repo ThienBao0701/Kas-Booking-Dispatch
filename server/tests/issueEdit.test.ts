@@ -152,7 +152,7 @@ describe('who may correct what', () => {
   it('refuses a completed incident', async () => {
     const id = await report();
     await accept(id);
-    await tech.post(`/api/issues/${id}/complete`).send({});
+    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect((await letan.put(`/api/issues/${id}`).send({ description: 'Muộn rồi' })).status).toBe(409);
   });
 

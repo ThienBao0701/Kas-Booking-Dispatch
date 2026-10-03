@@ -36,7 +36,8 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
-import { formatDateTime, hcmToday } from '../lib/format';
+import { formatDate, formatDateTime, hcmToday } from '../lib/format';
+import { pickRange } from '../test/reportFilter';
 import { daysBefore } from '../lib/shiftGroups';
 
 afterEach(() => {
@@ -1046,15 +1047,18 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     await userEvent.click(await within(table).findByTestId('complete-r1'));
 
     const dialog = await screen.findByRole('dialog');
+    // "Đúng" or "Sai" first — the one rule every "Hoàn thành" shares.
+    expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('verdict-CORRECT'));
     expect(within(dialog).getByText('Hướng xử lý (nếu có)')).toBeInTheDocument();
     // Optional: the button is enabled before anything is typed.
     expect(within(dialog).getByTestId('complete-confirm')).toBeEnabled();
-    if (typed) await userEvent.type(within(dialog).getByTestId('complete-resolution'), typed);
+    if (typed) await userEvent.type(within(dialog).getByTestId('verdict-resolution'), typed);
     await userEvent.click(within(dialog).getByTestId('complete-confirm'));
 
     await waitFor(() => expect(bodies).toHaveLength(1));
-    // Only the handling — never a time, a person or a shift.
-    expect(bodies[0]).toEqual(sent === undefined ? {} : { resolution: sent });
+    // The verdict and the handling — never a time, a person or a shift.
+    expect(bodies[0]).toEqual(sent === undefined ? { verdict: 'CORRECT' } : { verdict: 'CORRECT', resolution: sent });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(await within(table).findByText('Đã hoàn thành')).toBeInTheDocument();
     expect(within(table).queryByTestId('complete-r1')).not.toBeInTheDocument();
@@ -1740,19 +1744,65 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     await userEvent.click(await within(table).findByTestId('complete-g1'));
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Cách xử lý (nếu có)')).toBeInTheDocument();
     const confirm = within(dialog).getByTestId('complete-confirm');
-    // Optional: nothing typed, and the button is still enabled.
+    // Nothing is sent before "Đúng" or "Sai" is answered.
+    expect(confirm).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('verdict-CORRECT'));
+    expect(within(dialog).getByText('Cách xử lý (nếu có)')).toBeInTheDocument();
+    // Optional: nothing typed, and the button is enabled.
     expect(confirm).toBeEnabled();
     // No time field: the server stamps the completion.
-    expect(within(dialog).getByTestId('complete-resolution')).toHaveValue('');
+    expect(within(dialog).getByTestId('verdict-resolution')).toHaveValue('');
     expect(within(dialog).queryByLabelText(/thời gian/i)).not.toBeInTheDocument();
 
     // Blank is the same as empty: no placeholder text is sent.
-    await userEvent.type(within(dialog).getByTestId('complete-resolution'), '   ');
+    await userEvent.type(within(dialog).getByTestId('verdict-resolution'), '   ');
     await userEvent.click(confirm);
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toEqual({});
+    expect(posted[0]).toEqual({ verdict: 'CORRECT' });
+  });
+
+  it('completes as "Sai" only with its reason, and says so on the row', async () => {
+    const posted: unknown[] = [];
+    let completed = false;
+    const after = requestRow(
+      {},
+      {
+        completed: true,
+        completedByName: 'Nguyễn B',
+        completedAt: '2026-09-19T07:02:00.000Z',
+        resolution: null,
+        reportVerdict: 'INCORRECT',
+        incorrectReason: 'Khách đã tự lấy đồ',
+      },
+    );
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: { reports: [completed ? after : requestRow()], counts: { ...EMPTY_COUNTS, GUEST_REQUEST: 1 } },
+        }),
+        'POST /api/reception/reports/g1/complete': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          completed = true;
+          return { status: 200, body: { report: after } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+
+    await openCategory('GUEST_REQUEST');
+    const table = await screen.findByTestId('guest-request-table');
+    await userEvent.click(await within(table).findByTestId('complete-g1'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByTestId('verdict-INCORRECT'));
+    const confirm = within(dialog).getByTestId('complete-confirm');
+    // "Lý do báo cáo sai" is required.
+    expect(confirm).toBeDisabled();
+    await userEvent.type(within(dialog).getByTestId('verdict-reason'), 'Khách đã tự lấy đồ');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(posted).toEqual([{ verdict: 'INCORRECT', incorrectReason: 'Khách đã tự lấy đồ' }]));
+    expect(await within(await screen.findByTestId('guest-request-table')).findByText('Báo cáo sai: Khách đã tự lấy đồ')).toBeInTheDocument();
   });
 
   it('completing sends only the handling, and the row then reads "Đã hoàn thành"', async () => {
@@ -1790,11 +1840,12 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     const table = await screen.findByTestId('guest-request-table');
     await userEvent.click(await within(table).findByTestId('complete-g1'));
     const dialog = await screen.findByRole('dialog');
-    await userEvent.type(within(dialog).getByTestId('complete-resolution'), 'Đã trả balo cho khách');
+    await userEvent.click(within(dialog).getByTestId('verdict-CORRECT'));
+    await userEvent.type(within(dialog).getByTestId('verdict-resolution'), 'Đã trả balo cho khách');
     await userEvent.click(within(dialog).getByTestId('complete-confirm'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toEqual({ resolution: 'Đã trả balo cho khách' });
+    expect(posted[0]).toEqual({ verdict: 'CORRECT', resolution: 'Đã trả balo cho khách' });
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     const updated = await screen.findByTestId('guest-request-table');
@@ -1809,6 +1860,78 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     renderApp('/app/reports');
     await openCategory('GUEST_REQUEST');
     expect(await screen.findByTestId('guest-request-table-empty')).toBeInTheDocument();
+  });
+});
+
+describe('sự cố cơ sở vật chất — "Chuyển về chờ giao" and "Xóa"', () => {
+  const assigned = () =>
+    withLifecycle({
+      id: 'i1',
+      locationLabel: 'Phòng · Phòng 101',
+      description: 'Máy lạnh không mát',
+      status: 'NEW',
+      needsRework: false,
+      reportedByName: 'Nguyễn Văn A',
+      technicianName: null,
+      technicianPhone: null,
+      completedAt: null,
+      createdAt: '2026-09-19T02:00:00.000Z',
+      updatedAt: '2026-09-19T02:00:00.000Z',
+      attempts: [],
+      assignedTechnician: { id: 4, name: 'Kỹ thuật viên trực' },
+      assignmentState: 'ASSIGNED',
+      assignmentStateLabel: 'Đã giao — chờ tiếp nhận',
+    });
+  const routes = (calls: string[]) =>
+    shellRoutes(RECEPTIONIST_USER, {
+      'GET /api/issues?scope=active&pageSize=100': () => ({
+        status: 200,
+        body: { issues: [assigned()], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
+      }),
+      'POST /api/issues/i1/unassign': () => {
+        calls.push('unassign');
+        return { status: 200, body: { issue: assigned() } };
+      },
+      'POST /api/issues/i1/void': (init) => {
+        calls.push(`void ${String(init.body)}`);
+        return { status: 200, body: { voided: true, id: 'i1' } };
+      },
+    });
+
+  it('takes an assigned incident back to "Chờ giao kỹ thuật", after a confirmation', async () => {
+    const calls: string[] = [];
+    installApiMock(routes(calls));
+    renderApp('/app/reports');
+    await openCategory('FACILITY_ISSUE');
+    const board = await screen.findByTestId('facility-board');
+
+    await userEvent.click(await within(board).findByTestId('unassign-i1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Chuyển về chờ giao kỹ thuật' });
+    expect(dialog).toHaveTextContent('Kỹ thuật viên trực');
+    expect(dialog).toHaveTextContent('Lịch sử giao việc được giữ nguyên');
+    expect(calls).toEqual([]);
+    await userEvent.click(within(dialog).getByTestId('unassign-confirm'));
+    await waitFor(() => expect(calls).toEqual(['unassign']));
+  });
+
+  it('deletes an incident only after the confirmation, with an optional reason', async () => {
+    const calls: string[] = [];
+    installApiMock(routes(calls));
+    renderApp('/app/reports');
+    await openCategory('FACILITY_ISSUE');
+    const board = await screen.findByTestId('facility-board');
+
+    await userEvent.click(await within(board).findByTestId('delete-issue-i1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Xóa sự cố' });
+    expect(dialog).toHaveTextContent('Bạn chắc chắn muốn xóa sự cố này?');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Hủy' }));
+    expect(calls).toEqual([]);
+
+    await userEvent.click(within(board).getByTestId('delete-issue-i1'));
+    const again = await screen.findByRole('dialog', { name: 'Xóa sự cố' });
+    await userEvent.type(within(again).getByTestId('delete-issue-reason'), 'Báo trùng');
+    await userEvent.click(within(again).getByTestId('delete-issue-confirm'));
+    await waitFor(() => expect(calls).toEqual(['void {"reason":"Báo trùng"}']));
   });
 });
 
@@ -1893,7 +2016,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     expect(within(board).getByText('Cần sửa lại')).toBeInTheDocument();
   });
 
-  it('offers ONE action on a row — "Sửa vấn đề" — and none of the technician’s', async () => {
+  it('offers "Sửa vấn đề" and "Xóa" on a row — and none of the technician’s', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/issues?scope=active&pageSize=100': () => ({
@@ -1930,6 +2053,9 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     // The one thing reception does to an incident: correct what the report says.
     expect(within(board).getByText('Thao tác')).toBeInTheDocument();
     expect(within(board).getByTestId('edit-issue-i1')).toHaveTextContent('Sửa vấn đề');
+    expect(within(board).getByTestId('delete-issue-i1')).toHaveTextContent('Xóa');
+    // Not assigned: nothing to take back.
+    expect(within(board).queryByTestId('unassign-i1')).not.toBeInTheDocument();
     // Working the job — taking it, finishing it, giving it up — is Technical's alone.
     for (const name of [/Tiếp nhận/, /Hoàn thành/, /Không sửa được/, /Nhật ký/]) {
       expect(within(board).queryByRole('button', { name })).not.toBeInTheDocument();
@@ -1938,7 +2064,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     expect(
       within(board)
         .queryAllByRole('button')
-        .filter((b) => !['row-toggle-i1', 'edit-issue-i1'].includes(b.dataset.testid ?? '')),
+        .filter((b) => !['row-toggle-i1', 'edit-issue-i1', 'delete-issue-i1'].includes(b.dataset.testid ?? '')),
     ).toHaveLength(0);
   });
 
@@ -2485,8 +2611,11 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
   /** The page's own default: the last 7 days, ending today (HCM). */
   const TODAY = hcmToday();
   const WEEK_FROM = daysBefore(TODAY, 6);
-  const archiveUrl = (from: string, to: string) => `GET /api/reception/reports/archive?from=${from}&to=${to}`;
-  const issuesUrl = (from: string, to: string) => `GET /api/issues?scope=archive&from=${from}&to=${to}&pageSize=100`;
+  const archiveUrl = (from: string, to: string, verdict = 'CORRECT') =>
+    `GET /api/reception/reports/archive?from=${from}&to=${to}&verdict=${verdict}`;
+  const issuesUrl = (from: string, to: string, verdict = 'CORRECT') =>
+    `GET /api/issues?scope=archive&from=${from}&to=${to}&verdict=${verdict}&pageSize=100`;
+
 
   const doneRequest = () =>
     requestRow(
@@ -2561,9 +2690,12 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     renderApp('/app/reports');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    await userEvent.click(within(nav).getByRole('link', { name: 'Hoàn thành vấn đề' }));
+    // A group of two views: "đúng" and "sai".
+    await userEvent.click(within(nav).getByTestId('nav-group-Hoàn thành vấn đề'));
+    expect(within(nav).getByRole('link', { name: 'Vấn đề báo cáo sai' })).toHaveAttribute('href', '/app/completed-issues?verdict=INCORRECT');
+    await userEvent.click(within(nav).getByRole('link', { name: 'Vấn đề báo cáo đúng' }));
     expect(await screen.findByTestId('completed-issues')).toBeInTheDocument();
-    expect(screen.getByText('Vấn đề đã hoàn thành, từ 12 giờ trở lên kể từ lúc lễ tân tiếp nhận.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Vấn đề báo cáo đúng' })).toBeInTheDocument();
   });
 
   it('lists II, III and IV in their compact columns, each as "Đã hoàn thành" — and nothing to press', async () => {
@@ -2611,7 +2743,7 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     expect(notes[0]).toHaveTextContent('Đang hiển thị 1 bản ghi gần nhất trên tổng số 250.');
   });
 
-  it('asks the SERVER for the last 7 days by default, by the day received — and shows no journal', async () => {
+  it('asks the SERVER for the last 7 days by default — business dates — and shows no journal', async () => {
     const fetchMock = installApiMock(archiveRoutes());
     renderApp('/app/completed-issues');
 
@@ -2619,45 +2751,44 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     expect(requested(fetchMock, archiveUrl(WEEK_FROM, TODAY))).toBe(true);
     expect(requested(fetchMock, issuesUrl(WEEK_FROM, TODAY))).toBe(true);
     expect(requested(fetchMock, deliveriesUrl(WEEK_FROM, TODAY))).toBe(true);
-    // The range is the page's own, visible, and labelled as the day RECEIVED.
+    // The shared filter: "Khoảng ngày", one range control, showing the week.
     const filters = screen.getByTestId('completed-filters');
-    expect(within(filters).getByText('Ngày tiếp nhận')).toBeInTheDocument();
-    expect(within(filters).getByTestId('completed-range-from')).toHaveValue(WEEK_FROM);
-    expect(within(filters).getByTestId('completed-range-to')).toHaveValue(TODAY);
-    expect(within(filters).getByTestId('completed-range-6')).toHaveAttribute('aria-pressed', 'true');
+    expect(within(filters).getByTestId('period-RANGE')).toHaveAttribute('aria-pressed', 'true');
+    expect(within(filters).getByTestId('period-range')).toHaveTextContent(`${formatDate(WEEK_FROM)} – ${formatDate(TODAY)}`);
+    // Reception reads its own branch: no branch choice.
+    expect(within(filters).queryByTestId('branch-select')).not.toBeInTheDocument();
     expect(screen.queryByText(/Nhật ký ca hiện tại/)).not.toBeInTheDocument();
   });
 
-  it('re-asks the server when a quick period or a typed range is chosen', async () => {
+  it('re-asks the server for "Hôm nay", one exact day, and a range', async () => {
     const MONTH_FROM = daysBefore(TODAY, 29);
+    const DAY = daysBefore(TODAY, 2);
     const fetchMock = installApiMock({
       ...archiveRoutes(),
       ...emptyArchive(TODAY, TODAY),
       ...archiveRoutes(undefined, RECEPTIONIST_USER, MONTH_FROM, TODAY),
-      ...emptyArchive('2026-09-01', '2026-09-02'),
+      ...emptyArchive(DAY, DAY),
     });
     renderApp('/app/completed-issues');
     await within(await screen.findByTestId('completed-issues')).findByText('Khách Cũ');
 
-    await userEvent.click(screen.getByTestId('completed-range-0'));
+    await userEvent.click(screen.getByTestId('period-TODAY'));
     await waitFor(() => expect(requested(fetchMock, archiveUrl(TODAY, TODAY))).toBe(true));
     expect(requested(fetchMock, issuesUrl(TODAY, TODAY))).toBe(true);
-    // A same-day range with nothing in it says so — about the range, not the system.
+    // A day with nothing in it says so — about the period, not the system.
     expect(
       await within(screen.getByTestId('completed-issues')).findAllByText('Không có vấn đề hoàn thành trong khoảng thời gian này.'),
     ).toHaveLength(4);
 
-    await userEvent.click(screen.getByTestId('completed-range-29'));
+    await pickRange(MONTH_FROM, TODAY);
     await waitFor(() => expect(requested(fetchMock, archiveUrl(MONTH_FROM, TODAY))).toBe(true));
     expect(await within(screen.getByTestId('completed-issues')).findByText('Khách Cũ')).toBeInTheDocument();
 
-    // A typed range: the start first (it carries the end along), then the end.
-    const from = screen.getByTestId('completed-range-from');
-    const to = screen.getByTestId('completed-range-to');
-    fireEvent.change(from, { target: { value: '2026-09-01' } });
-    fireEvent.change(to, { target: { value: '2026-09-02' } });
-    await waitFor(() => expect(requested(fetchMock, archiveUrl('2026-09-01', '2026-09-02'))).toBe(true));
-    expect(requested(fetchMock, issuesUrl('2026-09-01', '2026-09-02'))).toBe(true);
+    // "Ngày cụ thể": ONE date.
+    await userEvent.click(screen.getByTestId('period-DAY'));
+    fireEvent.change(screen.getByTestId('period-day'), { target: { value: DAY } });
+    await waitFor(() => expect(requested(fetchMock, archiveUrl(DAY, DAY))).toBe(true));
+    expect(requested(fetchMock, issuesUrl(DAY, DAY))).toBe(true);
   });
 
   it('sends nothing for half a range, and says what is missing', async () => {
@@ -2666,13 +2797,49 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     await within(await screen.findByTestId('completed-issues')).findByText('Khách Cũ');
     const before = fetchMock.mock.calls.length;
 
-    fireEvent.change(screen.getByTestId('completed-range-from'), { target: { value: '' } });
+    // The start of a new range is picked; its end is not yet.
+    await userEvent.click(screen.getByTestId('period-range'));
+    await userEvent.click(screen.getByTestId(`period-range-day-${TODAY}`));
     expect(await screen.findByTestId('completed-range-invalid')).toHaveTextContent('Hãy chọn đủ ngày bắt đầu và ngày kết thúc.');
     expect(screen.queryByTestId('completed-issues')).not.toBeInTheDocument();
     const after = fetchMock.mock.calls.slice(before).map(([url]) => String(url));
     expect(
       after.some((u) => u.includes('/reception/reports/archive') || u.includes('scope=archive') || u.includes('/hotel-deliveries')),
     ).toBe(false);
+  });
+
+  it('"Vấn đề báo cáo sai" asks for the "sai" records only, with their reason, and no deliveries', async () => {
+    const fetchMock = installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        [archiveUrl(WEEK_FROM, TODAY, 'INCORRECT')]: () => ({
+          status: 200,
+          body: {
+            reports: [
+              requestRow(
+                { id: 'g-wrong', createdAt: '2026-09-18T01:00:00.000Z' },
+                { guestName: 'Khách Nhầm', completed: true, completedAt: '2026-09-18T02:00:00.000Z', reportVerdict: 'INCORRECT', incorrectReason: 'Không có ký gửi' },
+              ),
+            ],
+            totals: { GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 0 },
+            range: { from: WEEK_FROM, to: TODAY },
+            archiveAfterHours: 12,
+          },
+        }),
+        [issuesUrl(WEEK_FROM, TODAY, 'INCORRECT')]: () => ({
+          status: 200,
+          body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/completed-issues?verdict=INCORRECT');
+
+    expect(await screen.findByRole('heading', { name: 'Vấn đề báo cáo sai' })).toBeInTheDocument();
+    const requests = await screen.findByTestId('guest-request-table');
+    expect(await within(requests).findByText('Khách Nhầm')).toBeInTheDocument();
+    expect(requested(fetchMock, archiveUrl(WEEK_FROM, TODAY, 'INCORRECT'))).toBe(true);
+    // Deliveries are never "reported wrong".
+    expect(screen.queryByTestId('completed-delivery-table')).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/hotel-deliveries'))).toBe(false);
   });
 
   it('is open to the Admin over every branch, with a branch picker and the export', async () => {
@@ -2683,8 +2850,15 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     renderApp('/app/completed-issues');
 
     expect(await screen.findByTestId('completed-issues')).toBeInTheDocument();
-    const branch = screen.getByTestId('completed-branch');
-    await waitFor(() => expect(within(branch).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tất cả chi nhánh', 'Chi nhánh 1 — 05 Trương Định']));
+    const branch = screen.getByTestId('branch-select');
+    expect(branch).toHaveTextContent('Tất cả chi nhánh');
+    await userEvent.click(branch);
+    await waitFor(() =>
+      expect(within(screen.getByRole('listbox', { name: 'Chi nhánh' })).getAllByRole('option').map((o) => o.textContent)).toEqual([
+        'Tất cả chi nhánh(0)',
+        '05 Trương Định - Chi nhánh 01(0)',
+      ]),
+    );
     expect(screen.getByTestId('completed-export-pdf').getAttribute('href')).toContain('/api/admin/reports/operational.pdf');
   });
 });

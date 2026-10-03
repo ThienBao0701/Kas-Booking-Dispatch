@@ -161,7 +161,7 @@ describe('IN_PROGRESS → NEW via "Không sửa được"', () => {
   it('refuses an incident that is already COMPLETED', async () => {
     const id = await reportIssue();
     await accept(tech, id, 'Bao', '0369852177');
-    expect((await tech.post(`/api/issues/${id}/complete`)).status).toBe(200);
+    expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
 
     const res = await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'x' });
     expect(res.status).toBe(409);
@@ -282,7 +282,7 @@ describe('the failed attempt is kept, permanently', () => {
     setClock({ now: () => hcm('2026-09-17', '16:20') });
     await accept(tech2, id, 'Minh', '0911222333');
     setClock({ now: () => hcm('2026-09-17', '16:35') });
-    const res = await tech2.post(`/api/issues/${id}/complete`);
+    const res = await tech2.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
 
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe('COMPLETED');
@@ -402,7 +402,7 @@ describe('the incident row after a failed attempt', () => {
     await testPrisma.technicalRepairAttempt.deleteMany({ where: { issueId: id } });
 
     setClock({ now: () => hcm('2026-09-17', '15:59') });
-    expect((await tech.post(`/api/issues/${id}/complete`)).status).toBe(200);
+    expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
 
     const attempt = await testPrisma.technicalRepairAttempt.findFirstOrThrow({ where: { issueId: id } });
     expect(attempt).toMatchObject({
@@ -426,7 +426,7 @@ describe('the incident row after a failed attempt', () => {
     // (Assigned to the technician, so the job is theirs to close.)
     await testPrisma.hotelIssue.update({ where: { id }, data: { status: 'IN_PROGRESS', assignedTechnicianUserId: techId } });
 
-    expect((await tech.post(`/api/issues/${id}/complete`)).status).toBe(200);
+    expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
     expect(await testPrisma.technicalRepairAttempt.count({ where: { issueId: id } })).toBe(0);
     // And it is CLOSED — never parked in a queue it could not leave.
     const issue = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });

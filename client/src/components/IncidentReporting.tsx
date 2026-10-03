@@ -830,6 +830,12 @@ function statusCell(i: Issue): ReactNode {
     <div className="flex flex-col items-start gap-1">
       <IssueStageBadge issue={i} />
       {inspectionIsRelevant(i) ? <IssueInspectionBadge issue={i} /> : null}
+      {/* "Hoàn thành" answered "Sai": said, with its reason. */}
+      {i.reportVerdict === 'INCORRECT' ? (
+        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" data-testid={`verdict-incorrect-${i.id}`}>
+          Báo cáo sai: {i.incorrectReason ?? '—'}
+        </span>
+      ) : null}
     </div>
   );
 }

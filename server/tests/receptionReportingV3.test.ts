@@ -121,7 +121,7 @@ async function complaint(agent: Agent, guestName = 'Khách B') {
 }
 
 async function complete(agent: Agent, id: string, body: Record<string, unknown> = {}) {
-  const res = await agent.post(`/api/reception/reports/${id}/complete`).send(body);
+  const res = await agent.post(`/api/reception/reports/${id}/complete`).send({ verdict: 'CORRECT', ...body });
   expect(res.status).toBe(200);
   return res.body.report;
 }
@@ -334,29 +334,43 @@ describe('the 12-hour completion archive (II and IV)', () => {
 /* "Hoàn thành vấn đề" by the day a record was received                 */
 /* ================================================================== */
 
-describe('the completion archive, narrowed by the day a record was RECEIVED', () => {
+describe('the completion archive, narrowed by BUSINESS date — the day of the shift that received it', () => {
   const archiveIn = (agent: Agent, from: string, to: string) =>
     agent.get(`/api/reception/reports/archive?from=${from}&to=${to}`);
   const idsOf = (res: { body: { reports: { id: string }[] } }) => res.body.reports.map((r) => r.id).sort();
 
-  /** Receipts at the edges of 25/09 (HCM), all completed shortly after. */
+  /**
+   * Receipts around midnight on real shifts: Ca C of the 24th (one before and one
+   * AFTER midnight — both the 24th's), Ca A of the 25th, Ca A of the 26th; all
+   * completed on the morning of the 26th.
+   */
   async function edges() {
-    at('2026-09-24', '08:00');
-    await checkIn(letanA, 'A', 'Đức');
+    at('2026-09-24', '22:05');
+    await checkIn(letanA, 'C', 'Đức');
     at('2026-09-24', '23:59');
     const lateOn24 = await request(letanA, 'Tối 24');
-    at('2026-09-25', '00:00');
+    at('2026-09-25', '00:30');
+    const afterMidnight = await request(letanA, 'Ca C, sau nửa đêm');
+    at('2026-09-25', '06:00');
+    await closeShift(letanA);
+    at('2026-09-25', '06:05');
+    await checkIn(letanA, 'A', 'Đức');
+    at('2026-09-25', '08:00');
     const first25 = await request(letanA, 'Đầu ngày 25');
-    at('2026-09-25', '23:59');
-    const last25 = await complaint(letanA, 'Cuối ngày 25');
-    at('2026-09-26', '00:00');
-    const first26 = await request(letanA, 'Đầu ngày 26');
-    at('2026-09-26', '00:30');
-    for (const id of [lateOn24, first25, last25, first26]) await complete(letanA, id);
-    return { lateOn24, first25, last25, first26 };
+    at('2026-09-25', '13:30');
+    const last25 = await complaint(letanA, 'Cuối ca A ngày 25');
+    at('2026-09-25', '14:00');
+    await closeShift(letanA);
+    at('2026-09-26', '06:05');
+    await checkIn(letanA, 'A', 'Đức');
+    at('2026-09-26', '08:00');
+    const first26 = await request(letanA, 'Ngày 26');
+    at('2026-09-26', '09:00');
+    for (const id of [lateOn24, afterMidnight, first25, last25, first26]) await complete(letanA, id);
+    return { lateOn24, afterMidnight, first25, last25, first26 };
   }
 
-  it('takes a same-day range as the whole Vietnamese calendar day, 00:00 to 23:59', async () => {
+  it('takes a day as its shifts — Ca C after midnight is the day before', async () => {
     const r = await edges();
     at('2026-09-27', '12:00'); // everything is well past 12 hours
     const res = await archiveIn(letanA, '2026-09-25', '2026-09-25');
@@ -364,19 +378,25 @@ describe('the completion archive, narrowed by the day a record was RECEIVED', ()
     expect(idsOf(res)).toEqual([r.first25, r.last25].sort());
     expect(res.body.totals).toEqual({ GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 1 });
     expect(res.body.range).toEqual({ from: '2026-09-25', to: '2026-09-25' });
+    // 00:30 on the 25th was Ca C of the 24th.
+    expect(idsOf(await archiveIn(letanA, '2026-09-24', '2026-09-24'))).toEqual([r.lateOn24, r.afterMidnight].sort());
+    // One shift of the day.
+    expect(idsOf(await letanA.get('/api/reception/reports/archive?from=2026-09-24&to=2026-09-25&shiftType=C'))).toEqual(
+      [r.lateOn24, r.afterMidnight].sort(),
+    );
   });
 
   it('takes a multi-day range inclusively, at both ends', async () => {
     const r = await edges();
     at('2026-09-27', '12:00');
     expect(idsOf(await archiveIn(letanA, '2026-09-24', '2026-09-25'))).toEqual(
-      [r.lateOn24, r.first25, r.last25].sort(),
+      [r.lateOn24, r.afterMidnight, r.first25, r.last25].sort(),
     );
     expect(idsOf(await archiveIn(letanA, '2026-09-24', '2026-09-26'))).toEqual(
-      [r.lateOn24, r.first25, r.last25, r.first26].sort(),
+      [r.lateOn24, r.afterMidnight, r.first25, r.last25, r.first26].sort(),
     );
     // Without a range: the whole archive, as before.
-    expect(await archiveIds(letanA)).toHaveLength(4);
+    expect(await archiveIds(letanA)).toHaveLength(5);
   });
 
   it('returns nothing, and zero totals, for a range with no completed record', async () => {
@@ -443,7 +463,7 @@ describe('the completion archive, narrowed by the day a record was RECEIVED', ()
     for (const id of [on24, on25]) {
       await assignTo(admin, id, tech);
       await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
-      expect((await tech.post(`/api/issues/${id}/complete`).send({})).status).toBe(200);
+      expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
     }
     at('2026-09-26', '12:00');
     const day = async (from: string, to: string) =>
@@ -471,7 +491,7 @@ describe('the completion archive, narrowed by the day a record was RECEIVED', ()
     await assignTo(admin, recent, tech);
     await tech.post(`/api/issues/${recent}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
-    expect((await tech.post(`/api/issues/${recent}/complete`).send({})).status).toBe(200);
+    expect((await tech.post(`/api/issues/${recent}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
 
     const inRange = () => letanA.get('/api/issues?scope=archive&from=2026-09-25&to=2026-09-25&pageSize=100');
     at('2026-09-25', '20:59'); // under 12 hours after the 09:00 report
@@ -498,7 +518,7 @@ describe('the 12-hour completion archive (III, the incidents)', () => {
     await assignTo(admin, finished, tech);
     await tech.post(`/api/issues/${finished}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
-    expect((await tech.post(`/api/issues/${finished}/complete`).send({})).status).toBe(200);
+    expect((await tech.post(`/api/issues/${finished}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
 
     at('2026-09-25', '21:59');
     expect(await issueIds(letanA, 'active')).toEqual(expect.arrayContaining([finished, open]));
@@ -686,7 +706,7 @@ describe('Technical "Đã hoàn thành" by completion date', () => {
     at(day, hhmm);
     await assignTo(admin, id, tech);
     expect((await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' })).status).toBe(200);
-    expect((await tech.post(`/api/issues/${id}/complete`).send({})).status).toBe(200);
+    expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
   }
   const done = async (q: string) => {
     const res = await tech.get(`/api/issues?stage=COMPLETED&pageSize=100&${q}`);

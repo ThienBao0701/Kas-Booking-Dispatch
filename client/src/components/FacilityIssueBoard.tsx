@@ -23,7 +23,8 @@
  * "Báo cáo sự cố" screen used — `NewIssueModal`, in IncidentReporting — and the
  * incident is then recorded in this shift's journal in the same step.
  *
- * THE ONE PER-ROW ACTION IS "SỬA VẤN ĐỀ": correct what the report says while the
+ * THE PER-ROW ACTIONS: "Chuyển về chờ giao" (assigned, not yet accepted) and
+ * "Xóa" (a void; the record stays) — and "SỬA VẤN ĐỀ": correct what the report says while the
  * incident is still open. It runs through the same `EditIssueModal` field set as
  * the report form and the server keeps the old words, the report time, the status
  * and the whole repair history. Reception still operates no repair — accepting,
@@ -31,7 +32,7 @@
  */
 import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Pencil } from 'lucide-react';
+import { Pencil, Trash2, Undo2 } from 'lucide-react';
 import { issuesApi, type Issue } from '../api/issues';
 import { reportsApi } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
@@ -39,6 +40,7 @@ import { FACILITY_BOARD_KEY } from '../lib/reportKeys';
 import { RowAction } from './DataTable';
 import { EditIssueModal, IncidentTable, NewIssueModal } from './IncidentReporting';
 import { MoreNote } from './MoreNote';
+import { DeleteIssueDialog, UnassignIssueDialog } from './IssueManageDialogs';
 import type { SectionFrame } from './ReportSection';
 
 export function FacilityIssueBoard({
@@ -72,6 +74,8 @@ export function FacilityIssueBoard({
   });
 
   const [editing, setEditing] = useState<Issue | null>(null);
+  const [returning, setReturning] = useState<Issue | null>(null);
+  const [deleting, setDeleting] = useState<Issue | null>(null);
 
   const logToJournal = useMutation({
     mutationFn: (issueId: string) =>
@@ -120,10 +124,23 @@ export function FacilityIssueBoard({
           issue.status !== 'NEW' && issue.status !== 'IN_PROGRESS' ? (
             <span className="text-xs text-slate-300">—</span>
           ) : (
-            <RowAction onClick={() => setEditing(issue)} testId={`edit-issue-${issue.id}`}>
-              <Pencil className="h-3 w-3" aria-hidden="true" />
-              Sửa vấn đề
-            </RowAction>
+            <div className="flex flex-wrap justify-end gap-1.5">
+              <RowAction onClick={() => setEditing(issue)} testId={`edit-issue-${issue.id}`}>
+                <Pencil className="h-3 w-3" aria-hidden="true" />
+                Sửa vấn đề
+              </RowAction>
+              {/* Assigned but not taken up yet: back to "Chờ giao kỹ thuật". */}
+              {issue.status === 'NEW' && issue.assignedTechnician ? (
+                <RowAction onClick={() => setReturning(issue)} testId={`unassign-${issue.id}`}>
+                  <Undo2 className="h-3 w-3" aria-hidden="true" />
+                  Chuyển về chờ giao
+                </RowAction>
+              ) : null}
+              <RowAction onClick={() => setDeleting(issue)} testId={`delete-issue-${issue.id}`}>
+                <Trash2 className="h-3 w-3" aria-hidden="true" />
+                Xóa
+              </RowAction>
+            </div>
           )
         }
       />
@@ -136,6 +153,29 @@ export function FacilityIssueBoard({
             void issues.refetch();
             void onLogged();
             onToast('Đã lưu chỉnh sửa sự cố.');
+          }}
+        />
+      ) : null}
+      {returning ? (
+        <UnassignIssueDialog
+          issue={returning}
+          onClose={() => setReturning(null)}
+          onDone={() => {
+            setReturning(null);
+            void issues.refetch();
+            onToast('Đã chuyển sự cố về chờ giao kỹ thuật.');
+          }}
+        />
+      ) : null}
+      {deleting ? (
+        <DeleteIssueDialog
+          issue={deleting}
+          onClose={() => setDeleting(null)}
+          onDone={() => {
+            setDeleting(null);
+            void issues.refetch();
+            void onLogged();
+            onToast('Đã xóa sự cố.');
           }}
         />
       ) : null}
