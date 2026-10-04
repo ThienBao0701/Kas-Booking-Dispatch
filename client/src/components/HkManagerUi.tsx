@@ -11,6 +11,7 @@
  *   PriorityBadge    ưu tiên (red)
  *   ProgressBar      the three states as one bar
  *   ManagerRoomBoard the day's rooms, one group per code (OUT / OC / VC)
+ *   ReviewCard       a finished room waiting for "Đạt" / "Không đạt"
  *
  * Colour carries meaning only: status, priority, action.
  */
@@ -87,6 +88,7 @@ export function HkSection({
   testId,
   className = '',
   bodyClassName = 'p-4',
+  accent = false,
 }: {
   title: string;
   aside?: ReactNode;
@@ -94,10 +96,17 @@ export function HkSection({
   testId?: string;
   className?: string;
   bodyClassName?: string;
+  /** Amber frame and header — the review area, apart from the rooms being cleaned. */
+  accent?: boolean;
 }) {
   return (
-    <section data-testid={testId} className={`overflow-hidden rounded-xl border-section border-line bg-white ${className}`}>
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b-rule border-line bg-slate-50/70 px-4 py-2.5">
+    <section
+      data-testid={testId}
+      className={`overflow-hidden rounded-xl border-section bg-white ${accent ? 'border-amber-400' : 'border-line'} ${className}`}
+    >
+      <header
+        className={`flex flex-wrap items-center justify-between gap-2 border-b-rule px-4 py-2.5 ${accent ? 'border-amber-300 bg-amber-50' : 'border-line bg-slate-50/70'}`}
+      >
         <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
         {aside}
       </header>
@@ -237,7 +246,7 @@ export function ManagerLegend() {
     <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600" data-testid="room-legend">
       <Badge tone="gray">Chưa bắt đầu</Badge>
       <Badge tone="blue">Đang dọn</Badge>
-      <Badge tone="green">Hoàn thành</Badge>
+      <Badge tone="red">Cần dọn lại</Badge>
       <PriorityBadge />
     </p>
   );
@@ -245,14 +254,20 @@ export function ManagerLegend() {
 
 function RoomTile({ task, onClick }: { task: RoomTask; onClick?: () => void }) {
   const who = task.assignee?.name ?? null;
+  // "Cần dọn lại": a re-clean cycle — red until its cleaning starts.
+  const reclean = task.reclean !== null && task.state !== 'COMPLETED';
+  const stateLabel = reclean && task.state === 'NOT_STARTED' ? 'Cần dọn lại' : task.stateLabel;
   return (
     <button
       type="button"
       onClick={onClick}
       data-testid={`room-chip-${task.roomNumber}`}
       data-state={task.state}
-      aria-label={`Phòng ${task.roomNumber} · ${task.stateLabel} · ${who ?? 'Chưa giao'}${task.priority ? ' · Ưu tiên' : ''}`}
-      className={`relative flex min-h-[5.5rem] flex-col items-start justify-between rounded-lg border-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-1 ${TILE[task.state]}`}
+      data-reclean={reclean || undefined}
+      aria-label={`Phòng ${task.roomNumber} · ${stateLabel} · ${who ?? 'Chưa giao'}${task.priority ? ' · Ưu tiên' : ''}`}
+      className={`relative flex min-h-[5.5rem] flex-col items-start justify-between rounded-lg border-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-1 ${
+        reclean && task.state === 'NOT_STARTED' ? 'border-red-400 bg-red-50 hover:bg-red-100' : TILE[task.state]
+      }`}
     >
       <span className="flex w-full items-start justify-between gap-1">
         <span
@@ -269,7 +284,14 @@ function RoomTile({ task, onClick }: { task: RoomTask; onClick?: () => void }) {
         ) : null}
       </span>
       <span className={`w-full truncate text-xs ${who ? 'font-medium text-slate-700' : 'italic text-amber-700'}`}>{who ?? 'Chưa giao'}</span>
-      <span className={`text-[11px] font-semibold uppercase tracking-wide ${STATE_TEXT[task.state]}`}>{task.stateLabel}</span>
+      <span className="flex flex-wrap items-center gap-1">
+        <span className={`text-[11px] font-semibold uppercase tracking-wide ${reclean && task.state === 'NOT_STARTED' ? 'text-red-700' : STATE_TEXT[task.state]}`}>
+          {stateLabel}
+        </span>
+        {reclean && task.state === 'IN_PROGRESS' ? (
+          <span className="rounded bg-red-600 px-1 text-[10px] font-bold uppercase text-white">Dọn lại</span>
+        ) : null}
+      </span>
     </button>
   );
 }
@@ -324,5 +346,79 @@ export function PickChip({ room, selected, onToggle }: { room: string; selected:
     >
       {room}
     </button>
+  );
+}
+
+/**
+ * "PHÒNG CHỜ ĐÁNH GIÁ" — one finished room: who cleaned it, when it finished,
+ * how long it took, and the two outcomes. Opening the room shows its history.
+ */
+export function ReviewCard({
+  task,
+  finishedAt,
+  duration,
+  onOpen,
+  onPass,
+  onFail,
+}: {
+  task: RoomTask;
+  /** "10:42". */
+  finishedAt: string;
+  /** "32 phút". */
+  duration: string;
+  onOpen: () => void;
+  onPass: () => void;
+  onFail: () => void;
+}) {
+  return (
+    <article data-testid={`review-card-${task.roomNumber}`} className="flex flex-col rounded-lg border-2 border-amber-300 bg-white p-3">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex items-start justify-between gap-2 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        aria-label={`Xem chi tiết phòng ${task.roomNumber}`}
+      >
+        <span>
+          <span className="block text-lg font-bold leading-tight tabular-nums text-slate-900">PHÒNG {task.roomNumber}</span>
+          {task.cycleNumber > 1 ? <span className="text-xs font-semibold text-amber-800">Lần dọn {task.cycleNumber}</span> : null}
+        </span>
+        <span className="flex items-center gap-1">
+          {task.priority ? <Flag className="h-4 w-4 text-red-600" aria-label="Ưu tiên" /> : null}
+          <CodeTag code={task.statusCode} />
+        </span>
+      </button>
+      <dl className="mt-2 space-y-0.5 text-sm">
+        <div className="flex gap-1.5">
+          <dt className="text-slate-500">Nhân viên:</dt>
+          <dd className="min-w-0 truncate font-medium text-slate-900">{task.cleanedBy?.name ?? task.assignee?.name ?? '—'}</dd>
+        </div>
+        <div className="flex gap-1.5">
+          <dt className="text-slate-500">Hoàn thành:</dt>
+          <dd className="tabular-nums text-slate-900">{finishedAt}</dd>
+        </div>
+        <div className="flex gap-1.5">
+          <dt className="text-slate-500">Thời gian dọn:</dt>
+          <dd className="tabular-nums text-slate-900">{duration}</dd>
+        </div>
+      </dl>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onPass}
+          data-testid={`review-pass-${task.roomNumber}`}
+          className="min-h-[2.5rem] rounded-lg bg-green-600 px-3 text-sm font-semibold text-white hover:bg-green-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700 focus-visible:ring-offset-1"
+        >
+          Đạt
+        </button>
+        <button
+          type="button"
+          onClick={onFail}
+          data-testid={`review-fail-${task.roomNumber}`}
+          className="min-h-[2.5rem] rounded-lg border-2 border-red-300 bg-white px-3 text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-1"
+        >
+          Không đạt
+        </button>
+      </div>
+    </article>
   );
 }

@@ -103,6 +103,29 @@ export interface RoomTask {
   voidedByName: string | null;
   voidReason: string | null;
   events: TaskEvent[];
+  /** 1, 2, … — this room's cleaning cycle that business day. */
+  cycleNumber: number;
+  /** "Cần dọn lại": the failed cycle this one repeats, and the manager's reason. */
+  reclean: { taskId: string; cycleNumber: number; reason: string | null; reviewedByName: string | null; reviewedAt: string | null } | null;
+  /** Null before "Hoàn thành"; PENDING = "Chờ đánh giá"; then PASSED / FAILED, once. */
+  review: {
+    status: 'PENDING' | 'PASSED' | 'FAILED';
+    label: string;
+    reviewedAt: string | null;
+    reviewedByName: string | null;
+    failureReason: string | null;
+    recleanRequested: boolean;
+  } | null;
+  /** The re-clean this cycle's "Không đạt" opened. */
+  nextCycleId: string | null;
+}
+
+export interface ReviewInput {
+  result: 'PASSED' | 'FAILED';
+  reason?: string;
+  reclean?: boolean;
+  /** The re-clean's worker (of the branch); null = not assigned yet; omitted = this cycle's. */
+  assigneeUserId?: number | null;
 }
 
 export interface KpiRow {
@@ -203,6 +226,11 @@ export const roomWorkApi = {
     api.patch<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}`, input),
   assign: (id: string, assigneeUserId: number | null) =>
     api.post<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}/assign`, { assigneeUserId }),
+  /** "Đạt" / "Không đạt" (+ reason, + "Yêu cầu dọn lại"). */
+  review: (id: string, input: ReviewInput) =>
+    api.post<{ task: RoomTask; reclean: RoomTask | null }>(`/housekeeping/manager/tasks/${id}/review`, input),
+  /** Every cleaning cycle of the room that business day, in order. */
+  history: (id: string) => api.get<{ cycles: RoomTask[] }>(`/housekeeping/manager/tasks/${id}/history`),
   voidTask: (id: string, reason?: string) =>
     api.post<{ voided: true }>(`/housekeeping/manager/tasks/${id}/void`, reason ? { reason } : {}),
   /** The branch's own Buồng phòng accounts (the Admin without a branch: all of them). */

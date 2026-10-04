@@ -9,7 +9,8 @@
  * branch: "Vào ca" opens the shift at the branch the Admin assigned the account
  * (an account without one is told to ask the Admin). A room opens its work page
  * (Kiểm phòng | Dọn phòng); the board shows where each stands — gray not
- * started, blue being cleaned, green underline done.
+ * started, blue being cleaned. A finished room leaves the board (it waits for
+ * the manager's review); a re-clean comes back marked "Cần dọn lại".
  *
  * NOTHING ABOUT MONEY HERE. The worker's own collections are on "KPI & Thu tiền".
  */
@@ -111,7 +112,7 @@ export function HousekeepingInspectionPage() {
                   <h3 className="mb-3 flex flex-wrap items-center gap-2 text-base font-semibold text-slate-900">
                     {branchLabel(g.branch)}
                     <span className="text-sm font-normal text-slate-600">
-                      · {g.tasks.filter((t) => t.state === 'COMPLETED').length}/{g.tasks.length} phòng xong
+                      · {g.tasks.length} phòng
                     </span>
                     {!here ? (
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
@@ -123,6 +124,8 @@ export function HousekeepingInspectionPage() {
                     tasks={g.tasks}
                     codes={catalog.data?.statusCodes ?? []}
                     onSelect={(t) => navigate(`/app/inspections/room/${t.id}`)}
+                    // A re-clean the manager sent back: marked under the number.
+                    labelOf={(t) => (t.reclean ? 'Cần dọn lại' : null)}
                     testId={`work-board-${g.branch.id}`}
                   />
                 </section>

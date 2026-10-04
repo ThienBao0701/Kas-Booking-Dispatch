@@ -11,6 +11,10 @@
  *   4. "Theo dõi nhân viên" opens a worker's full detail, cleaning included.
  *   5. "KPI & Thu tiền" filters by collection status; "Báo cáo" exports PDF/Excel.
  *   6. The Admin reaches the same screens as a menu group, over every branch.
+ *   8. "Tình trạng phòng" has three areas: rooms being cleaned, rooms waiting for
+ *      "Đạt" / "Không đạt" (a reason required for the latter, with the re-clean
+ *      sent to a chosen worker), and rooms that can be added again; the room's
+ *      dialog shows every cleaning cycle and its review.
  *   7. Every screen opens with "Quản lý buồng phòng · Chi nhánh · Ngày nghiệp vụ";
  *      the worker lists come from the server's list of the branch's own accounts.
  */
@@ -85,6 +89,10 @@ function task(id: string, over: Record<string, unknown> = {}) {
     voidedAt: null,
     voidedByName: null,
     voidReason: null,
+    cycleNumber: 1,
+    reclean: null,
+    review: null,
+    nextCycleId: null,
     events: [
       { id: 'e1', type: 'CREATED', label: 'Tạo công việc', actorName: 'Quản lý Buồng', actorRole: 'HOUSEKEEPING_MANAGER', detail: null, createdAt: '2026-10-05T01:00:00.000Z' },
     ],
@@ -228,7 +236,7 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
     expect(within(row).getByTestId('room-chip-101')).toHaveAttribute('data-state', 'NOT_STARTED');
     expect(within(row).getByTestId('room-chip-101')).toHaveTextContent('Buồng phòng Một');
     const summary = screen.getByTestId('board-summary');
-    expect(summary).toHaveTextContent('Tổng phòng1');
+    expect(summary).toHaveTextContent('Đang thực hiện1');
     expect(summary).toHaveTextContent('Chưa bắt đầu1');
     expect(summary).not.toHaveTextContent('₫');
 
@@ -253,6 +261,134 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
   });
 });
 
+describe('Quản lý buồng phòng — đánh giá chất lượng', () => {
+  const done = (id: string, room: string, over: Record<string, unknown> = {}) =>
+    task(id, {
+      roomNumber: room,
+      state: 'COMPLETED',
+      stateLabel: 'Hoàn thành',
+      assignee: { id: 6, name: 'Buồng phòng Một' },
+      cleanedBy: { id: 6, name: 'Buồng phòng Một' },
+      startedAt: '2026-10-05T03:10:00.000Z',
+      completedAt: '2026-10-05T03:42:00.000Z',
+      durationSeconds: 32 * 60,
+      review: { status: 'PENDING', label: 'Chờ đánh giá', reviewedAt: null, reviewedByName: null, failureReason: null, recleanRequested: false },
+      ...over,
+    });
+  const BOARD = [
+    task('t1', { roomNumber: '101' }),
+    task('t2', { roomNumber: '102', state: 'IN_PROGRESS', stateLabel: 'Đang dọn' }),
+    done('t3', '103'),
+    done('t4', '104', { review: { status: 'PASSED', label: 'Đạt', reviewedAt: '2026-10-05T03:50:00.000Z', reviewedByName: 'Quản lý Buồng', failureReason: null, recleanRequested: false } }),
+    task('t5', { roomNumber: '105', cycleNumber: 2, assignee: { id: 7, name: 'Buồng phòng Hai' }, reclean: { taskId: 't0', cycleNumber: 1, reason: 'Thiếu khăn tắm', reviewedByName: 'Quản lý Buồng', reviewedAt: '2026-10-05T03:00:00.000Z' } }),
+  ];
+  const routes = (extra: Record<string, Handler> = {}) =>
+    shell(MANAGER, {
+      [TASKS_URL]: () => ({ status: 200, body: { tasks: BOARD } }),
+      'GET /api/branches/1/rooms': () => ({ status: 200, body: { branchId: 1, rooms: ['101', '102', '103', '104', '105', '106'] } }),
+      ...extra,
+    });
+  const chips = (el: HTMLElement) => within(el).queryAllByTestId(/^room-chip-/).map((c) => c.getAttribute('data-testid')!.replace('room-chip-', ''));
+
+  it('splits the board: rooms being cleaned, rooms waiting for review, and rooms that can be added again', async () => {
+    installApiMock(routes());
+    renderApp('/app/hk/rooms');
+    const active = await screen.findByTestId('board-active');
+    await waitFor(() => expect(chips(active)).toEqual(['101', '102', '105']));
+    // A re-clean, marked.
+    expect(within(active).getByTestId('room-chip-105')).toHaveAttribute('data-reclean', 'true');
+    expect(within(active).getByTestId('room-chip-105')).toHaveTextContent('Cần dọn lại');
+    // Waiting for the manager: its own area, with who, when and how long.
+    const review = screen.getByTestId('board-review');
+    expect(within(review).queryAllByTestId(/^review-card-/).map((c) => c.getAttribute('data-testid'))).toEqual(['review-card-103']);
+    const card = within(review).getByTestId('review-card-103');
+    expect(card).toHaveTextContent('PHÒNG 103');
+    expect(card).toHaveTextContent('Nhân viên:Buồng phòng Một');
+    expect(card).toHaveTextContent('Thời gian dọn:32 phút');
+    // 104 passed: released to "Thêm phòng vào bảng"; the open rooms are not offered.
+    expect(chips(await screen.findByTestId('free-rooms'))).toEqual(['104', '106']);
+    const summary = screen.getByTestId('board-summary');
+    for (const text of ['Đang thực hiện3', 'Cần dọn lại1', 'Chờ đánh giá1', 'Đạt1']) expect(summary).toHaveTextContent(text);
+  });
+
+  it('confirms "Đạt", and sends "Không đạt" only with its reason — with the re-clean for the chosen worker', async () => {
+    const posted: unknown[] = [];
+    installApiMock(
+      routes({
+        'POST /api/housekeeping/manager/tasks/t3/review': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { task: done('t3', '103'), reclean: null } };
+        },
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    await userEvent.click(await screen.findByTestId('review-pass-103'));
+    await userEvent.click(await screen.findByTestId('pass-confirm'));
+    await waitFor(() => expect(posted).toEqual([{ result: 'PASSED' }]));
+
+    await userEvent.click(screen.getByTestId('review-fail-103'));
+    const confirm = await screen.findByTestId('fail-confirm');
+    expect(confirm).toBeDisabled();
+    expect(screen.getByTestId('fail-reclean')).toBeChecked();
+    await userEvent.type(screen.getByTestId('fail-reason'), '   ');
+    expect(confirm).toBeDisabled();
+    await userEvent.clear(screen.getByTestId('fail-reason'));
+    await userEvent.type(screen.getByTestId('fail-reason'), 'Thiếu khăn tắm');
+    await waitFor(() => expect([...screen.getByTestId('fail-assignee').querySelectorAll('option')].length).toBeGreaterThan(1));
+    expect(screen.getByTestId('fail-assignee')).toHaveValue('6');
+    await userEvent.selectOptions(screen.getByTestId('fail-assignee'), '7');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(posted[1]).toEqual({ result: 'FAILED', reason: 'Thiếu khăn tắm', reclean: true, assigneeUserId: 7 }));
+
+    // Without "Yêu cầu dọn lại": no worker to choose, none sent.
+    await userEvent.click(screen.getByTestId('review-fail-103'));
+    await userEvent.type(await screen.findByTestId('fail-reason'), 'Khách đã nhận phòng');
+    await userEvent.click(screen.getByTestId('fail-reclean'));
+    expect(screen.queryByTestId('fail-assignee')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('fail-confirm'));
+    await waitFor(() => expect(posted[2]).toEqual({ result: 'FAILED', reason: 'Khách đã nhận phòng', reclean: false }));
+  });
+
+  it('shows every cleaning cycle of the room, with its review — from the review card', async () => {
+    const first = done('t0', '105', {
+      review: { status: 'FAILED', label: 'Không đạt', reviewedAt: '2026-10-05T03:00:00.000Z', reviewedByName: 'Quản lý Buồng', failureReason: 'Thiếu khăn tắm', recleanRequested: true },
+      nextCycleId: 't5',
+    });
+    const second = done('t5', '105', {
+      cycleNumber: 2,
+      assignee: { id: 7, name: 'Buồng phòng Hai' },
+      cleanedBy: { id: 7, name: 'Buồng phòng Hai' },
+      completedAt: '2026-10-05T04:05:00.000Z',
+      reclean: { taskId: 't0', cycleNumber: 1, reason: 'Thiếu khăn tắm', reviewedByName: 'Quản lý Buồng', reviewedAt: '2026-10-05T03:00:00.000Z' },
+    });
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [first, second] } }),
+        'GET /api/housekeeping/manager/tasks/t5/history': () => ({ status: 200, body: { cycles: [first, second] } }),
+        'GET /api/branches/1/rooms': () => ({ status: 200, body: { branchId: 1, rooms: ['105'] } }),
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    // The failed cycle is history; only its re-clean waits for review — and holds the room.
+    const card = await screen.findByTestId('review-card-105');
+    expect(card).toHaveTextContent('Lần dọn 2');
+    expect(card).toHaveTextContent('Nhân viên:Buồng phòng Hai');
+    expect(chips(await screen.findByTestId('free-rooms'))).toEqual([]);
+    await userEvent.click(within(card).getByRole('button', { name: 'Xem chi tiết phòng 105' }));
+    const history = await screen.findByTestId('cycle-history');
+    const one = await within(history).findByTestId('cycle-1');
+    expect(one).toHaveTextContent('Không đạt');
+    expect(one).toHaveTextContent('Người dọn:Buồng phòng Một');
+    expect(one).toHaveTextContent('Người đánh giá:Quản lý Buồng');
+    expect(one).toHaveTextContent('Yêu cầu dọn lại:Có');
+    expect(one).toHaveTextContent('Lý do: Thiếu khăn tắm');
+    const two = within(history).getByTestId('cycle-2');
+    expect(two).toHaveTextContent('Chờ đánh giá');
+    expect(two).toHaveTextContent('Người dọn:Buồng phòng Hai');
+    expect(within(history).getByTestId('cycle-current')).toHaveTextContent('Hiện tại: Chờ đánh giá');
+  });
+});
+
 describe('Quản lý buồng phòng — Phân công công việc', () => {
   const routes = (extra: Record<string, Handler> = {}) =>
     shell(MANAGER, {
@@ -260,6 +396,7 @@ describe('Quản lý buồng phòng — Phân công công việc', () => {
         status: 200,
         body: { tasks: [task('t1', { assignee: { id: 6, name: 'Buồng phòng Một' } }), task('t2', { roomNumber: '102', priority: true })] },
       }),
+      'GET /api/housekeeping/manager/tasks/t1/history': () => ({ status: 200, body: { cycles: [task('t1', { assignee: { id: 6, name: 'Buồng phòng Một' } })] } }),
       ...extra,
     });
 

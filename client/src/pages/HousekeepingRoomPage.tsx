@@ -152,6 +152,12 @@ function RoomHeader({ task }: { task: RoomTask }) {
         {task.priority ? <span className="rounded-full bg-red-600 px-2.5 py-0.5 text-sm font-semibold text-white">Ưu tiên</span> : null}
       </div>
       <p className="mt-1 text-sm text-slate-600">{branchLabel(task.branch)}</p>
+      {task.reclean && task.state !== 'COMPLETED' ? (
+        <p className="mt-3 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-base text-red-900" data-testid="room-reclean">
+          <span className="font-bold">CẦN DỌN LẠI</span>
+          <span className="block">Lý do: {task.reclean.reason ?? '—'}</span>
+        </p>
+      ) : null}
       {task.note ? (
         <p className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-base text-amber-900" data-testid="room-note">
           <span className="font-semibold">Ghi chú: </span>

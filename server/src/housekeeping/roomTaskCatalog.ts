@@ -21,6 +21,34 @@ export const ROOM_WORK_STATE_LABELS = {
   COMPLETED: 'Hoàn thành',
 } as const;
 
+/** The manager's quality review of a finished cycle. */
+export const ROOM_REVIEW_LABELS = {
+  PENDING: 'Chờ đánh giá',
+  PASSED: 'Đạt',
+  FAILED: 'Không đạt',
+} as const;
+
+/** A re-clean cycle not yet finished. */
+export const RECLEAN_LABEL = 'Cần dọn lại';
+
+/**
+ * Where ONE cycle stands, in a word — the cleaning state and the review read
+ * together, never merged in the data: Chưa bắt đầu / Cần dọn lại / Đang dọn /
+ * Chờ đánh giá / Đạt / Không đạt (— dọn lại).
+ */
+export function cycleOutcomeLabel(t: {
+  state: keyof typeof ROOM_WORK_STATE_LABELS;
+  reviewResult: 'PASSED' | 'FAILED' | null;
+  recleanRequested: boolean;
+  previousTaskId: string | null;
+}): string {
+  if (t.reviewResult === 'PASSED') return ROOM_REVIEW_LABELS.PASSED;
+  if (t.reviewResult === 'FAILED') return t.recleanRequested ? `${ROOM_REVIEW_LABELS.FAILED} — dọn lại` : ROOM_REVIEW_LABELS.FAILED;
+  if (t.state === 'COMPLETED') return ROOM_REVIEW_LABELS.PENDING;
+  if (t.state === 'NOT_STARTED' && t.previousTaskId) return RECLEAN_LABEL;
+  return ROOM_WORK_STATE_LABELS[t.state];
+}
+
 /** Bed linen: ONE type per item — King, Queen or Twin — and how many. */
 export const LINEN_ITEMS = [
   { code: 'BED_SHEET', label: 'Ga giường' },

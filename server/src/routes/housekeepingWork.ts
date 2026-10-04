@@ -27,6 +27,8 @@ import {
   myTasks,
   openTask,
   saveCleaning,
+  reviewTask,
+  roomHistory,
   updateTask,
   voidTask,
 } from '../housekeeping/roomTaskService';
@@ -124,6 +126,28 @@ export function createHousekeepingWorkRouter(): Router {
       const body = z.object({ reason: z.string().max(1000).optional() }).parse(req.body ?? {});
       await voidTask(actorOf(req), req.params.id!, body, getClock());
       res.json({ voided: true, id: req.params.id });
+    })().catch(next);
+  });
+
+  // "Đạt" / "Không đạt" (+ reason, + "Yêu cầu dọn lại" for a worker of the branch).
+  router.post('/housekeeping/manager/tasks/:id/review', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z
+        .object({
+          result: z.enum(['PASSED', 'FAILED']),
+          reason: z.string().max(1000).optional(),
+          reclean: z.boolean().optional(),
+          assigneeUserId: z.number().int().positive().nullable().optional(),
+        })
+        .parse(req.body ?? {});
+      res.json(await reviewTask(actorOf(req), req.params.id!, body, getClock()));
+    })().catch(next);
+  });
+
+  // Every cleaning cycle of the room that business day.
+  router.get('/housekeeping/manager/tasks/:id/history', ...gate, (req, res, next) => {
+    (async () => {
+      res.json({ cycles: await roomHistory(actorOf(req), req.params.id!) });
     })().catch(next);
   });
 

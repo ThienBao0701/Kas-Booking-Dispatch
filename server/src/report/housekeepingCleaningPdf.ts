@@ -2,10 +2,12 @@
  * "KAS – BÁO CÁO KIỂM TRA & DỌN PHÒNG" — the PDF of what the Buồng phòng worker
  * entered in "Dọn phòng", room by room, after the paper housekeeping form.
  *
- * For each branch and business day, five framed tables, each led by the room
- * number so a room is followed across them:
+ * For each branch and business day, six framed tables, each led by the room
+ * number (and the cleaning cycle, "Lần 2", when the room had more than one) so a
+ * room — and each of its cycles — is followed across them:
  *
  *   Phòng, thời gian và ghi nhận đặc biệt   code, worker, Time In / Out, time, L/B … LNL
+ *   Đánh giá chất lượng                      each cycle's review: result, evaluator, reason, re-clean, final outcome
  *   Đồ vải (Bedding)                         King / Queen / Twin and the count, per item
  *   Vật dụng — số lượng                      every counted item of the form
  *   Đồ thay thế                              the six replacement items
@@ -18,7 +20,7 @@
  */
 import type { CleaningDetailRow } from '../housekeeping/housekeepingKpi';
 import { LINEN_ITEMS, LINEN_SIZES, QUANTITY_ITEMS, REPLACEMENT_ITEMS, ROOM_WORK_STATE_LABELS, SPECIAL_STATUSES } from '../housekeeping/roomTaskCatalog';
-import { cleaningClock, cleaningDuration } from './housekeepingOpsReport';
+import { cleaningClock, cleaningDuration, reviewCells } from './housekeepingOpsReport';
 import { hcmDateTime, hcmDayLabel, periodLabel } from './format';
 import {
   FONT_BOLD,
@@ -56,7 +58,24 @@ const checked = (label: string, test: (r: Row) => boolean): Column<Row> => ({ he
 const sized = (column: Column<Row>, width: number): Column<Row> => ({ ...column, width });
 const fits = (label: string, columns: Column<Row>[]) => assertHeadersFit(label, assertFitsLandscape(label, columns));
 
-const ROOM: Column<Row> = { header: 'Phòng', width: 44, value: (r) => r.roomNumber };
+/** The room — and its cycle, when it had more than one that day: a re-clean is never folded into the first. */
+const ROOM: Column<Row> = { header: 'Phòng', width: 44, value: (r) => (r.cycleCount > 1 ? `${r.roomNumber}\nLần ${r.cycleNumber}` : r.roomNumber) };
+
+/** Each cycle's quality review — every cycle a row of its own. */
+export const REVIEW_COLUMNS = fits('housekeeping cleaning — review', [
+  { header: 'Phòng', width: 40, value: (r) => r.roomNumber },
+  { header: 'Lần', width: 28, value: (r) => String(r.cycleNumber), align: 'center' },
+  { header: 'Người dọn', width: 96, value: (r) => r.employee },
+  { header: 'Time In', width: 44, value: (r) => cleaningClock(r.startedAt, r.workDate) || BLANK, align: 'center' },
+  { header: 'Time Out', width: 44, value: (r) => cleaningClock(r.completedAt, r.workDate) || BLANK, align: 'center' },
+  { header: 'Thời gian dọn', width: 56, value: (r) => cleaningDuration(r) || BLANK, align: 'center' },
+  { header: 'Kết quả', width: 70, value: (r) => reviewCells(r).result || BLANK },
+  { header: 'Người đánh giá', width: 96, value: (r) => reviewCells(r).evaluator || BLANK },
+  { header: 'Lúc', width: 44, value: (r) => reviewCells(r).at || BLANK, align: 'center' },
+  { header: 'Lý do không đạt', width: 150, value: (r) => reviewCells(r).reason || BLANK },
+  { header: 'Dọn lại', width: 40, value: (r) => reviewCells(r).reclean || BLANK, align: 'center' },
+  { header: 'Kết quả cuối', width: 66, value: (r) => r.finalOutcome },
+]);
 
 /** Room, code, who, when — and the six special statuses as boxes. */
 export const ROOM_COLUMNS = fits('housekeeping cleaning — rooms', [
@@ -146,8 +165,10 @@ export async function buildHousekeepingCleaningPdf(data: HousekeepingCleaningDat
   }
   for (const rows of groups.values()) {
     const group = `${rows[0]!.branchLabel} · Ngày ${hcmDayLabel(rows[0]!.workDate)}`;
-    sectionTitle(doc, `${group} · ${rows.length} phòng`);
+    const roomCount = new Set(rows.map((r) => r.roomNumber)).size;
+    sectionTitle(doc, `${group} · ${roomCount} phòng${rows.length > roomCount ? ` · ${rows.length} lần dọn` : ''}`);
     table(doc, 'Phòng, thời gian và ghi nhận đặc biệt', group, ROOM_COLUMNS, rows, SPECIAL_LEGEND);
+    table(doc, 'Đánh giá chất lượng', group, REVIEW_COLUMNS, rows);
     table(doc, 'Đồ vải (Bedding)', group, BEDDING_COLUMNS, rows);
     table(doc, 'Vật dụng — số lượng', group, QUANTITY_COLUMNS, rows);
     table(doc, 'Đồ thay thế', group, REPLACEMENT_COLUMNS, rows);

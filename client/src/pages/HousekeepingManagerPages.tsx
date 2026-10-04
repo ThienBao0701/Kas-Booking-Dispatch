@@ -3,7 +3,8 @@
  * (the Admin: any branch, with a branch picker):
  *
  *   Tổng quan            the day at a glance, and the way into the rest
- *   Tình trạng phòng     the board: each room's code, priority, note, worker
+ *   Tình trạng phòng     the board: rooms being cleaned, rooms waiting for "Đạt" /
+ *                        "Không đạt", and the rooms that can be added again
  *   Phân công công việc  who has which room; assign, reassign, history
  *   Theo dõi nhân viên   per worker: rooms and progress — every detail one click down
  *   KPI & Thu tiền       findings and collections credited to each worker
@@ -56,6 +57,7 @@ import {
   PriorityBadge,
   ProgressBar,
   RateBar,
+  ReviewCard,
   StateBadge,
   type Tone,
 } from '../components/HkManagerUi';
@@ -131,16 +133,202 @@ function PickBranchFirst() {
   return <EmptyState icon={<BedDouble className="h-6 w-6" aria-hidden="true" />} title="Chọn chi nhánh" message="Chọn một chi nhánh để xem công việc buồng phòng." />;
 }
 
-/** The day's rooms, counted by state. */
-function countRooms(tasks: RoomTask[]) {
+/**
+ * The day's cycles by where each stands: being cleaned (Chưa bắt đầu, Đang dọn,
+ * Cần dọn lại), waiting for the manager (Chờ đánh giá), or reviewed.
+ */
+function splitBoard(tasks: RoomTask[]) {
+  const active = tasks.filter((t) => t.state !== 'COMPLETED');
   return {
-    total: tasks.length,
-    notStarted: tasks.filter((t) => t.state === 'NOT_STARTED').length,
-    inProgress: tasks.filter((t) => t.state === 'IN_PROGRESS').length,
-    completed: tasks.filter((t) => t.state === 'COMPLETED').length,
-    priority: tasks.filter((t) => t.priority).length,
-    unassigned: tasks.filter((t) => !t.assignee).length,
+    active,
+    awaiting: tasks.filter((t) => t.review?.status === 'PENDING').sort((a, b) => (a.completedAt ?? '').localeCompare(b.completedAt ?? '')),
+    notStarted: active.filter((t) => t.state === 'NOT_STARTED' && !t.reclean).length,
+    inProgress: active.filter((t) => t.state === 'IN_PROGRESS').length,
+    reclean: active.filter((t) => t.state === 'NOT_STARTED' && t.reclean).length,
+    passed: tasks.filter((t) => t.review?.status === 'PASSED').length,
+    priority: active.filter((t) => t.priority).length,
   };
+}
+
+/** One cycle in a word: Chưa bắt đầu / Cần dọn lại / Đang dọn / Chờ đánh giá / Đạt / Không đạt (— dọn lại). */
+function cycleOutcome(t: RoomTask): string {
+  if (t.review) return t.review.status === 'FAILED' && t.review.recleanRequested ? `${t.review.label} — dọn lại` : t.review.label;
+  if (t.state === 'NOT_STARTED' && t.reclean) return 'Cần dọn lại';
+  return t.stateLabel;
+}
+
+function CycleBadge({ task }: { task: RoomTask }) {
+  if (task.review?.status === 'PENDING') return <Badge tone="amber">Chờ đánh giá</Badge>;
+  if (task.review?.status === 'PASSED') return <Badge tone="green">Đạt</Badge>;
+  if (task.review?.status === 'FAILED') return <Badge tone="red">Không đạt</Badge>;
+  if (task.reclean && task.state === 'NOT_STARTED') return <Badge tone="red">Cần dọn lại</Badge>;
+  return <StateBadge state={task.state} label={task.stateLabel} />;
+}
+
+/** Every cleaning cycle of the room that day: who, when, how long, and the review. */
+function CycleHistory({ task }: { task: RoomTask }) {
+  const history = useQuery({ queryKey: [...ROOM_WORK_KEY, 'history', task.id], queryFn: () => roomWorkApi.history(task.id) });
+  const cycles = history.data?.cycles ?? [];
+  const latest = cycles.filter((c) => !c.voided).at(-1);
+  const fact = (label: string, value: string) => (
+    <div className="flex gap-1.5">
+      <dt className="shrink-0 text-slate-500">{label}:</dt>
+      <dd className="min-w-0 text-slate-900">{value}</dd>
+    </div>
+  );
+  return (
+    <section data-testid="cycle-history">
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Lịch sử các lần dọn</h3>
+      <QueryState isLoading={history.isLoading} isError={history.isError} error={history.error}>
+        {latest ? (
+          <p className="mb-2 text-sm" data-testid="cycle-current">
+            <span className="text-slate-500">Hiện tại: </span>
+            <span className="font-semibold text-slate-900">{cycleOutcome(latest)}</span>
+          </p>
+        ) : null}
+        <ol className="space-y-2">
+          {cycles.map((c) => (
+            <li
+              key={c.id}
+              data-testid={`cycle-${c.cycleNumber}`}
+              className={`rounded-lg border px-3 py-2 text-sm ${c.id === task.id ? 'border-brand-300 bg-brand-50/40' : 'border-line-subtle bg-white'}`}
+            >
+              <p className="flex flex-wrap items-center gap-2 font-semibold text-slate-900">
+                Lần dọn #{c.cycleNumber}
+                <CycleBadge task={c} />
+                {c.voided ? <Badge tone="slate">đã xóa</Badge> : null}
+              </p>
+              <dl className="mt-1 grid gap-x-4 gap-y-0.5 sm:grid-cols-2">
+                {fact('Người dọn', c.cleanedBy?.name ?? c.assignee?.name ?? '—')}
+                {fact('Thời gian', `${hhmm(c.startedAt)} → ${hhmm(c.completedAt)} · ${formatMinutes(c.durationSeconds)}`)}
+                {c.review && c.review.status !== 'PENDING'
+                  ? fact('Người đánh giá', `${c.review.reviewedByName ?? '—'} · ${hhmm(c.review.reviewedAt)}`)
+                  : null}
+                {c.review?.status === 'FAILED' ? fact('Yêu cầu dọn lại', c.review.recleanRequested ? 'Có' : 'Không') : null}
+              </dl>
+              {c.review?.status === 'FAILED' ? (
+                <p className="mt-1 text-red-800">
+                  <span className="text-slate-500">Lý do: </span>
+                  {c.review.failureReason}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ol>
+      </QueryState>
+    </section>
+  );
+}
+
+/** "Đạt": confirmed once — a review cannot be changed afterwards. */
+function PassDialog({ task, onClose, onDone }: { task: RoomTask; onClose: () => void; onDone: (msg: string) => void }) {
+  const queryClient = useQueryClient();
+  const pass = useMutation({
+    mutationFn: () => roomWorkApi.review(task.id, { result: 'PASSED' }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+      onDone(`Phòng ${task.roomNumber}: Đạt.`);
+    },
+  });
+  return (
+    <Modal
+      open
+      title={`Đạt — Phòng ${task.roomNumber}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Hủy
+          </Button>
+          <Button onClick={() => pass.mutate()} loading={pass.isPending} className="!bg-green-600 hover:!bg-green-700" data-testid="pass-confirm">
+            Đạt
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm text-slate-700">
+        <p>
+          Phòng {task.roomNumber}
+          {task.cycleNumber > 1 ? ` (lần dọn ${task.cycleNumber})` : ''} đạt yêu cầu. Phòng trở lại “Thêm phòng vào bảng”. Kết quả đánh giá không thể sửa sau khi lưu.
+        </p>
+        {pass.isError ? <ErrorAlert>{toUserMessage(pass.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/** "Không đạt": the reason is required; "Yêu cầu dọn lại" opens the next cycle for a worker of the branch. */
+function FailDialog({ task, staff, onClose, onDone }: { task: RoomTask; staff: { id: number; fullName: string }[]; onClose: () => void; onDone: (msg: string) => void }) {
+  const queryClient = useQueryClient();
+  const [reason, setReason] = useState('');
+  const [reclean, setReclean] = useState(true);
+  const [assignee, setAssignee] = useState<number | ''>(task.assignee?.id ?? '');
+  const people = task.assignee && !staff.some((x) => x.id === task.assignee!.id) ? [{ id: task.assignee.id, fullName: task.assignee.name }, ...staff] : staff;
+  const fail = useMutation({
+    mutationFn: () =>
+      roomWorkApi.review(task.id, {
+        result: 'FAILED',
+        reason: reason.trim(),
+        reclean,
+        ...(reclean ? { assigneeUserId: assignee === '' ? null : assignee } : {}),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+      onDone(reclean ? `Phòng ${task.roomNumber}: Không đạt — đã yêu cầu dọn lại.` : `Phòng ${task.roomNumber}: Không đạt.`);
+    },
+  });
+  return (
+    <Modal
+      open
+      title={`Không đạt — Phòng ${task.roomNumber}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Hủy
+          </Button>
+          <Button variant="danger" onClick={() => fail.mutate()} disabled={!reason.trim()} loading={fail.isPending} data-testid="fail-confirm">
+            Xác nhận không đạt
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <label className={LABEL}>
+          Lý do không đạt <span className="text-red-600">*</span>
+          <textarea
+            className={FIELD}
+            rows={3}
+            maxLength={1000}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Ví dụ: Thiếu khăn tắm"
+            data-testid="fail-reason"
+          />
+        </label>
+        <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <input type="checkbox" checked={reclean} onChange={(e) => setReclean(e.target.checked)} className="h-5 w-5 accent-red-600" data-testid="fail-reclean" />
+          Yêu cầu dọn lại
+        </label>
+        {reclean ? (
+          <label className={LABEL}>
+            Giao dọn lại cho
+            <select className={FIELD} value={assignee} onChange={(e) => setAssignee(e.target.value === '' ? '' : Number(e.target.value))} data-testid="fail-assignee">
+              <option value="">— Chưa giao —</option>
+              {people.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.fullName}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p className="text-sm text-slate-500">Không dọn lại: phòng trở lại “Thêm phòng vào bảng”.</p>
+        )}
+        {fail.isError ? <ErrorAlert>{toUserMessage(fail.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -355,7 +543,8 @@ function TaskDialog({ task, staff, onClose, onChanged }: { task: RoomTask; staff
     onSuccess: () => done('Đã lưu công việc phòng.'),
   });
   const remove = useMutation({ mutationFn: () => roomWorkApi.voidTask(task.id, reason.trim() || undefined), onSuccess: () => done('Đã xóa công việc phòng.') });
-  const locked = task.voided;
+  // A reviewed cycle is history: nothing on it can change.
+  const locked = task.voided || (task.review !== null && task.review.status !== 'PENDING');
   // The current assignee stays choosable even when the branch list has moved on.
   const people = task.assignee && !staff.some((s) => s.id === task.assignee!.id) ? [{ id: task.assignee.id, fullName: task.assignee.name }, ...staff] : staff;
   return (
@@ -387,7 +576,8 @@ function TaskDialog({ task, staff, onClose, onChanged }: { task: RoomTask; staff
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-2" data-testid="task-facts">
           <CodeTag code={task.statusCode} />
-          <StateBadge state={task.state} label={task.stateLabel} />
+          <CycleBadge task={task} />
+          {task.cycleNumber > 1 ? <span className="text-sm font-semibold text-slate-700">Lần dọn {task.cycleNumber}</span> : null}
           {task.priority ? <PriorityBadge /> : null}
           <span className="text-sm text-slate-600">{task.assignee ? `Người dọn: ${task.assignee.name}` : 'Chưa giao'}</span>
         </div>
@@ -434,6 +624,7 @@ function TaskDialog({ task, staff, onClose, onChanged }: { task: RoomTask; staff
           </section>
         ) : null}
         {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
+        <CycleHistory task={task} />
         <RoomTaskDetail task={task} catalog={catalog.data} />
       </div>
       {voiding ? (
@@ -484,6 +675,8 @@ export function HkRoomBoardPage() {
   const scope = useScope(false);
   const queryClient = useQueryClient();
   const [open, setOpen] = useState<RoomTask | null>(null);
+  const [passing, setPassing] = useState<RoomTask | null>(null);
+  const [failing, setFailing] = useState<RoomTask | null>(null);
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [code, setCode] = useState('');
   const [priority, setPriority] = useState(false);
@@ -501,11 +694,12 @@ export function HkRoomBoardPage() {
   });
   const { rooms } = useBranchRooms(scope.branchId ?? null);
   const live = tasks.data?.tasks ?? [];
-  const onBoard = new Set(live.map((t) => t.roomNumber));
+  const b = splitBoard(live);
+  // A room is taken while it has an OPEN cycle; a reviewed room can be added again.
+  const onBoard = new Set([...b.active, ...b.awaiting].map((t) => t.roomNumber));
   const free = (rooms ?? []).filter((r) => !onBoard.has(r));
   const chosen = rooms ? [...picked] : typed.split(/[\s,;]+/).filter(Boolean);
   const effectiveCode = code || catalog.data?.statusCodes[0] || '';
-  const n = countRooms(live);
 
   const create = useMutation({
     mutationFn: () =>
@@ -532,7 +726,7 @@ export function HkRoomBoardPage() {
     <div>
       <HkHeader
         title={`Tình trạng phòng ngày ${formatDate(date)}`}
-        description="Phòng trong ngày theo mã phòng: trạng thái dọn, ưu tiên và người dọn. Chọn một phòng để xem chi tiết hoặc điều chỉnh."
+        description="Phòng đang thực hiện, phòng chờ đánh giá “Đạt / Không đạt”, và phòng có thể thêm lại. Chọn một phòng để xem chi tiết và lịch sử."
         branch={scope.label}
         period={{ label: 'Ngày nghiệp vụ', value: formatDate(date) }}
         controls={
@@ -546,30 +740,60 @@ export function HkRoomBoardPage() {
         <PickBranchFirst />
       ) : (
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-5" data-testid="board-summary">
-            <Metric label="Tổng phòng" value={n.total} />
-            <Metric label="Chưa bắt đầu" value={n.notStarted} tone="gray" />
-            <Metric label="Đang dọn" value={n.inProgress} tone="blue" />
-            <Metric label="Hoàn thành" value={n.completed} tone="green" />
-            <Metric label="Ưu tiên" value={n.priority} tone="red" />
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-7" data-testid="board-summary">
+            <Metric label="Đang thực hiện" value={b.active.length} />
+            <Metric label="Chưa bắt đầu" value={b.notStarted} tone="gray" />
+            <Metric label="Đang dọn" value={b.inProgress} tone="blue" />
+            <Metric label="Cần dọn lại" value={b.reclean} tone="red" />
+            <Metric label="Chờ đánh giá" value={b.awaiting.length} tone="amber" />
+            <Metric label="Đạt" value={b.passed} tone="green" />
+            <Metric label="Ưu tiên" value={b.priority} tone="red" />
           </div>
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
-            <HkSection title="Bảng phòng" aside={<ManagerLegend />}>
-              <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
-                {live.length === 0 ? (
-                  <p className="py-6 text-center text-sm text-slate-500">Chưa có phòng nào trên bảng ngày này — thêm phòng ở khung “Thêm phòng vào bảng”.</p>
+            <div className="min-w-0 space-y-5">
+              <HkSection title="Phòng đang thực hiện" testId="board-active" aside={<ManagerLegend />}>
+                <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
+                  {live.length === 0 ? (
+                    <p className="py-6 text-center text-sm text-slate-500">Chưa có phòng nào trên bảng ngày này — thêm phòng ở khung “Thêm phòng vào bảng”.</p>
+                  ) : b.active.length === 0 ? (
+                    <p className="py-4 text-center text-sm text-slate-500">Không có phòng đang thực hiện.</p>
+                  ) : (
+                    <ManagerRoomBoard tasks={b.active} codes={catalog.data?.statusCodes ?? []} onSelect={setOpen} />
+                  )}
+                </QueryState>
+              </HkSection>
+              <HkSection
+                title="Phòng chờ đánh giá"
+                testId="board-review"
+                accent
+                aside={<Badge tone={b.awaiting.length > 0 ? 'amber' : 'gray'}>{b.awaiting.length} phòng</Badge>}
+              >
+                {b.awaiting.length === 0 ? (
+                  <p className="py-2 text-sm text-slate-500">Chưa có phòng chờ đánh giá. Phòng nhân viên bấm “Hoàn thành” sẽ hiện ở đây.</p>
                 ) : (
-                  <ManagerRoomBoard tasks={live} codes={catalog.data?.statusCodes ?? []} onSelect={setOpen} />
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-3">
+                    {b.awaiting.map((t) => (
+                      <ReviewCard
+                        key={t.id}
+                        task={t}
+                        finishedAt={hhmm(t.completedAt)}
+                        duration={formatMinutes(t.durationSeconds)}
+                        onOpen={() => setOpen(t)}
+                        onPass={() => setPassing(t)}
+                        onFail={() => setFailing(t)}
+                      />
+                    ))}
+                  </div>
                 )}
-              </QueryState>
-            </HkSection>
+              </HkSection>
+            </div>
             <HkSection title="Thêm phòng vào bảng" testId="board-setup" bodyClassName="space-y-4 p-4">
               {rooms ? (
                 <div>
                   <p className="mb-1.5 flex items-baseline justify-between gap-2 text-sm font-medium text-slate-700">
                     Chọn phòng
                     <span className="text-xs font-normal text-slate-500">
-                      {picked.size > 0 ? `Đã chọn ${picked.size}` : `${free.length} phòng chưa có trên bảng`}
+                      {picked.size > 0 ? `Đã chọn ${picked.size}` : `${free.length} phòng có thể thêm`}
                     </span>
                   </p>
                   <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto" data-testid="free-rooms">
@@ -645,6 +869,27 @@ export function HkRoomBoardPage() {
           }}
         />
       ) : null}
+      {passing ? (
+        <PassDialog
+          task={passing}
+          onClose={() => setPassing(null)}
+          onDone={(msg) => {
+            setPassing(null);
+            setToast(msg);
+          }}
+        />
+      ) : null}
+      {failing ? (
+        <FailDialog
+          task={failing}
+          staff={staff.data?.staff ?? []}
+          onClose={() => setFailing(null)}
+          onDone={(msg) => {
+            setFailing(null);
+            setToast(msg);
+          }}
+        />
+      ) : null}
       <Toast message={toast} onDone={() => setToast(null)} />
     </div>
   );
@@ -686,7 +931,8 @@ export function HkAssignPage() {
     onError: (e) => setToast(toUserMessage(e)),
   });
   const people = staff.data?.staff ?? [];
-  const rows = [...(tasks.data?.tasks ?? [])].sort(
+  // Open cycles only — a reviewed cycle is history (the room's dialog shows it).
+  const rows = (tasks.data?.tasks ?? []).filter((t) => !t.review || t.review.status === 'PENDING').sort(
     (a, b) => Number(b.priority) - Number(a.priority) || a.roomNumber.localeCompare(b.roomNumber, 'vi', { numeric: true }),
   );
   const unassigned = rows.filter((t) => !t.assignee).length;
@@ -701,7 +947,7 @@ export function HkAssignPage() {
           <span className="flex flex-wrap gap-1 md:hidden">
             <CodeTag code={t.statusCode} />
             {t.priority ? <PriorityBadge /> : null}
-            <StateBadge state={t.state} label={t.stateLabel} />
+            <CycleBadge task={t} />
           </span>
           {t.startedAt ? (
             <span className="text-xs text-slate-500 md:hidden">
@@ -740,7 +986,7 @@ export function HkAssignPage() {
         );
       },
     },
-    { key: 'state', header: 'Trạng thái', className: `whitespace-nowrap ${WIDE}`, render: (t) => <StateBadge state={t.state} label={t.stateLabel} /> },
+    { key: 'state', header: 'Trạng thái', className: `whitespace-nowrap ${WIDE}`, render: (t) => <CycleBadge task={t} /> },
     { key: 'time', header: 'Thời gian', className: WIDE, render: (t) => <TimeCell task={t} /> },
   ];
   return (
@@ -985,7 +1231,7 @@ function StaffDetailModal({ userId, name, scope, onClose }: { userId: number; na
                         {t.voided ? <Badge tone="red">đã xóa</Badge> : null}
                       </span>
                       <span className="flex items-center gap-2">
-                        <StateBadge state={t.state} label={t.stateLabel} />
+                        <CycleBadge task={t} />
                         <span className="tabular-nums text-slate-600">{formatMinutes(t.durationSeconds ?? t.elapsedSeconds)}</span>
                       </span>
                     </button>

@@ -10,8 +10,10 @@
  *      (shown, never chosen; none → "ask the Admin"); on shift, "Ca hiện tại ·
  *      Chi nhánh" with "Kết thúc ca" (a summary) — no "Đổi chi nhánh".
  *   1. The home is the day's board of the rooms given to this account: gray
- *      not started, blue being cleaned, green underline done; a room opens
- *      "Kiểm phòng | Dọn phòng" — the six conditions, then the cleaning form.
+ *      not started, blue being cleaned; a finished room leaves it (the server
+ *      lists only the rooms still to clean) and a re-clean returns marked "Cần
+ *      dọn lại" with the manager's reason. A room opens "Kiểm phòng | Dọn
+ *      phòng" — the six conditions, then the cleaning form.
  *   2. One save posts one inspection with every ticked condition.
  *   3. Reception's dialog enforces the money rules: Đã thu needs a method and an
  *      amount, Không thu được needs a reason — and the fields that do not apply
@@ -160,6 +162,10 @@ function roomTask(id: string, over: Record<string, unknown> = {}) {
     voidedAt: null,
     voidedByName: null,
     voidReason: null,
+    cycleNumber: 1,
+    reclean: null,
+    review: null,
+    nextCycleId: null,
     events: [],
     ...over,
   };
@@ -292,6 +298,36 @@ describe('Bộ phận buồng phòng — the day’s rooms', () => {
     const summary = await screen.findByTestId('shift-summary');
     expect(summary).toHaveTextContent('1 chi nhánh');
     expect(summary).toHaveTextContent('Hút thuốc: 2');
+  });
+});
+
+describe('Bộ phận buồng phòng — a re-clean sent back by the manager', () => {
+  const RECLEAN = roomTask('t9', {
+    roomNumber: '105',
+    cycleNumber: 2,
+    reclean: { taskId: 't8', cycleNumber: 1, reason: 'Thiếu khăn tắm', reviewedByName: 'Quản lý Buồng', reviewedAt: '2026-10-05T03:00:00.000Z' },
+  });
+
+  it('marks it "Cần dọn lại" on the board and shows the manager’s reason on the room', async () => {
+    installApiMock(
+      shell(HOUSEKEEPING_USER, {
+        'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: workShift() } }),
+        'GET /api/housekeeping/catalog': () => ({ status: 200, body: CATALOG }),
+        [`GET /api/housekeeping/work?date=${hcmToday()}`]: () => ({ status: 200, body: { tasks: [roomTask('t1', { roomNumber: '101' }), RECLEAN] } }),
+        'GET /api/housekeeping/work/tasks/t9': () => ({ status: 200, body: { task: RECLEAN } }),
+        'POST /api/housekeeping/work/tasks/t9/open': () => ({ status: 200, body: { task: RECLEAN } }),
+      }),
+    );
+    renderApp('/app/inspections');
+    const chip = await screen.findByTestId('room-chip-105');
+    expect(chip).toHaveTextContent('Cần dọn lại');
+    expect(screen.getByTestId('room-chip-101')).not.toHaveTextContent('Cần dọn lại');
+    await userEvent.click(chip);
+    const banner = await screen.findByTestId('room-reclean');
+    expect(banner).toHaveTextContent('CẦN DỌN LẠI');
+    expect(banner).toHaveTextContent('Lý do: Thiếu khăn tắm');
+    // A new cycle: "Kiểm phòng" first, as always.
+    expect(screen.getByTestId('room-tab-clean')).toBeDisabled();
   });
 });
 

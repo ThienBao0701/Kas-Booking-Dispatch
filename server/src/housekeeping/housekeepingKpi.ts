@@ -11,7 +11,7 @@
  * The worker reads its own KPI; the Quản lý buồng phòng its branch; the Admin
  * every branch — the same functions, a different scope.
  */
-import type { Prisma, PrismaClient, RoomCollectionStatus, RoomWorkState } from '@prisma/client';
+import type { Prisma, PrismaClient, RoomCollectionStatus, RoomReviewResult, RoomWorkState } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { hcmDateOnly } from '../lib/clock';
@@ -20,7 +20,7 @@ import { listShifts } from './workShiftService';
 import type { HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { TASK_INCLUDE, managerBranchWhere, serializeTask } from './roomTaskService';
-import { EMPTY_CLEANING, describeCleaning, readCleaning } from './roomTaskCatalog';
+import { EMPTY_CLEANING, cycleOutcomeLabel, describeCleaning, readCleaning } from './roomTaskCatalog';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -268,7 +268,7 @@ export async function overview(actor: HousekeepingActor, filter: { workDate: str
   const [tasks, working, inspections, pending] = await Promise.all([
     client.housekeepingRoomTask.findMany({
       where: { ...branchWhere, workDate: filter.workDate, voidedAt: null },
-      select: { state: true, priority: true, assigneeUserId: true, assigneeNameSnapshot: true },
+      select: { branchId: true, roomNumber: true, cycleNumber: true, state: true, priority: true, assigneeUserId: true, assigneeNameSnapshot: true },
     }),
     client.housekeepingWorkSegment.findMany({
       where: { ...branchWhere, endedAt: null, session: { endedAt: null } },
@@ -294,15 +294,23 @@ export async function overview(actor: HousekeepingActor, filter: { workDate: str
     employees.set(t.assigneeUserId, e);
   }
   const kpi = totalsOf(rowsOf(inspections));
+  // A ROOM counts once, by its latest cycle: a re-clean is the same room again.
+  // (Each cycle still counts as work for the worker it was given to, above.)
+  const latest = new Map<string, (typeof tasks)[number]>();
+  for (const t of tasks) {
+    const key = `${t.branchId}|${t.roomNumber}`;
+    if ((latest.get(key)?.cycleNumber ?? 0) < t.cycleNumber) latest.set(key, t);
+  }
+  const rooms = [...latest.values()];
   return {
     workDate: filter.workDate,
     rooms: {
-      total: tasks.length,
-      notStarted: tasks.filter((t) => t.state === 'NOT_STARTED').length,
-      inProgress: tasks.filter((t) => t.state === 'IN_PROGRESS').length,
-      completed: tasks.filter((t) => t.state === 'COMPLETED').length,
-      priority: tasks.filter((t) => t.priority).length,
-      unassigned: tasks.filter((t) => t.assigneeUserId === null).length,
+      total: rooms.length,
+      notStarted: rooms.filter((t) => t.state === 'NOT_STARTED').length,
+      inProgress: rooms.filter((t) => t.state === 'IN_PROGRESS').length,
+      completed: rooms.filter((t) => t.state === 'COMPLETED').length,
+      priority: rooms.filter((t) => t.priority).length,
+      unassigned: rooms.filter((t) => t.assigneeUserId === null).length,
     },
     working: working.map((w) => ({
       userId: w.session.user.id,
@@ -356,6 +364,23 @@ export type CleaningDetailRow = {
   /** "Time Out": "Hoàn thành". */
   completedAt: Date | null;
   durationSeconds: number | null;
+  /** This room's cleaning cycle that day — 1, 2, … — and how many it had. */
+  cycleNumber: number;
+  cycleCount: number;
+  /** The "Kiểm phòng" of this cycle (which started its cleaning). */
+  inspectedAt: Date | null;
+  /** Chưa bắt đầu / Cần dọn lại / Đang dọn / Chờ đánh giá / Đạt / Không đạt (— dọn lại). */
+  outcome: string;
+  /** A re-clean of the cycle before it. */
+  isReclean: boolean;
+  reviewResult: RoomReviewResult | null;
+  reviewedAt: Date | null;
+  reviewedByName: string | null;
+  failureReason: string | null;
+  recleanRequested: boolean;
+  /** Per room and day: the re-clean cycles, and where its latest cycle stands. */
+  recleanCount: number;
+  finalOutcome: string;
 } & ReturnType<typeof describeCleaning>;
 
 /**
@@ -365,6 +390,8 @@ export type CleaningDetailRow = {
  * with its saved form as data — King / Queen / Twin and counts, replacements,
  * "Ghi nhận đặc biệt", notes — and its times: the source of the PDF and of the
  * Excel "Chi tiết dọn phòng" alike. A room not yet cleaned has an empty form.
+ * ONE ROW PER CLEANING CYCLE, never collapsed: a room failed once and then
+ * passed is two rows, each with its own worker, times, form and review.
  */
 export async function operationsReport(actor: HousekeepingActor, filter: PeriodFilter, client: PrismaClient = defaultPrisma) {
   const { start, end } = assertPeriod(filter);
@@ -386,6 +413,14 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
         startedAt: true,
         completedAt: true,
         cleanedByNameSnapshot: true,
+        cycleNumber: true,
+        previousTaskId: true,
+        reviewResult: true,
+        reviewedAt: true,
+        reviewedByNameSnapshot: true,
+        failureReason: true,
+        recleanRequested: true,
+        inspection: { select: { createdAt: true } },
         branch: { select: { address: true, branchNumber: true } },
       },
     }),
@@ -442,9 +477,20 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
     row.pendingAmount += k.pendingAmount;
     row.pendingCount += k.pendingCount;
   }
+  // Per room and day: how many cycles, how many re-cleans, and the latest one.
+  const live = tasks.filter((t) => !t.voidedAt);
+  const roomDay = new Map<string, { cycles: number; recleans: number; latest: (typeof live)[number] }>();
+  for (const t of live) {
+    const key = `${t.branchId}|${t.workDate}|${t.roomNumber}`;
+    const day = roomDay.get(key) ?? { cycles: 0, recleans: 0, latest: t };
+    day.cycles += 1;
+    if (t.previousTaskId) day.recleans += 1;
+    if (t.cycleNumber > day.latest.cycleNumber) day.latest = t;
+    roomDay.set(key, day);
+  }
   const rooms: (CleaningDetailRow & { sortKey: string })[] = [];
-  for (const t of tasks) {
-    if (t.voidedAt) continue;
+  for (const t of live) {
+    const day = roomDay.get(`${t.branchId}|${t.workDate}|${t.roomNumber}`)!;
     rooms.push({
       branchLabel: label(t.branch),
       workDate: t.workDate,
@@ -455,8 +501,20 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
       startedAt: t.startedAt,
       completedAt: t.completedAt,
       durationSeconds: t.durationSeconds,
+      cycleNumber: t.cycleNumber,
+      cycleCount: day.cycles,
+      inspectedAt: t.inspection?.createdAt ?? null,
+      outcome: cycleOutcomeLabel(t),
+      isReclean: t.previousTaskId !== null,
+      reviewResult: t.reviewResult,
+      reviewedAt: t.reviewedAt,
+      reviewedByName: t.reviewedByNameSnapshot,
+      failureReason: t.failureReason,
+      recleanRequested: t.recleanRequested,
+      recleanCount: day.recleans,
+      finalOutcome: cycleOutcomeLabel(day.latest),
       ...describeCleaning(readCleaning(t.cleaning) ?? EMPTY_CLEANING),
-      sortKey: `${String(t.branch.branchNumber).padStart(3, '0')}|${t.workDate}|${t.roomNumber.padStart(6, '0')}`,
+      sortKey: `${String(t.branch.branchNumber).padStart(3, '0')}|${t.workDate}|${t.roomNumber.padStart(6, '0')}|${String(t.cycleNumber).padStart(3, '0')}`,
     });
   }
   const out = [...rows.values()]

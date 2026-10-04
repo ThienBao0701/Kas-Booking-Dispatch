@@ -95,6 +95,15 @@ enum RoomWorkState {
   COMPLETED
 }
 
+/// The manager's quality review of ONE completed cleaning cycle — given once,
+/// never changed. No review yet on a completed cycle = "Chờ đánh giá".
+enum RoomReviewResult {
+  /// "Đạt" — the room is released back to "Thêm phòng vào bảng".
+  PASSED
+  /// "Không đạt" — always with a reason; "Yêu cầu dọn lại" opens the next cycle.
+  FAILED
+}
+
 /// One line of a room work item's history — who did what, when.
 enum RoomTaskEventType {
   CREATED
@@ -105,6 +114,8 @@ enum RoomTaskEventType {
   CLEANING_SAVED
   COMPLETED
   VOIDED
+  /// The manager's "Đạt" / "Không đạt" (with the reason and the re-clean request).
+  REVIEWED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -635,6 +646,7 @@ model User {
   roomTasksCreated         HousekeepingRoomTask[]        @relation("RoomTaskCreatedBy")
   roomTasksCleaned         HousekeepingRoomTask[]        @relation("RoomTaskCleanedBy")
   roomTasksVoided          HousekeepingRoomTask[]        @relation("RoomTaskVoidedBy")
+  roomTasksReviewed        HousekeepingRoomTask[]        @relation("RoomTaskReviewedBy")
   roomTaskEvents           HousekeepingRoomTaskEvent[]   @relation("RoomTaskEventActor")
   housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
 
@@ -3318,6 +3330,21 @@ model HousekeepingRoomTask {
   voidedByUserId        Int?
   voidedByNameSnapshot  String?
   voidReason            String?
+  /// The room's cleaning cycle that business day — 1, 2, … A re-clean (or the
+  /// room added again after "Đạt") is a NEW row with the next number; a cycle,
+  /// once done, is never rewritten.
+  cycleNumber           Int               @default(1)
+  /// A re-clean: the failed cycle it repeats.
+  previousTaskId        String?           @unique
+  /// The manager's quality review of THIS cycle (null: not reviewed yet).
+  reviewResult          RoomReviewResult?
+  reviewedAt            DateTime?
+  reviewedByUserId      Int?
+  reviewedByNameSnapshot String?
+  /// "Lý do không đạt" — required with FAILED (also a database check).
+  failureReason         String?
+  /// FAILED with "Yêu cầu dọn lại": the next cycle was opened.
+  recleanRequested      Boolean           @default(false)
 
   branch     Branch                      @relation(fields: [branchId], references: [id])
   assignee   User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
@@ -3325,8 +3352,13 @@ model HousekeepingRoomTask {
   createdBy  User                        @relation("RoomTaskCreatedBy", fields: [createdByUserId], references: [id])
   cleanedBy  User?                       @relation("RoomTaskCleanedBy", fields: [cleanedByUserId], references: [id])
   voidedBy   User?                       @relation("RoomTaskVoidedBy", fields: [voidedByUserId], references: [id])
+  reviewedBy User?                       @relation("RoomTaskReviewedBy", fields: [reviewedByUserId], references: [id])
+  /// The failed cycle this one re-cleans, and (from the other side) its re-clean.
+  previousTask HousekeepingRoomTask?     @relation("RoomTaskReclean", fields: [previousTaskId], references: [id])
+  recleanTask  HousekeepingRoomTask?     @relation("RoomTaskReclean")
   events     HousekeepingRoomTaskEvent[]
 
+  @@unique([branchId, workDate, roomNumber, cycleNumber])
   @@index([branchId, workDate])
   @@index([assigneeUserId, workDate])
   @@index([workDate])

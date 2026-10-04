@@ -24,7 +24,7 @@ import { branchScopeOf, scopeIncludes, type BranchScope } from '../auth/branchSc
 import { catalogRoom } from '../room/branchRooms';
 import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
-import { ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
+import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch } from './workShiftService';
 
 export const TASK_INCLUDE = {
@@ -33,6 +33,9 @@ export const TASK_INCLUDE = {
     include: { issues: { include: { collection: true }, orderBy: { createdAt: 'asc' } } },
   },
   events: { orderBy: { createdAt: 'asc' } },
+  // A re-clean names the failed cycle it repeats — and why it failed.
+  previousTask: { select: { id: true, cycleNumber: true, failureReason: true, reviewedAt: true, reviewedByNameSnapshot: true } },
+  recleanTask: { select: { id: true, cycleNumber: true } },
 } satisfies Prisma.HousekeepingRoomTaskInclude;
 
 export type TaskRow = Prisma.HousekeepingRoomTaskGetPayload<{ include: typeof TASK_INCLUDE }>;
@@ -46,7 +49,37 @@ const EVENT_LABELS: Record<TaskRow['events'][number]['type'], string> = {
   CLEANING_SAVED: 'Lưu dọn phòng',
   COMPLETED: 'Hoàn thành dọn phòng',
   VOIDED: 'Xóa',
+  REVIEWED: 'Đánh giá chất lượng',
 };
+
+const REVIEWED_LOCKED = 'Phòng này đã được đánh giá — lần dọn đã đánh giá không thể thay đổi.';
+
+/**
+ * The manager's review of one cycle: null before "Hoàn thành", PENDING ("Chờ
+ * đánh giá") after it, then PASSED or FAILED — once, never changed.
+ */
+function reviewOf(row: TaskRow) {
+  if (row.reviewResult) {
+    return {
+      status: row.reviewResult,
+      label: ROOM_REVIEW_LABELS[row.reviewResult],
+      reviewedAt: row.reviewedAt?.toISOString() ?? null,
+      reviewedByName: row.reviewedByNameSnapshot,
+      failureReason: row.failureReason,
+      recleanRequested: row.recleanRequested,
+    };
+  }
+  if (row.state === 'COMPLETED' && !row.voidedAt) {
+    return { status: 'PENDING' as const, label: ROOM_REVIEW_LABELS.PENDING, reviewedAt: null, reviewedByName: null, failureReason: null, recleanRequested: false };
+  }
+  return null;
+}
+
+/** The next cycle's number for a room and day — every cycle counts, voided ones too. */
+async function nextCycle(tx: Prisma.TransactionClient, branchId: number, workDate: string, roomNumber: string): Promise<number> {
+  const { _max } = await tx.housekeepingRoomTask.aggregate({ where: { branchId, workDate, roomNumber }, _max: { cycleNumber: true } });
+  return (_max.cycleNumber ?? 0) + 1;
+}
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -209,6 +242,21 @@ export function serializeTask(row: TaskRow, opts: { money: boolean; now?: Date }
     voidedAt: row.voidedAt?.toISOString() ?? null,
     voidedByName: row.voidedByNameSnapshot,
     voidReason: row.voidReason,
+    /** 1, 2, … — this room's cleaning cycle that business day. */
+    cycleNumber: row.cycleNumber,
+    /** "Cần dọn lại": the failed cycle this one repeats, and the manager's reason. */
+    reclean: row.previousTask
+      ? {
+          taskId: row.previousTask.id,
+          cycleNumber: row.previousTask.cycleNumber,
+          reason: row.previousTask.failureReason,
+          reviewedByName: row.previousTask.reviewedByNameSnapshot,
+          reviewedAt: row.previousTask.reviewedAt?.toISOString() ?? null,
+        }
+      : null,
+    review: reviewOf(row),
+    /** The re-clean this cycle's "Không đạt" opened, if any. */
+    nextCycleId: row.recleanTask?.id ?? null,
     events: row.events.map((e) => ({
       id: e.id,
       type: e.type,
@@ -277,8 +325,10 @@ export async function createTasks(
     return catalogRoom(branch.code, typed)!;
   }))];
   const person = await assignee(input.assigneeUserId, branch.id, client);
+  // A room is taken while a cycle is OPEN (not voided, not yet reviewed); a
+  // reviewed room — "Đạt", or "Không đạt" without a re-clean — can be added again.
   const existing = await client.housekeepingRoomTask.findMany({
-    where: { branchId: branch.id, workDate, roomNumber: { in: rooms }, voidedAt: null },
+    where: { branchId: branch.id, workDate, roomNumber: { in: rooms }, voidedAt: null, reviewResult: null },
     select: { roomNumber: true },
   });
   const taken = new Set(existing.map((e) => e.roomNumber));
@@ -291,6 +341,7 @@ export async function createTasks(
           branchId: branch.id,
           workDate,
           roomNumber,
+          cycleNumber: await nextCycle(tx, branch.id, workDate, roomNumber),
           statusCode,
           priority,
           note,
@@ -310,12 +361,12 @@ export async function createTasks(
   return { created: created.length, skipped: [...taken] };
 }
 
-async function notifyAssignee(userId: number, rooms: string[], workDate: string, client: PrismaClient): Promise<void> {
+async function notifyAssignee(userId: number, rooms: string[], workDate: string, client: PrismaClient, title = 'Bạn được giao phòng'): Promise<void> {
   const [y, m, d] = workDate.split('-');
   await client.notification.create({
     data: {
       userId,
-      title: 'Bạn được giao phòng',
+      title,
       body: `Ngày ${d}/${m}/${y}: phòng ${rooms.join(', ')}.`,
     },
   });
@@ -332,6 +383,7 @@ export async function updateTask(
   const row = await loadTask(id, client);
   assertManagerOf(row, actor);
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
+  if (row.reviewResult) throw ApiError.conflict(REVIEWED_LOCKED);
   const next = {
     statusCode: input.statusCode === undefined ? row.statusCode : assertStatusCode(input.statusCode),
     priority: input.priority === undefined ? row.priority : input.priority === true,
@@ -358,6 +410,7 @@ export async function assignTask(
   const row = await loadTask(id, client);
   assertManagerOf(row, actor);
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
+  if (row.reviewResult) throw ApiError.conflict(REVIEWED_LOCKED);
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong, không thể giao lại.');
   const person = await assignee(input.assigneeUserId, row.branchId, client);
   if ((person?.id ?? null) === row.assigneeUserId) return serializeTask(row, { money: true });
@@ -390,6 +443,7 @@ export async function voidTask(
   const row = await loadTask(id, client);
   assertManagerOf(row, actor);
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
+  if (row.reviewResult) throw ApiError.conflict(REVIEWED_LOCKED);
   const reason = text(input.reason, 1000, 'Lý do');
   const now = clock.now();
   await client.$transaction(async (tx) => {
@@ -399,6 +453,102 @@ export async function voidTask(
     });
     await recordEvent(tx, id, 'VOIDED', actor, now, { reason, state: row.state });
   });
+}
+
+export interface ReviewInput {
+  result?: unknown;
+  reason?: unknown;
+  reclean?: unknown;
+  assigneeUserId?: unknown;
+}
+
+/**
+ * "ĐẠT" / "KHÔNG ĐẠT" — the manager's review of one finished cycle, given once.
+ *
+ *   Đạt        the room is released: back in "Thêm phòng vào bảng".
+ *   Không đạt  needs "Lý do không đạt"; with "Yêu cầu dọn lại" it opens the NEXT
+ *              cycle — the same room and day, a new row linked to this one —
+ *              for the chosen worker of the branch (this cycle's, by default).
+ *
+ * This cycle — its worker, times, form and review — is never written again.
+ */
+export async function reviewTask(
+  actor: HousekeepingActor,
+  id: string,
+  input: ReviewInput,
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  const row = await loadTask(id, client);
+  assertManagerOf(row, actor);
+  if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
+  if (row.reviewResult) throw ApiError.conflict('Phòng này đã được đánh giá.');
+  if (row.state !== 'COMPLETED') throw ApiError.conflict('Phòng chưa "Hoàn thành" — chưa thể đánh giá.');
+  if (input.result !== 'PASSED' && input.result !== 'FAILED') throw ApiError.validation('Chọn "Đạt" hoặc "Không đạt".');
+  const passed = input.result === 'PASSED';
+  if (passed && input.reclean === true) throw ApiError.validation('"Yêu cầu dọn lại" chỉ đi cùng "Không đạt".');
+  const reason = passed ? null : text(input.reason, 1000, 'Lý do không đạt');
+  if (!passed && !reason) throw ApiError.validation('Vui lòng nhập lý do không đạt.');
+  const reclean = !passed && input.reclean === true;
+  // The re-clean's worker: the one named, or this cycle's own — always of the branch.
+  const person = reclean
+    ? await assignee(input.assigneeUserId === undefined ? row.assigneeUserId : input.assigneeUserId, row.branchId, client)
+    : null;
+  const now = clock.now();
+  const nextId = await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id, voidedAt: null, state: 'COMPLETED', reviewResult: null },
+      data: {
+        reviewResult: passed ? 'PASSED' : 'FAILED',
+        reviewedAt: now,
+        reviewedByUserId: actor.id,
+        reviewedByNameSnapshot: actor.fullName,
+        failureReason: reason,
+        recleanRequested: reclean,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Phòng vừa được đánh giá hoặc thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, id, 'REVIEWED', actor, now, { result: passed ? 'PASSED' : 'FAILED', reason, recleanRequested: reclean });
+    if (!reclean) return null;
+    const next = await tx.housekeepingRoomTask.create({
+      data: {
+        branchId: row.branchId,
+        workDate: row.workDate,
+        roomNumber: row.roomNumber,
+        cycleNumber: await nextCycle(tx, row.branchId, row.workDate, row.roomNumber),
+        previousTaskId: id,
+        statusCode: row.statusCode,
+        priority: row.priority,
+        note: row.note,
+        assigneeUserId: person?.id ?? null,
+        assigneeNameSnapshot: person?.fullName ?? null,
+        createdByUserId: actor.id,
+        createdByNameSnapshot: actor.fullName,
+        createdAt: now,
+      },
+    });
+    await recordEvent(tx, next.id, 'CREATED', actor, now, { recleanOf: row.cycleNumber, reason, statusCode: row.statusCode, priority: row.priority, note: row.note });
+    if (person) await recordEvent(tx, next.id, 'ASSIGNED', actor, now, { fromId: null, fromName: null, toId: person.id, toName: person.fullName });
+    return next.id;
+  });
+  if (nextId && person) await notifyAssignee(person.id, [row.roomNumber], row.workDate, client, 'Phòng cần dọn lại');
+  return {
+    task: serializeTask(await loadTask(id, client), { money: true }),
+    reclean: nextId ? serializeTask(await loadTask(nextId, client), { money: true }) : null,
+  };
+}
+
+/** Every cycle of the room that business day, in order — voided ones marked — for the manager and the Admin. */
+export async function roomHistory(actor: HousekeepingActor, id: string, client: PrismaClient = defaultPrisma) {
+  const row = await loadTask(id, client);
+  assertManagerOf(row, actor);
+  const rows = await client.housekeepingRoomTask.findMany({
+    where: { branchId: row.branchId, workDate: row.workDate, roomNumber: row.roomNumber },
+    include: TASK_INCLUDE,
+    orderBy: { cycleNumber: 'asc' },
+  });
+  const now = getClock().now();
+  return rows.map((r) => serializeTask(r, { money: true, now }));
 }
 
 /**
@@ -419,13 +569,17 @@ export async function listStaff(actor: HousekeepingActor, query: { branchId?: un
  * The worker
  * ------------------------------------------------------------------ */
 
-/** The rooms given to this account for the day, at its own branch, priority first. */
+/**
+ * The rooms given to this account for the day, at its own branch, priority
+ * first — the ones still to clean. "Hoàn thành" takes a room off the list (it
+ * waits for the manager's review); a re-clean brings it back as a new cycle.
+ */
 export async function myTasks(actor: HousekeepingActor, workDateRaw: unknown, client: PrismaClient = defaultPrisma) {
   if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới có phòng được giao.');
   const branchId = accountBranch(actor);
   const workDate = assertDate(workDateRaw);
   const rows = await client.housekeepingRoomTask.findMany({
-    where: { assigneeUserId: actor.id, branchId, workDate, voidedAt: null },
+    where: { assigneeUserId: actor.id, branchId, workDate, voidedAt: null, state: { not: 'COMPLETED' } },
     include: TASK_INCLUDE,
     orderBy: [{ branchId: 'asc' }, { priority: 'desc' }, { roomNumber: 'asc' }],
   });

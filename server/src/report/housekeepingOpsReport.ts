@@ -6,13 +6,14 @@
  * Written for a reader outside the building: per branch, business date and
  * worker, the rooms given and done, inspections and findings, the average
  * cleaning time, and the money collected and still pending. Objective figures
- * only — no score, no "tốt / kém". "Chi tiết dọn phòng" adds each room: its
- * code, times and form — King / Queen / Twin and counts, replacements, "Ghi
+ * only — no score, no "tốt / kém". "Chi tiết dọn phòng" adds each cleaning
+ * CYCLE (a re-cleaned room is several rows): its code, times, quality review
+ * (result, evaluator, reason, re-clean) and form — King / Queen / Twin and counts, replacements, "Ghi
  * nhận đặc biệt", notes.
  */
 import ExcelJS from 'exceljs';
 import type { CleaningDetailRow, OperationsRow } from '../housekeeping/housekeepingKpi';
-import { LINEN_ITEMS, ROOM_WORK_STATE_LABELS } from '../housekeeping/roomTaskCatalog';
+import { LINEN_ITEMS, ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS } from '../housekeeping/roomTaskCatalog';
 import { formatDuration } from '../lib/duration';
 import { hcmDateTime, hcmDayLabel } from './format';
 
@@ -39,6 +40,20 @@ export function cleaningClock(instant: Date | string | null, workDate: string): 
 /** "42 phút" — the cleaning's own time, from "Kiểm phòng" to "Hoàn thành". */
 export function cleaningDuration(r: Pick<CleaningDetailRow, 'durationSeconds'>): string {
   return formatDuration(r.durationSeconds) ?? '';
+}
+
+/**
+ * One cycle's quality review in words — the same cells in the PDF and the
+ * Excel sheet: result (or "Chờ đánh giá"), evaluator, when, reason, re-clean.
+ */
+export function reviewCells(r: CleaningDetailRow) {
+  return {
+    result: r.reviewResult ? ROOM_REVIEW_LABELS[r.reviewResult] : r.state === 'COMPLETED' ? ROOM_REVIEW_LABELS.PENDING : '',
+    evaluator: r.reviewedByName ?? '',
+    at: cleaningClock(r.reviewedAt, r.workDate),
+    reason: r.failureReason ?? '',
+    reclean: r.reviewResult === 'FAILED' ? (r.recleanRequested ? 'Có' : 'Không') : '',
+  };
 }
 
 const exceptions = (r: OperationsRow) =>
@@ -92,12 +107,21 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
     { header: 'Chi nhánh', key: 'branch', width: 34 },
     { header: 'Ngày nghiệp vụ', key: 'date', width: 14 },
     { header: 'Phòng', key: 'room', width: 10 },
+    { header: 'Lần dọn', key: 'cycle', width: 9 },
     { header: 'Mã', key: 'code', width: 8 },
     { header: 'Nhân viên', key: 'employee', width: 24 },
+    { header: 'Kiểm phòng lúc', key: 'inspected', width: 14 },
     { header: 'Time In', key: 'timeIn', width: 12 },
     { header: 'Time Out', key: 'timeOut', width: 12 },
     { header: 'Thời gian dọn', key: 'duration', width: 14 },
     { header: 'Trạng thái', key: 'state', width: 14 },
+    { header: 'Kết quả đánh giá', key: 'review', width: 16 },
+    { header: 'Người đánh giá', key: 'evaluator', width: 22 },
+    { header: 'Thời điểm đánh giá', key: 'reviewedAt', width: 16 },
+    { header: 'Lý do không đạt', key: 'reason', width: 36 },
+    { header: 'Yêu cầu dọn lại', key: 'reclean', width: 14 },
+    { header: 'Số lần dọn lại', key: 'recleanCount', width: 14 },
+    { header: 'Kết quả cuối', key: 'final', width: 20 },
     ...LINEN_ITEMS.map((i) => ({ header: i.label, key: i.code, width: 14 })),
     { header: 'Số lượng', key: 'quantities', width: 40 },
     { header: 'Đồ thay thế', key: 'replaced', width: 40 },
@@ -111,12 +135,21 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
       branch: r.branchLabel,
       date: hcmDayLabel(r.workDate),
       room: r.roomNumber,
+      cycle: r.cycleNumber,
       code: r.statusCode,
       employee: r.employee,
+      inspected: cleaningClock(r.inspectedAt, r.workDate),
       timeIn: cleaningClock(r.startedAt, r.workDate),
       timeOut: cleaningClock(r.completedAt, r.workDate),
       duration: cleaningDuration(r),
       state: ROOM_WORK_STATE_LABELS[r.state],
+      review: reviewCells(r).result,
+      evaluator: reviewCells(r).evaluator,
+      reviewedAt: reviewCells(r).at,
+      reason: reviewCells(r).reason,
+      reclean: reviewCells(r).reclean,
+      recleanCount: r.recleanCount,
+      final: r.finalOutcome,
       ...Object.fromEntries(r.linen.map((l) => [l.item, l.quantity === null ? l.sizeLabel : `${l.sizeLabel} × ${l.quantity}`])),
       quantities: r.quantities.map((q) => `${q.label}: ${q.quantity}`).join('; '),
       replaced: r.replaced.map((x) => x.label).join('; '),
