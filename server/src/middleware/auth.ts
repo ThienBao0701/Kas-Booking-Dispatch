@@ -41,18 +41,12 @@ async function loadSessionUser(req: Request): Promise<SessionUser | null> {
     return { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) };
   }
   /*
-    BỘ PHẬN BUỒNG PHÒNG HAS NO PERMANENT BRANCH. Where it works is the OPEN
-    segment of its open workday ("Vào ca" / "Đổi chi nhánh"), read here on every
-    request — so every branch check downstream (inspections, the room catalog,
-    notifications) follows the shift, and an account not on shift has no branch.
+    BỘ PHẬN BUỒNG PHÒNG WORKS AT THE ONE BRANCH THE ADMIN GAVE THE ACCOUNT —
+    `branchId`, exactly like a receptionist's. "Vào ca" opens the shift there;
+    every branch check downstream (the room catalog, room work, inspections)
+    reads it from here, never from the request. An account with no branch yet
+    has none, and its work is refused until the Admin assigns one.
   */
-  if (user.role === 'HOUSEKEEPING') {
-    const segment = await prisma.housekeepingWorkSegment.findFirst({
-      where: { endedAt: null, session: { userId: user.id, endedAt: null } },
-      include: { branch: true },
-    });
-    return { ...rest, branchId: segment?.branchId ?? null, branch: segment?.branch ?? null };
-  }
   return rest;
 }
 
@@ -130,8 +124,7 @@ const HOUSEKEEPING_ROUTES = [
   /^\/api\/hotel-deliveries(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
-  // The room catalog of its own branch, for the inspection form's selector,
-  // and the branch list "Vào ca" / "Đổi chi nhánh" chooses from.
+  // The room catalog and the branch of its own account.
   /^\/api\/branches\/\d+\/rooms$/,
   /^\/api\/branches$/,
 ];

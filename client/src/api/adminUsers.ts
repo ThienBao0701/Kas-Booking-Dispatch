@@ -42,17 +42,18 @@ export const GLOBAL_ROLES: readonly ManageableRole[] = [
   'TECHNICAL_MANAGER',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
-  // No permanent branch: the branch is chosen at "Vào ca", for that shift.
-  'HOUSEKEEPING',
 ];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
   return !GLOBAL_ROLES.includes(role ?? 'RECEPTIONIST');
 }
 
-/** Quản lý buồng phòng: exactly ONE branch, chosen in the same checkbox list. */
+/**
+ * Quản lý buồng phòng and Bộ phận buồng phòng: exactly ONE branch, chosen in the
+ * same checkbox list — the worker's "Vào ca" opens the shift there.
+ */
 export function requiresSingleBranchChoice(role: UserRole | undefined): boolean {
-  return role === 'HOUSEKEEPING_MANAGER';
+  return role === 'HOUSEKEEPING_MANAGER' || role === 'HOUSEKEEPING';
 }
 
 /** Quản lý lễ tân and Quản lý kỹ thuật pick their branches — one or more, with checkboxes. */

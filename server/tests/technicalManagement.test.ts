@@ -240,13 +240,17 @@ describe('a repair in stages', () => {
 /* 5 ----------------------------------------------------------------- accounts */
 
 describe('account management', () => {
-  it('edits in place: a manager’s branches, a name; never a branch on a housekeeping account', async () => {
+  it('edits in place: a manager’s branches, a name, a housekeeping account’s one branch', async () => {
     const moved = await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1, cn4], fullName: 'Quản lý kỹ thuật A' });
     expect(moved.status).toBe(200);
     expect(moved.body.user.fullName).toBe('Quản lý kỹ thuật A');
     expect(moved.body.user.managedBranches.map((b: { id: number }) => b.id).sort()).toEqual([cn1, cn4].sort());
     const hk = await createUser({ username: 'buong_sua', password: PASSWORD, fullName: 'Buồng', role: 'HOUSEKEEPING', branchId: null });
-    expect((await admin.put(`/api/admin/users/${hk.id}`).send({ branchId: cn1 })).status).toBe(422);
+    const assigned = await admin.put(`/api/admin/users/${hk.id}`).send({ branchId: cn1 });
+    expect(assigned.status).toBe(200);
+    expect(assigned.body.user.branch.id).toBe(cn1);
+    // One branch, never a set.
+    expect((await admin.put(`/api/admin/users/${hk.id}`).send({ branchIds: [cn1, cn4] })).status).toBe(422);
     await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1], fullName: 'Quản lý kỹ thuật' });
   });
 

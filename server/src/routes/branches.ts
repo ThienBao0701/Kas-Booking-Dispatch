@@ -37,13 +37,6 @@ export function createBranchesRouter(): Router {
 
       // Quản lý lễ tân: the branches it supervises; Tổng quản lý lễ tân: all.
       // The shared scope, so this list and every scoped query agree.
-      // Bộ phận buồng phòng chooses where it works at "Vào ca": every active branch.
-      if (user.role === 'HOUSEKEEPING') {
-        const branches = await prisma.branch.findMany({ where: { active: true }, orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }] });
-        res.json({ branches: branches.map((b) => serializeBranch(b)) });
-        return;
-      }
-
       if (
         user.role === 'RECEPTION_MANAGER' ||
         user.role === 'RECEPTION_GENERAL_MANAGER' ||
@@ -58,8 +51,8 @@ export function createBranchesRouter(): Router {
         return;
       }
 
-      // Receptionist: the server decides the branch from the session identity,
-      // never from anything the client sends.
+      // Receptionist and Bộ phận buồng phòng: the server decides the branch from
+      // the session identity, never from anything the client sends.
       const branches =
         user.branchId != null
           ? await prisma.branch.findMany({ where: { id: user.branchId, active: true } })

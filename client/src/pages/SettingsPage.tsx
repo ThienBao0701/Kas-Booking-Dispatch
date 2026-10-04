@@ -175,17 +175,19 @@ function BranchChecklist({
   value,
   onChange,
   single = false,
+  title = 'Chi nhánh quản lý',
 }: {
   branches: Branch[];
   value: number[];
   onChange: (next: number[]) => void;
-  /** Quản lý buồng phòng: ticking a branch replaces the one ticked before. */
+  /** Quản lý / Bộ phận buồng phòng: ticking a branch replaces the one ticked before. */
   single?: boolean;
+  title?: string;
 }) {
   return (
     <fieldset>
       <legend className="text-sm font-medium text-slate-600">
-        Chi nhánh quản lý{single ? <span className="font-normal text-slate-500"> (chọn đúng một chi nhánh)</span> : null}
+        {title}{single ? <span className="font-normal text-slate-500"> (chọn đúng một chi nhánh)</span> : null}
       </legend>
       <div className="mt-1 grid gap-1.5 sm:grid-cols-2" data-testid="manager-branches">
         {branches.map((b) => {
@@ -217,10 +219,10 @@ function BranchChecklist({
 
 /**
  * "SỬA" — what the role carries, and nothing it does not: a receptionist's
- * branch; a Quản lý lễ tân's / Quản lý kỹ thuật's ticked branches; nothing for
- * the global roles (Tổng quản lý lễ tân reads every branch) or for Bộ phận
- * buồng phòng, whose branch is chosen at each "Vào ca". Scope moves on the next
- * request; records already made stay as they are.
+ * branch; a Quản lý / Bộ phận buồng phòng's one ticked branch; a Quản lý lễ
+ * tân's / Quản lý kỹ thuật's ticked branches; nothing for the global roles
+ * (Tổng quản lý lễ tân reads every branch). Scope moves on the next request;
+ * records already made stay as they are.
  */
 function EditUserModal({
   user,
@@ -282,7 +284,13 @@ function EditUserModal({
             </select>
           </label>
         ) : single ? (
-          <BranchChecklist branches={branches} value={branchId ? [branchId] : []} onChange={(ids) => setBranchId(ids[0] ?? 0)} single />
+          <BranchChecklist
+            branches={branches}
+            value={branchId ? [branchId] : []}
+            onChange={(ids) => setBranchId(ids[0] ?? 0)}
+            single
+            title={user.role === 'HOUSEKEEPING' ? 'Chi nhánh' : undefined}
+          />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
         ) : (
@@ -298,7 +306,6 @@ function EditUserModal({
 
 /** What a role without a branch field works on — said, not left blank. */
 function scopeNote(role: UserRole): string {
-  if (role === 'HOUSEKEEPING') return 'Bộ phận buồng phòng chọn chi nhánh mỗi khi “Vào ca” — tài khoản không thuộc chi nhánh cố định.';
   if (role === 'RECEPTION_GENERAL_MANAGER') return 'Tổng quản lý lễ tân xem và quản lý hoạt động lễ tân của tất cả chi nhánh.';
   return 'Tài khoản bộ phận làm việc trên tất cả chi nhánh, không thuộc chi nhánh nào.';
 }
@@ -373,12 +380,15 @@ function DepartmentTable({
       secondary: true,
       className: 'w-[22%] whitespace-nowrap text-slate-600',
       // Technical, booking and admin accounts are global: no branch is the fact.
-      // A Quản lý lễ tân / kỹ thuật lists its branches; Buồng phòng works by shift.
+      // A Quản lý lễ tân / kỹ thuật lists its branches; a Buồng phòng account
+      // without its one branch is flagged — it cannot work until it has one.
       render: (u) =>
         requiresBranchSet(u.role) ? (
           managedLabel(u)
-        ) : u.role === 'HOUSEKEEPING' ? (
-          <span className="text-slate-500">Theo ca làm việc</span>
+        ) : u.role === 'HOUSEKEEPING' && !u.branch ? (
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" data-testid={`needs-branch-${u.id}`}>
+            Cần gán chi nhánh
+          </span>
         ) : (
           u.branch?.address ?? <span className="text-slate-400">Tất cả chi nhánh</span>
         ),
@@ -543,9 +553,9 @@ function CreateUserModal({
           </select>
         </label>
         {/*
-          A branch belongs to a receptionist only. Bộ phận buồng phòng picks its
-          branch at each "Vào ca"; a global department works across every
-          branch, so offering the field would imply a scope it does not have.
+          A receptionist has one branch; Quản lý / Bộ phận buồng phòng tick exactly
+          one; a global department works across every branch, so offering the
+          field would imply a scope it does not have.
         */}
         {needsBranch ? (
           <label className="block text-sm font-medium text-slate-600">
@@ -564,6 +574,7 @@ function CreateUserModal({
             value={form.branchId ? [form.branchId] : []}
             onChange={(ids) => setForm({ ...form, branchId: ids[0] ?? 0 })}
             single
+            title={form.role === 'HOUSEKEEPING' ? 'Chi nhánh' : undefined}
           />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />

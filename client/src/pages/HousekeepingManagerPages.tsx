@@ -11,7 +11,7 @@
  *
  * Every screen opens with the same context — "Quản lý buồng phòng · Chi nhánh ·
  * Ngày nghiệp vụ" — then its own title. The SERVER scopes every read and write
- * to the manager's branch (and offers only that branch's workers); these
+ * to the manager's branch (and offers only that branch's own workers); these
  * screens only ask. Every action is recorded in the room's history.
  */
 import { useMemo, useState, type ReactNode } from 'react';
@@ -466,11 +466,11 @@ function TaskDialog({ task, staff, onClose, onChanged }: { task: RoomTask; staff
   );
 }
 
-/** The branch's workers for a day — the only people the server lets a room go to. */
-function useBranchStaff(date: string, branchId: number | undefined) {
+/** The branch's own Buồng phòng accounts — the only people the server lets a room go to. */
+function useBranchStaff(branchId: number | undefined) {
   return useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'staff', date, branchId ?? null],
-    queryFn: () => roomWorkApi.staff({ date, branchId }),
+    queryKey: [...ROOM_WORK_KEY, 'staff', 'branch', branchId ?? null],
+    queryFn: () => roomWorkApi.staff({ branchId }),
     enabled: branchId !== undefined,
   });
 }
@@ -492,7 +492,7 @@ export function HkRoomBoardPage() {
   const [typed, setTyped] = useState('');
   const [toast, setToast] = useState<string | null>(null);
   const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
-  const staff = useBranchStaff(date, scope.branchId);
+  const staff = useBranchStaff(scope.branchId);
   const tasks = useQuery({
     queryKey: [...ROOM_WORK_KEY, 'tasks', date, scope.branchId ?? null],
     queryFn: () => roomWorkApi.tasks({ date, branchId: scope.branchId }),
@@ -670,7 +670,7 @@ export function HkAssignPage() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState<RoomTask | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const staff = useBranchStaff(date, scope.branchId);
+  const staff = useBranchStaff(scope.branchId);
   const tasks = useQuery({
     queryKey: [...ROOM_WORK_KEY, 'tasks', date, scope.branchId ?? null],
     queryFn: () => roomWorkApi.tasks({ date, branchId: scope.branchId }),
@@ -747,7 +747,7 @@ export function HkAssignPage() {
     <div>
       <HkHeader
         title="Phân công công việc"
-        description="Ai dọn phòng nào trong ngày — giao, giao lại; mọi thay đổi được ghi vào lịch sử của phòng. Chỉ nhân viên làm việc tại chi nhánh mới có trong danh sách."
+        description="Ai dọn phòng nào trong ngày — giao, giao lại; mọi thay đổi được ghi vào lịch sử của phòng. Chỉ nhân viên buồng phòng thuộc chi nhánh mới có trong danh sách."
         branch={scope.label}
         period={{ label: 'Ngày nghiệp vụ', value: formatDate(date) }}
         controls={

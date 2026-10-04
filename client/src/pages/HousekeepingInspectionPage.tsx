@@ -1,27 +1,27 @@
 /**
  * "BUỒNG PHÒNG" — the worker's home.
  *
- *   [Ca hiện tại · Chi nhánh: …]            Đổi chi nhánh · Kết thúc ca
+ *   [Ca hiện tại · Chi nhánh: …]                          Kết thúc ca
  *   Tình trạng phòng ngày dd/mm/yyyy
  *   OUT   101  102 …                        (the rooms given to THIS account)
  *
- * THE PERSON IS THE ACCOUNT. Nobody types a name: "Vào ca" asks only where, and
- * offers first the branch the manager gave today's rooms in. A room opens its
- * work page (Kiểm phòng | Dọn phòng); the board shows where each stands — gray
- * not started, blue being cleaned, green underline done.
+ * THE PERSON AND THE BRANCH ARE THE ACCOUNT'S. Nobody types a name or picks a
+ * branch: "Vào ca" opens the shift at the branch the Admin assigned the account
+ * (an account without one is told to ask the Admin). A room opens its work page
+ * (Kiểm phòng | Dọn phòng); the board shows where each stands — gray not
+ * started, blue being cleaned, green underline done.
  *
  * NOTHING ABOUT MONEY HERE. The worker's own collections are on "KPI & Thu tiền".
  */
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeftRight, BedDouble, LogIn, LogOut, RefreshCw } from 'lucide-react';
+import { BedDouble, LogIn, LogOut, RefreshCw } from 'lucide-react';
 import { HOUSEKEEPING_SHIFT_KEY, ROOM_ISSUES_KEY, housekeepingApi, type WorkShift } from '../api/housekeeping';
 import { ROOM_WORK_KEY, roomWorkApi, type RoomTask } from '../api/roomWork';
-import { branchesApi } from '../api/bookings';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
-import { branchLabel } from '../auth/types';
+import { branchLabel, type AuthUser } from '../auth/types';
 import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
@@ -30,17 +30,17 @@ import { PageHeader, QueryState } from '../components/PageState';
 import { RoomBoard, RoomStateLegend } from '../components/RoomBoard';
 import { formatDate, formatDateTime, hcmToday } from '../lib/format';
 
-const FIELD =
-  'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
-
 export function HousekeepingInspectionPage() {
   const today = hcmToday();
   const navigate = useNavigate();
+  // The Admin-assigned branch: where "Vào ca" opens the shift. None → no work yet.
+  const home = useAuth().user?.branch ?? null;
   const shift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift() });
   const tasks = useQuery({
     queryKey: [...ROOM_WORK_KEY, 'mine', today],
     queryFn: () => roomWorkApi.myTasks(today),
     refetchInterval: 30_000,
+    enabled: home !== null,
   });
   const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
   const [ended, setEnded] = useState<WorkShift | null>(null);
@@ -73,9 +73,15 @@ export function HousekeepingInspectionPage() {
       />
       <QueryState isLoading={shift.isLoading} isError={shift.isError} error={shift.error} onRetry={() => void shift.refetch()}>
         {current && shift.data?.shift ? (
-          <ShiftStrip shift={shift.data.shift} onEnded={setEnded} />
+          <ShiftStrip shift={shift.data.shift} homeId={home?.id ?? null} onEnded={setEnded} />
+        ) : home ? (
+          <StartShift branch={home} />
         ) : (
-          <StartShift suggested={byBranch[0]?.branch.id} />
+          <EmptyState
+            icon={<BedDouble className="h-6 w-6" aria-hidden="true" />}
+            title="Tài khoản chưa được gán chi nhánh"
+            message="Vui lòng liên hệ Admin để được gán chi nhánh làm việc trước khi vào ca."
+          />
         )}
       </QueryState>
 
@@ -109,7 +115,7 @@ export function HousekeepingInspectionPage() {
                     </span>
                     {!here ? (
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                        {current ? 'Khác chi nhánh đang làm — Đổi chi nhánh để làm' : 'Vào ca tại chi nhánh này để làm'}
+                        {current ? 'Ca đang mở ở chi nhánh khác — Kết thúc ca rồi Vào ca lại' : 'Vào ca để làm'}
                       </span>
                     ) : null}
                   </h3>
@@ -142,40 +148,11 @@ function useShiftChanged() {
   };
 }
 
-/** The branch list for "Vào ca" / "Đổi chi nhánh" — every active branch. */
-function BranchSelect({ value, onChange, exclude }: { value: number | ''; onChange: (v: number | '') => void; exclude?: number }) {
-  const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list() });
-  return (
-    <label className="block text-sm font-medium text-slate-700">
-      Chi nhánh
-      <select
-        className={FIELD}
-        value={value}
-        aria-label="Chi nhánh"
-        data-testid="shift-branch"
-        onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))}
-      >
-        <option value="">— Chọn chi nhánh —</option>
-        {(branches.data?.branches ?? [])
-          .filter((b) => b.id !== exclude)
-          .map((b) => (
-            <option key={b.id} value={b.id}>
-              {branchLabel(b)}
-            </option>
-          ))}
-      </select>
-    </label>
-  );
-}
-
-/** "VÀO CA" — where today's work is. The person is the account: no name to type. */
-function StartShift({ suggested }: { suggested?: number }) {
+/** "VÀO CA" — at the account's branch. The person and the branch are the account: nothing to type or pick. */
+function StartShift({ branch }: { branch: NonNullable<AuthUser['branch']> }) {
   const changed = useShiftChanged();
-  const [picked, setPicked] = useState<number | '' | null>(null);
-  // The branch of today's assigned rooms, until the worker picks another.
-  const branchId = picked ?? suggested ?? '';
   const start = useMutation({
-    mutationFn: () => housekeepingApi.startShift({ branchId: Number(branchId) }),
+    mutationFn: () => housekeepingApi.startShift(),
     onSuccess: changed,
   });
   return (
@@ -188,11 +165,13 @@ function StartShift({ suggested }: { suggested?: number }) {
       className="max-w-md space-y-4 rounded-2xl border-section border-line bg-white p-4 shadow-sm"
     >
       <h2 className="text-base font-semibold text-slate-900">Vào ca</h2>
-      {suggested ? <p className="text-sm text-slate-600">Đã chọn sẵn chi nhánh của các phòng được giao hôm nay.</p> : null}
-      <BranchSelect value={branchId} onChange={setPicked} />
+      <div data-testid="shift-branch">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Chi nhánh hiện tại</p>
+        <p className="text-base font-bold text-slate-900">{branchLabel(branch)}</p>
+      </div>
       {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
       <div className="flex justify-end">
-        <Button type="submit" disabled={branchId === ''} loading={start.isPending} data-testid="shift-start-submit">
+        <Button type="submit" loading={start.isPending} data-testid="shift-start-submit">
           <LogIn className="h-4 w-4" aria-hidden="true" />
           Vào ca
         </Button>
@@ -202,10 +181,9 @@ function StartShift({ suggested }: { suggested?: number }) {
 }
 
 /** "CA HIỆN TẠI · CHI NHÁNH: …" — always in view, with the two shift actions. */
-function ShiftStrip({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: WorkShift) => void }) {
+function ShiftStrip({ shift, homeId, onEnded }: { shift: WorkShift; homeId: number | null; onEnded: (shift: WorkShift) => void }) {
   const changed = useShiftChanged();
   const current = shift.current!;
-  const [switching, setSwitching] = useState(false);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const end = useMutation({
     mutationFn: () => housekeepingApi.endShift(),
@@ -227,19 +205,20 @@ function ShiftStrip({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: Wor
           <p className="text-sm text-slate-700">
             Từ {formatDateTime(current.startedAt)} · {current.inspections} lượt kiểm phòng
           </p>
+          {homeId !== null && current.branch.id !== homeId ? (
+            // A shift opened before the Admin set the account's branch.
+            <p className="mt-1 text-sm font-medium text-amber-800" data-testid="shift-other-branch">
+              Ca đang mở không ở chi nhánh của tài khoản. Hãy “Kết thúc ca” rồi “Vào ca” lại.
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => setSwitching(true)} data-testid="shift-switch">
-            <ArrowLeftRight className="h-4 w-4" aria-hidden="true" />
-            Đổi chi nhánh
-          </Button>
           <Button variant="secondary" onClick={() => setConfirmEnd(true)} data-testid="shift-end">
             <LogOut className="h-4 w-4" aria-hidden="true" />
             Kết thúc ca
           </Button>
         </div>
       </section>
-      {switching ? <SwitchBranchModal shift={shift} onClose={() => setSwitching(false)} /> : null}
       {confirmEnd ? (
         <Modal
           open
@@ -306,41 +285,6 @@ function ShiftSummaryModal({ shift, onClose }: { shift: WorkShift; onClose: () =
           <p className="text-slate-600">{shift.totals.byType.map((t) => `${t.label}: ${t.count}`).join(' · ')}</p>
         ) : null}
         <SegmentList shift={shift} />
-      </div>
-    </Modal>
-  );
-}
-
-/** "ĐỔI CHI NHÁNH" — a new segment elsewhere. */
-function SwitchBranchModal({ shift, onClose }: { shift: WorkShift; onClose: () => void }) {
-  const changed = useShiftChanged();
-  const [branchId, setBranchId] = useState<number | ''>('');
-  const move = useMutation({
-    mutationFn: () => housekeepingApi.switchBranch({ branchId: Number(branchId) }),
-    onSuccess: async () => {
-      await changed();
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open
-      title="Đổi chi nhánh"
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Hủy
-          </Button>
-          <Button onClick={() => move.mutate()} disabled={branchId === ''} loading={move.isPending} data-testid="shift-switch-confirm">
-            Đổi chi nhánh
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <BranchSelect value={branchId} onChange={setBranchId} exclude={shift.current?.branch.id} />
-        {move.isError ? <ErrorAlert>{toUserMessage(move.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );

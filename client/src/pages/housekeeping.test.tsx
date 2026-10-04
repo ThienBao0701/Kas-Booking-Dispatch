@@ -6,9 +6,9 @@
  *   ADMIN         reads and reports on all of it, and can void.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
- *   0. The workday: no shift → "Vào ca" (the branch only — the account is the
- *      person); on shift, "Ca hiện tại · Chi nhánh" with "Đổi chi nhánh" and
- *      "Kết thúc ca" (a summary).
+ *   0. The workday: no shift → "Vào ca" at the branch the Admin gave the account
+ *      (shown, never chosen; none → "ask the Admin"); on shift, "Ca hiện tại ·
+ *      Chi nhánh" with "Kết thúc ca" (a summary) — no "Đổi chi nhánh".
  *   1. The home is the day's board of the rooms given to this account: gray
  *      not started, blue being cleaned, green underline done; a room opens
  *      "Kiểm phòng | Dọn phòng" — the six conditions, then the cleaning form.
@@ -224,12 +224,11 @@ describe('Bộ phận buồng phòng — the day’s rooms', () => {
     expect(screen.getByTestId('room-chip-101')).toHaveAccessibleName(/Ưu tiên/);
   });
 
-  it('asks only for the branch at "Vào ca" — preselected from today’s rooms — and sends no name', async () => {
+  it('opens "Vào ca" at the account’s branch — shown, never chosen — and sends nothing to choose', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       routes({
         'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
-        'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
         'POST /api/housekeeping/shift/start': (init) => {
           posted.push(JSON.parse(String(init.body)));
           return { status: 201, body: { shift: workShift() } };
@@ -238,10 +237,35 @@ describe('Bộ phận buồng phòng — the day’s rooms', () => {
     );
     renderApp('/app/inspections');
     const start = await screen.findByTestId('shift-start');
+    const branch = within(start).getByTestId('shift-branch');
+    expect(branch).toHaveTextContent('Chi nhánh hiện tại');
+    expect(branch).toHaveTextContent('05 Trương Định');
+    // No branch to pick, no name to type.
+    expect(within(start).queryByRole('combobox')).not.toBeInTheDocument();
     expect(within(start).queryByTestId('shift-staff')).not.toBeInTheDocument();
-    await waitFor(() => expect(within(start).getByTestId('shift-branch')).toHaveValue('1'));
     await userEvent.click(within(start).getByTestId('shift-start-submit'));
-    await waitFor(() => expect(posted).toEqual([{ branchId: 1 }]));
+    await waitFor(() => expect(posted).toEqual([{}]));
+  });
+
+  it('offers no "Đổi chi nhánh" on shift — only "Kết thúc ca"', async () => {
+    installApiMock(routes());
+    renderApp('/app/inspections');
+    const current = await screen.findByTestId('shift-current');
+    expect(within(current).queryByTestId('shift-switch')).not.toBeInTheDocument();
+    expect(within(current).queryByRole('button', { name: /Đổi chi nhánh/ })).not.toBeInTheDocument();
+    expect(within(current).getByTestId('shift-end')).toBeInTheDocument();
+  });
+
+  it('tells an account with no branch to ask the Admin — no "Vào ca"', async () => {
+    installApiMock(
+      routes({
+        'GET /api/auth/me': () => ({ status: 200, body: { user: { ...HOUSEKEEPING_USER, branch: null } } }),
+        'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
+      }),
+    );
+    renderApp('/app/inspections');
+    expect(await screen.findByText('Tài khoản chưa được gán chi nhánh')).toBeInTheDocument();
+    expect(screen.queryByTestId('shift-start')).not.toBeInTheDocument();
   });
 
   it('"Kết thúc ca" shows the day’s summary', async () => {

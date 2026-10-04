@@ -199,8 +199,8 @@ export const roomWorkApi = {
     api.post<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}/assign`, { assigneeUserId }),
   voidTask: (id: string, reason?: string) =>
     api.post<{ voided: true }>(`/housekeeping/manager/tasks/${id}/void`, reason ? { reason } : {}),
-  /** The branch's workers — for a day, also whoever already holds a room that day. */
-  staff: (p: { date?: string; branchId?: number } = {}) =>
+  /** The branch's own Buồng phòng accounts (the Admin without a branch: all of them). */
+  staff: (p: { branchId?: number } = {}) =>
     api.get<{ staff: { id: number; fullName: string }[] }>(`/housekeeping/manager/staff${query({ ...p })}`),
   overview: (p: { date: string; branchId?: number }) => api.get<Overview>(`/housekeeping/manager/overview${query({ ...p })}`),
   staffProgress: (p: Period) => api.get<{ rows: StaffProgressRow[] }>(`/housekeeping/manager/staff-progress${query({ ...p })}`),

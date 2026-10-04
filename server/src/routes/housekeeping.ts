@@ -51,9 +51,9 @@ const collectionSchema = z.object({
 
 const voidSchema = z.object({ reason: z.string() });
 
-/** "Vào ca" / "Đổi chi nhánh": where, and who cleans. */
+/** "Vào ca" / "Đổi chi nhánh": the account's branch (a branch sent must be it), and who cleans. */
 const shiftBranchSchema = z.object({
-  branchId: z.number().int().positive(),
+  branchId: z.number().int().positive().optional(),
   // Optional: the account is the person; a name is kept only when one is sent.
   staffName: z.string().trim().max(100).optional(),
 });
@@ -180,7 +180,7 @@ export function createHousekeepingRouter(): Router {
 
   router.post('/housekeeping/shift/switch', requireRole('HOUSEKEEPING'), (req, res, next) => {
     (async () => {
-      const body = shiftBranchSchema.partial({ staffName: true }).parse(req.body ?? {});
+      const body = shiftBranchSchema.parse(req.body ?? {});
       res.json({ shift: await switchShiftBranch(actorOf(req), body, getClock()) });
     })().catch(next);
   });

@@ -9,7 +9,7 @@
  *         it, once.
  *   12–13 the manager sees everything entered; "Xóa" keeps the evidence.
  *   +     a branch's staff — the only people its rooms can be given to — are the
- *         workers who work there (a shift there in the last 30 days, or now).
+ *         Buồng phòng accounts the Admin assigned to it, and nothing else.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
@@ -61,9 +61,10 @@ beforeAll(async () => {
   }
   manager1 = (await loginAgent(app, 'qlbp1', PASSWORD)).agent;
   manager2 = (await loginAgent(app, 'qlbp2', PASSWORD)).agent;
-  workerId = (await createUser({ username: 'buong1', password: PASSWORD, fullName: 'Chị Lan', role: 'HOUSEKEEPING', branchId: null })).id;
-  worker2Id = (await createUser({ username: 'buong2', password: PASSWORD, fullName: 'Chị Hoa', role: 'HOUSEKEEPING', branchId: null })).id;
-  worker3Id = (await createUser({ username: 'buong3', password: PASSWORD, fullName: 'Chị Mai', role: 'HOUSEKEEPING', branchId: null })).id;
+  // Each worker belongs to the one branch the Admin gave its account.
+  workerId = (await createUser({ username: 'buong1', password: PASSWORD, fullName: 'Chị Lan', role: 'HOUSEKEEPING', branchId: cn1 })).id;
+  worker2Id = (await createUser({ username: 'buong2', password: PASSWORD, fullName: 'Chị Hoa', role: 'HOUSEKEEPING', branchId: cn1 })).id;
+  worker3Id = (await createUser({ username: 'buong3', password: PASSWORD, fullName: 'Chị Mai', role: 'HOUSEKEEPING', branchId: cn2 })).id;
   manager1Id = (await testPrisma.user.findUniqueOrThrow({ where: { username: 'qlbp1' } })).id;
   worker = (await loginAgent(app, 'buong1', PASSWORD)).agent;
   worker2 = (await loginAgent(app, 'buong2', PASSWORD)).agent;
@@ -73,9 +74,6 @@ beforeEach(async () => {
   await resetHousekeepingData();
   await resetShiftData();
   setClock({ now: () => hcm(DAY, '08:00') });
-  // Both workers worked at CN1 yesterday: they are its staff.
-  await workedAt(workerId, cn1, '2026-10-04');
-  await workedAt(worker2Id, cn1, '2026-10-04');
 });
 
 /** A workday at one branch — ended at 16:00 unless `open`. */
@@ -159,30 +157,42 @@ describe('assignment', () => {
     expect((await worker2.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks).toHaveLength(1);
   });
 
-  it('4. refuses a worker another worker’s room, and a branch off its shift', async () => {
+  it('4. keeps a worker to its own rooms at its own branch — whatever the request says', async () => {
     const [task] = await setUp(manager1, ['101'], workerId);
     await onShift(worker2, cn1);
     expect((await worker2.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(403);
     expect((await worker2.get(`/api/housekeeping/work/tasks/${task!.id}`)).status).toBe(403);
-    // Its own room, but the shift is at another branch.
-    await onShift(worker, cn2);
-    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(409);
-    // A worker is no manager.
+    // The branch is the account's: "Vào ca" or "Đổi chi nhánh" to CN2 is refused.
+    expect((await worker.post('/api/housekeeping/shift/start').send({ branchId: cn2 })).status).toBe(403);
+    await onShift(worker, cn1);
+    expect((await worker.post('/api/housekeeping/shift/switch').send({ branchId: cn2 })).status).toBe(403);
+
+    // A CN2 room — even one wrongly given to it in the database — stays out of reach.
+    const foreign = await testPrisma.housekeepingRoomTask.create({
+      data: { branchId: cn2, workDate: DAY, roomNumber: '201', statusCode: 'OUT', assigneeUserId: workerId, assigneeNameSnapshot: 'Chị Lan', createdByUserId: manager1Id, createdByNameSnapshot: 'x', createdAt: hcm(DAY, '07:00') },
+    });
+    const url = `/api/housekeeping/work/tasks/${foreign.id}`;
+    expect((await worker.get(url)).status).toBe(403);
+    expect((await worker.post(`${url}/open`)).status).toBe(403);
+    expect((await worker.post(`${url}/inspect`).send({ issues: [] })).status).toBe(403);
+    expect((await worker.put(`${url}/cleaning`).send({})).status).toBe(403);
+    expect((await worker.post(`${url}/complete`).send({})).status).toBe(403);
+    expect((await worker.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks.map((t: { roomNumber: string }) => t.roomNumber)).toEqual(['101']);
+    // A worker is no manager: no room set up, no list, no branch KPI — at either branch.
+    expect((await worker.post('/api/housekeeping/manager/tasks').send({ branchId: cn2, workDate: DAY, roomNumbers: ['201'], statusCode: 'OUT' })).status).toBe(403);
     expect((await worker.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).status).toBe(403);
+    expect((await worker.get(`/api/housekeeping/manager/kpi?from=${DAY}&to=${DAY}&branchId=${cn2}`)).status).toBe(403);
   });
 });
 
-describe('the branch’s staff', () => {
+describe('the branch’s staff — the accounts the Admin assigned to it', () => {
   const names = async (agent: Agent, q = '') => {
     const res = await agent.get(`/api/housekeeping/manager/staff${q}`);
     expect(res.status).toBe(200);
     return res.body.staff.map((s: { fullName: string }) => s.fullName);
   };
 
-  it('lists, and lets the manager assign, only the workers who work at its branch', async () => {
-    // Chị Mai works at CN2; her one CN1 shift was two months ago.
-    await workedAt(worker3Id, cn2, '2026-10-03');
-    await workedAt(worker3Id, cn1, '2026-08-01');
+  it('7–8. lists, and lets the manager assign, only its branch’s accounts', async () => {
     expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan']);
     expect(await names(manager2)).toEqual(['Chị Mai']);
     expect((await manager1.get(`/api/housekeeping/manager/staff?branchId=${cn2}`)).status).toBe(403);
@@ -190,23 +200,36 @@ describe('the branch’s staff', () => {
     expect(await names(admin)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
     expect(await names(admin, `?branchId=${cn2}`)).toEqual(['Chị Mai']);
 
-    // The server refuses her for a CN1 room, set up or reassigned.
+    // The server refuses the CN2 worker for a CN1 room, set up or reassigned.
     expect((await manager1.post('/api/housekeeping/manager/tasks').send({ workDate: DAY, roomNumbers: ['101'], statusCode: 'OUT', assigneeUserId: worker3Id })).status).toBe(422);
     const [task] = await setUp(manager1, ['101'], workerId);
     expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker3Id })).status).toBe(422);
-
-    // On shift at CN1 now, she is one of its staff — and can be given the room.
-    await workedAt(worker3Id, cn1, DAY, true);
-    expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
-    expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker3Id })).status).toBe(200);
   });
 
-  it('keeps whoever already holds a room that day in that day’s list', async () => {
+  it('9. assigns a new account at once — no shift at the branch first', async () => {
+    const res = await admin.post('/api/admin/users').send({ username: 'buong_moi', fullName: 'Chị Nga', temporaryPassword: PASSWORD, role: 'HOUSEKEEPING', branchId: cn1 });
+    expect(res.status).toBe(201);
+    const id = res.body.user.id as number;
+    expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Nga']);
+    const [task] = await setUp(manager1, ['103'], id);
+    const row = (await manager1.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).body.tasks.find((t: { id: string }) => t.id === task!.id);
+    expect(row.assignee).toMatchObject({ id, name: 'Chị Nga' });
+    await resetHousekeepingData();
+    await testPrisma.notification.deleteMany({ where: { userId: id } });
+    await testPrisma.user.delete({ where: { id } });
+  });
+
+  it('10. reads the account’s branch only — shift history and old rooms count for nothing', async () => {
+    // Chị Mai (CN2) worked a CN1 shift today and still holds a CN1 room: she is not CN1's.
+    await workedAt(worker3Id, cn1, DAY);
     await testPrisma.housekeepingRoomTask.create({
       data: { branchId: cn1, workDate: DAY, roomNumber: '102', statusCode: 'OUT', assigneeUserId: worker3Id, assigneeNameSnapshot: 'Chị Mai', createdByUserId: manager1Id, createdByNameSnapshot: 'Quản lý qlbp1', createdAt: hcm(DAY, '07:00') },
     });
-    expect(await names(manager1, `?date=${DAY}`)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
-    expect(await names(manager1, '?date=2026-10-06')).toEqual(['Chị Hoa', 'Chị Lan']);
+    expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan']);
+    const [task] = await setUp(manager1, ['101'], workerId);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker3Id })).status).toBe(422);
+    // A CN1 account with no shift history at all is assignable.
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker2Id })).status).toBe(200);
   });
 });
 

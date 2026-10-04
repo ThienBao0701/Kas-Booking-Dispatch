@@ -194,12 +194,8 @@ export const housekeepingApi = {
 
   /** The account's open workday, or null. */
   shift: () => api.get<{ shift: WorkShift | null }>('/housekeeping/shift'),
-  /** "Vào ca". */
-  startShift: (input: { branchId: number; staffName?: string }) =>
-    api.post<{ shift: WorkShift }>('/housekeeping/shift/start', input),
-  /** "Đổi chi nhánh". */
-  switchBranch: (input: { branchId: number; staffName?: string }) =>
-    api.post<{ shift: WorkShift }>('/housekeeping/shift/switch', input),
+  /** "Vào ca" — at the account's branch; the server decides it. */
+  startShift: () => api.post<{ shift: WorkShift }>('/housekeeping/shift/start', {}),
   /** "Kết thúc ca": the day's summary comes back. */
   endShift: () => api.post<{ shift: WorkShift }>('/housekeeping/shift/end', {}),
   /** Workdays on record: one's own, or a supervisor's scope. */

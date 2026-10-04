@@ -98,6 +98,21 @@ function cleanerName(raw: unknown): string {
   return name;
 }
 
+export const NO_BRANCH_MESSAGE = 'Tài khoản chưa được gán chi nhánh. Vui lòng liên hệ Admin.';
+
+/**
+ * THE BRANCH IS THE ACCOUNT'S — set by the Admin, read from the session, never
+ * chosen by the worker. A request that names another branch is refused; an
+ * account with no branch yet cannot work at all.
+ */
+export function accountBranch(actor: { branchId: number | null }, requested?: unknown): number {
+  if (actor.branchId === null) throw ApiError.forbidden(NO_BRANCH_MESSAGE);
+  if (requested !== undefined && requested !== null && Number(requested) !== actor.branchId) {
+    throw ApiError.branchAccessDenied('Bạn chỉ làm việc tại chi nhánh được Admin gán cho tài khoản.');
+  }
+  return actor.branchId;
+}
+
 async function activeBranch(branchId: unknown, client: PrismaClient): Promise<number> {
   const id = Number(branchId);
   if (!Number.isInteger(id) || id <= 0) throw ApiError.validation('Vui lòng chọn chi nhánh.');
@@ -117,15 +132,15 @@ export async function currentShift(actor: ShiftActor, client: PrismaClient = def
   return row ? serializeShift(row) : null;
 }
 
-/** "Vào ca": the workday and its first branch. One open workday per account. */
+/** "Vào ca": the workday, at the account's branch. One open workday per account. */
 export async function startShift(
   actor: ShiftActor,
-  input: { branchId: unknown; staffName?: unknown },
+  input: { branchId?: unknown; staffName?: unknown },
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
   assertHousekeeping(actor);
-  const branchId = await activeBranch(input.branchId, client);
+  const branchId = await activeBranch(accountBranch(actor, input.branchId), client);
   // THE PERSON IS THE ACCOUNT: nobody types their own name any more.
   const staffName = cleanerName(input.staffName === undefined || input.staffName === '' ? actor.fullName : input.staffName);
   if (await openSession(actor.id, client)) throw ApiError.conflict('Bạn đang trong ca. Hãy đổi chi nhánh hoặc kết thúc ca.');
@@ -145,16 +160,17 @@ export async function startShift(
 
 /**
  * "Đổi chi nhánh": the open segment ends now, kept as history; the next one opens
- * at the new branch (with the same cleaner unless another name is given).
+ * at the new branch. Only ever TO the account's branch — the way back for a shift
+ * opened before the Admin assigned it; any other branch is refused.
  */
 export async function switchShiftBranch(
   actor: ShiftActor,
-  input: { branchId: unknown; staffName?: unknown },
+  input: { branchId?: unknown; staffName?: unknown },
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
   assertHousekeeping(actor);
-  const branchId = await activeBranch(input.branchId, client);
+  const branchId = await activeBranch(accountBranch(actor, input.branchId ?? actor.branchId), client);
   const session = await openSession(actor.id, client);
   if (!session) throw ApiError.conflict('Bạn chưa vào ca.');
   const open = session.segments.find((s) => s.endedAt === null);
@@ -224,6 +240,6 @@ export async function openSegmentFor(userId: number, client: PrismaClient = defa
     where: { endedAt: null, session: { userId, endedAt: null } },
     include: { branch: { select: { code: true } } },
   });
-  if (!segment) throw ApiError.conflict('Bạn cần "Vào ca" và chọn chi nhánh trước khi ghi nhận kiểm tra phòng.');
+  if (!segment) throw ApiError.conflict('Bạn cần "Vào ca" trước khi ghi nhận kiểm tra phòng.');
   return segment;
 }

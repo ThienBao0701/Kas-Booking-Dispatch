@@ -128,7 +128,7 @@ export function createHousekeepingWorkRouter(): Router {
 
   router.get('/housekeeping/manager/staff', ...gate, (req, res, next) => {
     (async () => {
-      res.json({ staff: await listStaff(actorOf(req), { branchId: req.query.branchId, date: req.query.date }) });
+      res.json({ staff: await listStaff(actorOf(req), { branchId: req.query.branchId }) });
     })().catch(next);
   });
 

@@ -36,7 +36,7 @@ import { captureShiftContext, type ShiftActor } from '../shift/shiftService';
 import { assertMoney } from '../reception/reportService';
 import { branchScopeOf, isReceptionSupervisor, scopeIncludes, scopedBranchFilter } from '../auth/branchScope';
 import { catalogRoom } from '../room/branchRooms';
-import { openSegmentFor } from './workShiftService';
+import { accountBranch, openSegmentFor } from './workShiftService';
 import {
   ROOM_COLLECTION_METHODS,
   ROOM_COLLECTION_METHOD_LABELS,
@@ -177,11 +177,16 @@ export async function createInspection(
     throw ApiError.forbidden('Chỉ bộ phận buồng phòng mới ghi nhận được kiểm tra phòng.');
   }
   /*
-    THE BRANCH IS THE SHIFT'S. The open work segment ("Vào ca" / "Đổi chi nhánh")
-    decides where this inspection happened — never the request, never a
-    permanent account branch — and it is recorded against that segment.
+    THE BRANCH IS THE ACCOUNT'S. The Admin-assigned branch is where this worker
+    works; the open segment ("Vào ca") must be there, and the inspection is
+    recorded against it — never a branch named by the request.
   */
+  const home = accountBranch(actor);
   const segment = await openSegmentFor(actor.id, client);
+  if (segment.branchId !== home) {
+    throw ApiError.branchAccessDenied('Ca đang mở không ở chi nhánh của tài khoản. Hãy "Kết thúc ca" rồi "Vào ca" lại.');
+  }
+  if (options.branchId !== undefined && options.branchId !== home) throw ApiError.branchAccessDenied();
   if (options.branchId !== undefined && segment.branchId !== options.branchId) {
     throw ApiError.conflict('Bạn đang trong ca ở chi nhánh khác. Hãy "Đổi chi nhánh" sang chi nhánh của phòng này.');
   }
@@ -291,11 +296,11 @@ export function roomIssueWhere(
     where.branchId = actor.branchId ?? -1;
     where.voidedAt = null;
   } else if (actor.role === 'HOUSEKEEPING') {
-    // Its OWN inspections, whichever branch the shift was at — its work history
-    // follows the person across "Đổi chi nhánh", never anybody else's.
+    // Its OWN inspections — its history stays its own, whichever branch it was
+    // at — and never another branch on request.
     where.voidedAt = null;
     inspection.createdByUserId = actor.id;
-    if (filter.branchId !== undefined) where.branchId = filter.branchId;
+    if (filter.branchId !== undefined) where.branchId = accountBranch(actor, filter.branchId);
   } else if (isReceptionSupervisor(actor.role) || actor.role === 'HOUSEKEEPING_MANAGER') {
     // Admin: every branch; a Quản lý lễ tân: its branches; the general manager: all;
     // a Quản lý buồng phòng: its one branch.

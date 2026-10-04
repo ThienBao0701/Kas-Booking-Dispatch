@@ -25,6 +25,7 @@ import { catalogRoom } from '../room/branchRooms';
 import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, type CleaningForm } from './roomTaskCatalog';
+import { accountBranch } from './workShiftService';
 
 export const TASK_INCLUDE = {
   branch: { select: { id: true, code: true, hotelName: true, address: true, branchNumber: true } },
@@ -109,50 +110,32 @@ function assertManagerOf(row: TaskRow, actor: HousekeepingActor): void {
 /** A worker may touch only the rooms given to it — never another's, never by branch. */
 function assertAssignee(row: TaskRow, actor: HousekeepingActor): void {
   if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới làm được việc này.');
+  if (row.branchId !== accountBranch(actor)) throw ApiError.branchAccessDenied();
   if (row.assigneeUserId !== actor.id) throw ApiError.forbidden('Phòng này không được giao cho bạn.');
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
 }
 
-/** How far back a shift at a branch still makes a worker one of its staff. */
-const BRANCH_STAFF_DAYS = 30;
-
 /**
- * "NHÂN VIÊN CỦA CHI NHÁNH" — a Buồng phòng account has no fixed branch (it picks
- * one at "Vào ca"), so a branch's staff is read from the work itself: on shift
- * there now, a shift there in the last BRANCH_STAFF_DAYS days, or — for a day —
- * already holding one of its rooms that day (so a current assignee stays listed).
+ * "NHÂN VIÊN CỦA CHI NHÁNH" — the active Bộ phận buồng phòng accounts the Admin
+ * assigned to the branch. The account's branch is the only source: no shift
+ * history, no earlier assignment stands in for it.
  */
-function branchStaffWhere(branchId: number, workDate: string | null, now: Date): Prisma.UserWhereInput {
-  const since = new Date(now.getTime() - BRANCH_STAFF_DAYS * 24 * 60 * 60 * 1000);
-  return {
-    role: 'HOUSEKEEPING',
-    active: true,
-    OR: [
-      { housekeepingSessions: { some: { segments: { some: { branchId, OR: [{ endedAt: null }, { startedAt: { gte: since } }] } } } } },
-      ...(workDate ? [{ roomTasksAssigned: { some: { branchId, workDate, voidedAt: null } } }] : []),
-    ],
-  };
+function branchStaffWhere(branchId: number): Prisma.UserWhereInput {
+  return { role: 'HOUSEKEEPING', active: true, branchId };
 }
 
-/** The active HOUSEKEEPING account the manager names — one of the branch's staff. */
-async function assignee(
-  raw: unknown,
-  at: { branchId: number; workDate: string; now: Date },
-  client: PrismaClient,
-): Promise<{ id: number; fullName: string } | null> {
+/** The active HOUSEKEEPING account the manager names — one of the branch's own. */
+async function assignee(raw: unknown, branchId: number, client: PrismaClient): Promise<{ id: number; fullName: string } | null> {
   if (raw === null || raw === undefined || raw === '') return null;
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) throw ApiError.validation('Nhân viên buồng phòng không hợp lệ.');
   const user = await client.user.findFirst({
     where: { id, role: 'HOUSEKEEPING', active: true },
-    select: { id: true, fullName: true },
+    select: { id: true, fullName: true, branchId: true },
   });
   if (!user) throw ApiError.validation('Nhân viên buồng phòng không hợp lệ hoặc đã ngừng hoạt động.');
-  const ofBranch = await client.user.count({ where: { id, ...branchStaffWhere(at.branchId, at.workDate, at.now) } });
-  if (ofBranch === 0) {
-    throw ApiError.validation(`Chỉ giao được cho nhân viên làm việc tại chi nhánh này (đã vào ca tại chi nhánh trong ${BRANCH_STAFF_DAYS} ngày qua).`);
-  }
-  return user;
+  if (user.branchId !== branchId) throw ApiError.validation('Chỉ giao được cho nhân viên buồng phòng thuộc chi nhánh này.');
+  return { id: user.id, fullName: user.fullName };
 }
 
 async function recordEvent(
@@ -293,13 +276,13 @@ export async function createTasks(
     if (!typed) throw ApiError.validation('Số phòng không hợp lệ.');
     return catalogRoom(branch.code, typed)!;
   }))];
-  const now = clock.now();
-  const person = await assignee(input.assigneeUserId, { branchId: branch.id, workDate, now }, client);
+  const person = await assignee(input.assigneeUserId, branch.id, client);
   const existing = await client.housekeepingRoomTask.findMany({
     where: { branchId: branch.id, workDate, roomNumber: { in: rooms }, voidedAt: null },
     select: { roomNumber: true },
   });
   const taken = new Set(existing.map((e) => e.roomNumber));
+  const now = clock.now();
   const created: string[] = [];
   await client.$transaction(async (tx) => {
     for (const roomNumber of rooms.filter((r) => !taken.has(r))) {
@@ -376,9 +359,9 @@ export async function assignTask(
   assertManagerOf(row, actor);
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong, không thể giao lại.');
-  const now = clock.now();
-  const person = await assignee(input.assigneeUserId, { branchId: row.branchId, workDate: row.workDate, now }, client);
+  const person = await assignee(input.assigneeUserId, row.branchId, client);
   if ((person?.id ?? null) === row.assigneeUserId) return serializeTask(row, { money: true });
+  const now = clock.now();
   await client.$transaction(async (tx) => {
     const { count } = await tx.housekeepingRoomTask.updateMany({
       where: { id, voidedAt: null, state: { not: 'COMPLETED' }, assigneeUserId: row.assigneeUserId },
@@ -419,23 +402,16 @@ export async function voidTask(
 }
 
 /**
- * The people a manager can give a room to: the branch's staff (see
- * branchStaffWhere) — for a day, also whoever already holds a room that day.
- * The Admin without a branch reads every active Bộ phận buồng phòng account.
+ * The people a manager can give a room to: the branch's own accounts (see
+ * branchStaffWhere). The Admin without a branch reads every active one.
  */
-export async function listStaff(
-  actor: HousekeepingActor,
-  query: { branchId?: unknown; date?: unknown } = {},
-  clock: Clock = getClock(),
-  client: PrismaClient = defaultPrisma,
-) {
+export async function listStaff(actor: HousekeepingActor, query: { branchId?: unknown } = {}, client: PrismaClient = defaultPrisma) {
   const scope = managerScope(actor);
-  const date = query.date === undefined || query.date === '' ? null : assertDate(query.date);
   const requested = query.branchId === '' ? undefined : query.branchId;
   const where: Prisma.UserWhereInput =
     scope === 'ALL' && requested === undefined
       ? { role: 'HOUSEKEEPING', active: true }
-      : branchStaffWhere((await managedBranch(actor, requested, client)).id, date, clock.now());
+      : branchStaffWhere((await managedBranch(actor, requested, client)).id);
   return client.user.findMany({ where, select: { id: true, fullName: true }, orderBy: { fullName: 'asc' } });
 }
 
@@ -443,12 +419,13 @@ export async function listStaff(
  * The worker
  * ------------------------------------------------------------------ */
 
-/** The rooms given to this account for the day, every branch, priority first. */
+/** The rooms given to this account for the day, at its own branch, priority first. */
 export async function myTasks(actor: HousekeepingActor, workDateRaw: unknown, client: PrismaClient = defaultPrisma) {
   if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới có phòng được giao.');
+  const branchId = accountBranch(actor);
   const workDate = assertDate(workDateRaw);
   const rows = await client.housekeepingRoomTask.findMany({
-    where: { assigneeUserId: actor.id, workDate, voidedAt: null },
+    where: { assigneeUserId: actor.id, branchId, workDate, voidedAt: null },
     include: TASK_INCLUDE,
     orderBy: [{ branchId: 'asc' }, { priority: 'desc' }, { roomNumber: 'asc' }],
   });
@@ -460,6 +437,7 @@ export async function myTasks(actor: HousekeepingActor, workDateRaw: unknown, cl
 export async function getTask(actor: HousekeepingActor, id: string, client: PrismaClient = defaultPrisma) {
   const row = await loadTask(id, client);
   if (actor.role === 'HOUSEKEEPING') {
+    if (row.branchId !== accountBranch(actor)) throw ApiError.branchAccessDenied();
     if (row.assigneeUserId !== actor.id) throw ApiError.forbidden('Phòng này không được giao cho bạn.');
     return serializeTask(row, { money: false });
   }

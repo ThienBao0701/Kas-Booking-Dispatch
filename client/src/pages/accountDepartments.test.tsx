@@ -206,23 +206,26 @@ describe('locking and unlocking, from every section', () => {
     expect(within(admin).queryByRole('button', { name: /Khoá|Mở khoá/ })).not.toBeInTheDocument();
   });
 
-  it('lists a Buồng phòng account in its own section — its branch is the shift’s', async () => {
-    mount({}, [...USERS, user(7, 'HOUSEKEEPING')]);
+  it('lists a Buồng phòng account with its one branch — and flags one still without', async () => {
+    mount({}, [...USERS, user(7, 'HOUSEKEEPING', { branch: BRANCH }), user(8, 'HOUSEKEEPING')]);
     renderApp('/app/settings');
 
     const housekeeping = await screen.findByTestId('department-HOUSEKEEPING');
-    expect(within(housekeeping).getByTestId('row-7')).toHaveTextContent('Theo ca làm việc');
+    expect(within(housekeeping).getByTestId('row-7')).toHaveTextContent('05 Trương Định');
+    expect(within(within(housekeeping).getByTestId('row-8')).getByTestId('needs-branch-8')).toHaveTextContent('Cần gán chi nhánh');
     // Between Lễ tân and Kỹ thuật, and shown only because it has an account.
     const order = screen.getAllByTestId(/^department-/).map((el) => el.getAttribute('data-testid'));
     expect(order.indexOf('department-HOUSEKEEPING')).toBe(order.indexOf('department-RECEPTIONIST') + 1);
   });
 
-  it('creates a Buồng phòng account with no branch — "Vào ca" picks it', async () => {
+  it('creates a Buồng phòng account only with exactly one ticked branch, sent as its branch', async () => {
+    const BRANCH_2 = { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'KAS B', address: '260 Lý Tự Trọng', branchNumber: 2 };
     const posted: Record<string, unknown>[] = [];
     mount({
+      'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH_2] } }),
       'POST /api/admin/users': (init) => {
         posted.push(JSON.parse(String(init.body)));
-        return { status: 201, body: { user: user(8, 'HOUSEKEEPING') } };
+        return { status: 201, body: { user: user(8, 'HOUSEKEEPING', { branch: BRANCH }) } };
       },
     });
     renderApp('/app/settings');
@@ -234,16 +237,42 @@ describe('locking and unlocking, from every section', () => {
     await userEvent.type(within(dialog).getByLabelText(/Mật khẩu tạm/), 'Matkhau123');
     await userEvent.selectOptions(within(dialog).getByLabelText('Vai trò'), 'HOUSEKEEPING');
 
-    // No permanent branch: none is asked for, and none is sent.
+    // "Chi nhánh": exactly one, required.
     const create = within(dialog).getByRole('button', { name: 'Tạo' });
-    expect(within(dialog).queryByLabelText('Chi nhánh')).not.toBeInTheDocument();
-    expect(within(dialog).getByText(/Vào ca/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('group', { name: /^Chi nhánh/ })).toBeInTheDocument();
+    expect(create).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('manager-branch-2'));
+    await userEvent.click(within(dialog).getByTestId('manager-branch-1'));
+    expect(within(dialog).getByTestId('manager-branch-2')).not.toBeChecked();
     expect(create).toBeEnabled();
     await userEvent.click(create);
 
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', username: 'buongphong1' });
-    expect(posted[0]!.branchId).toBeUndefined();
+    expect(posted[0]).toMatchObject({ role: 'HOUSEKEEPING', username: 'buongphong1', branchId: 1 });
+    expect(posted[0]!.branchIds).toBeUndefined();
+  });
+
+  it('assigns the branch of a Buồng phòng account that has none — on the same account', async () => {
+    const put: Record<string, unknown>[] = [];
+    mount(
+      {
+        'PUT /api/admin/users/8': (init) => {
+          put.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { user: user(8, 'HOUSEKEEPING', { branch: BRANCH }) } };
+        },
+      },
+      [...USERS, user(8, 'HOUSEKEEPING')],
+    );
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByTestId('edit-user-8'));
+    const dialog = await screen.findByRole('dialog', { name: /Sửa tài khoản/ });
+    const save = within(dialog).getByTestId('edit-user-save');
+    expect(save).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('manager-branch-1'));
+    await userEvent.click(save);
+
+    await waitFor(() => expect(put).toEqual([{ branchId: 1 }]));
   });
 
   it('creates a Quản lý lễ tân only with at least one ticked branch, and sends the set', async () => {

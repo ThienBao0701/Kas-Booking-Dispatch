@@ -12,7 +12,7 @@
  *   5. "KPI & Thu tiền" filters by collection status; "Báo cáo" exports PDF/Excel.
  *   6. The Admin reaches the same screens as a menu group, over every branch.
  *   7. Every screen opens with "Quản lý buồng phòng · Chi nhánh · Ngày nghiệp vụ";
- *      the worker lists come from the server's branch-and-day list only.
+ *      the worker lists come from the server's list of the branch's own accounts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -103,8 +103,8 @@ function shell(user: unknown, extra: Record<string, Handler> = {}): Record<strin
     'GET /api/housekeeping/catalog': () => ({ status: 200, body: CATALOG }),
     // KPI's employee filter (the server defaults to the manager's branch) …
     'GET /api/housekeeping/manager/staff': () => ({ status: 200, body: STAFF }),
-    // … and the day's assignable workers at the branch.
-    [`GET /api/housekeeping/manager/staff?date=${TODAY}&branchId=1`]: () => ({ status: 200, body: STAFF }),
+    // … and the branch's own workers, for setting up and assigning rooms.
+    [`GET /api/housekeeping/manager/staff?branchId=1`]: () => ({ status: 200, body: STAFF }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
     ...extra,
   };
@@ -279,17 +279,17 @@ describe('Quản lý buồng phòng — Phân công công việc', () => {
     await waitFor(() => expect(posted).toEqual([{ assigneeUserId: 7 }]));
   });
 
-  it('offers only the branch’s workers for the day — the list the server scopes', async () => {
+  it('offers only the branch’s own workers — the list the server scopes', async () => {
     const fetchMock = installApiMock(
       routes({
-        // The server's answer for this branch and day: one worker, not every account.
-        [`GET /api/housekeeping/manager/staff?date=${TODAY}&branchId=1`]: () => ({ status: 200, body: { staff: [{ id: 6, fullName: 'Buồng phòng Một' }] } }),
+        // The server's answer for this branch: its one worker, not every account.
+        [`GET /api/housekeeping/manager/staff?branchId=1`]: () => ({ status: 200, body: { staff: [{ id: 6, fullName: 'Buồng phòng Một' }] } }),
       }),
     );
     renderApp('/app/hk/assign');
     const select = await screen.findByTestId('assign-102');
     await waitFor(() => expect([...select.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chưa giao —', 'Buồng phòng Một']));
-    expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/housekeeping/manager/staff?date=${TODAY}&branchId=1`)).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/housekeeping/manager/staff?branchId=1`)).toBe(true);
     // Columns as a manager reads them.
     const table = screen.getByTestId('assign-table');
     expect([...table.querySelectorAll('thead th')].map((th) => th.textContent).filter(Boolean)).toEqual([
