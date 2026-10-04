@@ -35,6 +35,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** A collapsible group: its children are the links; `to` only names it. */
   children?: NavItem[];
+  /** A plain heading above this top-level link, starting a section (not a level). */
+  section?: string;
 }
 
 /**
@@ -64,11 +66,11 @@ const COMPLETED_GROUP: NavItem = {
  * The Quản lý buồng phòng's whole menu; for the Admin, a group (every branch).
  */
 const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = [
-  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard },
+  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard, section: 'Vận hành' },
   { to: '/app/hk/rooms', label: 'Tình trạng phòng', icon: BedDouble },
   { to: '/app/hk/assign', label: 'Phân công công việc', icon: ClipboardCheck },
   { to: '/app/hk/staff', label: 'Theo dõi nhân viên', icon: Users },
-  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet },
+  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet, section: 'KPI & Báo cáo' },
   { to: '/app/hk/report', label: 'Báo cáo', icon: FileText },
 ];
 

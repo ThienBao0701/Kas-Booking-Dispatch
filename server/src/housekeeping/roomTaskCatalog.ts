@@ -4,15 +4,14 @@
  * and validated here on every save.
  *
  * THE CODES AND ITEM NAMES ARE THE OPERATION'S OWN, kept exactly as given: the
- * board's rows (OUT, OC, CC, VC — OC and CC are both kept, neither is
- * reinterpreted), the bed-linen sizes K / Q / T, and the item names of the paper
- * housekeeping form. Nothing here defines what a code means; extending the form
- * is adding a line to a list.
+ * board's rows (OUT, OC, VC — there is no CC), the bed-linen sizes K / Q / T,
+ * and the item names of the paper housekeeping form. Nothing here defines what
+ * a code means; extending the form is adding a line to a list.
  */
 import { ApiError } from '../lib/errors';
 
 /** The board's rows — the room's operational code for the day. */
-export const ROOM_STATUS_CODES = ['OUT', 'OC', 'CC', 'VC'] as const;
+export const ROOM_STATUS_CODES = ['OUT', 'OC', 'VC'] as const;
 export type RoomStatusCode = (typeof ROOM_STATUS_CODES)[number];
 
 export const ROOM_WORK_STATE_LABELS = {

@@ -10,7 +10,7 @@
  *     timer, at the inspection's own time), fills "Dọn phòng", completes.
  *
  * THE ROOM CODE AND THE CLEANING STATE ARE TWO FIELDS: \`statusCode\` (OUT / OC /
- * CC / VC) is the manager's; \`state\` (chưa bắt đầu / đang dọn / hoàn thành) is the
+ * VC) is the manager's; \`state\` (chưa bắt đầu / đang dọn / hoàn thành) is the
  * work's. Neither is derived from the other.
  *
  * NOTHING IS DELETED. "Xóa" voids an item; its inspection, findings, collections
@@ -113,14 +113,45 @@ function assertAssignee(row: TaskRow, actor: HousekeepingActor): void {
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
 }
 
-/** The active HOUSEKEEPING account the manager names, by full name. */
-async function assignee(raw: unknown, client: PrismaClient): Promise<{ id: number; fullName: string } | null> {
+/** How far back a shift at a branch still makes a worker one of its staff. */
+const BRANCH_STAFF_DAYS = 30;
+
+/**
+ * "NHÂN VIÊN CỦA CHI NHÁNH" — a Buồng phòng account has no fixed branch (it picks
+ * one at "Vào ca"), so a branch's staff is read from the work itself: on shift
+ * there now, a shift there in the last BRANCH_STAFF_DAYS days, or — for a day —
+ * already holding one of its rooms that day (so a current assignee stays listed).
+ */
+function branchStaffWhere(branchId: number, workDate: string | null, now: Date): Prisma.UserWhereInput {
+  const since = new Date(now.getTime() - BRANCH_STAFF_DAYS * 24 * 60 * 60 * 1000);
+  return {
+    role: 'HOUSEKEEPING',
+    active: true,
+    OR: [
+      { housekeepingSessions: { some: { segments: { some: { branchId, OR: [{ endedAt: null }, { startedAt: { gte: since } }] } } } } },
+      ...(workDate ? [{ roomTasksAssigned: { some: { branchId, workDate, voidedAt: null } } }] : []),
+    ],
+  };
+}
+
+/** The active HOUSEKEEPING account the manager names — one of the branch's staff. */
+async function assignee(
+  raw: unknown,
+  at: { branchId: number; workDate: string; now: Date },
+  client: PrismaClient,
+): Promise<{ id: number; fullName: string } | null> {
   if (raw === null || raw === undefined || raw === '') return null;
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.validation('Nhân viên buồng phòng không hợp lệ.');
   const user = await client.user.findFirst({
-    where: { id: Number(raw), role: 'HOUSEKEEPING', active: true },
+    where: { id, role: 'HOUSEKEEPING', active: true },
     select: { id: true, fullName: true },
   });
   if (!user) throw ApiError.validation('Nhân viên buồng phòng không hợp lệ hoặc đã ngừng hoạt động.');
+  const ofBranch = await client.user.count({ where: { id, ...branchStaffWhere(at.branchId, at.workDate, at.now) } });
+  if (ofBranch === 0) {
+    throw ApiError.validation(`Chỉ giao được cho nhân viên làm việc tại chi nhánh này (đã vào ca tại chi nhánh trong ${BRANCH_STAFF_DAYS} ngày qua).`);
+  }
   return user;
 }
 
@@ -262,13 +293,13 @@ export async function createTasks(
     if (!typed) throw ApiError.validation('Số phòng không hợp lệ.');
     return catalogRoom(branch.code, typed)!;
   }))];
-  const person = await assignee(input.assigneeUserId, client);
+  const now = clock.now();
+  const person = await assignee(input.assigneeUserId, { branchId: branch.id, workDate, now }, client);
   const existing = await client.housekeepingRoomTask.findMany({
     where: { branchId: branch.id, workDate, roomNumber: { in: rooms }, voidedAt: null },
     select: { roomNumber: true },
   });
   const taken = new Set(existing.map((e) => e.roomNumber));
-  const now = clock.now();
   const created: string[] = [];
   await client.$transaction(async (tx) => {
     for (const roomNumber of rooms.filter((r) => !taken.has(r))) {
@@ -345,9 +376,9 @@ export async function assignTask(
   assertManagerOf(row, actor);
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong, không thể giao lại.');
-  const person = await assignee(input.assigneeUserId, client);
-  if ((person?.id ?? null) === row.assigneeUserId) return serializeTask(row, { money: true });
   const now = clock.now();
+  const person = await assignee(input.assigneeUserId, { branchId: row.branchId, workDate: row.workDate, now }, client);
+  if ((person?.id ?? null) === row.assigneeUserId) return serializeTask(row, { money: true });
   await client.$transaction(async (tx) => {
     const { count } = await tx.housekeepingRoomTask.updateMany({
       where: { id, voidedAt: null, state: { not: 'COMPLETED' }, assigneeUserId: row.assigneeUserId },
@@ -387,14 +418,25 @@ export async function voidTask(
   });
 }
 
-/** The people a manager can give a room to: every active Bộ phận buồng phòng account. */
-export async function listStaff(actor: HousekeepingActor, client: PrismaClient = defaultPrisma) {
-  managerScope(actor);
-  return client.user.findMany({
-    where: { role: 'HOUSEKEEPING', active: true },
-    select: { id: true, fullName: true },
-    orderBy: { fullName: 'asc' },
-  });
+/**
+ * The people a manager can give a room to: the branch's staff (see
+ * branchStaffWhere) — for a day, also whoever already holds a room that day.
+ * The Admin without a branch reads every active Bộ phận buồng phòng account.
+ */
+export async function listStaff(
+  actor: HousekeepingActor,
+  query: { branchId?: unknown; date?: unknown } = {},
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  const scope = managerScope(actor);
+  const date = query.date === undefined || query.date === '' ? null : assertDate(query.date);
+  const requested = query.branchId === '' ? undefined : query.branchId;
+  const where: Prisma.UserWhereInput =
+    scope === 'ALL' && requested === undefined
+      ? { role: 'HOUSEKEEPING', active: true }
+      : branchStaffWhere((await managedBranch(actor, requested, client)).id, date, clock.now());
+  return client.user.findMany({ where, select: { id: true, fullName: true }, orderBy: { fullName: 'asc' } });
 }
 
 /* ------------------------------------------------------------------ *

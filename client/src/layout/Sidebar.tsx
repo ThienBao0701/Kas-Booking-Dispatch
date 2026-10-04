@@ -213,12 +213,21 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         </div>
         <div className="leading-tight">
           <p className="text-sm font-semibold text-slate-900">Kas</p>
-          <p className="text-xs text-slate-500">Điều phối đặt phòng</p>
+          <p className="text-xs text-slate-500">{user?.role === 'HOUSEKEEPING_MANAGER' ? 'Quản lý buồng phòng' : 'Điều phối đặt phòng'}</p>
         </div>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-2" aria-label="Điều hướng chính">
-        {nav.map((item) =>
+        {nav.map((item, i) => [
+          // A section heading (the Quản lý buồng phòng's menu): a label, never a level.
+          item.section ? (
+            <p
+              key={`section-${item.section}`}
+              className={`px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${i === 0 ? 'pt-1' : 'pt-4'}`}
+            >
+              {item.section}
+            </p>
+          ) : null,
           item.children ? (
             <SidebarGroup
               key={item.to}
@@ -241,7 +250,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 : {})}
             />
           ),
-        )}
+        ])}
       </nav>
 
       {user?.branch ? (

@@ -11,6 +11,8 @@
  *   4. "Theo dõi nhân viên" opens a worker's full detail, cleaning included.
  *   5. "KPI & Thu tiền" filters by collection status; "Báo cáo" exports PDF/Excel.
  *   6. The Admin reaches the same screens as a menu group, over every branch.
+ *   7. Every screen opens with "Quản lý buồng phòng · Chi nhánh · Ngày nghiệp vụ";
+ *      the worker lists come from the server's branch-and-day list only.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -40,7 +42,7 @@ const MANAGER: AuthUser = {
 };
 
 const CATALOG = {
-  statusCodes: ['OUT', 'OC', 'CC', 'VC'],
+  statusCodes: ['OUT', 'OC', 'VC'],
   states: { NOT_STARTED: 'Chưa bắt đầu', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
   linen: [{ code: 'BED_SHEET', label: 'Ga giường' }],
   linenSizes: ['K', 'Q', 'T'],
@@ -99,7 +101,10 @@ function shell(user: unknown, extra: Record<string, Handler> = {}): Record<strin
     }),
     'GET /api/chat/channels': () => ({ status: 200, body: { channels: [] } }),
     'GET /api/housekeeping/catalog': () => ({ status: 200, body: CATALOG }),
+    // KPI's employee filter (the server defaults to the manager's branch) …
     'GET /api/housekeeping/manager/staff': () => ({ status: 200, body: STAFF }),
+    // … and the day's assignable workers at the branch.
+    [`GET /api/housekeeping/manager/staff?date=${TODAY}&branchId=1`]: () => ({ status: 200, body: STAFF }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
     ...extra,
   };
@@ -148,10 +153,25 @@ describe('Quản lý buồng phòng — menu and overview', () => {
       'KPI & Thu tiền',
       'Báo cáo',
     ]);
+    // The sections are headings, not levels.
+    expect(within(nav).getByText('Vận hành')).toBeInTheDocument();
+    expect(within(nav).getByText('KPI & Báo cáo')).toBeInTheDocument();
+    // Quản lý buồng phòng · Chi nhánh · Ngày nghiệp vụ — then the page's title.
+    const context = screen.getByTestId('hk-context');
+    expect(context).toHaveTextContent('Quản lý buồng phòng');
     expect(screen.getByTestId('manager-branch')).toHaveTextContent('Chi nhánh 1 — 05 Trương Định');
-    expect(screen.queryByTestId('branch-picker')).not.toBeInTheDocument();
-    expect(overview).toHaveTextContent('12Tổng phòng');
-    expect(overview).toHaveTextContent('3Đang dọn');
+    expect(screen.getByTestId('hk-period-value')).toHaveTextContent(TODAY.split('-').reverse().join('/'));
+    expect(within(screen.getByRole('main')).getByRole('heading', { level: 1, name: 'Tổng quan' })).toBeInTheDocument();
+    expect(screen.queryByTestId('branch-select')).not.toBeInTheDocument();
+    expect(overview).toHaveTextContent('Tổng phòng12');
+    expect(overview).toHaveTextContent('Đang dọn3');
+    expect(within(screen.getByTestId('hk-quick')).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
+      '/app/hk/rooms',
+      '/app/hk/assign',
+      '/app/hk/staff',
+      '/app/hk/kpi',
+      '/app/hk/report',
+    ]);
     expect(overview).toHaveTextContent('500.000 ₫');
     expect(within(overview).getAllByText('Buồng phòng Một')).toHaveLength(2);
   });
@@ -201,6 +221,11 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
     expect(await screen.findByRole('heading', { name: `Tình trạng phòng ngày ${TODAY.split('-').reverse().join('/')}` })).toBeInTheDocument();
     const row = await screen.findByTestId('room-row-OUT');
     expect(within(row).getByTestId('room-chip-101')).toHaveAttribute('data-state', 'NOT_STARTED');
+    expect(within(row).getByTestId('room-chip-101')).toHaveTextContent('Buồng phòng Một');
+    const summary = screen.getByTestId('board-summary');
+    expect(summary).toHaveTextContent('Tổng phòng1');
+    expect(summary).toHaveTextContent('Chưa bắt đầu1');
+    expect(summary).not.toHaveTextContent('₫');
 
     const setup = screen.getByTestId('board-setup');
     // A room already on the board is not offered again.
@@ -254,6 +279,31 @@ describe('Quản lý buồng phòng — Phân công công việc', () => {
     await waitFor(() => expect(posted).toEqual([{ assigneeUserId: 7 }]));
   });
 
+  it('offers only the branch’s workers for the day — the list the server scopes', async () => {
+    const fetchMock = installApiMock(
+      routes({
+        // The server's answer for this branch and day: one worker, not every account.
+        [`GET /api/housekeeping/manager/staff?date=${TODAY}&branchId=1`]: () => ({ status: 200, body: { staff: [{ id: 6, fullName: 'Buồng phòng Một' }] } }),
+      }),
+    );
+    renderApp('/app/hk/assign');
+    const select = await screen.findByTestId('assign-102');
+    await waitFor(() => expect([...select.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chưa giao —', 'Buồng phòng Một']));
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/housekeeping/manager/staff?date=${TODAY}&branchId=1`)).toBe(true);
+    // Columns as a manager reads them.
+    const table = screen.getByTestId('assign-table');
+    expect([...table.querySelectorAll('thead th')].map((th) => th.textContent).filter(Boolean)).toEqual([
+      'Phòng',
+      'Tình trạng',
+      'Ưu tiên',
+      'Nhân viên',
+      'Trạng thái',
+      'Thời gian',
+      'Thao tác',
+    ]);
+    expect(within(table).getByText('1 phòng chưa giao')).toBeInTheDocument();
+  });
+
   it('edits a room’s code, priority and note in its dialog, beside the history', async () => {
     const patched: unknown[] = [];
     installApiMock(
@@ -268,12 +318,14 @@ describe('Quản lý buồng phòng — Phân công công việc', () => {
     await userEvent.click(await screen.findByTestId('task-open-101'));
     const dialog = await screen.findByRole('dialog', { name: /Phòng 101/ });
     expect(within(dialog).getByTestId('task-history')).toHaveTextContent('Tạo công việc · Quản lý Buồng');
-    await waitFor(() => expect(within(dialog).getByTestId('task-code').querySelectorAll('option')).toHaveLength(4));
-    await userEvent.selectOptions(within(dialog).getByTestId('task-code'), 'CC');
+    // OUT, OC, VC — there is no CC.
+    await waitFor(() => expect(within(dialog).getByTestId('task-code').querySelectorAll('option')).toHaveLength(3));
+    expect([...within(dialog).getByTestId('task-code').querySelectorAll('option')].map((o) => o.textContent)).toEqual(['OUT', 'OC', 'VC']);
+    await userEvent.selectOptions(within(dialog).getByTestId('task-code'), 'VC');
     await userEvent.click(within(dialog).getByTestId('task-priority'));
     await userEvent.type(within(dialog).getByTestId('task-note'), 'Khách VIP');
     await userEvent.click(within(dialog).getByTestId('task-save'));
-    await waitFor(() => expect(patched).toEqual([{ statusCode: 'CC', priority: true, note: 'Khách VIP' }]));
+    await waitFor(() => expect(patched).toEqual([{ statusCode: 'VC', priority: true, note: 'Khách VIP' }]));
   });
 
   it('removes a room from the day only with the confirmation, sending the reason', async () => {
@@ -331,6 +383,11 @@ describe('Quản lý buồng phòng — Theo dõi nhân viên, KPI, Báo cáo', 
     renderApp('/app/hk/staff');
     const table = await screen.findByTestId('staff-table');
     expect(await within(table).findByText('50%')).toBeInTheDocument();
+    // The status: once in its column, once in the phone's folded row.
+    expect(within(table).getAllByText('Đang dọn', { selector: 'span' })).toHaveLength(2);
+    const team = screen.getByTestId('staff-summary');
+    expect(team).toHaveTextContent('Được giao6');
+    expect(team).toHaveTextContent('Hoàn thành3');
     await userEvent.click(within(table).getByTestId('staff-open-6'));
     const detail = await screen.findByTestId('staff-detail');
     expect(detail).toHaveTextContent('500.000 ₫');
@@ -357,7 +414,9 @@ describe('Quản lý buồng phòng — Theo dõi nhân viên, KPI, Báo cáo', 
     );
     renderApp('/app/hk/kpi');
     const totals = await screen.findByTestId('kpi-totals');
-    expect(totals).toHaveTextContent('500.000 ₫');
+    expect(within(totals).getByRole('heading', { name: 'KPI vận hành' })).toBeInTheDocument();
+    expect(within(totals).getByRole('heading', { name: 'Thu tiền' })).toBeInTheDocument();
+    expect(screen.getByTestId('kpi-collected')).toHaveTextContent('500.000 ₫');
     expect(totals).toHaveTextContent('200.000 ₫');
     expect(within(screen.getByTestId('kpi-table')).getByText('Buồng phòng Một')).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByTestId('kpi-status'), 'COLLECTED');
@@ -401,6 +460,9 @@ describe('Quản lý buồng phòng — Theo dõi nhân viên, KPI, Báo cáo', 
     const report = screen.getByTestId('hk-report');
     expect(await within(report).findByText('3 (75%)')).toBeInTheDocument();
     expect(within(report).getByText('30 phút')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Bộ lọc' })).toContainElement(screen.getByTestId('hk-period'));
+    expect(within(screen.getByTestId('hk-report-export')).getAllByRole('link')).toHaveLength(2);
+    expect(screen.getByTestId('hk-report-totals')).toHaveTextContent('Hoàn thành 3/4 phòng');
     expect(screen.getByTestId('hk-report-pdf')).toHaveAttribute('href', `/api/housekeeping/manager/report.pdf?${PERIOD}`);
     expect(screen.getByTestId('hk-report-xlsx')).toHaveAttribute('href', `/api/housekeeping/manager/report.xlsx?${PERIOD}`);
   });

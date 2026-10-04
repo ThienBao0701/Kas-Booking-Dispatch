@@ -166,7 +166,7 @@ function roomTask(id: string, over: Record<string, unknown> = {}) {
 }
 
 const CATALOG = {
-  statusCodes: ['OUT', 'OC', 'CC', 'VC'],
+  statusCodes: ['OUT', 'OC', 'VC'],
   states: { NOT_STARTED: 'Chưa bắt đầu', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
   linen: [
     { code: 'BED_SHEET', label: 'Ga giường' },

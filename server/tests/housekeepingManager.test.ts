@@ -8,6 +8,8 @@
  *   9–11  a finding → Reception's "Đã thu" → credited to the worker who found
  *         it, once.
  *   12–13 the manager sees everything entered; "Xóa" keeps the evidence.
+ *   +     a branch's staff — the only people its rooms can be given to — are the
+ *         workers who work there (a shift there in the last 30 days, or now).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
@@ -32,6 +34,8 @@ let worker: Agent;
 let worker2: Agent;
 let workerId = 0;
 let worker2Id = 0;
+let worker3Id = 0;
+let manager1Id = 0;
 
 beforeAll(async () => {
   await resetAll();
@@ -59,6 +63,8 @@ beforeAll(async () => {
   manager2 = (await loginAgent(app, 'qlbp2', PASSWORD)).agent;
   workerId = (await createUser({ username: 'buong1', password: PASSWORD, fullName: 'Chị Lan', role: 'HOUSEKEEPING', branchId: null })).id;
   worker2Id = (await createUser({ username: 'buong2', password: PASSWORD, fullName: 'Chị Hoa', role: 'HOUSEKEEPING', branchId: null })).id;
+  worker3Id = (await createUser({ username: 'buong3', password: PASSWORD, fullName: 'Chị Mai', role: 'HOUSEKEEPING', branchId: null })).id;
+  manager1Id = (await testPrisma.user.findUniqueOrThrow({ where: { username: 'qlbp1' } })).id;
   worker = (await loginAgent(app, 'buong1', PASSWORD)).agent;
   worker2 = (await loginAgent(app, 'buong2', PASSWORD)).agent;
 });
@@ -67,7 +73,19 @@ beforeEach(async () => {
   await resetHousekeepingData();
   await resetShiftData();
   setClock({ now: () => hcm(DAY, '08:00') });
+  // Both workers worked at CN1 yesterday: they are its staff.
+  await workedAt(workerId, cn1, '2026-10-04');
+  await workedAt(worker2Id, cn1, '2026-10-04');
 });
+
+/** A workday at one branch — ended at 16:00 unless `open`. */
+async function workedAt(userId: number, branchId: number, day: string, open = false) {
+  const startedAt = hcm(day, '07:00');
+  const endedAt = open ? null : hcm(day, '16:00');
+  await testPrisma.housekeepingWorkSession.create({
+    data: { userId, startedAt, endedAt, segments: { create: { branchId, staffName: 'x', startedAt, endedAt } } },
+  });
+}
 
 afterAll(async () => {
   resetClock();
@@ -113,11 +131,14 @@ describe('the account and its one branch', () => {
     expect((await manager1.patch(`/api/housekeeping/manager/tasks/${other.id}`).send({ priority: true })).status).toBe(403);
   });
 
-  it('keeps the room code and the cleaning state apart, and refuses an unknown code', async () => {
+  it('keeps the room code and the cleaning state apart, and refuses an unknown code — CC included', async () => {
     expect((await manager1.post('/api/housekeeping/manager/tasks').send({ workDate: DAY, roomNumbers: ['101'], statusCode: 'XX' })).status).toBe(422);
-    const [task] = await setUp(manager1, ['101'], null, { statusCode: 'CC', priority: true, note: 'Dọn trước 14:00' });
+    // OUT, OC and VC only: there is no CC.
+    expect((await manager1.get('/api/housekeeping/catalog')).body.statusCodes).toEqual(['OUT', 'OC', 'VC']);
+    expect((await manager1.post('/api/housekeeping/manager/tasks').send({ workDate: DAY, roomNumbers: ['101'], statusCode: 'CC' })).status).toBe(422);
+    const [task] = await setUp(manager1, ['101'], null, { statusCode: 'VC', priority: true, note: 'Dọn trước 14:00' });
     const row = (await manager1.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).body.tasks[0];
-    expect(row).toMatchObject({ id: task!.id, statusCode: 'CC', state: 'NOT_STARTED', priority: true, note: 'Dọn trước 14:00' });
+    expect(row).toMatchObject({ id: task!.id, statusCode: 'VC', state: 'NOT_STARTED', priority: true, note: 'Dọn trước 14:00' });
     // A room already on the day's board is left as it is.
     const again = await manager1.post('/api/housekeeping/manager/tasks').send({ workDate: DAY, roomNumbers: ['101'], statusCode: 'OUT' });
     expect(again.body).toMatchObject({ created: 0, skipped: ['101'] });
@@ -148,6 +169,44 @@ describe('assignment', () => {
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(409);
     // A worker is no manager.
     expect((await worker.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).status).toBe(403);
+  });
+});
+
+describe('the branch’s staff', () => {
+  const names = async (agent: Agent, q = '') => {
+    const res = await agent.get(`/api/housekeeping/manager/staff${q}`);
+    expect(res.status).toBe(200);
+    return res.body.staff.map((s: { fullName: string }) => s.fullName);
+  };
+
+  it('lists, and lets the manager assign, only the workers who work at its branch', async () => {
+    // Chị Mai works at CN2; her one CN1 shift was two months ago.
+    await workedAt(worker3Id, cn2, '2026-10-03');
+    await workedAt(worker3Id, cn1, '2026-08-01');
+    expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan']);
+    expect(await names(manager2)).toEqual(['Chị Mai']);
+    expect((await manager1.get(`/api/housekeeping/manager/staff?branchId=${cn2}`)).status).toBe(403);
+    // The Admin: every worker, or one branch's.
+    expect(await names(admin)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
+    expect(await names(admin, `?branchId=${cn2}`)).toEqual(['Chị Mai']);
+
+    // The server refuses her for a CN1 room, set up or reassigned.
+    expect((await manager1.post('/api/housekeeping/manager/tasks').send({ workDate: DAY, roomNumbers: ['101'], statusCode: 'OUT', assigneeUserId: worker3Id })).status).toBe(422);
+    const [task] = await setUp(manager1, ['101'], workerId);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker3Id })).status).toBe(422);
+
+    // On shift at CN1 now, she is one of its staff — and can be given the room.
+    await workedAt(worker3Id, cn1, DAY, true);
+    expect(await names(manager1)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker3Id })).status).toBe(200);
+  });
+
+  it('keeps whoever already holds a room that day in that day’s list', async () => {
+    await testPrisma.housekeepingRoomTask.create({
+      data: { branchId: cn1, workDate: DAY, roomNumber: '102', statusCode: 'OUT', assigneeUserId: worker3Id, assigneeNameSnapshot: 'Chị Mai', createdByUserId: manager1Id, createdByNameSnapshot: 'Quản lý qlbp1', createdAt: hcm(DAY, '07:00') },
+    });
+    expect(await names(manager1, `?date=${DAY}`)).toEqual(['Chị Hoa', 'Chị Lan', 'Chị Mai']);
+    expect(await names(manager1, '?date=2026-10-06')).toEqual(['Chị Hoa', 'Chị Lan']);
   });
 });
 
