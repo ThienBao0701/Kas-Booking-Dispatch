@@ -195,6 +195,9 @@ export function readCleaning(raw: unknown): StoredCleaning | null {
   };
 }
 
+/** A room with nothing saved yet. */
+export const EMPTY_CLEANING: StoredCleaning = { linen: {}, quantities: {}, replaced: [], special: [], note: null };
+
 const labelOf = (list: readonly { code: string; label: string }[], code: string) => list.find((i) => i.code === code)?.label ?? code;
 
 /** One saved form in words, for a report: every field the worker filled in, labelled. */

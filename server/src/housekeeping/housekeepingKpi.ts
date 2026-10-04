@@ -20,7 +20,7 @@ import { listShifts } from './workShiftService';
 import type { HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { TASK_INCLUDE, managerBranchWhere, serializeTask } from './roomTaskService';
-import { describeCleaning, readCleaning } from './roomTaskCatalog';
+import { EMPTY_CLEANING, describeCleaning, readCleaning } from './roomTaskCatalog';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -347,15 +347,24 @@ export type CleaningDetailRow = {
   branchLabel: string;
   workDate: string;
   roomNumber: string;
+  /** OUT / OC / VC. */
+  statusCode: string;
   employee: string;
   state: RoomWorkState;
+  /** "Time In": the inspection that started the cleaning. */
+  startedAt: Date | null;
+  /** "Time Out": "Hoàn thành". */
+  completedAt: Date | null;
+  durationSeconds: number | null;
 } & ReturnType<typeof describeCleaning>;
 
 /**
  * Objective figures only — per branch, business date and worker: rooms given and
  * done, inspections, findings, cleaning time, money collected and still pending.
- * No scores, no "tốt / kém". `rooms` carries each room's saved form as data:
- * King / Queen / Twin and counts, replacements, "Ghi nhận đặc biệt", notes.
+ * No scores, no "tốt / kém". `rooms` carries every live room of the period
+ * with its saved form as data — King / Queen / Twin and counts, replacements,
+ * "Ghi nhận đặc biệt", notes — and its times: the source of the PDF and of the
+ * Excel "Chi tiết dọn phòng" alike. A room not yet cleaned has an empty form.
  */
 export async function operationsReport(actor: HousekeepingActor, filter: PeriodFilter, client: PrismaClient = defaultPrisma) {
   const { start, end } = assertPeriod(filter);
@@ -373,6 +382,9 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
         voidedAt: true,
         cleaning: true,
         roomNumber: true,
+        statusCode: true,
+        startedAt: true,
+        completedAt: true,
         cleanedByNameSnapshot: true,
         branch: { select: { address: true, branchNumber: true } },
       },
@@ -432,15 +444,18 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
   }
   const rooms: (CleaningDetailRow & { sortKey: string })[] = [];
   for (const t of tasks) {
-    const form = t.voidedAt ? null : readCleaning(t.cleaning);
-    if (!form) continue;
+    if (t.voidedAt) continue;
     rooms.push({
       branchLabel: label(t.branch),
       workDate: t.workDate,
       roomNumber: t.roomNumber,
+      statusCode: t.statusCode,
       employee: t.cleanedByNameSnapshot ?? t.assigneeNameSnapshot ?? '—',
       state: t.state,
-      ...describeCleaning(form),
+      startedAt: t.startedAt,
+      completedAt: t.completedAt,
+      durationSeconds: t.durationSeconds,
+      ...describeCleaning(readCleaning(t.cleaning) ?? EMPTY_CLEANING),
       sortKey: `${String(t.branch.branchNumber).padStart(3, '0')}|${t.workDate}|${t.roomNumber.padStart(6, '0')}`,
     });
   }

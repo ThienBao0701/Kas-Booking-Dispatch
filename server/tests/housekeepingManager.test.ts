@@ -11,12 +11,18 @@
  *   +     a branch's staff — the only people its rooms can be given to — are the
  *         Buồng phòng accounts the Admin assigned to it, and nothing else.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import PDFDocument from 'pdfkit';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import type { CleaningDetailRow } from '../src/housekeeping/housekeepingKpi';
+import { BEDDING_COLUMNS, REPLACEMENT_COLUMNS, ROOM_COLUMNS } from '../src/report/housekeepingCleaningPdf';
+import type { Column } from '../src/report/pdf';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -301,8 +307,8 @@ describe('the room work', () => {
 });
 
 describe('"Dọn phòng" — the form’s fields, as data', () => {
-  const xlsxOf = async (agent: Agent, url: string) => {
-    const res = await agent
+  const fileOf = (agent: Agent, url: string) =>
+    agent
       .get(url)
       .buffer(true)
       .parse((r, cb) => {
@@ -310,6 +316,8 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
         r.on('data', (c: Buffer) => chunks.push(c));
         r.on('end', () => cb(null, Buffer.concat(chunks)));
       });
+  const xlsxOf = async (agent: Agent, url: string) => {
+    const res = await fileOf(agent, url);
     expect(res.status).toBe(200);
     const ExcelJS = (await import('exceljs')).default;
     const wb = new ExcelJS.Workbook();
@@ -366,8 +374,12 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
         branchLabel: expect.stringContaining('Chi nhánh'),
         workDate: DAY,
         roomNumber: '101',
+        statusCode: 'OUT',
         employee: 'Chị Lan',
         state: 'COMPLETED',
+        startedAt: hcm(DAY, '08:00').toISOString(),
+        completedAt: hcm(DAY, '08:40').toISOString(),
+        durationSeconds: 40 * 60,
         linen: [
           { item: 'BED_SHEET', label: 'Ga giường', size: 'Q', sizeLabel: 'Queen', quantity: 2 },
           { item: 'MATTRESS_PROTECTOR', label: 'Bảo vệ nệm', size: 'K', sizeLabel: 'King', quantity: 1 },
@@ -392,13 +404,104 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     const values = (sheet.getRow(2).values as unknown[]).slice(1);
     const cell = (h: string) => values[header.indexOf(h)];
     expect(cell('Phòng')).toBe('101');
+    expect(cell('Mã')).toBe('OUT');
     expect(cell('Nhân viên')).toBe('Chị Lan');
+    expect(cell('Time In')).toBe('08:00');
+    expect(cell('Time Out')).toBe('08:40');
+    expect(cell('Thời gian dọn')).toBe('40 phút');
     expect(cell('Ga giường')).toBe('Queen × 2');
     expect(cell('Bảo vệ nệm')).toBe('King × 1');
     expect(cell('Số lượng')).toBe('Áo gối: 4');
     expect(cell('Đồ thay thế')).toBe('Trà, cà phê, đường. Miễn phí; Nước rửa tay');
     expect(cell('Ghi nhận đặc biệt')).toBe('SO : Phòng có đồ nhưng khách không ngủ; OOO : Không thể bán phòng; LNL : Hàng thất lạc');
     expect(cell('Ghi chú')).toBe('Ổ cắm hỏng');
+  });
+
+  it('prints the PDF from the "Dọn phòng" data — King and its count, replacements, special statuses, note, worker, times', async () => {
+    const [task] = await setUp(manager1, ['101'], workerId);
+    await onShift(worker, cn1);
+    setClock({ now: () => hcm(DAY, '09:00') });
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
+    setClock({ now: () => hcm(DAY, '09:42') });
+    const form = {
+      linen: { BED_SHEET: { size: 'K', quantity: 2 } },
+      quantities: { BATH_TOWEL: 3 },
+      replaced: ['SHAMPOO', 'HAND_WASH'],
+      special: ['DND', 'LNL'],
+      note: 'Vòi sen rỉ nước',
+    };
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send(form)).status).toBe(200);
+
+    // The PDF's boxes read the very rows the report (and the Excel sheet) is made of.
+    const [row] = (await manager1.get(`/api/housekeeping/manager/report?from=${DAY}&to=${DAY}`)).body.rooms as CleaningDetailRow[];
+    const ticked = (columns: Column<CleaningDetailRow>[]) => columns.filter((c) => c.mark?.(row!)).map((c) => c.header);
+    expect(ticked(BEDDING_COLUMNS)).toEqual(['Ga giường\nKing']);
+    expect(ticked(REPLACEMENT_COLUMNS)).toEqual(['Nước rửa tay', 'Dầu gội']);
+    expect(ticked(ROOM_COLUMNS)).toEqual(['DND', 'LNL']);
+
+    // The generated PDF: every value written into it, and one drawn check mark per ticked box.
+    const text = vi.spyOn(PDFDocument.prototype, 'text');
+    const marks = vi.spyOn(PDFDocument.prototype, 'path');
+    let drawn: string[] = [];
+    try {
+      const pdf = await fileOf(manager1, `/api/housekeeping/manager/report.pdf?from=${DAY}&to=${DAY}`);
+      expect(pdf.status).toBe(200);
+      expect((pdf.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
+      expect(pdf.headers['content-disposition']).toContain('Bao cao kiem tra don phong_05-10-2026.pdf');
+      drawn = text.mock.calls.map((c) => String(c[0]));
+      expect(marks).toHaveBeenCalledTimes(5);
+    } finally {
+      text.mockRestore();
+      marks.mockRestore();
+    }
+    for (const value of [
+      'KAS – BÁO CÁO KIỂM TRA & DỌN PHÒNG',
+      'Ngày nghiệp vụ: 05/10/2026',
+      'Nhân viên: Chị Lan',
+      'Phòng',
+      'Người thực hiện',
+      'Time In',
+      'Time Out',
+      'Thời gian dọn',
+      '101',
+      'OUT',
+      'Chị Lan',
+      '09:00',
+      '09:42',
+      '42 phút',
+      'Hoàn thành',
+      'Ga giường\nKing',
+      'Bọc chăn\nQueen',
+      'Bảo vệ nệm\nTwin',
+      'Lược, tăm bông, chụp tóc',
+      'Trà, cà phê, đường. Miễn phí',
+      'Sữa tắm',
+      'L/B',
+      'OOO',
+      'Ghi chú',
+      'Vòi sen rỉ nước',
+    ]) {
+      expect(drawn).toContain(value);
+    }
+    expect(drawn.some((t) => /^Chi nhánh: Chi nhánh \d+ — /.test(t))).toBe(true);
+    expect(drawn.some((t) => t.startsWith('Xuất lúc: '))).toBe(true);
+    // The bedding row: the room, then Ga giường's count beside its ticked King.
+    const bedding = drawn.indexOf('Bảo vệ nệm\nSố lượng');
+    expect(drawn.slice(bedding + 1, bedding + 3)).toEqual(['101', '2']);
+    // The counted items, in the form's order: Áo gối, Bảo vệ gối, Khăn tắm = 3.
+    const counted = drawn.indexOf('Laundrybag');
+    expect(drawn.slice(counted + 1, counted + 5)).toEqual(['101', ' ', ' ', '3']);
+    // The KPI figures belong to "KPI & Thu tiền", not to this report.
+    for (const kpi of ['Được giao', 'Tỷ lệ', 'Đã thu', 'Chưa thu', 'Phát sinh']) expect(drawn.join('|')).not.toContain(kpi);
+    // And every character written is one the embedded font can draw.
+    for (const file of ['BeVietnamPro-Regular.ttf', 'BeVietnamPro-SemiBold.ttf']) {
+      const doc = new PDFDocument();
+      doc.registerFont('F', fs.readFileSync(path.join(__dirname, '..', 'src', 'report', 'fonts', file)));
+      doc.font('F');
+      const font = (doc as unknown as { _font: { font: { hasGlyphForCodePoint(cp: number): boolean } } })._font.font;
+      const missing = [...new Set(drawn.join(''))].filter((ch) => ch !== '\n' && !font.hasGlyphForCodePoint(ch.codePointAt(0)!));
+      expect(missing).toEqual([]);
+    }
   });
 
   it('reads a form saved before these fields existed — without rewriting it', async () => {

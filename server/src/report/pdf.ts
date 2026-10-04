@@ -66,6 +66,11 @@ export interface ReportHeader {
   generatedAt: string;
   /** "Tất cả chi nhánh" or one branch's name. */
   scope: string;
+  /**
+   * The report's own labelled lines under the title, in place of "Kỳ báo cáo /
+   * Phạm vi / Xuất lúc" — for a report whose reader expects other words.
+   */
+  lines?: { label: string; value: string }[];
 }
 
 export interface Column<T> {
@@ -80,7 +85,13 @@ export interface Column<T> {
    * hundred thousand, and the eye cannot compare them. A cash sheet is read by
    * running down the column.
    */
-  align?: 'left' | 'right';
+  align?: 'left' | 'right' | 'center';
+  /**
+   * A checklist box: a drawn check mark when true, empty when false. Drawn as a
+   * shape, because the embedded font has no check-mark glyph and would print
+   * nothing. `value` is not printed in such a column.
+   */
+  mark?: (row: T) => boolean;
 }
 
 /** A4 landscape is 841.89pt wide; `createReportDocument` uses a 32pt margin. */
@@ -250,9 +261,12 @@ export function createReportDocument(header: ReportHeader, landscape = true): Pd
   doc.font(FONT_BOLD).fontSize(15).text(header.title);
   doc.moveDown(0.3);
   doc.font(FONT_REGULAR).fontSize(9);
-  doc.text(`Kỳ báo cáo: ${header.period}`);
-  doc.text(`Phạm vi: ${header.scope}`);
-  doc.text(`Xuất lúc: ${header.generatedAt}`);
+  const lines = header.lines ?? [
+    { label: 'Kỳ báo cáo', value: header.period },
+    { label: 'Phạm vi', value: header.scope },
+    { label: 'Xuất lúc', value: header.generatedAt },
+  ];
+  for (const line of lines) doc.text(`${line.label}: ${line.value}`);
   doc.moveDown(0.6);
 
   return doc;
@@ -312,6 +326,27 @@ export interface TableOptions {
    * Off by default: the reports that do not ask for it keep their look.
    */
   frame?: boolean;
+  /**
+   * Printed above the repeated header when the table continues on a new page —
+   * "… (tiếp)" — so a reader of page 3 knows which table, branch and day it is.
+   */
+  continuedTitle?: string;
+}
+
+/** A check mark centred in a cell, in the frame's family of colours but darker. */
+function drawCheck(doc: PdfDoc, x: number, top: number, width: number, height: number): void {
+  const cx = x + width / 2;
+  const cy = top + height / 2;
+  const s = 4;
+  doc
+    .save()
+    .lineWidth(1.4)
+    .lineCap('round')
+    .lineJoin('round')
+    .strokeColor('#166534')
+    .path(`M ${cx - s} ${cy} L ${cx - s / 3} ${cy + s * 0.7} L ${cx + s} ${cy - s * 0.8}`)
+    .stroke()
+    .restore();
 }
 
 function strokeLine(doc: PdfDoc, x1: number, y1: number, x2: number, y2: number, color: string, width: number): void {
@@ -344,7 +379,7 @@ export function tableLeadHeight<T>(doc: PdfDoc, columns: Column<T>[], rows: T[])
   doc.font(FONT_BOLD).fontSize(8);
   const header = rowHeight(doc, cols, columns.map((c) => c.header));
   doc.font(FONT_REGULAR).fontSize(8);
-  const first = rows.length > 0 ? rowHeight(doc, cols, columns.map((c) => c.value(rows[0]!) || '—')) : 0;
+  const first = rows.length > 0 ? rowHeight(doc, cols, columns.map((c) => (c.mark ? ' ' : c.value(rows[0]!) || '—'))) : 0;
   return header + first;
 }
 
@@ -386,7 +421,7 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[], optio
   drawHeader();
 
   rows.forEach((row, index) => {
-    const cells = columns.map((c) => c.value(row) || '—');
+    const cells = columns.map((c) => (c.mark ? ' ' : c.value(row) || '—'));
     const h = rowHeight(doc, cols, cells);
 
     // A row that would cross the bottom margin starts a new page, with the
@@ -396,6 +431,11 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[], optio
       // repeated header on the next.
       if (frame && index > 0) strokeLine(doc, startX, doc.y, startX + tableWidth, doc.y, FRAME_COLOR, FRAME_WIDTH);
       doc.addPage();
+      if (options.continuedTitle) {
+        doc.x = startX;
+        doc.fillColor('#000').font(FONT_BOLD).fontSize(9).text(options.continuedTitle);
+        doc.moveDown(0.2);
+      }
       drawHeader();
     }
 
@@ -406,10 +446,15 @@ export function drawTable<T>(doc: PdfDoc, columns: Column<T>[], rows: T[], optio
     }
     let x = startX;
     cells.forEach((text, i) => {
-      doc.text(text, x + ROW_PADDING, top + ROW_PADDING, {
-        width: cols[i]!.width - ROW_PADDING * 2,
-        align: cols[i]!.align ?? 'left',
-      });
+      const mark = cols[i]!.mark;
+      if (mark) {
+        if (mark(row)) drawCheck(doc, x, top, cols[i]!.width, h);
+      } else {
+        doc.text(text, x + ROW_PADDING, top + ROW_PADDING, {
+          width: cols[i]!.width - ROW_PADDING * 2,
+          align: cols[i]!.align ?? 'left',
+        });
+      }
       x += cols[i]!.width;
     });
     doc.y = top + h;

@@ -31,7 +31,8 @@ import {
   voidTask,
 } from '../housekeeping/roomTaskService';
 import { housekeepingKpi, myKpi, operationsReport, overview, staffDetail, staffProgress } from '../housekeeping/housekeepingKpi';
-import { buildHousekeepingOpsPdf, buildHousekeepingOpsWorkbook, housekeepingOpsFileName } from '../report/housekeepingOpsReport';
+import { buildHousekeepingOpsWorkbook, housekeepingOpsFileName } from '../report/housekeepingOpsReport';
+import { buildHousekeepingCleaningPdf } from '../report/housekeepingCleaningPdf';
 import { contentDisposition } from '../report/format';
 import { prisma } from '../db/prisma';
 
@@ -182,7 +183,8 @@ export function createHousekeepingWorkRouter(): Router {
       const report = await operationsReport(actor, q);
       const data = { ...report, scope: await scopeLabel(actor, q.branchId), generatedAt: getClock().now() };
       const fileName = housekeepingOpsFileName(q.from, q.to, kind);
-      if (kind === 'pdf') sendFile(res, await buildHousekeepingOpsPdf(data), 'application/pdf', fileName);
+      // The PDF reports what was entered in "Dọn phòng"; the workbook adds the KPI sheet.
+      if (kind === 'pdf') sendFile(res, await buildHousekeepingCleaningPdf(data), 'application/pdf', fileName);
       else sendFile(res, await buildHousekeepingOpsWorkbook(data), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName);
     })().catch(next);
   });

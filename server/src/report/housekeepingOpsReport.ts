@@ -1,31 +1,20 @@
 /**
- * "BÁO CÁO VẬN HÀNH BUỒNG PHÒNG" — PDF and Excel, from \`operationsReport\`.
+ * "BÁO CÁO VẬN HÀNH BUỒNG PHÒNG" — the Excel workbook, from operationsReport.
+ * (The PDF is "Báo cáo kiểm tra & dọn phòng", housekeepingCleaningPdf.ts,
+ * written from the same rooms as the "Chi tiết dọn phòng" sheet below.)
  *
  * Written for a reader outside the building: per branch, business date and
  * worker, the rooms given and done, inspections and findings, the average
  * cleaning time, and the money collected and still pending. Objective figures
- * only — no score, no "tốt / kém". The workbook adds "Chi tiết dọn phòng": each
- * room's form — King / Queen / Twin and counts, replacements, "Ghi nhận đặc
- * biệt", notes.
+ * only — no score, no "tốt / kém". "Chi tiết dọn phòng" adds each room: its
+ * code, times and form — King / Queen / Twin and counts, replacements, "Ghi
+ * nhận đặc biệt", notes.
  */
 import ExcelJS from 'exceljs';
 import type { CleaningDetailRow, OperationsRow } from '../housekeeping/housekeepingKpi';
 import { LINEN_ITEMS, ROOM_WORK_STATE_LABELS } from '../housekeeping/roomTaskCatalog';
 import { formatDuration } from '../lib/duration';
-import { formatVndPlain } from '../reception/reportTypes';
-import { hcmDateTime, hcmDayLabel, periodLabel } from './format';
-import {
-  addPageNumbers,
-  assertFitsLandscape,
-  assertHeadersFit,
-  createReportDocument,
-  drawTable,
-  finishDocument,
-  sectionTitle,
-  type Column,
-} from './pdf';
-
-export const HOUSEKEEPING_OPS_TITLE = 'KAS – BÁO CÁO VẬN HÀNH BUỒNG PHÒNG';
+import { hcmDateTime, hcmDayLabel } from './format';
 
 export interface HousekeepingOpsData {
   from: string;
@@ -37,64 +26,23 @@ export interface HousekeepingOpsData {
   rooms?: CleaningDetailRow[];
 }
 
-const money = (n: number) => formatVndPlain(n);
-const cleaning = (s: number | null) => (s === null ? '—' : (formatDuration(s) ?? '—'));
+/**
+ * "08:10" — or "06/10 08:10" when it falls on a day other than the room's work
+ * day. Shared by the PDF and the Excel sheet so the two print the same time.
+ */
+export function cleaningClock(instant: Date | string | null, workDate: string): string {
+  if (!instant) return '';
+  const full = hcmDateTime(new Date(instant));
+  return full.slice(0, 10) === hcmDayLabel(workDate) ? full.slice(11) : `${full.slice(0, 5)} ${full.slice(11)}`;
+}
+
+/** "42 phút" — the cleaning's own time, from "Kiểm phòng" to "Hoàn thành". */
+export function cleaningDuration(r: Pick<CleaningDetailRow, 'durationSeconds'>): string {
+  return formatDuration(r.durationSeconds) ?? '';
+}
+
 const exceptions = (r: OperationsRow) =>
   [r.voided ? `${r.voided} phòng đã xóa` : '', r.notes ? `${r.notes} ghi chú` : ''].filter(Boolean).join(', ') || '—';
-
-const COLUMNS: Column<OperationsRow>[] = assertHeadersFit(
-  'housekeeping operations',
-  assertFitsLandscape('housekeeping operations', [
-    { header: 'Chi nhánh', width: 118, value: (r) => r.branchLabel },
-    { header: 'Ngày', width: 52, value: (r) => hcmDayLabel(r.workDate) },
-    { header: 'Nhân viên', width: 92, value: (r) => r.employee },
-    { header: 'Được giao', width: 46, value: (r) => String(r.assigned), align: 'right' },
-    { header: 'Hoàn thành', width: 50, value: (r) => String(r.completed), align: 'right' },
-    { header: 'Tỷ lệ', width: 36, value: (r) => `${r.completionRate}%`, align: 'right' },
-    { header: 'Kiểm phòng', width: 50, value: (r) => String(r.inspections), align: 'right' },
-    { header: 'Phát sinh', width: 44, value: (r) => String(r.findings), align: 'right' },
-    { header: 'TB dọn', width: 52, value: (r) => cleaning(r.avgCleaningSeconds) },
-    { header: 'Đã thu', width: 70, value: (r) => money(r.collectedAmount), align: 'right' },
-    { header: 'Chưa thu', width: 66, value: (r) => `${money(r.pendingAmount)} (${r.pendingCount})`, align: 'right' },
-    { header: 'Ghi chú', width: 76, value: exceptions },
-  ]),
-);
-
-export async function buildHousekeepingOpsPdf(data: HousekeepingOpsData): Promise<Buffer> {
-  const doc = createReportDocument({
-    title: HOUSEKEEPING_OPS_TITLE,
-    period: periodLabel(data.from, data.to),
-    generatedAt: hcmDateTime(data.generatedAt),
-    scope: data.scope,
-  });
-  if (data.rows.length === 0) {
-    doc.text('Không có công việc buồng phòng nào trong kỳ báo cáo này.');
-  } else {
-    sectionTitle(doc, 'THEO CHI NHÁNH, NGÀY VÀ NHÂN VIÊN');
-    drawTable(doc, COLUMNS, data.rows);
-    const t = totals(data.rows);
-    doc.moveDown();
-    doc.text(
-      `Tổng: ${t.assigned} phòng được giao, ${t.completed} hoàn thành · ${t.inspections} lượt kiểm phòng · ${t.findings} phát sinh · đã thu ${money(t.collectedAmount)} · chưa thu ${money(t.pendingAmount)}.`,
-    );
-  }
-  addPageNumbers(doc);
-  return finishDocument(doc);
-}
-
-function totals(rows: OperationsRow[]) {
-  return rows.reduce(
-    (t, r) => ({
-      assigned: t.assigned + r.assigned,
-      completed: t.completed + r.completed,
-      inspections: t.inspections + r.inspections,
-      findings: t.findings + r.findings,
-      collectedAmount: t.collectedAmount + r.collectedAmount,
-      pendingAmount: t.pendingAmount + r.pendingAmount,
-    }),
-    { assigned: 0, completed: 0, inspections: 0, findings: 0, collectedAmount: 0, pendingAmount: 0 },
-  );
-}
 
 export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -144,7 +92,11 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
     { header: 'Chi nhánh', key: 'branch', width: 34 },
     { header: 'Ngày nghiệp vụ', key: 'date', width: 14 },
     { header: 'Phòng', key: 'room', width: 10 },
+    { header: 'Mã', key: 'code', width: 8 },
     { header: 'Nhân viên', key: 'employee', width: 24 },
+    { header: 'Time In', key: 'timeIn', width: 12 },
+    { header: 'Time Out', key: 'timeOut', width: 12 },
+    { header: 'Thời gian dọn', key: 'duration', width: 14 },
     { header: 'Trạng thái', key: 'state', width: 14 },
     ...LINEN_ITEMS.map((i) => ({ header: i.label, key: i.code, width: 14 })),
     { header: 'Số lượng', key: 'quantities', width: 40 },
@@ -159,7 +111,11 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
       branch: r.branchLabel,
       date: hcmDayLabel(r.workDate),
       room: r.roomNumber,
+      code: r.statusCode,
       employee: r.employee,
+      timeIn: cleaningClock(r.startedAt, r.workDate),
+      timeOut: cleaningClock(r.completedAt, r.workDate),
+      duration: cleaningDuration(r),
       state: ROOM_WORK_STATE_LABELS[r.state],
       ...Object.fromEntries(r.linen.map((l) => [l.item, l.quantity === null ? l.sizeLabel : `${l.sizeLabel} × ${l.quantity}`])),
       quantities: r.quantities.map((q) => `${q.label}: ${q.quantity}`).join('; '),
@@ -171,8 +127,12 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
-/** "Bao cao buong phong_<period>.pdf" — ASCII, like every other report file name. */
+/**
+ * "Bao cao kiem tra don phong_<period>.pdf" / "Bao cao buong phong_<period>.xlsx"
+ * — ASCII, like every other report file name.
+ */
 export function housekeepingOpsFileName(from: string, to: string, ext: 'pdf' | 'xlsx'): string {
   const d = (s: string) => s.split('-').reverse().join('-');
-  return `Bao cao buong phong_${from === to ? d(from) : `${d(from)}_${d(to)}`}.${ext}`;
+  const base = ext === 'pdf' ? 'Bao cao kiem tra don phong' : 'Bao cao buong phong';
+  return `${base}_${from === to ? d(from) : `${d(from)}_${d(to)}`}.${ext}`;
 }
