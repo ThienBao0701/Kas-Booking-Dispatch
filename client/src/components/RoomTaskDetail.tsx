@@ -103,7 +103,9 @@ export function RoomTaskDetail({ task, catalog }: { task: RoomTask; catalog?: Ro
           <div className="space-y-1.5 text-slate-800" data-testid="task-cleaning">
             <p>
               <span className="text-slate-500">Đồ vải: </span>
-              {Object.entries(c.linen).map(([k, sizes]) => `${label(catalog?.linen, k)} ${sizes.join('/')}`).join(' · ') || '—'}
+              {Object.entries(c.linen)
+                .map(([k, e]) => `${label(catalog?.linen, k)}: ${label(catalog?.linenSizes, e.size)}${e.quantity === null ? '' : ` × ${e.quantity}`}`)
+                .join(' · ') || '—'}
             </p>
             <p>
               <span className="text-slate-500">Số lượng: </span>
@@ -112,6 +114,15 @@ export function RoomTaskDetail({ task, catalog }: { task: RoomTask; catalog?: Ro
             <p>
               <span className="text-slate-500">Thay thế ✓: </span>
               {c.replaced.map((k) => label(catalog?.replacements, k)).join(', ') || '—'}
+            </p>
+            <p>
+              <span className="text-slate-500">Ghi nhận đặc biệt: </span>
+              {(c.special ?? [])
+                .map((k) => {
+                  const s = catalog?.specialStatuses.find((x) => x.code === k);
+                  return s ? `${s.short} (${s.label})` : k;
+                })
+                .join(', ') || '—'}
             </p>
             {c.note ? (
               <p>

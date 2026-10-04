@@ -25,7 +25,7 @@ import { QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
 import { formatDateTime } from '../lib/format';
 
-const EMPTY_FORM: CleaningForm = { linen: {}, quantities: {}, replaced: [], note: null };
+const EMPTY_FORM: CleaningForm = { linen: {}, quantities: {}, replaced: [], special: [], note: null };
 
 export function HousekeepingRoomPage() {
   const { id = '' } = useParams();
@@ -279,22 +279,34 @@ function CleanPanel({
 }) {
   const [form, setForm] = useState<CleaningForm>(() => ({ ...EMPTY_FORM, ...(task.cleaning ?? {}) }));
   const done = task.state === 'COMPLETED';
-  const payload = useMemo(() => ({ linen: form.linen, quantities: form.quantities, replaced: form.replaced, note: form.note?.trim() || null }), [form]);
+  const payload = useMemo(
+    () => ({
+      linen: Object.fromEntries(Object.entries(form.linen).map(([item, e]) => [item, { size: e.size, quantity: e.quantity ?? 0 }])),
+      quantities: form.quantities,
+      replaced: form.replaced,
+      special: form.special,
+      note: form.note?.trim() || null,
+    }),
+    [form],
+  );
   const save = useMutation({
     mutationFn: (complete: boolean) => (complete ? roomWorkApi.complete(task.id, payload) : roomWorkApi.saveCleaning(task.id, payload)),
     onSuccess: ({ task: next }, complete) => onSaved(next, complete),
   });
 
-  const toggleSize = (item: string, size: string) =>
+  const clamp = (value: number) => Math.max(0, Math.min(catalog.maxQuantity, Math.round(value) || 0));
+  // ONE type per linen item: choosing another replaces it; choosing it again clears it.
+  const pickSize = (item: string, size: string) =>
     setForm((f) => {
-      const sizes = f.linen[item] ?? [];
-      const next = sizes.includes(size) ? sizes.filter((s) => s !== size) : [...sizes, size];
-      return { ...f, linen: { ...f.linen, [item]: next } };
+      const { [item]: current, ...rest } = f.linen;
+      return { ...f, linen: current?.size === size ? rest : { ...rest, [item]: { size, quantity: current?.quantity ?? 1 } } };
     });
-  const setQty = (item: string, value: number) =>
-    setForm((f) => ({ ...f, quantities: { ...f.quantities, [item]: Math.max(0, Math.min(catalog.maxQuantity, Math.round(value) || 0)) } }));
-  const toggleReplaced = (item: string) =>
-    setForm((f) => ({ ...f, replaced: f.replaced.includes(item) ? f.replaced.filter((c) => c !== item) : [...f.replaced, item] }));
+  const setLinenQty = (item: string, value: number) =>
+    setForm((f) => (f.linen[item] ? { ...f, linen: { ...f.linen, [item]: { ...f.linen[item]!, quantity: clamp(value) } } } : f));
+  const setQty = (item: string, value: number) => setForm((f) => ({ ...f, quantities: { ...f.quantities, [item]: clamp(value) } }));
+  const toggleIn = (list: string[], item: string) => (list.includes(item) ? list.filter((c) => c !== item) : [...list, item]);
+  const toggleReplaced = (item: string) => setForm((f) => ({ ...f, replaced: toggleIn(f.replaced, item) }));
+  const toggleSpecial = (item: string) => setForm((f) => ({ ...f, special: toggleIn(f.special, item) }));
 
   const section = (title: string, children: React.ReactNode) => (
     <section className="rounded-2xl border border-line bg-white p-4">
@@ -314,31 +326,51 @@ function CleanPanel({
       {section(
         'Đồ vải giường',
         <div className="space-y-3">
-          {catalog.linen.map((item) => (
-            <div key={item.code} className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-base font-medium text-slate-800">{item.label}</span>
-              <div className="flex gap-2">
-                {catalog.linenSizes.map((size) => {
-                  const on = (form.linen[item.code] ?? []).includes(size);
-                  return (
-                    <button
-                      key={size}
-                      type="button"
+          {catalog.linen.map((item) => {
+            const entry = form.linen[item.code];
+            return (
+              <div key={item.code} className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-base font-medium text-slate-800">{item.label}</span>
+                  <div className="flex gap-2" role="group" aria-label={`Loại ${item.label}`}>
+                    {catalog.linenSizes.map((size) => {
+                      const on = entry?.size === size.code;
+                      return (
+                        <button
+                          key={size.code}
+                          type="button"
+                          disabled={done}
+                          aria-pressed={on}
+                          onClick={() => pickSize(item.code, size.code)}
+                          data-testid={`linen-${item.code}-${size.code}`}
+                          className={`h-12 min-w-[4.75rem] rounded-xl border-2 px-3 text-base font-bold ${
+                            on ? 'border-brand-600 bg-brand-600 text-white' : 'border-line-strong bg-white text-slate-700'
+                          } disabled:opacity-70`}
+                        >
+                          {size.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {entry ? (
+                  <div className="flex items-center justify-end gap-2">
+                    <label htmlFor={`linen-qty-${item.code}`} className="text-base text-slate-700">
+                      Số lượng
+                    </label>
+                    <Stepper
+                      id={`linen-qty-${item.code}`}
+                      label={`số lượng ${item.label}`}
+                      value={entry.quantity ?? 0}
+                      max={catalog.maxQuantity}
                       disabled={done}
-                      aria-pressed={on}
-                      onClick={() => toggleSize(item.code, size)}
-                      data-testid={`linen-${item.code}-${size}`}
-                      className={`h-12 w-12 rounded-xl border-2 text-lg font-bold ${
-                        on ? 'border-brand-600 bg-brand-600 text-white' : 'border-line-strong bg-white text-slate-700'
-                      } disabled:opacity-70`}
-                    >
-                      {size}
-                    </button>
-                  );
-                })}
+                      onChange={(v) => setLinenQty(item.code, v)}
+                    />
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>,
       )}
       {section(
@@ -351,38 +383,14 @@ function CleanPanel({
                 <label htmlFor={`qty-${item.code}`} className="text-base text-slate-800">
                   {item.label}
                 </label>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    aria-label={`Bớt ${item.label}`}
-                    disabled={done || value === 0}
-                    onClick={() => setQty(item.code, value - 1)}
-                    className="flex h-11 w-11 items-center justify-center rounded-xl border border-line-strong bg-white disabled:opacity-40"
-                  >
-                    <Minus className="h-5 w-5" aria-hidden="true" />
-                  </button>
-                  <input
-                    id={`qty-${item.code}`}
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    max={catalog.maxQuantity}
-                    disabled={done}
-                    value={value}
-                    onChange={(e) => setQty(item.code, Number(e.target.value))}
-                    data-testid={`qty-${item.code}`}
-                    className="h-11 w-16 rounded-xl border border-line-strong text-center text-lg font-semibold tabular-nums"
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Thêm ${item.label}`}
-                    disabled={done}
-                    onClick={() => setQty(item.code, value + 1)}
-                    className="flex h-11 w-11 items-center justify-center rounded-xl border border-line-strong bg-white disabled:opacity-40"
-                  >
-                    <Plus className="h-5 w-5" aria-hidden="true" />
-                  </button>
-                </div>
+                <Stepper
+                  id={`qty-${item.code}`}
+                  label={item.label}
+                  value={value}
+                  max={catalog.maxQuantity}
+                  disabled={done}
+                  onChange={(v) => setQty(item.code, v)}
+                />
               </div>
             );
           })}
@@ -391,30 +399,35 @@ function CleanPanel({
       {section(
         'Đánh dấu nếu đồ được thay thế',
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          {catalog.replacements.map((item) => {
-            const on = form.replaced.includes(item.code);
-            return (
-              <button
-                key={item.code}
-                type="button"
-                disabled={done}
-                aria-pressed={on}
-                onClick={() => toggleReplaced(item.code)}
-                data-testid={`replaced-${item.code}`}
-                className={`flex min-h-[3rem] items-center gap-2.5 rounded-xl border-2 px-3 text-left text-base ${
-                  on ? 'border-green-600 bg-green-50 text-green-900' : 'border-line bg-white text-slate-700'
-                } disabled:opacity-70`}
-              >
-                <span
-                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${on ? 'border-green-600 bg-green-600 text-white' : 'border-slate-400'}`}
-                  aria-hidden="true"
-                >
-                  {on ? <Check className="h-4 w-4" /> : null}
-                </span>
-                {item.label}
-              </button>
-            );
-          })}
+          {catalog.replacements.map((item) => (
+            <CheckToggle
+              key={item.code}
+              on={form.replaced.includes(item.code)}
+              disabled={done}
+              onClick={() => toggleReplaced(item.code)}
+              testId={`replaced-${item.code}`}
+            >
+              {item.label}
+            </CheckToggle>
+          ))}
+        </div>,
+      )}
+      {section(
+        'Ghi nhận đặc biệt',
+        <div className="grid gap-2 sm:grid-cols-2">
+          {catalog.specialStatuses.map((item) => (
+            <CheckToggle
+              key={item.code}
+              on={form.special.includes(item.code)}
+              disabled={done}
+              onClick={() => toggleSpecial(item.code)}
+              testId={`special-${item.code}`}
+            >
+              <span>
+                <span className="font-bold">{item.short}</span> : {item.label}
+              </span>
+            </CheckToggle>
+          ))}
         </div>,
       )}
       {section(
@@ -425,7 +438,7 @@ function CleanPanel({
           disabled={done}
           value={form.note ?? ''}
           onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
-          placeholder="Tình trạng bất thường, thiếu thông tin, ngoại lệ…"
+          placeholder="Các lưu ý-Hỏng hóc-Vấn đề khác..."
           data-testid="cleaning-note"
           className="w-full rounded-xl border border-line-strong px-3 py-2 text-base"
         />,
@@ -444,5 +457,67 @@ function CleanPanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** − [n] + : a count, from 0 to the catalog's maximum. */
+function Stepper({ id, label, value, max, disabled, onChange }: { id: string; label: string; value: number; max: number; disabled: boolean; onChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        aria-label={`Bớt ${label}`}
+        disabled={disabled || value === 0}
+        onClick={() => onChange(value - 1)}
+        className="flex h-11 w-11 items-center justify-center rounded-xl border border-line-strong bg-white disabled:opacity-40"
+      >
+        <Minus className="h-5 w-5" aria-hidden="true" />
+      </button>
+      <input
+        id={id}
+        type="number"
+        inputMode="numeric"
+        min={0}
+        max={max}
+        disabled={disabled}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        data-testid={id}
+        className="h-11 w-16 rounded-xl border border-line-strong text-center text-lg font-semibold tabular-nums"
+      />
+      <button
+        type="button"
+        aria-label={`Thêm ${label}`}
+        disabled={disabled}
+        onClick={() => onChange(value + 1)}
+        className="flex h-11 w-11 items-center justify-center rounded-xl border border-line-strong bg-white disabled:opacity-40"
+      >
+        <Plus className="h-5 w-5" aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
+/** A checkbox as a large tap target: a ✓ when ticked — never the word "Đúng". */
+function CheckToggle({ on, disabled, onClick, testId, children }: { on: boolean; disabled: boolean; onClick: () => void; testId: string; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-pressed={on}
+      onClick={onClick}
+      data-testid={testId}
+      className={`flex min-h-[3rem] items-center gap-2.5 rounded-xl border-2 px-3 text-left text-base ${
+        on ? 'border-green-600 bg-green-50 text-green-900' : 'border-line bg-white text-slate-700'
+      } disabled:opacity-70`}
+    >
+      <span
+        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${on ? 'border-green-600 bg-green-600 text-white' : 'border-slate-400'}`}
+        aria-hidden="true"
+      >
+        {on ? <Check className="h-4 w-4" /> : null}
+      </span>
+      {children}
+    </button>
   );
 }

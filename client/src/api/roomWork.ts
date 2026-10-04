@@ -25,16 +25,22 @@ export interface RoomWorkCatalog {
   statusCodes: string[];
   states: Record<RoomWorkState, string>;
   linen: CatalogItem[];
-  linenSizes: string[];
+  /** K / Q / T — shown as King / Queen / Twin. */
+  linenSizes: CatalogItem[];
   quantities: CatalogItem[];
   replacements: CatalogItem[];
+  /** "Ghi nhận đặc biệt": L/B, SO, DND, OOO, OS, LNL. */
+  specialStatuses: (CatalogItem & { short: string })[];
   maxQuantity: number;
 }
 
 export interface CleaningForm {
-  linen: Record<string, string[]>;
+  /** Per linen item: ONE type (K / Q / T) and how many — null only on a save from before counts. */
+  linen: Record<string, { size: string; quantity: number | null }>;
   quantities: Record<string, number>;
   replaced: string[];
+  /** The "Ghi nhận đặc biệt" ticked. */
+  special: string[];
   note: string | null;
   savedAt?: string;
   savedByName?: string;

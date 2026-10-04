@@ -11,7 +11,7 @@
  * The worker reads its own KPI; the Quản lý buồng phòng its branch; the Admin
  * every branch — the same functions, a different scope.
  */
-import type { Prisma, PrismaClient, RoomCollectionStatus } from '@prisma/client';
+import type { Prisma, PrismaClient, RoomCollectionStatus, RoomWorkState } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { hcmDateOnly } from '../lib/clock';
@@ -20,6 +20,7 @@ import { listShifts } from './workShiftService';
 import type { HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { TASK_INCLUDE, managerBranchWhere, serializeTask } from './roomTaskService';
+import { describeCleaning, readCleaning } from './roomTaskCatalog';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -341,10 +342,20 @@ export interface OperationsRow {
   notes: number;
 }
 
+/** One room's "Dọn phòng" form in the report: who, where, and every field, labelled. */
+export type CleaningDetailRow = {
+  branchLabel: string;
+  workDate: string;
+  roomNumber: string;
+  employee: string;
+  state: RoomWorkState;
+} & ReturnType<typeof describeCleaning>;
+
 /**
  * Objective figures only — per branch, business date and worker: rooms given and
  * done, inspections, findings, cleaning time, money collected and still pending.
- * No scores, no "tốt / kém".
+ * No scores, no "tốt / kém". `rooms` carries each room's saved form as data:
+ * King / Queen / Twin and counts, replacements, "Ghi nhận đặc biệt", notes.
  */
 export async function operationsReport(actor: HousekeepingActor, filter: PeriodFilter, client: PrismaClient = defaultPrisma) {
   const { start, end } = assertPeriod(filter);
@@ -361,6 +372,8 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
         durationSeconds: true,
         voidedAt: true,
         cleaning: true,
+        roomNumber: true,
+        cleanedByNameSnapshot: true,
         branch: { select: { address: true, branchNumber: true } },
       },
     }),
@@ -417,6 +430,20 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
     row.pendingAmount += k.pendingAmount;
     row.pendingCount += k.pendingCount;
   }
+  const rooms: (CleaningDetailRow & { sortKey: string })[] = [];
+  for (const t of tasks) {
+    const form = t.voidedAt ? null : readCleaning(t.cleaning);
+    if (!form) continue;
+    rooms.push({
+      branchLabel: label(t.branch),
+      workDate: t.workDate,
+      roomNumber: t.roomNumber,
+      employee: t.cleanedByNameSnapshot ?? t.assigneeNameSnapshot ?? '—',
+      state: t.state,
+      ...describeCleaning(form),
+      sortKey: `${String(t.branch.branchNumber).padStart(3, '0')}|${t.workDate}|${t.roomNumber.padStart(6, '0')}`,
+    });
+  }
   const out = [...rows.values()]
     .sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'vi'))
     .map(({ durations, sortKey: _k, ...r }) => ({
@@ -424,5 +451,10 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
       completionRate: r.assigned ? Math.round((r.completed / r.assigned) * 100) : 0,
       avgCleaningSeconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
     }));
-  return { from: filter.from, to: filter.to, rows: out };
+  return {
+    from: filter.from,
+    to: filter.to,
+    rows: out,
+    rooms: rooms.sort((a, b) => a.sortKey.localeCompare(b.sortKey)).map(({ sortKey: _k, ...r }) => r),
+  };
 }

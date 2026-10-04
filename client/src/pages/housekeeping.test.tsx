@@ -173,14 +173,30 @@ const CATALOG = {
     { code: 'DUVET_COVER', label: 'Bọc chăn' },
     { code: 'MATTRESS_PROTECTOR', label: 'Bảo vệ nệm' },
   ],
-  linenSizes: ['K', 'Q', 'T'],
+  linenSizes: [
+    { code: 'K', label: 'King' },
+    { code: 'Q', label: 'Queen' },
+    { code: 'T', label: 'Twin' },
+  ],
   quantities: [
     { code: 'BATH_TOWEL', label: 'Khăn tắm' },
     { code: 'WATER', label: 'Nước suối' },
   ],
   replacements: [
-    { code: 'COMB', label: 'Lược' },
+    { code: 'COMB_COTTON_CAP', label: 'Lược, tăm bông, chụp tóc' },
+    { code: 'TEA_COFFEE_SUGAR', label: 'Trà, cà phê, đường. Miễn phí' },
+    { code: 'TISSUE', label: 'Giấy ăn, lau tay' },
+    { code: 'HAND_WASH', label: 'Nước rửa tay' },
     { code: 'SHAMPOO', label: 'Dầu gội' },
+    { code: 'SHOWER_GEL', label: 'Sữa tắm' },
+  ],
+  specialStatuses: [
+    { code: 'LB', short: 'L/B', label: 'Khách có hành lý gọn nhẹ' },
+    { code: 'SO', short: 'SO', label: 'Phòng có đồ nhưng khách không ngủ' },
+    { code: 'DND', short: 'DND', label: 'Không làm phiền' },
+    { code: 'OOO', short: 'OOO', label: 'Không thể bán phòng' },
+    { code: 'OS', short: 'OS', label: 'Phòng ngưng tạm' },
+    { code: 'LNL', short: 'LNL', label: 'Hàng thất lạc' },
   ],
   maxQuantity: 999,
 };
@@ -330,7 +346,7 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     expect(screen.getByTestId('room-state')).toHaveTextContent('Đang dọn');
   });
 
-  it('records linen sizes, counts and ✓ replacements, and completes the room', async () => {
+  it('records King / Queen / Twin with a count, counts, ✓ replacements and special notes, and completes the room', async () => {
     const posted: unknown[] = [];
     const task = roomTask('t1', {
       state: 'IN_PROGRESS',
@@ -351,23 +367,91 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     );
     renderApp('/app/inspections/room/t1');
     await screen.findByTestId('cleaning-form');
-    // The three linen items, each with K / Q / T.
-    for (const item of ['BED_SHEET', 'DUVET_COVER', 'MATTRESS_PROTECTOR']) {
-      for (const size of ['K', 'Q', 'T']) expect(screen.getByTestId(`linen-${item}-${size}`)).toBeInTheDocument();
+    // The three linen items, each King / Queen / Twin — the words, never K / Q / T.
+    for (const label of ['Ga giường', 'Bọc chăn', 'Bảo vệ nệm']) {
+      expect(within(screen.getByRole('group', { name: `Loại ${label}` })).getAllByRole('button').map((b) => b.textContent)).toEqual(['King', 'Queen', 'Twin']);
     }
+    // ONE type per item: another choice replaces it; then its count.
+    expect(screen.queryByTestId('linen-qty-BED_SHEET')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('linen-BED_SHEET-K'));
     await userEvent.click(screen.getByTestId('linen-BED_SHEET-Q'));
+    expect(screen.getByTestId('linen-BED_SHEET-K')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('linen-BED_SHEET-Q')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Thêm số lượng Ga giường' }));
+    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(2);
     await userEvent.click(screen.getByRole('button', { name: 'Thêm Khăn tắm' }));
     await userEvent.click(screen.getByRole('button', { name: 'Thêm Khăn tắm' }));
-    // A ✓, not the word "Đúng".
+    // The six replacement items, exactly — each a ✓, never the word "Đúng".
+    expect(screen.getAllByTestId(/^replaced-/).map((b) => b.textContent)).toEqual([
+      'Lược, tăm bông, chụp tóc',
+      'Trà, cà phê, đường. Miễn phí',
+      'Giấy ăn, lau tay',
+      'Nước rửa tay',
+      'Dầu gội',
+      'Sữa tắm',
+    ]);
     await userEvent.click(screen.getByTestId('replaced-SHAMPOO'));
     expect(screen.getByTestId('replaced-SHAMPOO')).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByText('Đúng')).not.toBeInTheDocument();
+    // "Ghi nhận đặc biệt": the six, several at once.
+    expect(screen.getByRole('heading', { name: 'Ghi nhận đặc biệt' })).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^special-/).map((b) => b.textContent)).toEqual([
+      'L/B : Khách có hành lý gọn nhẹ',
+      'SO : Phòng có đồ nhưng khách không ngủ',
+      'DND : Không làm phiền',
+      'OOO : Không thể bán phòng',
+      'OS : Phòng ngưng tạm',
+      'LNL : Hàng thất lạc',
+    ]);
+    await userEvent.click(screen.getByTestId('special-LB'));
+    await userEvent.click(screen.getByTestId('special-DND'));
+    expect(screen.getByTestId('special-LB')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('special-DND')).toHaveAttribute('aria-pressed', 'true');
+    // The note, under its own placeholder.
+    expect(screen.getByTestId('cleaning-note')).toHaveAttribute('placeholder', 'Các lưu ý-Hỏng hóc-Vấn đề khác...');
     await userEvent.type(screen.getByTestId('cleaning-note'), 'Rèm hơi bẩn');
     await userEvent.click(screen.getByTestId('cleaning-complete'));
     await waitFor(() =>
-      expect(posted).toEqual([{ linen: { BED_SHEET: ['Q'] }, quantities: { BATH_TOWEL: 2 }, replaced: ['SHAMPOO'], note: 'Rèm hơi bẩn' }]),
+      expect(posted).toEqual([
+        {
+          linen: { BED_SHEET: { size: 'Q', quantity: 2 } },
+          quantities: { BATH_TOWEL: 2 },
+          replaced: ['SHAMPOO'],
+          special: ['LB', 'DND'],
+          note: 'Rèm hơi bẩn',
+        },
+      ]),
     );
     expect(await screen.findByTestId('cleaning-done')).toHaveTextContent('42 phút');
+  });
+
+  it('shows a saved form again on reload — type, count, ✓ and special notes', async () => {
+    const task = roomTask('t1', {
+      state: 'IN_PROGRESS',
+      stateLabel: 'Đang dọn',
+      startedAt: '2026-10-05T02:00:00.000Z',
+      inspection: { id: 'in1', createdAt: '2026-10-05T02:00:00.000Z', inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] },
+      cleaning: {
+        linen: { DUVET_COVER: { size: 'T', quantity: 3 } },
+        quantities: { WATER: 4 },
+        replaced: ['TEA_COFFEE_SUGAR'],
+        special: ['OOO', 'LNL'],
+        note: 'Ổ cắm hỏng',
+      },
+    });
+    installApiMock(routes(task));
+    renderApp('/app/inspections/room/t1');
+    await screen.findByTestId('cleaning-form');
+    expect(screen.getByTestId('linen-DUVET_COVER-T')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('linen-qty-DUVET_COVER')).toHaveValue(3);
+    expect(screen.queryByTestId('linen-qty-BED_SHEET')).not.toBeInTheDocument();
+    expect(screen.getByTestId('qty-WATER')).toHaveValue(4);
+    expect(screen.getByTestId('replaced-TEA_COFFEE_SUGAR')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('special-OOO')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('special-LNL')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('special-DND')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('cleaning-note')).toHaveValue('Ổ cắm hỏng');
   });
 });
 

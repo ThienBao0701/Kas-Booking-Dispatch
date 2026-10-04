@@ -4,10 +4,13 @@
  * Written for a reader outside the building: per branch, business date and
  * worker, the rooms given and done, inspections and findings, the average
  * cleaning time, and the money collected and still pending. Objective figures
- * only — no score, no "tốt / kém".
+ * only — no score, no "tốt / kém". The workbook adds "Chi tiết dọn phòng": each
+ * room's form — King / Queen / Twin and counts, replacements, "Ghi nhận đặc
+ * biệt", notes.
  */
 import ExcelJS from 'exceljs';
-import type { OperationsRow } from '../housekeeping/housekeepingKpi';
+import type { CleaningDetailRow, OperationsRow } from '../housekeeping/housekeepingKpi';
+import { LINEN_ITEMS, ROOM_WORK_STATE_LABELS } from '../housekeeping/roomTaskCatalog';
 import { formatDuration } from '../lib/duration';
 import { formatVndPlain } from '../reception/reportTypes';
 import { hcmDateTime, hcmDayLabel, periodLabel } from './format';
@@ -30,6 +33,8 @@ export interface HousekeepingOpsData {
   scope: string;
   generatedAt: Date;
   rows: OperationsRow[];
+  /** Each room's saved "Dọn phòng" form. */
+  rooms?: CleaningDetailRow[];
 }
 
 const money = (n: number) => formatVndPlain(n);
@@ -133,6 +138,36 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
   sheet.addRow({});
   sheet.addRow({ branch: `Kỳ báo cáo: ${hcmDayLabel(data.from)} – ${hcmDayLabel(data.to)} · ${data.scope}` });
   for (const key of ['collected', 'pending']) sheet.getColumn(key).numFmt = '#,##0';
+
+  const detail = wb.addWorksheet('Chi tiết dọn phòng');
+  detail.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 34 },
+    { header: 'Ngày nghiệp vụ', key: 'date', width: 14 },
+    { header: 'Phòng', key: 'room', width: 10 },
+    { header: 'Nhân viên', key: 'employee', width: 24 },
+    { header: 'Trạng thái', key: 'state', width: 14 },
+    ...LINEN_ITEMS.map((i) => ({ header: i.label, key: i.code, width: 14 })),
+    { header: 'Số lượng', key: 'quantities', width: 40 },
+    { header: 'Đồ thay thế', key: 'replaced', width: 40 },
+    { header: 'Ghi nhận đặc biệt', key: 'special', width: 44 },
+    { header: 'Ghi chú', key: 'note', width: 40 },
+  ];
+  detail.getRow(1).font = { bold: true };
+  detail.views = [{ state: 'frozen', ySplit: 1 }];
+  for (const r of data.rooms ?? []) {
+    detail.addRow({
+      branch: r.branchLabel,
+      date: hcmDayLabel(r.workDate),
+      room: r.roomNumber,
+      employee: r.employee,
+      state: ROOM_WORK_STATE_LABELS[r.state],
+      ...Object.fromEntries(r.linen.map((l) => [l.item, l.quantity === null ? l.sizeLabel : `${l.sizeLabel} × ${l.quantity}`])),
+      quantities: r.quantities.map((q) => `${q.label}: ${q.quantity}`).join('; '),
+      replaced: r.replaced.map((x) => x.label).join('; '),
+      special: r.special.map((x) => `${x.short} : ${x.label}`).join('; '),
+      note: r.note ?? '',
+    });
+  }
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 

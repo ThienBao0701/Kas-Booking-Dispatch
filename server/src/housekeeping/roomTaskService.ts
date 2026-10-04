@@ -24,7 +24,7 @@ import { branchScopeOf, scopeIncludes, type BranchScope } from '../auth/branchSc
 import { catalogRoom } from '../room/branchRooms';
 import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
-import { ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, type CleaningForm } from './roomTaskCatalog';
+import { ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch } from './workShiftService';
 
 export const TASK_INCLUDE = {
@@ -200,7 +200,7 @@ export function serializeTask(row: TaskRow, opts: { money: boolean; now?: Date }
           })),
         }
       : null,
-    cleaning: (row.cleaning as CleaningForm | null) ?? null,
+    cleaning: readCleaning(row.cleaning),
     cleanedBy: row.cleanedByUserId ? { id: row.cleanedByUserId, name: row.cleanedByNameSnapshot ?? '—' } : null,
     createdByName: row.createdByNameSnapshot,
     createdAt: row.createdAt.toISOString(),
@@ -527,6 +527,7 @@ async function writeCleaning(
       linen: Object.keys(form.linen).length,
       quantities: Object.keys(form.quantities).length,
       replaced: form.replaced.length,
+      special: form.special.length,
       ...(complete ? { durationSeconds } : {}),
     });
   });

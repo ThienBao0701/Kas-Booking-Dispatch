@@ -45,9 +45,14 @@ const CATALOG = {
   statusCodes: ['OUT', 'OC', 'VC'],
   states: { NOT_STARTED: 'Chưa bắt đầu', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
   linen: [{ code: 'BED_SHEET', label: 'Ga giường' }],
-  linenSizes: ['K', 'Q', 'T'],
+  linenSizes: [
+    { code: 'K', label: 'King' },
+    { code: 'Q', label: 'Queen' },
+    { code: 'T', label: 'Twin' },
+  ],
   quantities: [{ code: 'BATH_TOWEL', label: 'Khăn tắm' }],
   replacements: [{ code: 'SHAMPOO', label: 'Dầu gội' }],
+  specialStatuses: [{ code: 'DND', short: 'DND', label: 'Không làm phiền' }],
   maxQuantity: 999,
 };
 
@@ -371,7 +376,7 @@ describe('Quản lý buồng phòng — Theo dõi nhân viên, KPI, Báo cáo', 
                 state: 'COMPLETED',
                 stateLabel: 'Hoàn thành',
                 durationSeconds: 2520,
-                cleaning: { linen: { BED_SHEET: ['Q'] }, quantities: { BATH_TOWEL: 2 }, replaced: ['SHAMPOO'], note: null },
+                cleaning: { linen: { BED_SHEET: { size: 'Q', quantity: 2 } }, quantities: { BATH_TOWEL: 2 }, replaced: ['SHAMPOO'], special: ['DND'], note: null },
               }),
             ],
             findings: [],
@@ -393,7 +398,8 @@ describe('Quản lý buồng phòng — Theo dõi nhân viên, KPI, Báo cáo', 
     expect(detail).toHaveTextContent('500.000 ₫');
     await userEvent.click(within(detail).getByTestId('staff-task-t1'));
     const cleaning = within(detail).getByTestId('task-cleaning');
-    expect(cleaning).toHaveTextContent('Ga giường Q');
+    expect(cleaning).toHaveTextContent('Ga giường: Queen × 2');
+    expect(cleaning).toHaveTextContent('Ghi nhận đặc biệt: DND (Không làm phiền)');
     expect(cleaning).toHaveTextContent('Khăn tắm: 2');
     expect(cleaning).toHaveTextContent('Dầu gội');
     expect(within(detail).getByTestId('staff-task-t1')).toHaveTextContent('42 phút');

@@ -253,10 +253,21 @@ describe('the room work', () => {
     expect(stored).toMatchObject({ createdByUserId: workerId, staffName: 'Chị Lan', branchId: cn1, roomNumber: '101' });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(409);
 
-    // The form, validated against the catalog.
-    expect((await worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send({ quantities: { BATH_TOWEL: -1 } })).status).toBe(422);
-    expect((await worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send({ linen: { BED_SHEET: ['X'] } })).status).toBe(422);
-    const form = { linen: { BED_SHEET: ['K', 'Q'], DUVET_COVER: ['T'] }, quantities: { BATH_TOWEL: 2, WATER: 4 }, replaced: ['SHAMPOO', 'COMB'], note: 'Rèm hơi bẩn' };
+    // The form, validated against the catalog: ONE type per linen item, with its count.
+    const cleaning = (body: Record<string, unknown>) => worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send(body);
+    expect((await cleaning({ quantities: { BATH_TOWEL: -1 } })).status).toBe(422);
+    expect((await cleaning({ linen: { BED_SHEET: ['K', 'Q'] } })).status).toBe(422);
+    expect((await cleaning({ linen: { BED_SHEET: { size: 'X', quantity: 1 } } })).status).toBe(422);
+    expect((await cleaning({ linen: { BED_SHEET: { size: 'K' } } })).status).toBe(422);
+    expect((await cleaning({ replaced: ['COMB'] })).status).toBe(422);
+    expect((await cleaning({ special: ['VIP'] })).status).toBe(422);
+    const form = {
+      linen: { BED_SHEET: { size: 'K', quantity: 2 }, DUVET_COVER: { size: 'T', quantity: 1 } },
+      quantities: { BATH_TOWEL: 2, WATER: 4 },
+      replaced: ['SHAMPOO', 'COMB_COTTON_CAP'],
+      special: ['DND', 'LB'],
+      note: 'Rèm hơi bẩn',
+    };
 
     // 7. Completion: the end time and the duration from the inspection.
     setClock({ now: () => hcm(DAY, '09:42') });
@@ -269,16 +280,171 @@ describe('the room work', () => {
       durationSeconds: 42 * 60,
       cleanedBy: { id: workerId, name: 'Chị Lan' },
     });
-    expect(done.body.task.cleaning).toMatchObject({ linen: { BED_SHEET: ['K', 'Q'], DUVET_COVER: ['T'] }, quantities: { BATH_TOWEL: 2, WATER: 4 }, replaced: ['COMB', 'SHAMPOO'], note: 'Rèm hơi bẩn', savedByUserId: workerId });
+    expect(done.body.task.cleaning).toMatchObject({
+      linen: { BED_SHEET: { size: 'K', quantity: 2 }, DUVET_COVER: { size: 'T', quantity: 1 } },
+      quantities: { BATH_TOWEL: 2, WATER: 4 },
+      replaced: ['COMB_COTTON_CAP', 'SHAMPOO'],
+      special: ['LB', 'DND'],
+      note: 'Rèm hơi bẩn',
+      savedByUserId: workerId,
+    });
 
     // 12. The manager sees every step and every value the worker entered.
     const seen = (await manager1.get(`/api/housekeeping/manager/staff/${workerId}?from=${DAY}&to=${DAY}`)).body;
     expect(seen.tasks[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'OPENED', 'INSPECTED', 'COMPLETED']);
-    expect(seen.tasks[0].cleaning.quantities).toEqual({ BATH_TOWEL: 2, WATER: 4 });
+    expect(seen.tasks[0].cleaning).toMatchObject({ quantities: { BATH_TOWEL: 2, WATER: 4 }, special: ['LB', 'DND'], linen: { BED_SHEET: { size: 'K', quantity: 2 } } });
     expect(seen.findings.map((f: { typeLabel: string }) => f.typeLabel)).toEqual(['Hút thuốc']);
     expect(seen.shifts).toHaveLength(1);
     const progress = (await manager1.get(`/api/housekeeping/manager/staff-progress?from=${DAY}&to=${DAY}`)).body.rows;
     expect(progress[0]).toMatchObject({ userId: workerId, assigned: 1, completed: 1, completionRate: 100, inspections: 1, findings: 1 });
+  });
+});
+
+describe('"Dọn phòng" — the form’s fields, as data', () => {
+  const xlsxOf = async (agent: Agent, url: string) => {
+    const res = await agent
+      .get(url)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.body as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    return wb;
+  };
+
+  it('serves King / Queen / Twin, the six replacement items and the six special statuses — exactly', async () => {
+    const cat = (await worker.get('/api/housekeeping/catalog')).body;
+    expect(cat.linenSizes).toEqual([
+      { code: 'K', label: 'King' },
+      { code: 'Q', label: 'Queen' },
+      { code: 'T', label: 'Twin' },
+    ]);
+    expect(cat.replacements.map((r: { label: string }) => r.label)).toEqual([
+      'Lược, tăm bông, chụp tóc',
+      'Trà, cà phê, đường. Miễn phí',
+      'Giấy ăn, lau tay',
+      'Nước rửa tay',
+      'Dầu gội',
+      'Sữa tắm',
+    ]);
+    expect(cat.specialStatuses.map((x: { short: string; label: string }) => `${x.short} : ${x.label}`)).toEqual([
+      'L/B : Khách có hành lý gọn nhẹ',
+      'SO : Phòng có đồ nhưng khách không ngủ',
+      'DND : Không làm phiền',
+      'OOO : Không thể bán phòng',
+      'OS : Phòng ngưng tạm',
+      'LNL : Hàng thất lạc',
+    ]);
+  });
+
+  it('keeps every field through "Lưu tạm" and a reload, and hands them to the report', async () => {
+    const [task] = await setUp(manager1, ['101'], workerId);
+    await onShift(worker, cn1);
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
+    const form = {
+      linen: { BED_SHEET: { size: 'Q', quantity: 2 }, MATTRESS_PROTECTOR: { size: 'K', quantity: 1 } },
+      quantities: { PILLOWCASE: 4 },
+      replaced: ['TEA_COFFEE_SUGAR', 'HAND_WASH'],
+      special: ['SO', 'OOO', 'LNL'],
+      note: 'Ổ cắm hỏng',
+    };
+    expect((await worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send(form)).status).toBe(200);
+    // Reloaded, and stored as data — not as text.
+    expect((await worker.get(`/api/housekeeping/work/tasks/${task!.id}`)).body.task.cleaning).toMatchObject(form);
+    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task!.id } })).cleaning).toMatchObject(form);
+
+    setClock({ now: () => hcm(DAY, '08:40') });
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send(form)).status).toBe(200);
+    const report = (await manager1.get(`/api/housekeeping/manager/report?from=${DAY}&to=${DAY}`)).body;
+    expect(report.rooms).toEqual([
+      {
+        branchLabel: expect.stringContaining('Chi nhánh'),
+        workDate: DAY,
+        roomNumber: '101',
+        employee: 'Chị Lan',
+        state: 'COMPLETED',
+        linen: [
+          { item: 'BED_SHEET', label: 'Ga giường', size: 'Q', sizeLabel: 'Queen', quantity: 2 },
+          { item: 'MATTRESS_PROTECTOR', label: 'Bảo vệ nệm', size: 'K', sizeLabel: 'King', quantity: 1 },
+        ],
+        quantities: [{ item: 'PILLOWCASE', label: 'Áo gối', quantity: 4 }],
+        replaced: [
+          { code: 'TEA_COFFEE_SUGAR', label: 'Trà, cà phê, đường. Miễn phí' },
+          { code: 'HAND_WASH', label: 'Nước rửa tay' },
+        ],
+        special: [
+          { code: 'SO', short: 'SO', label: 'Phòng có đồ nhưng khách không ngủ' },
+          { code: 'OOO', short: 'OOO', label: 'Không thể bán phòng' },
+          { code: 'LNL', short: 'LNL', label: 'Hàng thất lạc' },
+        ],
+        note: 'Ổ cắm hỏng',
+      },
+    ]);
+    // The workbook's "Chi tiết dọn phòng": one row per room, every field in words.
+    const wb = await xlsxOf(manager1, `/api/housekeeping/manager/report.xlsx?from=${DAY}&to=${DAY}`);
+    const sheet = wb.getWorksheet('Chi tiết dọn phòng')!;
+    const header = (sheet.getRow(1).values as unknown[]).slice(1);
+    const values = (sheet.getRow(2).values as unknown[]).slice(1);
+    const cell = (h: string) => values[header.indexOf(h)];
+    expect(cell('Phòng')).toBe('101');
+    expect(cell('Nhân viên')).toBe('Chị Lan');
+    expect(cell('Ga giường')).toBe('Queen × 2');
+    expect(cell('Bảo vệ nệm')).toBe('King × 1');
+    expect(cell('Số lượng')).toBe('Áo gối: 4');
+    expect(cell('Đồ thay thế')).toBe('Trà, cà phê, đường. Miễn phí; Nước rửa tay');
+    expect(cell('Ghi nhận đặc biệt')).toBe('SO : Phòng có đồ nhưng khách không ngủ; OOO : Không thể bán phòng; LNL : Hàng thất lạc');
+    expect(cell('Ghi chú')).toBe('Ổ cắm hỏng');
+  });
+
+  it('reads a form saved before these fields existed — without rewriting it', async () => {
+    const legacy = {
+      linen: { BED_SHEET: ['K'], DUVET_COVER: ['Q'] },
+      quantities: { WATER: 2 },
+      replaced: ['COTTON_BUDS', 'SHOWER_CAP', 'TISSUE'],
+      note: 'Cũ',
+      savedAt: hcm(DAY, '08:30').toISOString(),
+      savedByUserId: workerId,
+      savedByName: 'Chị Lan',
+    };
+    const t = await testPrisma.housekeepingRoomTask.create({
+      data: {
+        branchId: cn1,
+        workDate: DAY,
+        roomNumber: '104',
+        statusCode: 'OUT',
+        assigneeUserId: workerId,
+        assigneeNameSnapshot: 'Chị Lan',
+        state: 'COMPLETED',
+        startedAt: hcm(DAY, '08:00'),
+        completedAt: hcm(DAY, '08:30'),
+        durationSeconds: 1800,
+        cleaning: legacy,
+        cleanedByUserId: workerId,
+        cleanedByNameSnapshot: 'Chị Lan',
+        createdByUserId: manager1Id,
+        createdByNameSnapshot: 'Quản lý qlbp1',
+        createdAt: hcm(DAY, '07:00'),
+      },
+    });
+    const read = (await manager1.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).body.tasks.find((x: { id: string }) => x.id === t.id).cleaning;
+    expect(read).toMatchObject({
+      linen: { BED_SHEET: { size: 'K', quantity: null }, DUVET_COVER: { size: 'Q', quantity: null } },
+      quantities: { WATER: 2 },
+      replaced: ['COMB_COTTON_CAP', 'TISSUE'],
+      special: [],
+      note: 'Cũ',
+    });
+    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: t.id } })).cleaning).toEqual(legacy);
+    const rooms = (await manager1.get(`/api/housekeeping/manager/report?from=${DAY}&to=${DAY}`)).body.rooms;
+    expect(rooms[0].linen.map((l: { sizeLabel: string; quantity: number | null }) => [l.sizeLabel, l.quantity])).toEqual([
+      ['King', null],
+      ['Queen', null],
+    ]);
   });
 });
 
