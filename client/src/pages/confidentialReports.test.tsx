@@ -81,7 +81,10 @@ function report(id: string, over: Record<string, unknown> = {}) {
     branch: { id: 1, branchNumber: 1, address: '05 Trương Định' },
     createdAt: '2026-10-05T03:00:00.000Z',
     preview: 'Đồng nghiệp ca C thường xuyên đến muộn',
-    recipients: [{ id: 9, name: 'Quản lý Một', roleLabel: 'Quản lý lễ tân' }],
+    recipients: [
+      { id: 9, name: 'Quản lý Một', roleLabel: 'Quản lý lễ tân', always: false },
+      { id: 1, name: 'Quản trị viên', roleLabel: 'Admin', always: true },
+    ],
     read: false,
     readAt: null,
     ...over,
@@ -101,8 +104,9 @@ describe('sending a confidential report', () => {
             canSend: true,
             canRead: false,
             recipients: [
-              { id: 9, fullName: 'Quản lý Một', role: 'RECEPTION_MANAGER', roleLabel: 'Quản lý lễ tân' },
-              { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý' },
+              { id: 9, fullName: 'Quản lý Một', role: 'RECEPTION_MANAGER', roleLabel: 'Quản lý lễ tân', always: false },
+              { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý', always: false },
+              { id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true },
             ],
           },
         }),
@@ -125,11 +129,18 @@ describe('sending a confidential report', () => {
     await userEvent.click(screen.getByTestId('confidential-category-COLLEAGUES'));
     expect(screen.getByTestId('confidential-chosen')).toHaveTextContent('Đồng nghiệp, nhân viên');
 
-    // Only the server's superiors; never the Admin as a choice — it always receives.
+    // The server's superiors, nearest first — the Admin visible, ticked and locked.
     const recipients = screen.getByTestId('confidential-recipients');
-    expect(within(recipients).getAllByRole('checkbox')).toHaveLength(2);
-    expect(recipients).not.toHaveTextContent('Admin');
-    expect(screen.getByText('Admin luôn nhận được báo cáo này.')).toBeInTheDocument();
+    const boxes = within(recipients).getAllByRole('checkbox');
+    expect(boxes.map((b) => b.closest('label')!.textContent)).toEqual([
+      'Quản lý MộtQuản lý lễ tân',
+      'Tổng quản lýTổng quản lý',
+      'Admin— Admin luôn nhận',
+    ]);
+    expect(screen.getByTestId('confidential-recipient-admin')).toBeChecked();
+    expect(screen.getByTestId('confidential-recipient-admin')).toBeDisabled();
+    expect(screen.getByTestId('confidential-recipient-9')).not.toBeChecked();
+    expect(screen.getByTestId('confidential-recipient-9')).toBeEnabled();
 
     expect(screen.getByTestId('confidential-send')).toBeDisabled();
     await userEvent.type(screen.getByTestId('confidential-content'), 'Đồng nghiệp ca C thường xuyên đến muộn');
@@ -178,6 +189,8 @@ describe('reading the inbox', () => {
     const detail = await screen.findByTestId('confidential-detail');
     expect(detail).toHaveTextContent('Đồng nghiệp ca C thường xuyên đến muộn, đã nhắc 3 lần.');
     expect(detail).toHaveTextContent('Lễ tân Một · Lễ tân');
+    // Sent to the chosen manager and, always, the Admin.
+    expect(detail).toHaveTextContent('Gửi đến: Quản lý Một, Quản trị viên (Admin)');
 
     await userEvent.click(screen.getByRole('button', { name: /Đóng/ }));
     await userEvent.click(screen.getByTestId('confidential-tab-READ'));

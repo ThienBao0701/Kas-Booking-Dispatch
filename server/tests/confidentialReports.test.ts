@@ -1,8 +1,9 @@
 /**
  * "VII. BÁO CÁO CÁC VẤN ĐỀ VÀ TÌNH HÌNH QUAN TRỌNG" — private, upward, kept.
  *
- *   12  a receptionist sends only to its own superiors (the server's list)
- *   13  … never to another branch's Quản lý lễ tân
+ *   12  each sender is offered exactly its superiors, nearest first, the Admin
+ *       always among them (ticked, not removable) — and nobody else
+ *   13  … never another branch's Quản lý lễ tân, a peer or a lower role
  *   14  every Admin always reads it, chosen or not — even one created later
  *   15  peers, the sender, other branches and other departments cannot
  *   16  a manager reads only what was addressed to it
@@ -83,7 +84,7 @@ const inbox = async (agent: Agent) =>
   };
 
 describe('who may be addressed', () => {
-  it('12. a receptionist chooses among its own superiors only — the Admin is added by the system', async () => {
+  it('12. each sender is offered exactly its superiors, nearest first — the Admin always, ticked', async () => {
     const options = (await letan1.get('/api/confidential-reports/options')).body;
     expect(options.categories.map((c: { label: string }) => c.label)).toEqual([
       'Môi trường làm việc',
@@ -91,21 +92,49 @@ describe('who may be addressed', () => {
       'Đồng nghiệp, nhân viên',
       'Các vấn đề tình hình quan trọng khác',
     ]);
-    expect(options.recipients.map((r: { id: number }) => r.id).sort()).toEqual([ids.rm1, ids.tongql].sort());
-    expect((await rm1.get('/api/confidential-reports/options')).body.recipients.map((r: { id: number }) => r.id)).toEqual([ids.tongql]);
-    expect((await general.get('/api/confidential-reports/options')).body).toMatchObject({ canSend: true, recipients: [] });
-    expect((await admin.get('/api/confidential-reports/options')).body).toMatchObject({ canSend: false, canRead: true });
+    const offered = (body: { recipients: { id: number; role: string; always: boolean }[] }) =>
+      body.recipients.map((r) => [r.id, r.role, r.always]);
+    // Lễ tân CN1 → its own branch's Quản lý lễ tân, the Tổng quản lý lễ tân, Admin.
+    expect(offered(options)).toEqual([
+      [ids.rm1, 'RECEPTION_MANAGER', false],
+      [ids.tongql, 'RECEPTION_GENERAL_MANAGER', false],
+      [ids.admin, 'ADMIN', true],
+    ]);
+    // Quản lý lễ tân → the Tổng quản lý lễ tân, Admin.
+    expect(offered((await rm1.get('/api/confidential-reports/options')).body)).toEqual([
+      [ids.tongql, 'RECEPTION_GENERAL_MANAGER', false],
+      [ids.admin, 'ADMIN', true],
+    ]);
+    // Tổng quản lý lễ tân → Admin.
+    expect(offered((await general.get('/api/confidential-reports/options')).body)).toEqual([[ids.admin, 'ADMIN', true]]);
+    // Admin → nobody above it.
+    expect((await admin.get('/api/confidential-reports/options')).body).toMatchObject({ canSend: false, canRead: true, recipients: [] });
 
     expect((await send(letan1, { recipientIds: [ids.rm1, ids.tongql] })).status).toBe(201);
-    // Not a peer, not the Admin by hand, not oneself; and the Admin has nobody above it.
-    for (const wrong of [ids.peer!, ids.admin, ids.letan1]) {
+    // Naming the Admin is allowed — and changes nothing: it is one reader, once.
+    const withAdmin = (await send(letan1, { recipientIds: [ids.rm1, ids.admin] })).body.report.id;
+    const rows = await testPrisma.confidentialReportRecipient.findMany({ where: { reportId: withAdmin } });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.userId === ids.admin)?.automatic).toBe(true);
+    expect(rows.find((r) => r.userId === ids.rm1)?.automatic).toBe(false);
+    // The Tổng quản lý's report reaches the Admin without anybody being ticked.
+    const fromGeneral = (await send(general, {})).body.report.id;
+    expect((await testPrisma.confidentialReportRecipient.findMany({ where: { reportId: fromGeneral } })).map((r) => r.userId)).toEqual([ids.admin]);
+    // Not a peer, not oneself; and the Admin has nobody above it.
+    for (const wrong of [ids.peer!, ids.letan1]) {
       expect((await send(letan1, { recipientIds: [wrong] })).status).toBe(403);
     }
+    // A manager cannot address a manager — of its own branch or another — nor a receptionist.
+    for (const wrong of [ids.rm2, ids.letan1]) {
+      expect((await send(rm1, { recipientIds: [wrong] })).status).toBe(403);
+    }
+    // The Tổng quản lý cannot address a manager below it.
+    expect((await send(general, { recipientIds: [ids.rm1] })).status).toBe(403);
     expect((await send(admin, {})).status).toBe(403);
     // Departments outside the reception hierarchy have no part in it.
     expect((await send(hk, {})).status).toBe(403);
     expect((await send(tech, {})).status).toBe(403);
-    expect(await testPrisma.confidentialReport.count()).toBe(1);
+    expect(await testPrisma.confidentialReport.count()).toBe(3);
     // Exactly the four kinds.
     expect((await send(letan1, { category: 'SALARY' })).status).toBe(422);
   });
@@ -114,9 +143,11 @@ describe('who may be addressed', () => {
     const res = await send(letan1, { recipientIds: [ids.rm1, ids.rm2] });
     expect(res.status).toBe(403);
     expect(await testPrisma.confidentialReport.count()).toBe(0);
-    expect((await letan2.get('/api/confidential-reports/options')).body.recipients.map((r: { id: number }) => r.id).sort()).toEqual(
-      [ids.rm2, ids.tongql].sort(),
-    );
+    expect((await letan2.get('/api/confidential-reports/options')).body.recipients.map((r: { id: number }) => r.id)).toEqual([
+      ids.rm2,
+      ids.tongql,
+      ids.admin,
+    ]);
   });
 });
 
@@ -182,8 +213,12 @@ describe('who may read', () => {
       category: 'COLLEAGUES',
       categoryLabel: 'Đồng nghiệp, nhân viên',
       content: 'Sự việc ở quầy',
-      recipients: [{ id: ids.rm1, name: 'Quản lý CN1' }],
     });
+    // The readers see who it went to: the chosen manager, then every Admin (always).
+    expect(detail.recipients[0]).toMatchObject({ id: ids.rm1, name: 'Quản lý CN1', always: false });
+    const rest = detail.recipients.slice(1) as { id: number; roleLabel: string; always: boolean }[];
+    expect(rest.map((r) => r.id)).toContain(ids.admin);
+    expect(rest.every((r) => r.roleLabel === 'Admin' && r.always)).toBe(true);
     const stored = await testPrisma.confidentialReport.findUniqueOrThrow({ where: { id } });
     expect(stored).toMatchObject({ senderUserId: ids.letan1, senderRole: 'RECEPTIONIST', senderBranchId: cn1 });
   });

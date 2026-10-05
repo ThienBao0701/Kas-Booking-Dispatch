@@ -188,9 +188,14 @@ describe('"Mức độ" on the technical report', () => {
     await waitFor(() => expect(screen.queryByTestId('tr-branch-2')).not.toBeInTheDocument());
     const row = screen.getByTestId('tr-issue-a');
     expect(within(row).getByTestId('severity-badge')).toHaveTextContent('Cao');
-    // An unresolved "Cao" carries a red edge, so it is found at a glance.
-    expect(row.className).toMatch(/border-l-red-500/);
-    // Who holds it is stated on the row, set apart.
-    expect(row).toHaveTextContent('Kỹ thuật:Chưa giao');
+    // The accepted layout: the filter is a fifth select in the same grid.
+    const filters = screen.getByRole('region', { name: 'Bộ lọc kỹ thuật' });
+    expect(within(filters).getAllByRole('combobox').map((c) => c.getAttribute('data-testid'))).toEqual([
+      'tr-room',
+      'tr-category',
+      'tr-technician',
+      'tr-status',
+      'tr-severity',
+    ]);
   });
 });

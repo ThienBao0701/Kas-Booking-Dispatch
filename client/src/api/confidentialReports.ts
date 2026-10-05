@@ -7,6 +7,8 @@ export interface ConfidentialRecipient {
   fullName: string;
   role: string;
   roleLabel: string;
+  /** The Admin: always a recipient — shown ticked, not removable. */
+  always: boolean;
 }
 
 export interface ConfidentialOptions {
@@ -16,7 +18,7 @@ export interface ConfidentialOptions {
   canSend: boolean;
   /** Whether this account has an inbox (the managers and the Admin). */
   canRead: boolean;
-  /** The superiors THIS account may choose — the server's list; the Admin is always added. */
+  /** THIS account's superiors, nearest first — the server's list, the Admin always among them. */
   recipients: ConfidentialRecipient[];
 }
 
@@ -30,7 +32,8 @@ export interface ConfidentialReport {
   preview: string;
   /** Present on the opened report only. */
   content?: string;
-  recipients: { id: number; name: string; roleLabel: string }[];
+  /** Who it was sent to — the chosen superiors, then the Admin (always). */
+  recipients: { id: number; name: string; roleLabel: string; always: boolean }[];
   /** THIS reader's state. */
   read: boolean;
   readAt: string | null;

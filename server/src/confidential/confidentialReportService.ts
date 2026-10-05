@@ -3,8 +3,9 @@
  *
  *   Lễ tân  ──▶  Quản lý lễ tân (its own branch)  ──▶  Tổng quản lý  ──▶  Admin
  *
- * WHO MAY READ ONE: the superiors the sender chose, and every Admin — always,
- * whether chosen or not (the system adds them; the sender never has to). Nobody
+ * WHO MAY READ ONE: the superiors the sender chose, and every Admin — always.
+ * The Admin is SHOWN to the sender as a recipient that cannot be removed, and
+ * the server adds every active Admin whatever the request says. Nobody
  * else: not the sender's peers, not the sender (it is not in their inbox), not
  * another branch, not Buồng phòng or Kỹ thuật. A report outside the reader's
  * reach answers 404 — its existence is not confirmed either.
@@ -70,44 +71,54 @@ export function canRead(role: UserRole): boolean {
   return READER_ROLES.includes(role);
 }
 
+/** The order the sender reads them in: the nearest superior first. */
+const UPWARD_ORDER: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
+
 /**
- * THE SUPERIORS THIS SENDER MAY CHOOSE — the Admin never among them, because the
- * Admin receives every report anyway.
+ * THE SUPERIORS THIS SENDER MAY ADDRESS, nearest first:
  *
- *   Lễ tân           its branch's Quản lý lễ tân, and the Tổng quản lý
- *   Quản lý lễ tân   the Tổng quản lý
- *   Tổng quản lý     nobody to choose — the Admin receives it
+ *   Lễ tân           its OWN branch's Quản lý lễ tân, the Tổng quản lý lễ tân, Admin
+ *   Quản lý lễ tân   the Tổng quản lý lễ tân, Admin
+ *   Tổng quản lý     Admin
+ *   Admin            nobody — it cannot send
  *
- * A receptionist with no branch matches no manager (fail closed): its report
- * still reaches the Admin.
+ * Every Admin is listed with `always: true`: shown to the sender, ticked and
+ * not removable — the server adds every active Admin to every report anyway.
+ * Never a peer, a lower role or another branch's manager. A receptionist with no
+ * branch matches no manager (fail closed); its report still reaches the Admin.
  */
 export async function allowedRecipients(actor: ConfidentialActor) {
   if (!canSend(actor.role)) throw ApiError.forbidden('Bạn không gửi được báo cáo này.');
-  let where: Prisma.UserWhereInput;
+  const superiors: Prisma.UserWhereInput[] = [{ role: 'ADMIN' }];
   if (actor.role === 'RECEPTIONIST') {
-    where = {
-      OR: [
-        { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: actor.branchId ?? -1 } } },
-        { role: 'RECEPTION_GENERAL_MANAGER' },
-      ],
-    };
+    superiors.push(
+      { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: actor.branchId ?? -1 } } },
+      { role: 'RECEPTION_GENERAL_MANAGER' },
+    );
   } else if (actor.role === 'RECEPTION_MANAGER') {
-    where = { role: 'RECEPTION_GENERAL_MANAGER' };
-  } else {
-    return [];
+    superiors.push({ role: 'RECEPTION_GENERAL_MANAGER' });
   }
   const users = await prisma.user.findMany({
-    where: { AND: [where, { active: true, id: { not: actor.id } }] },
+    where: { AND: [{ OR: superiors }, { active: true, id: { not: actor.id } }] },
     select: { id: true, fullName: true, role: true },
-    orderBy: [{ role: 'asc' }, { fullName: 'asc' }],
+    orderBy: { fullName: 'asc' },
   });
-  return users.map((u) => ({ id: u.id, fullName: u.fullName, role: u.role, roleLabel: ROLE_LABELS[u.role] ?? u.role }));
+  return users
+    .sort((a, b) => UPWARD_ORDER.indexOf(a.role) - UPWARD_ORDER.indexOf(b.role))
+    .map((u) => ({
+      id: u.id,
+      fullName: u.fullName,
+      role: u.role,
+      roleLabel: ROLE_LABELS[u.role] ?? u.role,
+      /** The Admin: always a recipient, whatever the sender ticks. */
+      always: u.role === 'ADMIN',
+    }));
 }
 
 export interface CreateConfidentialInput {
   category: ConfidentialReportCategory;
   content: string;
-  /** The chosen superiors. May be empty: the Admin always receives it. */
+  /** The chosen superiors. The Admin may be named or not: it always receives it. */
   recipientIds?: number[];
 }
 
@@ -120,12 +131,15 @@ export async function createConfidentialReport(actor: ConfidentialActor, input: 
     throw ApiError.validation(`Nội dung không được vượt quá ${MAX_CONFIDENTIAL_LENGTH} ký tự.`);
   }
 
-  const allowed = new Set((await allowedRecipients(actor)).map((u) => u.id));
-  const chosen = [...new Set(input.recipientIds ?? [])];
-  for (const id of chosen) {
-    if (!allowed.has(id)) throw ApiError.forbidden('Người nhận không thuộc cấp quản lý của bạn.');
+  const allowed = await allowedRecipients(actor);
+  const allowedIds = new Set(allowed.map((u) => u.id));
+  const requested = [...new Set(input.recipientIds ?? [])];
+  for (const id of requested) {
+    if (!allowedIds.has(id)) throw ApiError.forbidden('Người nhận không thuộc cấp quản lý của bạn.');
   }
-  const admins = await prisma.user.findMany({ where: { role: 'ADMIN', active: true }, select: { id: true } });
+  // ONE report, one row per reader: the chosen managers, then every Admin.
+  const admins = allowed.filter((u) => u.always);
+  const chosen = requested.filter((id) => !admins.some((a) => a.id === id));
 
   const report = await prisma.confidentialReport.create({
     data: {
@@ -139,7 +153,7 @@ export async function createConfidentialReport(actor: ConfidentialActor, input: 
       recipients: {
         create: [
           ...chosen.map((userId) => ({ userId })),
-          ...admins.filter((a) => !chosen.includes(a.id)).map((a) => ({ userId: a.id, automatic: true })),
+          ...admins.map((a) => ({ userId: a.id, automatic: true })),
         ],
       },
     },
@@ -180,10 +194,15 @@ function serialize(row: ReportRow, actor: ConfidentialActor, full: boolean) {
     createdAt: row.createdAt.toISOString(),
     preview: row.content.length > 140 ? `${row.content.slice(0, 140)}…` : row.content,
     content: full ? row.content : undefined,
-    /** The superiors the sender chose — the Admin's automatic copy is not one of them. */
-    recipients: row.recipients
-      .filter((r) => !r.automatic)
-      .map((r) => ({ id: r.user.id, name: r.user.fullName, roleLabel: ROLE_LABELS[r.user.role] ?? r.user.role })),
+    /** Who it was sent to — the chosen superiors, then the Admin (always). */
+    recipients: [...row.recipients]
+      .sort((a, b) => UPWARD_ORDER.indexOf(a.user.role) - UPWARD_ORDER.indexOf(b.user.role))
+      .map((r) => ({
+        id: r.user.id,
+        name: r.user.fullName,
+        roleLabel: ROLE_LABELS[r.user.role] ?? r.user.role,
+        always: r.automatic,
+      })),
     /** THIS reader's state; another reader opening it changes nothing here. */
     read: Boolean(mine?.readAt),
     readAt: mine?.readAt ? mine.readAt.toISOString() : null,

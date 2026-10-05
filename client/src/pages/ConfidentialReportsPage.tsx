@@ -12,7 +12,12 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Lock, Mail, MailOpen, Plus, ShieldAlert } from 'lucide-react';
-import { confidentialApi, type ConfidentialCategory, type ConfidentialReport } from '../api/confidentialReports';
+import {
+  confidentialApi,
+  type ConfidentialCategory,
+  type ConfidentialRecipient,
+  type ConfidentialReport,
+} from '../api/confidentialReports';
 import { toUserMessage } from '../api/errors';
 import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
@@ -191,7 +196,7 @@ function Inbox() {
               </div>
               <div>
                 <dt className="inline text-slate-500">Gửi đến: </dt>
-                <dd className="inline">{opened.recipients.map((x) => x.name).join(', ') || 'Admin'}</dd>
+                <dd className="inline">{opened.recipients.map((x) => (x.always ? `${x.name} (Admin)` : x.name)).join(', ') || 'Admin'}</dd>
               </div>
             </dl>
             <p className="whitespace-pre-wrap rounded-lg bg-slate-50 px-3 py-2.5 text-sm leading-relaxed text-slate-900">{opened.content}</p>
@@ -208,7 +213,7 @@ function ComposeDialog({
   onClose,
   onSent,
 }: {
-  options: { categories: { code: ConfidentialCategory; label: string }[]; recipients: { id: number; fullName: string; roleLabel: string }[] };
+  options: { categories: { code: ConfidentialCategory; label: string }[]; recipients: ConfidentialRecipient[] };
   onClose: () => void;
   onSent: () => void;
 }) {
@@ -295,9 +300,15 @@ function ComposeDialog({
           </label>
           <fieldset>
             <legend className="mb-1.5 text-sm font-medium text-slate-700">Gửi đến</legend>
-            {options.recipients.length > 0 ? (
-              <ul className="space-y-1.5" data-testid="confidential-recipients">
-                {options.recipients.map((r) => (
+            {/*
+              THE SENDER'S SUPERIORS, nearest first, as the server lists them. The
+              Admin is one of them, ticked and locked: it always receives the
+              report, and the server adds it whatever is ticked here.
+            */}
+            <ul className="space-y-1.5" data-testid="confidential-recipients">
+              {options.recipients
+                .filter((r) => !r.always)
+                .map((r) => (
                   <li key={r.id}>
                     <label className="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm hover:bg-slate-50">
                       <input
@@ -312,9 +323,24 @@ function ComposeDialog({
                     </label>
                   </li>
                 ))}
-              </ul>
-            ) : null}
-            <p className="mt-1.5 text-xs text-slate-500">Admin luôn nhận được báo cáo này.</p>
+              {/* One line for the Admin however many Admin accounts there are. */}
+              {options.recipients.some((r) => r.always) ? (
+                <li>
+                  <label className="flex items-center gap-2.5 rounded-lg border border-line bg-slate-50 px-3 py-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked
+                      disabled
+                      readOnly
+                      data-testid="confidential-recipient-admin"
+                      className="h-4 w-4 rounded border-line-strong text-brand-600 disabled:opacity-70"
+                    />
+                    <span className="font-medium text-slate-900">Admin</span>
+                    <span className="text-xs text-slate-500">— Admin luôn nhận</span>
+                  </label>
+                </li>
+              ) : null}
+            </ul>
           </fieldset>
           {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}
         </div>

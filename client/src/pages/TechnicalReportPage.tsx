@@ -10,18 +10,13 @@
  * Tổng quản lý lễ tân all — the SERVER scopes every row and every action.
  *
  * THE SHARED REPORT FILTER (business dates, branch, shift) plus the technical
- * filters — room, type, technician, level — all go to the server; the status
+ * filters — room, type, technician, "Mức độ" — all go to the server; the status
  * buckets are read from the loaded rows, because they are the server's own
  * assignment state and overlap on purpose ("Đã giao lại" is also "Đã giao").
- *
- * READ TOP TO BOTTOM AS AN OPERATIONS CONSOLE: chi nhánh → phòng → sự cố →
- * kỹ thuật viên → tình trạng → thao tác. Unresolved incidents come first in a
- * room, Cao before Trung bình before Thấp (the server's order); an unresolved
- * "Cao" carries a red edge so it is found at a glance.
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Building2, Download, Eye, RefreshCw, SlidersHorizontal, Trash2, Undo2, UserPlus, Wrench } from 'lucide-react';
+import { Download, Eye, RefreshCw, Undo2, Trash2, UserPlus, Wrench } from 'lucide-react';
 import { ISSUE_CATEGORIES, issueCategoryLabel, issuesApi, type Issue, type IssueCategory } from '../api/issues';
 import { branchesApi } from '../api/bookings';
 import { adminBranchesApi } from '../api/adminBranches';
@@ -42,7 +37,8 @@ import { groupIssuesByBranchRoom, type RoomGroup } from '../lib/issueGroups';
 import { initialReportFilter, reportBranchId, reportPeriod, type ReportFilterValue } from '../lib/reportFilter';
 import { formatDateTime, hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
-import { SeverityBadge, SeverityFilter } from '../components/Severity';
+import { SeverityBadge } from '../components/Severity';
+import { SEVERITY_OPTIONS } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
 
 const POLL_MS = 30_000;
@@ -100,6 +96,7 @@ export function TechnicalReportPage() {
   const [category, setCategory] = useState<IssueCategory | ''>('');
   const [technicianId, setTechnicianId] = useState<number | ''>('');
   const [bucket, setBucket] = useState<Bucket | ''>('');
+  /** "Mức độ" — one level, filtered by the server. */
   const [severity, setSeverity] = useState<Severity | ''>('');
   const [assigning, setAssigning] = useState<{ group: RoomGroup; branch: Issue['branch'] } | null>(null);
   const [viewing, setViewing] = useState<Issue | null>(null);
@@ -152,7 +149,7 @@ export function TechnicalReportPage() {
     <a
       href={href}
       data-testid={testId}
-      className="inline-flex min-h-[2.5rem] items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+      className="inline-flex items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
     >
       <Download className="h-4 w-4" aria-hidden="true" />
       {text}
@@ -172,7 +169,7 @@ export function TechnicalReportPage() {
               type="button"
               onClick={() => void list.refetch()}
               aria-label="Làm mới"
-              className="inline-flex min-h-[2.5rem] items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+              className="inline-flex items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
             >
               <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
             </button>
@@ -192,12 +189,7 @@ export function TechnicalReportPage() {
         testId="tr-filter"
       />
 
-      <section aria-label="Bộ lọc kỹ thuật" className="mb-5 overflow-hidden rounded-xl border-section border-line bg-white shadow-sm">
-        <header className="flex items-center gap-2 border-b-rule border-line bg-slate-50 px-4 py-2">
-          <SlidersHorizontal className="h-4 w-4 text-slate-500" aria-hidden="true" />
-          <h2 className="text-xs font-bold uppercase tracking-wide text-slate-600">Lọc sự cố</h2>
-        </header>
-        <div className="grid gap-3 px-4 py-3 sm:grid-cols-2 lg:grid-cols-5">
+      <section aria-label="Bộ lọc kỹ thuật" className="mb-4 grid gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-sm sm:grid-cols-2 lg:grid-cols-5">
         <label className="block text-sm font-medium text-slate-700">
           Phòng
           <select className={FIELD} value={room} disabled={!rooms} data-testid="tr-room" onChange={(e) => setRoom(e.target.value)}>
@@ -247,34 +239,39 @@ export function TechnicalReportPage() {
             ))}
           </select>
         </label>
-        <SeverityFilter value={severity} onChange={setSeverity} testId="tr-severity" />
-        </div>
-        {/* Status at a glance, over the loaded rows; a press filters by it. */}
-        <div className="flex flex-wrap items-center gap-1.5 border-t-rule border-line bg-slate-50/60 px-4 py-2.5" data-testid="tr-counts">
-          <span className="mr-1 text-xs font-bold uppercase tracking-wide text-slate-500">Tình trạng</span>
-          {BUCKETS.map((b) => (
-            <button
-              key={b.key}
-              type="button"
-              onClick={() => setBucket(bucket === b.key ? '' : b.key)}
-              aria-pressed={bucket === b.key}
-              data-testid={`tr-count-${b.key}`}
-              className={`inline-flex min-h-[2.25rem] items-center gap-1.5 rounded-lg border px-2.5 py-1 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
-                bucket === b.key ? 'border-brand-600 bg-brand-600 text-white' : 'border-line bg-white text-slate-700 hover:border-line-strong hover:bg-slate-50'
-              }`}
-            >
-              {b.label}
-              <span
-                className={`min-w-[1.5rem] rounded-full px-1.5 text-center text-xs font-bold tabular-nums ${
-                  bucket === b.key ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-800'
-                }`}
-              >
-                {all.filter((i) => inBucket(i, b.key)).length}
-              </span>
-            </button>
-          ))}
-        </div>
+        <label className="block text-sm font-medium text-slate-700">
+          Mức độ
+          <select className={FIELD} value={severity} data-testid="tr-severity" onChange={(e) => setSeverity(e.target.value as Severity | '')}>
+            <option value="">Tất cả mức độ</option>
+            {SEVERITY_OPTIONS.map((o) => (
+              <option key={o.code} value={o.code}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </section>
+
+      {/* Status at a glance, over the loaded rows; a press filters by it. */}
+      <div className="mb-5 flex flex-wrap gap-2" data-testid="tr-counts">
+        {BUCKETS.map((b) => (
+          <button
+            key={b.key}
+            type="button"
+            onClick={() => setBucket(bucket === b.key ? '' : b.key)}
+            aria-pressed={bucket === b.key}
+            data-testid={`tr-count-${b.key}`}
+            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium ${
+              bucket === b.key ? 'border-brand-600 bg-brand-50 text-brand-700' : 'border-line bg-white text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            {b.label}
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold tabular-nums text-slate-800">
+              {all.filter((i) => inBucket(i, b.key)).length}
+            </span>
+          </button>
+        ))}
+      </div>
 
       {period === null ? (
         <p className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900">
@@ -291,14 +288,13 @@ export function TechnicalReportPage() {
               message="Không có sự cố kỹ thuật nào khớp bộ lọc."
             />
           ) : (
-            <div className="space-y-7">
+            <div className="space-y-6">
               {groups.map((g) => (
                 <section key={g.branchId} data-testid={`tr-branch-${g.branchId}`} className="space-y-3">
-                  <h2 className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-[15px] font-bold text-white">
-                    <Building2 className="h-4 w-4 shrink-0 text-slate-300" aria-hidden="true" />
+                  <h2 className="flex items-center gap-2 border-b-2 border-slate-800 pb-1.5 text-base font-bold text-slate-900">
                     {g.branch ? branchLabel(g.branch) : '—'}
-                    <span className="ml-auto rounded-full bg-white/15 px-2 py-0.5 text-xs font-semibold tabular-nums">
-                      {g.rooms.reduce((n, r) => n + r.issues.length, 0)} sự cố · {g.rooms.length} khu vực
+                    <span className="text-sm font-medium text-slate-500">
+                      · {g.rooms.reduce((n, r) => n + r.issues.length, 0)} sự cố
                     </span>
                   </h2>
                   {g.rooms.map((roomGroup) => {
@@ -307,28 +303,19 @@ export function TechnicalReportPage() {
                       <article
                         key={roomGroup.key}
                         data-testid={`tr-room-${roomGroup.key}`}
-                        className="overflow-hidden rounded-xl border-section border-line bg-white shadow-sm"
+                        className="overflow-hidden rounded-2xl border border-line-strong bg-white shadow-sm"
                       >
-                        <header className="flex flex-wrap items-center justify-between gap-3 border-b-rule border-line bg-slate-50 px-4 py-2.5">
-                          <div className="flex min-w-0 flex-wrap items-center gap-2">
-                            <h3 className="text-base font-bold leading-tight text-slate-900">
-                              {roomGroup.label}
-                              <span className="ml-2 inline-block rounded-full bg-slate-200 px-2 py-0.5 align-[1px] text-xs font-semibold tabular-nums text-slate-700">
-                                {roomGroup.issues.length} vấn đề
-                              </span>
-                            </h3>
-                            {waiting.length > 0 ? (
-                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 ring-1 ring-inset ring-amber-300">
-                                {waiting.length} chưa tiếp nhận
-                              </span>
-                            ) : null}
-                          </div>
+                        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-slate-50 px-4 py-2.5">
+                          <h3 className="text-base font-bold text-slate-900">
+                            {roomGroup.label}
+                            <span className="ml-2 text-sm font-medium text-slate-600">{roomGroup.issues.length} vấn đề</span>
+                          </h3>
                           {canAssign && waiting.length > 0 ? (
                             <button
                               type="button"
                               onClick={() => setAssigning({ group: { ...roomGroup, issues: waiting }, branch: g.branch })}
                               data-testid={`tr-room-assign-${roomGroup.key}`}
-                              className="inline-flex min-h-[2.5rem] items-center gap-2 rounded-xl bg-brand-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
+                              className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-3.5 py-2 text-sm font-semibold text-white hover:bg-brand-700"
                             >
                               <UserPlus className="h-4 w-4" aria-hidden="true" />
                               Giao kỹ thuật
@@ -336,7 +323,7 @@ export function TechnicalReportPage() {
                             </button>
                           ) : null}
                         </header>
-                        <ul className="divide-y-rule divide-line-subtle">
+                        <ul className="divide-y divide-line">
                           {roomGroup.issues.map((issue) => (
                             <IssueRow
                               key={issue.id}
@@ -404,14 +391,9 @@ export function TechnicalReportPage() {
 }
 
 /**
- * One incident inside its room, in the order the eye needs it:
- *
- *   [Mức độ] [Tình trạng] Loại sự cố · tình trạng giao            [Thao tác]
- *   Mô tả sự cố
- *   Kỹ thuật viên ── the person holding it, set apart
- *   Người báo · Nguyên nhân · Kết quả … then the repair stages
- *
- * Nothing is dropped from before; it is only ordered and spaced.
+ * One incident inside its room: WHAT (type, description, cause), WHERE IT STANDS
+ * (stage badge, assignment state), WHO (reporter and time, technician), the
+ * last result and the stages — readable at a glance, nothing dropped.
  */
 function IssueRow({
   issue,
@@ -428,38 +410,32 @@ function IssueRow({
 }) {
   const last = issue.attempts[issue.attempts.length - 1];
   const open = issue.status === 'NEW' || issue.status === 'IN_PROGRESS';
-  const technician = issue.assignedTechnician?.name ?? last?.technicianName ?? null;
   const action =
-    'inline-flex min-h-[2.25rem] items-center gap-1.5 rounded-lg border border-line-strong bg-white px-2.5 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
+    'inline-flex items-center gap-1.5 rounded-lg border border-line-strong bg-white px-2.5 py-1.5 text-sm text-slate-700 hover:bg-slate-50';
   return (
-    <li
-      className={`px-4 py-3.5 ${open && issue.severity === 'HIGH' ? 'border-l-4 border-l-red-500 pl-3' : ''}`}
-      data-testid={`tr-issue-${issue.id}`}
-    >
+    <li className="px-4 py-3.5" data-testid={`tr-issue-${issue.id}`}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0 flex-1 space-y-2">
-          <div className="flex flex-wrap items-center gap-1.5">
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             <SeverityBadge severity={issue.severity} label={issue.severityLabel} />
             <IssueStageBadge issue={issue} />
             {issue.category ? (
-              <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">{issueCategoryLabel(issue)}</span>
+              <span className="rounded-md bg-slate-100 px-2 py-0.5 text-sm font-medium text-slate-800">{issueCategoryLabel(issue)}</span>
             ) : null}
-            {issue.assignmentStateLabel ? <span className="text-xs font-medium text-slate-500">{issue.assignmentStateLabel}</span> : null}
+            {issue.assignmentStateLabel ? <span className="text-sm text-slate-600">{issue.assignmentStateLabel}</span> : null}
           </div>
-          <p className="whitespace-pre-wrap break-words text-[15px] font-semibold leading-snug text-slate-900">{issue.description}</p>
+          <p className="whitespace-pre-wrap break-words text-[15px] font-medium leading-relaxed text-slate-900">{issue.description}</p>
           {issue.locationDetail ? <p className="text-sm text-slate-600">Vị trí: {issue.locationDetail}</p> : null}
-          {/* WHO HOLDS IT — the one fact a manager scans a room for. */}
-          <p className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1 text-sm ring-1 ring-inset ring-line">
-            <Wrench className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />
-            <span className="text-slate-500">Kỹ thuật:</span>
-            <span className={technician ? 'font-semibold text-slate-900' : 'font-medium italic text-amber-700'}>{technician ?? 'Chưa giao'}</span>
-          </p>
           <dl className="grid gap-x-6 gap-y-1 text-sm leading-relaxed text-slate-700 sm:grid-cols-2">
             <div>
               <dt className="inline text-slate-500">Người báo: </dt>
               <dd className="inline">
                 {issue.reporterName ?? '—'} · {formatDateTime(issue.createdAt)}
               </dd>
+            </div>
+            <div>
+              <dt className="inline text-slate-500">Kỹ thuật: </dt>
+              <dd className="inline font-medium">{issue.assignedTechnician?.name ?? last?.technicianName ?? 'Chưa giao'}</dd>
             </div>
             <div>
               <dt className="inline text-slate-500">Nguyên nhân: </dt>
@@ -486,7 +462,7 @@ function IssueRow({
           </dl>
           <IssueStageTimeline issue={issue} />
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2 lg:max-w-[15rem] lg:flex-col lg:items-stretch">
+        <div className="flex shrink-0 flex-wrap gap-2 lg:max-w-[14rem] lg:justify-end">
           <button type="button" onClick={onView} data-testid={`tr-detail-${issue.id}`} className={action}>
             <Eye className="h-4 w-4" aria-hidden="true" />
             Chi tiết
@@ -502,7 +478,7 @@ function IssueRow({
               type="button"
               onClick={onDelete}
               data-testid={`tr-delete-${issue.id}`}
-              className={`${action} !border-transparent !bg-transparent !text-rose-700 hover:!bg-rose-50`}
+              className={`${action} !border-rose-300 !text-rose-700 hover:!bg-rose-50`}
             >
               <Trash2 className="h-4 w-4" aria-hidden="true" />
               Xóa
