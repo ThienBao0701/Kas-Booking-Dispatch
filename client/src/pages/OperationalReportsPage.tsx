@@ -36,14 +36,16 @@
  * but they share one menu entry because operators call both "Báo cáo vấn đề".
  */
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, Plus, RefreshCw } from 'lucide-react';
 import {
   reportsApi,
   type ReportCategory,
   type RoomServiceType,
+  type Severity,
 } from '../api/receptionReports';
+import { SeverityFilter } from '../components/Severity';
 import { useIsReception, useShiftSession } from '../hooks/useShiftSession';
 import { Toast } from '../components/Toast';
 import { Button } from '../components/Button';
@@ -60,6 +62,7 @@ import { DeliveryTable } from '../components/HotelDelivery';
 import { useDeliveries } from '../hooks/useDeliveries';
 import { FacilityIssueBoard } from '../components/FacilityIssueBoard';
 import { MoreNote } from '../components/MoreNote';
+import { ReportSection, ReportSubsection } from '../components/ReportSection';
 import {
   GuestRequestTable,
   RoomServiceOverview,
@@ -100,6 +103,10 @@ function ReceptionJournal() {
   const [adding, setAdding] = useState(false);
   /** "Hoàn thành vấn đề" — a view beside the categories, not a sixth-and-a-half category. */
   const [toast, setToast] = useState<string | null>(null);
+  /** "Mức độ" on II, III and IV — the server filters; the overview never does. */
+  const [severity, setSeverity] = useState<Severity | ''>('');
+  const levelled = category === 'GUEST_REQUEST' || category === 'FACILITY_ISSUE' || category === 'CUSTOMER_COMPLAINT';
+  const level = levelled && severity ? severity : undefined;
 
   const options = useQuery({
     queryKey: ['reception', 'reports', 'options'],
@@ -137,8 +144,8 @@ function ReceptionJournal() {
     it. The server clock decides; this screen only asks.
   */
   const active = useQuery({
-    queryKey: [...ACTIVE_REPORTS_KEY, sessionId],
-    queryFn: () => reportsApi.active(),
+    queryKey: [...ACTIVE_REPORTS_KEY, sessionId, level ?? ''],
+    queryFn: () => reportsApi.active(level ? { severity: level } : {}),
     enabled: sessionId !== null,
     refetchOnWindowFocus: true,
   });
@@ -190,10 +197,12 @@ function ReceptionJournal() {
   const openCategory = (c: ReportCategory) => {
     setCategory(c);
     setAdding(false);
+    setSeverity('');
   };
   const openOverview = () => {
     setCategory(null);
     setAdding(false);
+    setSeverity('');
   };
   const deliveryState = {
     rows: deliveries.data?.deliveries ?? [],
@@ -286,6 +295,9 @@ function ReceptionJournal() {
         </section>
       ) : (
         <CategoryShell title={title(category)} description={CATEGORY_HINTS[category]}>
+          {levelled ? (
+            <SeverityFilter value={severity} onChange={setSeverity} testId="reception-severity" className="sm:w-60" />
+          ) : null}
           {/*
             THE FORM AND ITS TABLE ARE OUTSIDE THE QUERY STATE for the form's sake.
 
@@ -336,6 +348,7 @@ function ReceptionJournal() {
               onToast={setToast}
               reportOpen={adding}
               onCloseReport={() => setAdding(false)}
+              severity={level}
             />
           ) : null}
 
@@ -383,24 +396,31 @@ function ReceptionJournal() {
                 </Modal>
               ) : null}
               {/*
-                SIX SECTIONS, ONE PER SERVICE, stacked — not six tabs. Each holds
-                only its own service's rows; the columns follow the service, and
-                "Review" holds its two counts where the others hold a price.
+                ONE CONTAINER, ONE PART PER SERVICE — not six tabs, and not six
+                separate cards. Each part holds only its own service's rows; the
+                columns follow the service, and "Review" holds its two counts
+                where the others hold a price.
               */}
-              <div className="space-y-4" data-testid="room-service-groups">
-                {ROOM_SERVICE_ORDER.map((type) => (
-                  <RoomServiceTable
-                    key={type}
-                    rows={byCategory('ROOM_SERVICE').filter((r) => r.roomService?.serviceType === type)}
-                    serviceType={type}
-                    serviceLabel={roomServiceLabel(type)}
-                    onChanged={refresh}
-                    onToast={setToast}
-                    {...tableState}
-                    compact
-                    section={{}}
-                  />
-                ))}
+              <div data-testid="room-service-groups">
+                <ReportSection marker={CATEGORY_MARKERS.ROOM_SERVICE} title={title('ROOM_SERVICE')} count={byCategory('ROOM_SERVICE').length}>
+                  {ROOM_SERVICE_ORDER.map((type) => {
+                    const mine = byCategory('ROOM_SERVICE').filter((r) => r.roomService?.serviceType === type);
+                    return (
+                      <ReportSubsection key={type} title={roomServiceLabel(type)} count={mine.length} testId={`room-service-part-${type}`}>
+                        <RoomServiceTable
+                          rows={mine}
+                          serviceType={type}
+                          serviceLabel={roomServiceLabel(type)}
+                          onChanged={refresh}
+                          onToast={setToast}
+                          {...tableState}
+                          compact
+                          embedded
+                        />
+                      </ReportSubsection>
+                    );
+                  })}
+                </ReportSection>
               </div>
             </>
           ) : null}
@@ -530,6 +550,7 @@ function TotalMenu({
   // A category is a screen of its own, one step away from the overview.
   const away = current !== null;
   const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -657,6 +678,27 @@ function TotalMenu({
                 </button>
               );
             })}
+            {/*
+              VII is not a journal category: it is a private report to the
+              desk's superiors, on its own page — so it is a link, set apart.
+            */}
+            <div role="separator" className="my-1 border-t border-line" />
+            <button
+              ref={(el) => {
+                itemRefs.current[CATEGORY_ORDER.length] = el;
+              }}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                navigate('/app/reports/confidential');
+              }}
+              data-testid="category-CONFIDENTIAL"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-brand-50 hover:text-brand-800 focus:bg-brand-50 focus:text-brand-800 focus:outline-none"
+            >
+              <span className="text-xs font-bold text-slate-500">VII</span>
+              Báo cáo các vấn đề và tình hình quan trọng
+            </button>
           </div>
         </>
       ) : null}

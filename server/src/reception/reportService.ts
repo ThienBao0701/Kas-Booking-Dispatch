@@ -27,7 +27,7 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { HotelDeliveryDepartment, Prisma, PrismaClient, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
+import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { parseCompletionVerdict, verdictWhere, type CompletionVerdictInput } from '../completion/verdict';
@@ -37,6 +37,7 @@ import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
 import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
+import { DEFAULT_SEVERITY, SEVERITY_LABELS, parseSeverity, prioritise, severityLabel } from '../issue/severity';
 import {
   ACTIVE_PAGE_SIZE,
   ARCHIVE_PAGE_SIZE,
@@ -52,6 +53,7 @@ import {
   EXPENSE_SOURCE,
   MAX_REVIEW_COUNT,
   PAYMENT_METHOD_LABELS,
+  PAYMENT_METHODS,
   PAYMENT_SOURCES,
   ROOM_SERVICE_LABELS,
   ROOM_SERVICE_PRICE_LABEL,
@@ -59,6 +61,15 @@ import {
   isRevenueService,
 } from './reportTypes';
 import { isArchived } from './deliveryLifecycle';
+import {
+  ALLOCATION_COLUMN,
+  allocationColumns,
+  allocationsOf,
+  describeAllocations,
+  methodAmounts,
+  type Allocation,
+  type PaymentMoneyColumns,
+} from './paymentAllocation';
 import {
   assertBranchInScope,
   branchScopeOf,
@@ -169,7 +180,10 @@ export function requestContent(row: { itemType: string | null; note: string | nu
 export function reportSummary(row: ReportDetail): string {
   if (row.payment) {
     const who = row.payment.guestName?.trim() || row.payment.roomNumber?.trim() || 'Khách';
-    return `${who} · ${PAYMENT_METHOD_LABELS[row.payment.method]} ${formatVnd(row.payment.amount)}`;
+    const used = allocationsOf(row.payment);
+    return used.length > 0
+      ? `${who} · ${describeAllocations(used)}`
+      : `${who} · ${PAYMENT_METHOD_LABELS[row.payment.method]} ${formatVnd(row.payment.amount)}`;
   }
   if (row.guestRequest) {
     const state = row.guestRequest.completedAt ? 'đã hoàn thành' : 'đã tiếp nhận';
@@ -268,32 +282,7 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
     voidReason: row.voidReason,
 
     payment: row.payment
-      ? {
-          ezCode: row.payment.ezCode,
-          source: row.payment.source,
-          guestName: row.payment.guestName,
-          roomNumber: row.payment.roomNumber,
-          method: row.payment.method,
-          methodLabel: PAYMENT_METHOD_LABELS[row.payment.method],
-          amount: row.payment.amount,
-          /*
-            "Công nợ" AS THE COLUMN REPORTS IT: a row whose METHOD is Công nợ
-            holds its debt in `amount` (the method decides where the amount
-            belongs), and an older row carried a debt beside its cash in the
-            legacy `receivable` column. Both are summed here, once, so the
-            screen, the PDF and the XLSX read one number.
-          */
-          receivable: paymentDebt(row.payment),
-          expense: row.payment.expense,
-          note: row.payment.note,
-          /* The money columns the table shows, already split by method so
-             the screen, the PDF and the XLSX cannot disagree about which column
-             a row belongs in. */
-          cash: row.payment.method === 'CASH' ? row.payment.amount : 0,
-          transfer: row.payment.method === 'TRANSFER' ? row.payment.amount : 0,
-          card: row.payment.method === 'CARD' ? row.payment.amount : 0,
-          debt: row.payment.method === 'DEBT' ? row.payment.amount : 0,
-        }
+      ? serializePayment(row.payment)
       : null,
 
     guestRequest: row.guestRequest
@@ -319,6 +308,9 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
           resolution: row.guestRequest.resolution,
           reportVerdict: row.guestRequest.reportVerdict,
           incorrectReason: row.guestRequest.incorrectReason,
+          /** "Mức độ"; null (with "Chưa phân mức") only on requests recorded before it existed. */
+          severity: row.guestRequest.severity,
+          severityLabel: severityLabel(row.guestRequest.severity),
         }
       : null,
 
@@ -345,6 +337,8 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
           resolution: row.complaint.resolution,
           reportVerdict: row.complaint.reportVerdict,
           incorrectReason: row.complaint.incorrectReason,
+          severity: row.complaint.severity,
+          severityLabel: severityLabel(row.complaint.severity),
         }
       : null,
 
@@ -396,9 +390,44 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
   };
 }
 
-/** The debt a payment row reports: its own amount if it IS a debt, plus any legacy column. */
-export function paymentDebt(p: { method: string; amount: number; receivable: number }): number {
-  return p.receivable + (p.method === 'DEBT' ? p.amount : 0);
+/**
+ * A payment as every screen and export reads it — ONE row, whatever number of
+ * methods paid it. The money columns are already split by method so the screen,
+ * the PDF and the XLSX cannot disagree about which column holds what.
+ */
+function serializePayment(p: NonNullable<ReportDetail['payment']>) {
+  const amounts = methodAmounts(p);
+  const used = allocationsOf(p);
+  return {
+    ezCode: p.ezCode,
+    source: p.source,
+    guestName: p.guestName,
+    roomNumber: p.roomNumber,
+    /** The primary method (the largest allocation). */
+    method: p.method,
+    methodLabel: PAYMENT_METHOD_LABELS[p.method],
+    /** "Tổng tiền thu". */
+    amount: p.amount,
+    /** Every method used, in the selector's order — one entry per method. */
+    allocations: used.map((a) => ({ method: a.method, label: PAYMENT_METHOD_LABELS[a.method], amount: a.amount })),
+    /*
+      "Công nợ" AS THE COLUMN REPORTS IT: the debt allocation, plus the legacy
+      `receivable` column an older row carried beside its cash. Both are summed
+      here, once, so the screen, the PDF and the XLSX read one number.
+    */
+    receivable: paymentDebt(p),
+    expense: p.expense,
+    note: p.note,
+    cash: amounts.CASH,
+    transfer: amounts.TRANSFER,
+    card: amounts.CARD,
+    debt: amounts.DEBT,
+  };
+}
+
+/** The debt a payment row reports: its debt allocation, plus any legacy column. */
+export function paymentDebt(p: PaymentMoneyColumns & { receivable: number }): number {
+  return p.receivable + methodAmounts(p).DEBT;
 }
 
 export type SerializedReport = ReturnType<typeof serializeReport>;
@@ -536,6 +565,39 @@ function assertExpenseRow(row: { method: string; amount: number; receivable: num
   }
 }
 
+/** The most methods one transaction can carry: each of the four, once. */
+const MAX_ALLOCATIONS = PAYMENT_METHODS.length;
+
+/**
+ * "PHƯƠNG THỨC THANH TOÁN" — the allocations of ONE transaction, validated.
+ *
+ * Each method at most once (a second "Tiền mặt" line is refused, never merged
+ * silently into a figure nobody typed), every amount a whole non-negative number
+ * of đồng, and together EXACTLY the "Tổng tiền thu". The browser checks the same
+ * sum before it lets anyone press Lưu; this is the check that counts.
+ */
+export function parseAllocations(raw: unknown, total: number): Allocation[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw ApiError.validation('Vui lòng chọn ít nhất một phương thức thanh toán.');
+  }
+  if (raw.length > MAX_ALLOCATIONS) throw ApiError.validation('Mỗi phương thức chỉ được chọn một lần.');
+  const seen = new Set<string>();
+  const allocations = raw.map((item) => {
+    const entry = (item ?? {}) as { method?: unknown; amount?: unknown };
+    const method = assertMethod(entry.method);
+    if (seen.has(method)) throw ApiError.validation('Mỗi phương thức chỉ được chọn một lần.');
+    seen.add(method);
+    return { method, amount: assertMoney(entry.amount, PAYMENT_METHOD_LABELS[method]) };
+  });
+  const sum = allocations.reduce((n, a) => n + a.amount, 0);
+  if (sum !== total) {
+    throw ApiError.validation(
+      `Tổng các phương thức (${formatVnd(sum)}) phải bằng tổng tiền thu (${formatVnd(total)}).`,
+    );
+  }
+  return allocations;
+}
+
 /** A new payment's money fields, with the "Chi tiền" rule applied. */
 function paymentMoney(p: PaymentInput) {
   const source = assertSource(p.source);
@@ -547,15 +609,27 @@ function paymentMoney(p: PaymentInput) {
       expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
     };
     assertExpenseRow(row);
-    return { source, ...row };
+    // A payout collects nothing: every allocation is zero.
+    return { source, ...row, ...allocationColumns([{ method: 'CASH', amount: 0 }]) };
   }
+  const amount = assertMoney(p.amount, 'Tổng tiền thu');
+  /*
+    ONE TRANSACTION, ONE ROW. The older single-method body ({ method, amount })
+    is the one-allocation case of the same thing, so both shapes land here.
+  */
+  const allocations = parseAllocations(p.allocations ?? [{ method: p.method, amount }], amount);
   return {
     source,
-    method: p.method,
-    amount: assertMoney(p.amount, 'Thu tiền'),
+    amount,
+    ...allocationColumns(allocations),
     receivable: assertMoney(p.receivable ?? 0, 'Công nợ'),
     expense: assertMoney(p.expense ?? 0, 'Chi tiền'),
   };
+}
+
+/** A new record's "Mức độ": the one it names, or Trung bình. */
+function newSeverity(raw: unknown): IssueSeverity {
+  return raw === undefined || raw === null ? DEFAULT_SEVERITY : parseSeverity(raw);
 }
 
 /** The longest stay one "Bán phòng" or "Upgrade" row may record. */
@@ -574,9 +648,12 @@ export interface PaymentInput {
   ezCode?: string;
   source?: string;
   guestName?: string;
-  method: 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
-  /** "Thu tiền" — under Công nợ it is the amount owed; it never moves the drawer. */
+  /** The single method of the older body; `allocations` replaces it. */
+  method?: 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
+  /** "Tổng tiền thu" — the whole transaction, whatever paid it. */
   amount: number;
+  /** "Phương thức thanh toán" — one line per method, summing to `amount`. */
+  allocations?: { method: 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT'; amount: number }[];
   /** LEGACY second column; the form no longer sends it. */
   receivable?: number;
   expense?: number;
@@ -618,6 +695,8 @@ export interface GuestRequestInput {
   guestName: string;
   ezCode?: string;
   note: string;
+  /** "Mức độ" — Trung bình when omitted. */
+  severity?: IssueSeverity;
 }
 
 export interface FacilityInput {
@@ -629,6 +708,8 @@ export interface ComplaintInput {
   guestName: string;
   ezCode?: string;
   description: string;
+  /** "Mức độ" — Trung bình when omitted. */
+  severity?: IssueSeverity;
 }
 
 export interface RoomServiceInput {
@@ -847,6 +928,7 @@ async function buildCreateData(
             guestName: required(input.guestRequest.guestName, 'tên khách'),
             ezCode: optional(input.guestRequest.ezCode),
             note: required(input.guestRequest.note, 'nội dung'),
+            severity: newSeverity(input.guestRequest.severity),
           },
         },
       };
@@ -880,6 +962,7 @@ async function buildCreateData(
             guestName: required(input.complaint.guestName, 'tên khách'),
             ezCode: optional(input.complaint.ezCode),
             description: required(input.complaint.description, 'mô tả'),
+            severity: newSeverity(input.complaint.severity),
           },
         },
       };
@@ -935,6 +1018,8 @@ export interface ListReportsFilter {
   to?: Date;
   /** Voided rows are INCLUDED by default — they are part of the audit record. */
   includeVoided?: boolean;
+  /** "Mức độ" — requests, complaints and facility entries of that level only. */
+  severity?: IssueSeverity;
   take?: number;
 }
 
@@ -961,7 +1046,43 @@ export function reportWhere(
     };
   }
   if (filter.includeVoided === false) where.voidedAt = null;
+  if (filter.severity) where.AND = [severityWhere(filter.severity)];
   return where;
+}
+
+/**
+ * The records of one level. Only the three categories that carry one can match:
+ * a facility entry by its incident's level — the journal points at the incident
+ * and never holds a copy of it.
+ */
+export function severityWhere(severity: IssueSeverity): Prisma.ReceptionOperationalReportWhereInput {
+  return {
+    OR: [
+      { guestRequest: { is: { severity } } },
+      { complaint: { is: { severity } } },
+      { facility: { is: { issue: { severity } } } },
+    ],
+  };
+}
+
+/** Whether a II / IV record still needs doing — not completed, not withdrawn. */
+function journalOpen(row: ReportDetail): boolean {
+  const detail = row.guestRequest ?? row.complaint;
+  return detail !== null && detail.completedAt === null && row.voidedAt === null;
+}
+
+/**
+ * II and IV in their default order: what still needs doing first, by level,
+ * then what was finished, newest first (see `prioritise`). Other categories
+ * are left in their order.
+ */
+export function prioritiseJournal(rows: ReportDetail[]): ReportDetail[] {
+  return prioritise(
+    rows,
+    journalOpen,
+    (r) => r.guestRequest?.severity ?? r.complaint?.severity ?? null,
+    (r) => r.createdAt,
+  );
 }
 
 export async function listReports(
@@ -1023,12 +1144,11 @@ export async function listActiveJournal(
   now: Date,
   currentShiftSessionId: string | null,
   client: PrismaClient = prisma,
+  severity?: IssueSeverity,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
-  return pageByCategory(
-    activeJournalWhere(reportVisibilityWhere(actor), now, currentShiftSessionId),
-    ACTIVE_PAGE_SIZE,
-    client,
-  );
+  const where = activeJournalWhere(reportVisibilityWhere(actor), now, currentShiftSessionId);
+  const page = await pageByCategory(severity ? { AND: [where, severityWhere(severity)] } : where, ACTIVE_PAGE_SIZE, client);
+  return { ...page, reports: prioritiseJournal(page.reports) };
 }
 
 /**
@@ -1046,6 +1166,8 @@ export async function listArchivedJournal(
     verdict?: ReportVerdict;
     /** A supervisor's one branch (inside its scope); a receptionist's is always its own. */
     branchId?: number;
+    /** "Mức độ"; every level when absent. */
+    severity?: IssueSeverity;
   } = {},
   client: PrismaClient = prisma,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
@@ -1055,6 +1177,7 @@ export async function listArchivedJournal(
       AND: [
         where,
         ...(options.period ? [journalPeriodWhere(options.period)] : []),
+        ...(options.severity ? [severityWhere(options.severity)] : []),
         ...(options.verdict
           ? [
               {
@@ -1150,16 +1273,18 @@ async function loadOwn(
  * more, so an older row keeps them exactly as recorded.
  */
 const EDITABLE: Record<CreateReportInput['category'], readonly string[]> = {
-  PAYMENT: ['ezCode', 'source', 'guestName', 'method', 'amount', 'receivable', 'expense', 'note'],
+  // The money itself ("Tổng tiền thu" and its methods) is judged as a whole by
+  // `correctPaymentMoney`, never field by field.
+  PAYMENT: ['ezCode', 'source', 'guestName', 'receivable', 'expense', 'note'],
   // `resolution` is absent on purpose: it is written only by `completeReport`.
-  GUEST_REQUEST: ['guestName', 'ezCode', 'note'],
+  GUEST_REQUEST: ['guestName', 'ezCode', 'note', 'severity'],
   /*
     A facility entry has NOTHING TO CORRECT. Its only field is the incident it
     points at, and pointing it somewhere else would not be a correction — it
     would be a different report. The wrong one is voided and a new one written.
   */
   FACILITY_ISSUE: [],
-  CUSTOMER_COMPLAINT: ['guestName', 'ezCode', 'description'],
+  CUSTOMER_COMPLAINT: ['guestName', 'ezCode', 'description', 'severity'],
   ROOM_SERVICE: [
     'guestName',
     'ezCode',
@@ -1321,6 +1446,8 @@ export async function updateReport(
         ? assertMoney(raw, moneyLabel(field))
         : field in COUNT_FIELDS
           ? assertReviewCount(raw, COUNT_FIELDS[field]!)
+          : field === 'severity'
+          ? parseSeverity(raw)
           : field === 'method'
           ? assertMethod(raw)
           : field === 'department'
@@ -1340,7 +1467,13 @@ export async function updateReport(
       if (field === 'source') assertSource(next as string | null);
       data[field] = next;
       guard[field] = before;
-      changes.push({ field, oldValue: auditValue(before), newValue: auditValue(next) });
+      // A level is audited in words ("Trung bình → Cao"), like every other value a person reads.
+      const said = (v: unknown) => (field === 'severity' && v ? SEVERITY_LABELS[v as IssueSeverity] : auditValue(v));
+      changes.push({ field, oldValue: said(before), newValue: said(next) });
+    }
+
+    if (current.category === 'PAYMENT' && fresh.payment) {
+      correctPaymentMoney(fresh.payment, supplied, data, guard, changes);
     }
 
     if (changes.length === 0) return fresh.id;
@@ -1434,6 +1567,74 @@ export async function updateReport(
       include: REPORT_INCLUDE,
     }),
   );
+}
+
+/**
+ * THE MONEY OF A CORRECTED PAYMENT — "Tổng tiền thu" and its methods, judged
+ * TOGETHER, so a correction can add a method, change an amount or remove one,
+ * and the row still balances. Still one row: nothing here creates another.
+ *
+ * Audited as two readable lines, never as four column names: "amount" when the
+ * total changed and "allocations" when the split did ("Tiền mặt 1.000.000 ₫ →
+ * Tiền mặt 500.000 ₫ + Chuyển khoản 500.000 ₫"). The old values are the row's as
+ * read inside the transaction — a legacy row's split is its one method — and
+ * every stored money column goes into the guard.
+ *
+ * The older single-method body ({ method, amount }) still corrects a row paid
+ * one way. A row paid several ways must be corrected by its allocations: a bare
+ * new total could not say which method it belongs to.
+ */
+function correctPaymentMoney(
+  stored: PaymentMoneyColumns,
+  supplied: Record<string, unknown>,
+  data: Record<string, unknown>,
+  guard: Record<string, unknown>,
+  changes: { field: string; oldValue: string | null; newValue: string | null }[],
+): void {
+  const touches = 'allocations' in supplied || 'method' in supplied || 'amount' in supplied;
+  if (!touches) return;
+  const before = allocationsOf(stored);
+  let total: number;
+  let next: Allocation[];
+  if (supplied.allocations !== undefined) {
+    total = supplied.amount !== undefined ? assertMoney(supplied.amount, 'Tổng tiền thu') : sumOf(supplied.allocations);
+    next = parseAllocations(supplied.allocations, total);
+  } else {
+    total = supplied.amount !== undefined ? assertMoney(supplied.amount, 'Tổng tiền thu') : stored.amount;
+    // A bare total cannot say which of several methods it belongs to — but a
+    // zero total (the row becoming a "Chi tiền" payout) belongs to none.
+    if (before.length > 1 && total !== 0) {
+      throw ApiError.validation('Giao dịch có nhiều phương thức — hãy sửa số tiền của từng phương thức.');
+    }
+    const method = supplied.method !== undefined ? assertMethod(supplied.method) : stored.method;
+    next = parseAllocations([{ method, amount: total }], total);
+  }
+  const columns = allocationColumns(next);
+  const after = allocationsOf({ ...columns, amount: total });
+  // One method before and after, the same one: only the total moved, and the
+  // "amount" line says so — a second line repeating it would be noise.
+  const sameSingleMethod =
+    before.length <= 1 && after.length <= 1 && (before[0]?.method ?? stored.method) === (after[0]?.method ?? columns.method);
+  const splitChanged = !sameSingleMethod && describeAllocations(before) !== describeAllocations(after);
+  const methodChanged = columns.method !== stored.method;
+  if (total === stored.amount && !splitChanged && !methodChanged) return;
+
+  Object.assign(data, { amount: total, ...columns });
+  guard.amount = stored.amount;
+  guard.method = stored.method;
+  for (const column of Object.values(ALLOCATION_COLUMN)) guard[column] = stored[column];
+  if (total !== stored.amount) {
+    changes.push({ field: 'amount', oldValue: auditValue(stored.amount), newValue: auditValue(total) });
+  }
+  if (splitChanged || methodChanged) {
+    changes.push({ field: 'allocations', oldValue: describeAllocations(before), newValue: describeAllocations(after) });
+  }
+}
+
+/** The sum of allocations as sent, for a body that names no total of its own. */
+function sumOf(raw: unknown): number {
+  if (!Array.isArray(raw)) return 0;
+  return raw.reduce((n: number, item) => n + (typeof item?.amount === 'number' ? item.amount : 0), 0);
 }
 
 function moneyLabel(field: string): string {

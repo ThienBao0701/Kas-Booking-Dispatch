@@ -14,6 +14,9 @@
  * an entry category. See `FacilityIssueBoard.tsx`.
  */
 import { useState } from 'react';
+import { SeverityPicker } from './Severity';
+import { DEFAULT_SEVERITY } from '../lib/severity';
+import type { Severity } from '../api/receptionReports';
 import { useMutation } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import {
@@ -161,10 +164,12 @@ export function GuestRequestForm({
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
   const [content, setContent] = useState('');
+  const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
   const { mutation, error } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setContent('');
+    setSeverity(DEFAULT_SEVERITY);
     await onCreated();
   }, branchId);
 
@@ -184,6 +189,7 @@ export function GuestRequestForm({
             guestName: guestName.trim(),
             ezCode: ezCode.trim() || undefined,
             note: content.trim(),
+            severity,
           },
         })
       }
@@ -197,6 +203,7 @@ export function GuestRequestForm({
         />
         <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="guest-request-ez" />
       </div>
+      <SeverityPicker value={severity} onChange={setSeverity} testId="guest-request-severity" />
       <TextArea
         label="Nội dung"
         value={content}
@@ -211,8 +218,7 @@ export function GuestRequestForm({
 /* ------------------- Vấn đề về chất lượng và dịch vụ ------------------- */
 
 /**
- * TÊN KHÁCH, MÃ EZ, MÔ TẢ. No room, no staff field (the shift says who), no
- * priority. A new report is "Đã tiếp nhận"; completing it — with an optional
+ * TÊN KHÁCH, MÃ EZ, MỨC ĐỘ, MÔ TẢ. No room, no staff field (the shift says who). A new report is "Đã tiếp nhận"; completing it — with an optional
  * "Hướng xử lý" — is a separate step on the table.
  */
 export function ServiceQualityForm({
@@ -230,10 +236,12 @@ export function ServiceQualityForm({
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
   const [description, setDescription] = useState('');
+  const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
   const { mutation, error } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setDescription('');
+    setSeverity(DEFAULT_SEVERITY);
     await onCreated();
   }, branchId);
 
@@ -253,6 +261,7 @@ export function ServiceQualityForm({
             guestName: guestName.trim(),
             ezCode: ezCode.trim() || undefined,
             description: description.trim(),
+            severity,
           },
         })
       }
@@ -266,6 +275,7 @@ export function ServiceQualityForm({
         />
         <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="service-quality-ez" />
       </div>
+      <SeverityPicker value={severity} onChange={setSeverity} testId="service-quality-severity" />
       <TextArea
         label="Mô tả"
         value={description}

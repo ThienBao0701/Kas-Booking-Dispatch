@@ -455,8 +455,8 @@ describe('adding a transaction', () => {
     await userEvent.type(await screen.findByTestId('payment-ez'), 'EZ999');
     await userEvent.selectOptions(screen.getByTestId('payment-source'), 'Booking');
     await userEvent.type(screen.getByTestId('payment-guest'), 'Khách B');
-    await userEvent.selectOptions(screen.getByTestId('payment-method'), 'TRANSFER');
-    await userEvent.type(screen.getByTestId('payment-amount'), '3150000');
+    await userEvent.selectOptions(screen.getByTestId('payment-method-0'), 'TRANSFER');
+    await userEvent.type(screen.getByTestId('payment-total'), '3150000');
     await userEvent.type(screen.getByTestId('payment-expense'), '100000');
     await userEvent.click(screen.getByTestId('payment-add'));
 
@@ -490,8 +490,8 @@ describe('adding a transaction', () => {
     await openPaymentForm();
 
     await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Chi tiền');
-    expect(screen.queryByTestId('payment-amount')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('payment-method')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('payment-total')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('payment-method-0')).not.toBeInTheDocument();
     expect(screen.getByTestId('payment-payout-hint')).toBeInTheDocument();
     // A payout needs its amount above zero.
     expect(screen.getByTestId('payment-add')).toBeDisabled();
@@ -509,7 +509,7 @@ describe('adding a transaction', () => {
     await openPaymentForm();
     expect(await screen.findByTestId('payment-add')).toBeDisabled();
 
-    await userEvent.type(screen.getByTestId('payment-amount'), '1000');
+    await userEvent.type(screen.getByTestId('payment-total'), '1000');
     expect(screen.getByTestId('payment-add')).toBeEnabled();
   });
 
@@ -547,7 +547,7 @@ describe('correcting a row', () => {
     await openPayment();
 
     await userEvent.click(await screen.findByTestId('payment-edit-p1'));
-    const amount = await screen.findByTestId('payment-edit-amount-p1');
+    const amount = await screen.findByTestId('payment-edit-alloc-p1-total');
     expect(amount).toHaveValue('300.000');
 
     await userEvent.clear(amount);
@@ -571,7 +571,7 @@ describe('correcting a row', () => {
     await userEvent.click(await screen.findByTestId('payment-edit-p1'));
     await userEvent.click(await screen.findByTestId('payment-cancel-p1'));
     expect(await screen.findByTestId('payment-row-p1')).toBeInTheDocument();
-    expect(screen.queryByTestId('payment-edit-amount-p1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('payment-edit-alloc-p1-total')).not.toBeInTheDocument();
   });
 
   it('marks a row that has been corrected', async () => {
@@ -736,7 +736,7 @@ describe('the opening-cash reminder', () => {
 
     await userEvent.click(screen.getByTestId('category-add'));
     await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Walking');
-    await userEvent.type(screen.getByTestId('payment-amount'), '150000');
+    await userEvent.type(screen.getByTestId('payment-total'), '150000');
     await userEvent.click(screen.getByTestId('payment-add'));
     await waitFor(() => expect(posted).toHaveLength(1));
   });
@@ -764,7 +764,7 @@ describe('"Nguồn" is a controlled select', () => {
     expect(options).toEqual(['Booking', 'Agoda', 'Ctrip', 'Traveloka', 'Expedia', 'Walking', 'Khác', 'Chi tiền']);
 
     await userEvent.selectOptions(source, 'Agoda');
-    await userEvent.type(screen.getByTestId('payment-amount'), '100000');
+    await userEvent.type(screen.getByTestId('payment-total'), '100000');
     await userEvent.click(screen.getByTestId('payment-add'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
@@ -791,7 +791,7 @@ describe('"Nguồn" is a controlled select', () => {
     );
     await openPaymentForm();
 
-    await userEvent.type(await screen.findByTestId('payment-amount'), '100000');
+    await userEvent.type(await screen.findByTestId('payment-total'), '100000');
     await userEvent.click(screen.getByTestId('payment-add'));
     expect(await screen.findByTestId('payment-source-error')).toHaveTextContent('Vui lòng chọn nguồn.');
     expect(screen.getByTestId('payment-source')).toHaveAttribute('aria-invalid', 'true');
@@ -853,8 +853,8 @@ describe('Công nợ is a method, and the note travels with the payment', () => 
 
     // "Nguồn" is required for a new payment; "Khác" is for what is no booking channel.
     await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Khác');
-    await userEvent.selectOptions(screen.getByTestId('payment-method'), 'DEBT');
-    await userEvent.type(screen.getByTestId('payment-amount'), '750000');
+    await userEvent.selectOptions(screen.getByTestId('payment-method-0'), 'DEBT');
+    await userEvent.type(screen.getByTestId('payment-total'), '750000');
     await userEvent.type(screen.getByTestId('payment-note'), 'Công ty chuyển khoản cuối tháng');
     await userEvent.click(screen.getByTestId('payment-add'));
 
@@ -870,7 +870,7 @@ describe('Công nợ is a method, and the note travels with the payment', () => 
     await openPaymentForm();
     expect(await screen.findByTestId('payment-add')).toBeDisabled();
     await userEvent.selectOptions(screen.getByTestId('payment-source'), 'Walking');
-    await userEvent.type(screen.getByTestId('payment-amount'), '1000');
+    await userEvent.type(screen.getByTestId('payment-total'), '1000');
     expect(screen.getByTestId('payment-add')).toBeEnabled();
   });
 
@@ -940,13 +940,13 @@ describe('the "Thêm giao dịch" dialog', () => {
     // Row 2: Phương thức | Thu tiền | Chi tiền — and NO separate Công nợ box:
     // Công nợ is one of the four payment methods.
     const money = within(dialog).getByTestId('payment-row-money');
-    const inMoney = ['payment-method', 'payment-amount', 'payment-expense'];
+    const inMoney = ['payment-method-0', 'payment-total', 'payment-expense'];
     for (const id of inMoney) expect(within(money).getByTestId(id)).toBeInTheDocument();
     expect(money.className).toMatch(/\bsm:grid-cols-3\b/);
     expect(within(dialog).queryByTestId('payment-receivable')).not.toBeInTheDocument();
-    expect(within(dialog).getByLabelText(/Thu tiền/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Tổng tiền thu/)).toBeInTheDocument();
     expect(within(dialog).queryByLabelText('Số tiền')).not.toBeInTheDocument();
-    const methods = within(within(money).getByTestId('payment-method'))
+    const methods = within(within(money).getByTestId('payment-method-0'))
       .getAllByRole('option')
       .map((o) => o.textContent);
     expect(methods).toEqual(['Tiền mặt', 'Chuyển khoản', 'Cà thẻ', 'Công nợ']);
@@ -978,7 +978,7 @@ describe('the "Thêm giao dịch" dialog', () => {
     const fetchMock = installApiMock(shellRoutes());
     await openPaymentForm();
 
-    await userEvent.type(await screen.findByTestId('payment-amount'), '500000');
+    await userEvent.type(await screen.findByTestId('payment-total'), '500000');
     await userEvent.click(screen.getByTestId('payment-cancel'));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -1002,5 +1002,99 @@ describe('the "Thêm giao dịch" dialog', () => {
     await userEvent.click(within(empty).getByTestId('payment-empty-add'));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByTestId('payment-form')).toBeInTheDocument();
+  });
+});
+
+describe('one transaction, several methods', () => {
+  it('splits 1.000.000 into 500.000 cash and 500.000 transfer — ONE transaction, sent once', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: payment() } };
+        },
+      }),
+    );
+    await openPaymentForm();
+
+    await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Ctrip');
+    await userEvent.type(screen.getByTestId('payment-total'), '1000000');
+    // One method: its amount follows the total.
+    expect(screen.getByTestId('payment-amount-0')).toHaveValue('1.000.000');
+    await userEvent.clear(screen.getByTestId('payment-amount-0'));
+    await userEvent.type(screen.getByTestId('payment-amount-0'), '500000');
+    expect(screen.getByTestId('payment-balance')).toHaveTextContent('Còn thiếu 500.000');
+    expect(screen.getByTestId('payment-add')).toBeDisabled();
+
+    // "+ Thêm phương thức": the next method, with what is left.
+    await userEvent.click(screen.getByTestId('payment-add-method'));
+    const second = screen.getByTestId('payment-method-1');
+    expect(second).toHaveValue('TRANSFER');
+    expect(screen.getByTestId('payment-amount-1')).toHaveValue('500.000');
+    // A method already used is not offered on another line.
+    expect(within(second).queryByRole('option', { name: 'Tiền mặt' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('payment-balance')).toHaveTextContent('Khớp tổng tiền thu');
+
+    await userEvent.click(screen.getByTestId('payment-add'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      category: 'PAYMENT',
+      payment: {
+        source: 'Ctrip',
+        amount: 1000000,
+        allocations: [
+          { method: 'CASH', amount: 500000 },
+          { method: 'TRANSFER', amount: 500000 },
+        ],
+        expense: 0,
+      },
+    });
+  });
+
+  it('will not save a split that does not add up, and X removes a method', async () => {
+    installApiMock(shellRoutes());
+    await openPaymentForm();
+    await userEvent.selectOptions(await screen.findByTestId('payment-source'), 'Agoda');
+    await userEvent.type(screen.getByTestId('payment-total'), '900000');
+    await userEvent.click(screen.getByTestId('payment-add-method'));
+    await userEvent.clear(screen.getByTestId('payment-amount-1'));
+    await userEvent.type(screen.getByTestId('payment-amount-1'), '100000');
+    expect(screen.getByTestId('payment-balance')).toHaveTextContent('Vượt 100.000');
+    expect(screen.getByTestId('payment-add')).toBeDisabled();
+    await userEvent.click(screen.getByTestId('payment-remove-1'));
+    expect(screen.queryByTestId('payment-method-1')).not.toBeInTheDocument();
+    // Back to one method: it carries the whole total again.
+    expect(screen.getByTestId('payment-amount-0')).toHaveValue('900.000');
+    expect(screen.getByTestId('payment-add')).toBeEnabled();
+  });
+
+  it('corrects a row in place: adds a method, keeps it ONE row, sends the allocations', async () => {
+    const patched: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes({
+        'PATCH /api/reception/reports/p1': (init) => {
+          patched.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { report: payment() } };
+        },
+      }),
+    );
+    await openPayment();
+    await userEvent.click(await screen.findByTestId('payment-edit-p1'));
+    expect(screen.getByTestId('payment-edit-alloc-p1-total')).toHaveValue('300.000');
+    await userEvent.clear(screen.getByTestId('payment-edit-alloc-p1-amount-0'));
+    await userEvent.type(screen.getByTestId('payment-edit-alloc-p1-amount-0'), '100000');
+    await userEvent.click(screen.getByTestId('payment-edit-alloc-p1-add-method'));
+    await userEvent.selectOptions(screen.getByTestId('payment-edit-alloc-p1-method-1'), 'CARD');
+    await userEvent.click(screen.getByTestId('payment-save-p1'));
+    await waitFor(() => expect(patched).toHaveLength(1));
+    expect((patched[0] as { payment: Record<string, unknown> }).payment).toMatchObject({
+      amount: 300000,
+      allocations: [
+        { method: 'CASH', amount: 100000 },
+        { method: 'CARD', amount: 200000 },
+      ],
+    });
+    expect(screen.queryAllByTestId(/^payment-row-/)).toHaveLength(1);
   });
 });

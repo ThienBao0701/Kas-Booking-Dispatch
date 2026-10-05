@@ -12,6 +12,15 @@ export type ReportCategory =
 
 export type PaymentMethod = 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
 
+/** "Mức độ" — on requests, incidents and service-quality reports only. */
+export type Severity = 'HIGH' | 'MEDIUM' | 'LOW';
+
+/** One method's part of ONE transaction. */
+export interface PaymentAllocation {
+  method: PaymentMethod;
+  amount: number;
+}
+
 /** "Bộ phận" of a delivered item. */
 export type DeliveryDepartment = 'RECEPTION' | 'HOUSEKEEPING' | 'TECHNICAL';
 
@@ -36,6 +45,8 @@ export interface ReportOptions {
   deliveryTitle: string;
   /** How long a completed delivery stays active before "Hoàn thành vấn đề". */
   deliveryArchiveHours: number;
+  /** Cao / Trung bình / Thấp, in priority order. */
+  severities?: { code: Severity; label: string }[];
 }
 
 export interface ReportAudit {
@@ -55,9 +66,13 @@ export interface PaymentDetail {
   source: string | null;
   guestName: string | null;
   roomNumber: string | null;
+  /** The primary method (the largest allocation). */
   method: PaymentMethod;
   methodLabel: string;
+  /** "Tổng tiền thu". */
   amount: number;
+  /** Every method that paid it, in the selector's order — one per method. */
+  allocations: (PaymentAllocation & { label: string })[];
   receivable: number;
   expense: number;
   note: string | null;
@@ -93,6 +108,9 @@ export interface GuestRequestDetail {
   /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
   reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
   incorrectReason?: string | null;
+  /** "Mức độ"; null ("Chưa phân mức") on requests recorded before it existed. */
+  severity: Severity | null;
+  severityLabel: string;
 }
 
 /**
@@ -127,6 +145,8 @@ export interface ComplaintDetail {
   /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
   reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
   incorrectReason?: string | null;
+  severity: Severity | null;
+  severityLabel: string;
 }
 
 export interface RoomServiceDetail {
@@ -239,8 +259,12 @@ export interface NewPaymentInput {
   ezCode?: string;
   source?: string;
   guestName?: string;
-  method: PaymentMethod;
+  /** The older single-method body; `allocations` is the current one. */
+  method?: PaymentMethod;
+  /** "Tổng tiền thu". */
   amount: number;
+  /** One line per method, summing to `amount`. */
+  allocations?: PaymentAllocation[];
   /** LEGACY; the form no longer sends it — Công nợ is a method now. */
   receivable?: number;
   expense?: number;
@@ -252,12 +276,14 @@ export interface NewGuestRequestInput {
   guestName: string;
   ezCode?: string;
   note: string;
+  severity?: Severity;
 }
 
 export interface NewComplaintInput {
   guestName: string;
   ezCode?: string;
   description: string;
+  severity?: Severity;
 }
 
 export interface NewRoomServiceInput {
@@ -346,7 +372,8 @@ export const reportsApi = {
    * Requests and service-quality reports, across shifts: unfinished at any age,
    * or completed within 12 hours of receipt. The server clock decides.
    */
-  active: () => api.get<ActiveJournalResponse>('/reception/reports/active'),
+  active: (params: { severity?: Severity } = {}) =>
+    api.get<ActiveJournalResponse>(`/reception/reports/active${query(params)}`),
 
   /**
    * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —
@@ -354,7 +381,14 @@ export const reportsApi = {
    */
   /** `branchId`: a reception manager narrowing to one branch of its scope. */
   archive: (
-    params: { from?: string; to?: string; branchId?: number; shiftType?: string; verdict?: 'CORRECT' | 'INCORRECT' } = {},
+    params: {
+      from?: string;
+      to?: string;
+      branchId?: number;
+      shiftType?: string;
+      verdict?: 'CORRECT' | 'INCORRECT';
+      severity?: Severity;
+    } = {},
   ) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
@@ -446,6 +480,8 @@ export const adminReportsApi = {
     category?: ReportCategory;
     from?: string;
     to?: string;
+    /** "Mức độ" — on II, III and IV. */
+    severity?: Severity;
   }) =>
     api.get<AdminOperationalResponse>(`/admin/reports/operational${query(params)}`),
 };

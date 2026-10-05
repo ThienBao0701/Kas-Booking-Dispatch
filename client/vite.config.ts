@@ -99,6 +99,8 @@ export default defineConfig({
         // No runtime caching at all: operational/API data is always fetched live.
         runtimeCaching: [],
         cleanupOutdatedCaches: true,
+        // Web Push: the "push" and "notificationclick" handlers (public/push-sw.js).
+        importScripts: ['push-sw.js'],
       },
       devOptions: { enabled: false },
     }),

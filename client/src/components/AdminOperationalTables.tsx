@@ -26,6 +26,7 @@
  * including the correction history. That is what keeps the compact table honest:
  * nothing is dropped, it is one click down rather than eight lines tall.
  */
+import { SeverityBadge } from './Severity';
 import type { ReactNode } from 'react';
 import { SourceTag } from './SourceTag';
 import type {
@@ -67,6 +68,8 @@ export interface AdminTableProps {
   section?: SectionFrame;
   /** A one-line empty state, for a category with nothing in it inside a shift. */
   compact?: boolean;
+  /** The table alone, inside a section someone else draws (a part of "V"). */
+  embedded?: boolean;
   /**
    * "Sửa" on each live row — the SAME correction dialog and endpoint Reception
    * uses. Given by the supervision screen; absent, the table is read-only.
@@ -213,8 +216,8 @@ const SHARED = {
 /**
  * THE CANONICAL PAYMENT FIELDS FIRST — Tên khách, Mã EZ, Nguồn, then the money
  * split Tiền mặt / Thu CK / Cà thẻ / Công nợ / Chi — and the Admin's own
- * traceability after them: the method and amount as entered, the room an older
- * row recorded, the time and the record's integrity. Reception's table is a
+ * traceability after them: the room an older row recorded, the time and the
+ * record's integrity. Reception's table is a
  * subset of this one, never the other way round.
  */
 export function AdminPaymentTable({ rows, title, grouped, onEdit, ...state }: AdminTableProps) {
@@ -231,26 +234,13 @@ export function AdminPaymentTable({ rows, title, grouped, onEdit, ...state }: Ad
     },
     { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.ezCode) },
     { key: 'source', header: 'Nguồn', secondary: true, render: (r) => text(r.payment?.source) },
-    {
-      key: 'method',
-      header: 'Phương thức',
-      className: 'whitespace-nowrap',
-      render: (r) => text(r.payment?.methodLabel),
-    },
     /*
-      THE HEADLINE FIGURE, AND IT IS THE ONE THAT SURVIVES A NARROW SCREEN.
-      The split below it is per-method, so on a phone — where only the primary
-      columns render — a card payment would otherwise show "Thu tiền mặt: —" and
-      no amount anywhere. `amount` is the transaction, whatever it was paid with.
+      THE MONEY IS ITS ALLOCATIONS: one transaction, its amount under each
+      method that paid it — 500.000 Tiền mặt and 500.000 Thu CK on ONE row. The
+      separate "Phương thức" and "Thu tiền" columns are gone: they repeated
+      these. Tiền mặt stays on a phone; the rest are a tap away in the row.
     */
-    {
-      key: 'amount',
-      header: 'Thu tiền',
-      align: 'right',
-      className: 'whitespace-nowrap font-medium text-slate-800',
-      render: (r) => money(r.payment?.amount),
-    },
-    { key: 'cash', header: 'Tiền mặt', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.cash) },
+    { key: 'cash', header: 'Tiền mặt', align: 'right', className: 'whitespace-nowrap', render: (r) => money(r.payment?.cash) },
     { key: 'transfer', header: 'Thu CK', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.transfer) },
     { key: 'card', header: 'Cà thẻ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.card) },
     { key: 'receivable', header: 'Công nợ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.receivable) },
@@ -409,6 +399,12 @@ export function AdminGuestRequestTable({ rows, title, grouped, onEdit, ...state 
       className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.guestRequest?.guestName),
     },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
+    },
     { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.guestRequest?.ezCode) },
     {
       key: 'content',
@@ -476,6 +472,12 @@ export function AdminServiceQualityTable({ rows, title, grouped, onEdit, ...stat
       className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.complaint?.guestName),
     },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
+    },
     { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.complaint?.ezCode) },
     {
       key: 'description',
@@ -539,6 +541,13 @@ export function AdminFacilityJournalTable({ rows, title, grouped, onEdit, ...sta
       header: 'Khu vực',
       className: 'min-w-[8rem] font-medium text-slate-800',
       render: (r) => text(r.facility?.issue.locationLabel),
+    },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) =>
+        r.facility ? <SeverityBadge severity={r.facility.issue.severity} label={r.facility.issue.severityLabel} /> : text(null),
     },
     {
       key: 'issue',

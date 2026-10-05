@@ -35,6 +35,7 @@ import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { assertMoney } from './reportService';
+import { methodAmounts } from './paymentAllocation';
 
 export interface CashSummary {
   /** Null when the drawer was never counted — which is NOT the same as zero. */
@@ -84,7 +85,7 @@ export async function sumPayments(
 ): Promise<Omit<CashSummary, 'openingCash' | 'endingCash'>> {
   const rows = await client.receptionPayment.findMany({
     where: { report: { ...where, voidedAt: null } },
-    select: { method: true, amount: true, receivable: true, expense: true },
+    select: PAYMENT_FIGURES,
   });
   const voidedCount = await client.receptionPayment.count({
     where: { report: { ...where, NOT: { voidedAt: null } } },
@@ -92,10 +93,19 @@ export async function sumPayments(
   return accumulatePayments(rows, voidedCount);
 }
 
-type PaymentFigures = Pick<
-  Prisma.ReceptionPaymentGetPayload<object>,
-  'method' | 'amount' | 'receivable' | 'expense'
->;
+/** The columns the drawer arithmetic reads — the allocations among them. */
+const PAYMENT_FIGURES = {
+  method: true,
+  amount: true,
+  cashAmount: true,
+  transferAmount: true,
+  cardAmount: true,
+  debtAmount: true,
+  receivable: true,
+  expense: true,
+} as const satisfies Prisma.ReceptionPaymentSelect;
+
+type PaymentFigures = Prisma.ReceptionPaymentGetPayload<{ select: typeof PAYMENT_FIGURES }>;
 
 /**
  * THE ONE PLACE PAYMENT ROWS BECOME TOTALS. `sumPayments` and the per-shift
@@ -109,15 +119,17 @@ export function accumulatePayments(
   const totals = { ...EMPTY, voidedCount, paymentCount: rows.length };
   for (const row of rows) {
     /*
-      EVERY METHOD IS NAMED. This used to end in a bare `else` that meant "card",
-      which would have filed a Công nợ row under Cà thẻ the day the method
-      existed. Only CASH reaches the drawer; DEBT is reported as receivable and,
-      like transfer and card, never as cash.
+      EVERY METHOD IS NAMED, and a split payment counts each part under its own:
+      500.000 cash + 500.000 transfer moves the drawer by 500.000, not 1.000.000.
+      Only CASH reaches the drawer; DEBT is reported as receivable and, like
+      transfer and card, never as cash. (`methodAmounts` reads an older
+      single-method row as its whole amount under its one method.)
     */
-    if (row.method === 'CASH') totals.cashCollected += row.amount;
-    else if (row.method === 'TRANSFER') totals.transferCollected += row.amount;
-    else if (row.method === 'CARD') totals.cardCollected += row.amount;
-    else totals.receivable += row.amount;
+    const by = methodAmounts(row);
+    totals.cashCollected += by.CASH;
+    totals.transferCollected += by.TRANSFER;
+    totals.cardCollected += by.CARD;
+    totals.receivable += by.DEBT;
     // The legacy column: an older row carried a debt beside its own amount.
     totals.receivable += row.receivable;
     // Always cash, whatever `method` says — see the module comment.
@@ -142,10 +154,7 @@ export async function perShiftCash(
   const rows = await client.receptionPayment.findMany({
     where: { report: { shiftSessionId: { in: sessions.map((s) => s.id) } } },
     select: {
-      method: true,
-      amount: true,
-      receivable: true,
-      expense: true,
+      ...PAYMENT_FIGURES,
       report: { select: { shiftSessionId: true, voidedAt: true } },
     },
   });

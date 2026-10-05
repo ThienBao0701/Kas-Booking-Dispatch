@@ -166,3 +166,31 @@ describe('"Báo cáo vấn đề" in the menu', () => {
     expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
   });
 });
+
+describe('"Mức độ" on the technical report', () => {
+  it('marks every incident’s level and filters by it on the server', async () => {
+    const high = issue('a', { severity: 'HIGH', severityLabel: 'Cao' });
+    installApiMock(
+      routes(ADMIN_USER, {
+        [`GET /api/issues?severity=HIGH&from=${daysBefore(TODAY, 29)}&to=${TODAY}&pageSize=500`]: () => ({
+          status: 200,
+          body: { issues: [high], pagination: { page: 1, pageSize: 500, total: 1, totalPages: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports/technical');
+
+    await screen.findByTestId('tr-branch-2');
+    // An older incident says it has no level rather than inventing one.
+    expect(within(screen.getByTestId('tr-issue-b')).getByTestId('severity-badge')).toHaveTextContent('Chưa phân mức');
+
+    await userEvent.selectOptions(screen.getByTestId('tr-severity'), 'HIGH');
+    await waitFor(() => expect(screen.queryByTestId('tr-branch-2')).not.toBeInTheDocument());
+    const row = screen.getByTestId('tr-issue-a');
+    expect(within(row).getByTestId('severity-badge')).toHaveTextContent('Cao');
+    // An unresolved "Cao" carries a red edge, so it is found at a glance.
+    expect(row.className).toMatch(/border-l-red-500/);
+    // Who holds it is stated on the row, set apart.
+    expect(row).toHaveTextContent('Kỹ thuật:Chưa giao');
+  });
+});

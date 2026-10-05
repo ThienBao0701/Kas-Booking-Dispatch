@@ -649,6 +649,11 @@ model User {
   roomTasksReviewed        HousekeepingRoomTask[]        @relation("RoomTaskReviewedBy")
   roomTaskEvents           HousekeepingRoomTaskEvent[]   @relation("RoomTaskEventActor")
   housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
+  confidentialReportsSent  ConfidentialReport[]          @relation("ConfidentialReportSender")
+  confidentialReportsIn    ConfidentialReportRecipient[] @relation("ConfidentialReportRecipientUser")
+  pushSubscriptions        PushSubscription[]
+  accountAuditsReceived    AccountAudit[]                @relation("AccountAuditTarget")
+  accountAuditsMade        AccountAudit[]                @relation("AccountAuditActor")
 
   @@index([branchId])
   @@index([role])
@@ -766,6 +771,7 @@ model Branch {
   managerAssignments      UserBranchAssignment[]        @relation("UserBranchAssignmentBranch")
   housekeepingSegments    HousekeepingWorkSegment[]
   housekeepingRoomTasks   HousekeepingRoomTask[]
+  confidentialReports     ConfidentialReport[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -1771,14 +1777,26 @@ model BookingStatusHistory {
 
 /// In-app notification delivered to a user (new booking / completion).
 model Notification {
-  id        String    @id @default(cuid())
+  id        String            @id @default(cuid())
   userId    Int
   bookingId String?
   title     String
   body      String
-  read      Boolean   @default(false)
-  createdAt DateTime  @default(now())
+  read      Boolean           @default(false)
+  createdAt DateTime          @default(now())
   readAt    DateTime?
+  /// Where a press on the notification goes — an in-app path ("/app/…"), never
+  /// an external URL. Null on older rows (the bell falls back to `bookingId`).
+  link      String?
+  /// Set ONLY on the operational assignments that are also sent as Web Push;
+  /// every other notification is in-app only and leaves it null.
+  kind      NotificationKind?
+  /// THE IDEMPOTENCY KEY of the action that produced it (e.g. the assignment
+  /// event's id): one real assignment is one notification, whatever retries.
+  dedupeKey String?           @unique
+  /// When the push for this row was dispatched — claimed once, so a push is
+  /// sent at most once per notification.
+  pushedAt  DateTime?
 
   /// Development demo marker (dev-test tools only). Real notifications are false.
   isDemo      Boolean @default(false)
@@ -1904,6 +1922,10 @@ model HotelIssue {
   /// "Đúng" / "Sai", set at "Hoàn thành"; "Lý do báo cáo sai" when "Sai".
   reportVerdict   ReportVerdict?
   incorrectReason String?
+
+  /// "Mức độ" — Cao / Trung bình / Thấp. Null only on incidents reported before
+  /// the level was asked for ("Chưa phân mức"); never guessed for them.
+  severity IssueSeverity?
 
   /// "XÓA" — the operational journal's void, never a physical delete: the row,
   /// its attempts, assignments and stages stay; every operational read filters
@@ -2708,13 +2730,25 @@ model ReceptionPayment {
   /// Số phòng — no longer asked for by reception; kept for the Admin.
   roomNumber String?
 
-  method     ReceptionPaymentMethod
-  /// Số tiền, whole đồng, non-negative.
-  amount     Int
+  /// The PRIMARY method — the largest allocation of a split payment (the only
+  /// one of a single-method payment). The allocations below are the money.
+  method ReceptionPaymentMethod
+  /// "Tổng tiền thu" — whole đồng, non-negative. On an allocated row it equals
+  /// the sum of the four allocations (a database CHECK holds it to that).
+  amount Int
+
+  /// ONE TRANSACTION, SEVERAL METHODS: how `amount` was paid, per method.
+  /// All four null on rows recorded before split payments existed — those are
+  /// read as `amount` under `method`, never rewritten. All four set (0 for an
+  /// unused method) on every row recorded or corrected since.
+  cashAmount     Int?
+  transferAmount Int?
+  cardAmount     Int?
+  debtAmount     Int?
   /// Công nợ — recorded, and deliberately NOT part of cash on hand.
-  receivable Int                    @default(0)
+  receivable     Int  @default(0)
   /// Chi tiền — cash paid out at the desk. Always cash; see the model comment.
-  expense    Int                    @default(0)
+  expense        Int  @default(0)
 
   note String?
 
@@ -2769,6 +2803,8 @@ model GuestRequestReport {
   resolution              String?
   reportVerdict           ReportVerdict?
   incorrectReason         String?
+  /// "Mức độ" — null only on requests recorded before it was asked for.
+  severity                IssueSeverity?
 
   report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   completedBy      User?                      @relation("GuestRequestCompletedBy", fields: [completedByUserId], references: [id])
@@ -2811,7 +2847,7 @@ model FacilityIssueReport {
 ///
 /// THE SAME TWO-STATE LIFECYCLE AS A GUEST REQUEST, and nothing more: "Đã tiếp
 /// nhận" from the moment it is recorded, "Đã hoàn thành" once the completion
-/// event below is set. No priority, no severity, no assignee — the desk closes
+/// event below is set. A "Mức độ" (severity) but no assignee — the desk closes
 /// what the desk opened, and the completion keeps its own actor, shift and time
 /// beside the creator's, never over them.
 model CustomerComplaintReport {
@@ -2837,6 +2873,8 @@ model CustomerComplaintReport {
   resolution              String?
   reportVerdict           ReportVerdict?
   incorrectReason         String?
+  /// "Mức độ" — null only on reports recorded before it was asked for.
+  severity                IssueSeverity?
 
   report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   completedBy      User?                      @relation("ComplaintCompletedBy", fields: [completedByUserId], references: [id])
@@ -3298,65 +3336,65 @@ model RoomIssueCollectionEvent {
 /// and events stay. One LIVE item per branch, date and room (a partial unique
 /// index in the migration).
 model HousekeepingRoomTask {
-  id                    String        @id @default(cuid())
-  branchId              Int
+  id                     String            @id @default(cuid())
+  branchId               Int
   /// "YYYY-MM-DD", Asia/Ho_Chi_Minh — the business date of the board.
-  workDate              String
-  roomNumber            String
+  workDate               String
+  roomNumber             String
   /// The room's operational code for the day (catalog: `ROOM_STATUS_CODES`).
-  statusCode            String
+  statusCode             String
   /// "Ưu tiên" — clean first.
-  priority              Boolean       @default(false)
+  priority               Boolean           @default(false)
   /// The manager's instruction ("dọn trước 14:00").
-  note                  String?
+  note                   String?
   /// The CURRENT assignee; every assignment is an ASSIGNED event.
-  assigneeUserId        Int?
-  assigneeNameSnapshot  String?
-  state                 RoomWorkState @default(NOT_STARTED)
+  assigneeUserId         Int?
+  assigneeNameSnapshot   String?
+  state                  RoomWorkState     @default(NOT_STARTED)
   /// The saved "Kiểm phòng" that started the cleaning.
-  inspectionId          String?       @unique
-  startedAt             DateTime?
-  completedAt           DateTime?
-  durationSeconds       Int?
+  inspectionId           String?           @unique
+  startedAt              DateTime?
+  completedAt            DateTime?
+  durationSeconds        Int?
   /// The "Dọn phòng" form as last saved (validated against the catalog).
-  cleaning              Json?
-  cleanedByUserId       Int?
-  cleanedByNameSnapshot String?
-  createdByUserId       Int
-  createdByNameSnapshot String
-  createdAt             DateTime
-  updatedAt             DateTime      @updatedAt
-  voidedAt              DateTime?
-  voidedByUserId        Int?
-  voidedByNameSnapshot  String?
-  voidReason            String?
+  cleaning               Json?
+  cleanedByUserId        Int?
+  cleanedByNameSnapshot  String?
+  createdByUserId        Int
+  createdByNameSnapshot  String
+  createdAt              DateTime
+  updatedAt              DateTime          @updatedAt
+  voidedAt               DateTime?
+  voidedByUserId         Int?
+  voidedByNameSnapshot   String?
+  voidReason             String?
   /// The room's cleaning cycle that business day — 1, 2, … A re-clean (or the
   /// room added again after "Đạt") is a NEW row with the next number; a cycle,
   /// once done, is never rewritten.
-  cycleNumber           Int               @default(1)
+  cycleNumber            Int               @default(1)
   /// A re-clean: the failed cycle it repeats.
-  previousTaskId        String?           @unique
+  previousTaskId         String?           @unique
   /// The manager's quality review of THIS cycle (null: not reviewed yet).
-  reviewResult          RoomReviewResult?
-  reviewedAt            DateTime?
-  reviewedByUserId      Int?
+  reviewResult           RoomReviewResult?
+  reviewedAt             DateTime?
+  reviewedByUserId       Int?
   reviewedByNameSnapshot String?
   /// "Lý do không đạt" — required with FAILED (also a database check).
-  failureReason         String?
+  failureReason          String?
   /// FAILED with "Yêu cầu dọn lại": the next cycle was opened.
-  recleanRequested      Boolean           @default(false)
+  recleanRequested       Boolean           @default(false)
 
-  branch     Branch                      @relation(fields: [branchId], references: [id])
-  assignee   User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
-  inspection RoomInspection?             @relation(fields: [inspectionId], references: [id])
-  createdBy  User                        @relation("RoomTaskCreatedBy", fields: [createdByUserId], references: [id])
-  cleanedBy  User?                       @relation("RoomTaskCleanedBy", fields: [cleanedByUserId], references: [id])
-  voidedBy   User?                       @relation("RoomTaskVoidedBy", fields: [voidedByUserId], references: [id])
-  reviewedBy User?                       @relation("RoomTaskReviewedBy", fields: [reviewedByUserId], references: [id])
+  branch       Branch                      @relation(fields: [branchId], references: [id])
+  assignee     User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
+  inspection   RoomInspection?             @relation(fields: [inspectionId], references: [id])
+  createdBy    User                        @relation("RoomTaskCreatedBy", fields: [createdByUserId], references: [id])
+  cleanedBy    User?                       @relation("RoomTaskCleanedBy", fields: [cleanedByUserId], references: [id])
+  voidedBy     User?                       @relation("RoomTaskVoidedBy", fields: [voidedByUserId], references: [id])
+  reviewedBy   User?                       @relation("RoomTaskReviewedBy", fields: [reviewedByUserId], references: [id])
   /// The failed cycle this one re-cleans, and (from the other side) its re-clean.
-  previousTask HousekeepingRoomTask?     @relation("RoomTaskReclean", fields: [previousTaskId], references: [id])
-  recleanTask  HousekeepingRoomTask?     @relation("RoomTaskReclean")
-  events     HousekeepingRoomTaskEvent[]
+  previousTask HousekeepingRoomTask?       @relation("RoomTaskReclean", fields: [previousTaskId], references: [id])
+  recleanTask  HousekeepingRoomTask?       @relation("RoomTaskReclean")
+  events       HousekeepingRoomTaskEvent[]
 
   @@unique([branchId, workDate, roomNumber, cycleNumber])
   @@index([branchId, workDate])
@@ -3382,4 +3420,126 @@ model HousekeepingRoomTaskEvent {
 
   @@index([taskId, createdAt])
   @@index([actorUserId, createdAt])
+}
+
+/// "MỨC ĐỘ" — how urgent an issue is, on exactly three record types: "Vấn đề
+/// khách yêu cầu", "Sự cố cơ sở vật chất" (the incident itself) and "Vấn đề về
+/// chất lượng và dịch vụ". DECLARATION ORDER IS THE PRIORITY ORDER: PostgreSQL
+/// sorts an enum by it, so ascending is Cao → Trung bình → Thấp.
+enum IssueSeverity {
+  /// Cao
+  HIGH
+  /// Trung bình
+  MEDIUM
+  /// Thấp
+  LOW
+}
+
+/// The operational assignments that are also sent to the worker's devices as
+/// Web Push. Nothing else is pushed.
+enum NotificationKind {
+  /// "Công việc kỹ thuật mới" — incidents given to a technician.
+  TECHNICAL_ASSIGNED
+  /// "Công việc buồng phòng mới" — rooms given to a housekeeping worker.
+  HOUSEKEEPING_ASSIGNED
+  /// "Dọn lại phòng …" — a failed room sent back to a worker.
+  HOUSEKEEPING_RECLEAN
+}
+
+/// "VII. BÁO CÁO CÁC VẤN ĐỀ VÀ TÌNH HÌNH QUAN TRỌNG" — the four kinds.
+enum ConfidentialReportCategory {
+  /// Môi trường làm việc
+  WORK_ENVIRONMENT
+  /// Quy trình, quy định
+  PROCESS_RULES
+  /// Đồng nghiệp, nhân viên
+  COLLEAGUES
+  /// Các vấn đề tình hình quan trọng khác
+  OTHER_IMPORTANT
+}
+
+/// A PRIVATE UPWARD REPORT — Lễ tân → Quản lý lễ tân → Tổng quản lý → Admin.
+///
+/// NOT ANONYMOUS: the sender is kept, for accountability, and shown to the
+/// recipients and the Admin only. One row per report, never a copy per reader:
+/// who may read it is `ConfidentialReportRecipient` (plus every Admin, always).
+/// It is not a reception journal entry and never appears in one.
+model ConfidentialReport {
+  id                 String                     @id @default(cuid())
+  senderUserId       Int
+  senderNameSnapshot String
+  senderRole         UserRole
+  /// The sender's branch when it has one (a receptionist); null for a manager.
+  senderBranchId     Int?
+  category           ConfidentialReportCategory
+  content            String
+  createdAt          DateTime                   @default(now())
+
+  sender       User                          @relation("ConfidentialReportSender", fields: [senderUserId], references: [id])
+  senderBranch Branch?                       @relation(fields: [senderBranchId], references: [id])
+  recipients   ConfidentialReportRecipient[]
+
+  @@index([createdAt])
+  @@index([senderUserId])
+}
+
+/// One reader of a confidential report, and whether THAT reader has read it.
+/// `automatic` marks an Admin the system added — the sender never chooses one.
+model ConfidentialReportRecipient {
+  id        String    @id @default(cuid())
+  reportId  String
+  userId    Int
+  automatic Boolean   @default(false)
+  readAt    DateTime?
+
+  report ConfidentialReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   User               @relation("ConfidentialReportRecipientUser", fields: [userId], references: [id])
+
+  @@unique([reportId, userId])
+  @@index([userId, readAt])
+}
+
+/// ONE DEVICE'S WEB PUSH SUBSCRIPTION. An account may have several devices.
+///
+/// The OWNER is the authenticated account that registered it — never a user id
+/// from the request. The endpoint is unique: the same browser registering under
+/// another login moves to that account, so a shared phone never receives the
+/// previous user's work.
+model PushSubscription {
+  id         String    @id @default(cuid())
+  userId     Int
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastUsedAt DateTime?
+  /// Set when the push service answered that the subscription is gone (404/410).
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum AccountAuditAction {
+  /// "Đặt lại mật khẩu" by the Admin. The password itself is never recorded.
+  PASSWORD_RESET
+}
+
+/// WHAT AN ADMIN DID TO AN ACCOUNT'S CREDENTIALS — who, when, which account.
+/// Append-only.
+model AccountAudit {
+  id                String             @id @default(cuid())
+  userId            Int
+  action            AccountAuditAction
+  actorUserId       Int
+  actorNameSnapshot String
+  createdAt         DateTime           @default(now())
+
+  user  User @relation("AccountAuditTarget", fields: [userId], references: [id])
+  actor User @relation("AccountAuditActor", fields: [actorUserId], references: [id])
+
+  @@index([userId, createdAt])
 }

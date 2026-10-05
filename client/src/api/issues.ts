@@ -1,6 +1,7 @@
 import { api } from './client';
 import type { Branch } from '../auth/types';
 import type { Actor, Pagination } from './bookings';
+import type { Severity } from './receptionReports';
 
 export type IssueCategory =
   | 'DOOR'
@@ -203,6 +204,9 @@ export interface Issue {
   /** The place as one line, built by the server so every screen agrees. */
   locationLabel: string;
   category: IssueCategory | null;
+  /** "Mức độ"; null ("Chưa phân mức") on incidents reported before it existed. */
+  severity: Severity | null;
+  severityLabel: string;
   description: string;
   /** "Nguyên nhân" as Reception reported it — often empty. */
   reportedCause: string | null;
@@ -376,6 +380,7 @@ export interface UpdateIssueInput {
   locationDetail?: string | null;
   category?: IssueCategory | null;
   description?: string;
+  severity?: Severity;
 }
 
 /** Technical's "Thống kê" — counts over the incidents that exist, nothing else. */
@@ -513,6 +518,8 @@ export interface NewIssueInput {
   floorNumber?: string;
   areaSubtype?: IssueAreaSubtype;
   locationDetail?: string;
+  /** "Mức độ" — Trung bình when not chosen. */
+  severity?: Severity;
   photo?: File;
 }
 
@@ -552,6 +559,8 @@ export const issuesApi = {
       roomNumber?: string;
       floorNumber?: string;
       category?: IssueCategory;
+      /** "Mức độ" — one level. */
+      severity?: Severity;
       page?: number;
       pageSize?: number;
     } = {},
@@ -573,6 +582,7 @@ export const issuesApi = {
     // Only the fields this area actually uses are sent; the server drops any
     // that do not belong to it anyway.
     if (input.category) form.append('category', input.category);
+    if (input.severity) form.append('severity', input.severity);
     if (input.roomNumber?.trim()) form.append('roomNumber', input.roomNumber.trim());
     if (input.floorNumber?.trim()) form.append('floorNumber', input.floorNumber.trim());
     if (input.areaSubtype) form.append('areaSubtype', input.areaSubtype);

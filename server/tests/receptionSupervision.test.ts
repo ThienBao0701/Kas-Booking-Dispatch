@@ -309,8 +309,8 @@ describe('a technician works only what was assigned to them', () => {
     expect(await testPrisma.hotelIssueAssignment.count({ where: { issueId: id } })).toBe(3);
 
     // Each technician was told when the job became theirs.
-    const t1 = await testPrisma.notification.count({ where: { userId: await userIdOf(tech), title: 'Bạn được giao xử lý sự cố' } });
-    const t2 = await testPrisma.notification.count({ where: { userId: await userIdOf(tech2), title: 'Bạn được giao xử lý sự cố' } });
+    const t1 = await testPrisma.notification.count({ where: { userId: await userIdOf(tech), title: 'Công việc kỹ thuật mới' } });
+    const t2 = await testPrisma.notification.count({ where: { userId: await userIdOf(tech2), title: 'Công việc kỹ thuật mới' } });
     expect([t1, t2]).toEqual([2, 1]);
 
     // The second technician keeps it in their own history ("Lịch sử").

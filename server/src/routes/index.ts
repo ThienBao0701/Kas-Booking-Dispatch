@@ -24,6 +24,8 @@ import { createHousekeepingWorkRouter } from './housekeepingWork';
 import { createReceptionShiftsRouter } from './receptionShifts';
 import { createReceptionReportsRouter } from './receptionReports';
 import { createDevTestRouter } from './devTest';
+import { createConfidentialReportsRouter } from './confidentialReports';
+import { createPushRouter } from './push';
 
 /**
  * Builds a fresh API router. A factory (rather than a shared singleton) so each
@@ -55,6 +57,8 @@ export function createApiRouter(): Router {
   router.use(createBookingLifecycleRouter());
   router.use(createBookingsRouter());
   router.use(createNotificationsRouter());
+  router.use(createPushRouter());
+  router.use(createConfidentialReportsRouter());
   router.use(createNavBadgesRouter());
   router.use(createReceptionShiftsRouter());
   router.use(createReceptionReportsRouter());

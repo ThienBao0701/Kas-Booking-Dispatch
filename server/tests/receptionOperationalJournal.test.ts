@@ -268,10 +268,13 @@ describe('the six categories', () => {
       completedAt: null,
       completedByName: null,
       resolution: null,
+      // "Mức độ" — Trung bình when the form names none.
+      severity: 'MEDIUM',
+      severityLabel: 'Trung bình',
     });
-    // No priority, no severity, no assignee — only the two-state lifecycle.
+    // No priority and no assignee — the two-state lifecycle, with a level.
     expect(Object.keys(complaint)).not.toEqual(expect.arrayContaining(['priority']));
-    expect(Object.keys(complaint)).not.toEqual(expect.arrayContaining(['severity']));
+    expect(Object.keys(complaint)).not.toEqual(expect.arrayContaining(['assignee']));
   });
 
   it('refuses a complaint with an empty description', async () => {

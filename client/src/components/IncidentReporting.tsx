@@ -8,6 +8,9 @@
  * create and read the same `HotelIssue` rows through the same `/api/issues` the
  * technical department works from. There is no second incident system.
  */
+import { SeverityBadge, SeverityPicker } from './Severity';
+import { DEFAULT_SEVERITY } from '../lib/severity';
+import type { Severity } from '../api/receptionReports';
 import { useRef, useState, type ReactNode } from 'react';
 import { SourceTag } from './SourceTag';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -394,6 +397,7 @@ export function NewIssueModal({
   // Optional: Reception often does not know why yet. The technician can fill
   // it in during the repair, and what is typed here is never overwritten.
   const [cause, setCause] = useState('');
+  const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -430,6 +434,7 @@ export function NewIssueModal({
         areaCategory: form.areaCategory,
         description: form.description,
         cause: cause.trim() || undefined,
+        severity,
         category: fields.category ? form.category : undefined,
         roomNumber: fields.roomNumber ? form.roomNumber : undefined,
         floorNumber: fields.floorNumber ? form.floorNumber : undefined,
@@ -516,6 +521,7 @@ export function NewIssueModal({
           rooms={rooms}
           floors={floors}
         />
+        <SeverityPicker value={severity} onChange={setSeverity} testId="issue-severity" />
 
         <label className="block text-sm font-medium text-slate-700">
           Nguyên nhân <span className="font-normal text-slate-500">(không bắt buộc)</span>
@@ -601,15 +607,17 @@ export function EditIssueModal({
     description: issue.description,
   };
   const [form, setForm] = useState<IssueFormValue>(initial);
+  const [severity, setSeverity] = useState<Severity | ''>(issue.severity ?? '');
   const fields = AREA_FIELDS[form.areaCategory];
   // The incident's OWN branch's rooms — a correction can never move it elsewhere.
   const { rooms, floors } = useBranchRooms(issue.branchId);
 
   const save = useMutation({
     mutationFn: () =>
-      issuesApi.update(
-        issue.id,
-        legacy
+      issuesApi.update(issue.id, {
+        // Sent only when it changed; an older incident keeps none until one is chosen.
+        ...(severity && severity !== issue.severity ? { severity } : {}),
+        ...(legacy
           ? { description: form.description.trim() }
           : {
               areaCategory: form.areaCategory,
@@ -619,8 +627,8 @@ export function EditIssueModal({
               floorNumber: fields.floorNumber ? form.floorNumber.trim() : null,
               areaSubtype: fields.areaSubtype && form.areaSubtype ? form.areaSubtype : null,
               locationDetail: form.locationDetail.trim() || null,
-            },
-      ),
+            }),
+      }),
     onSuccess: ({ issue: updated }) => {
       void queryClient.invalidateQueries({ queryKey: ['issues'] });
       onSaved(updated);
@@ -628,7 +636,7 @@ export function EditIssueModal({
   });
 
   const ready = legacy ? form.description.trim().length > 0 : issueFormReady(form);
-  const changed = JSON.stringify(form) !== JSON.stringify(initial);
+  const changed = JSON.stringify(form) !== JSON.stringify(initial) || (severity !== '' && severity !== issue.severity);
 
   return (
     <Modal
@@ -675,6 +683,7 @@ export function EditIssueModal({
             floors={floors}
           />
         )}
+        <SeverityPicker value={severity} onChange={setSeverity} testId="edit-issue-severity" />
         {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
     </Modal>
@@ -1035,7 +1044,14 @@ export function IncidentTable({
     { ...status, render: (i) => <IssueStageBadge issue={i} /> },
   ];
 
-  const columns: DataColumn<Issue>[] = summary
+  /** "Mức độ", beside the place in every variant — the same badge every role reads. */
+  const severity: DataColumn<Issue> = {
+    key: 'severity',
+    header: 'Mức độ',
+    className: 'whitespace-nowrap',
+    render: (i) => <SeverityBadge severity={i.severity} label={i.severityLabel} />,
+  };
+  const baseColumns: DataColumn<Issue>[] = summary
     ? summaryColumns
     : receptionView
     ? [
@@ -1103,6 +1119,8 @@ export function IncidentTable({
           render: (i) => formatDateTime(i.updatedAt),
         },
       ];
+
+  const columns = baseColumns.flatMap((c) => (c.key === 'location' ? [c, severity] : [c]));
 
   return (
     <DataTable

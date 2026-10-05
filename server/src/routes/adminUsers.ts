@@ -326,14 +326,21 @@ export function createAdminUsersRouter(): Router {
       const id = parseUserId(req.params.id);
       await loadReceptionist(id);
       const { temporaryPassword } = resetPasswordSchema.parse(req.body);
+      const admin = req.currentUser!;
 
-      await prisma.user.update({
-        where: { id },
-        data: {
-          passwordHash: await hashPassword(temporaryPassword),
-          mustChangePassword: true,
-        },
-      });
+      /*
+        ONLY THE HASH IS STORED, and the answer carries no password. The Admin
+        typed or generated the temporary one in the browser and is shown it there,
+        once; no endpoint can return an account's password, new or old. Who reset
+        which account, and when, is kept in AccountAudit — never the value.
+      */
+      const passwordHash = await hashPassword(temporaryPassword);
+      await prisma.$transaction([
+        prisma.user.update({ where: { id }, data: { passwordHash, mustChangePassword: true } }),
+        prisma.accountAudit.create({
+          data: { userId: id, action: 'PASSWORD_RESET', actorUserId: admin.id, actorNameSnapshot: admin.fullName },
+        }),
+      ]);
 
       // Force re-authentication with the new temporary password.
       await sessionStore.destroyByUserId(id);

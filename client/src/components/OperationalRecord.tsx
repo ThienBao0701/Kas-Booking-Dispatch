@@ -116,8 +116,13 @@ export function OperationalRecordDetail({
             <Field label="Tên khách">{row.payment.guestName}</Field>
             <Field label="Mã EZ">{row.payment.ezCode}</Field>
             <Field label="Nguồn">{row.payment.source}</Field>
-            <Field label="Phương thức">{row.payment.methodLabel}</Field>
-            <Field label="Thu tiền">{formatVnd(row.payment.amount)}</Field>
+            {/* ONE transaction: its total, and every method that paid it. */}
+            <Field label="Tổng tiền thu">{formatVnd(row.payment.amount)}</Field>
+            <Field label="Phương thức thanh toán">
+              {(row.payment.allocations ?? []).length > 0
+                ? row.payment.allocations.map((a) => `${a.label} ${formatVnd(a.amount)}`).join(" + ")
+                : row.payment.methodLabel}
+            </Field>
             <Field label="Công nợ">{formatVnd(row.payment.receivable)}</Field>
             <Field label="Chi tiền">{formatVnd(row.payment.expense)}</Field>
             {/* Recorded before the form stopped asking for them; kept, not shown empty. */}

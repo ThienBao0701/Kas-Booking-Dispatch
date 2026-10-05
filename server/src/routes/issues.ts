@@ -49,6 +49,8 @@ const SUBTYPE = z.enum(['RECEPTION_DESK', 'SOFA', 'FLOOR', 'CEILING', 'LIGHT_BUL
 const STATUS = z.enum(['NEW', 'IN_PROGRESS', 'AWAITING_INSPECTION', 'COMPLETED']);
 /** The queues as people name them — see `IssueStage` in the service. */
 const STAGE = z.enum(['WAITING', 'REWORK', 'IN_PROGRESS', 'AWAITING_INSPECTION', 'COMPLETED']);
+/** "Mức độ" — exactly these three; a new incident without one is Trung bình. */
+const SEVERITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
 
 /**
  * Shape only. WHICH location fields are REQUIRED is decided by `normaliseArea`
@@ -67,6 +69,7 @@ const createSchema = z.object({
   description: z.string().trim().min(1, 'Vui lòng nhập mô tả sự cố.').max(2000),
   /** "Nguyên nhân" — optional: Reception often does not know it yet. */
   cause: z.string().trim().max(1000).optional(),
+  severity: SEVERITY.optional(),
 });
 
 const updateSchema = z
@@ -78,6 +81,7 @@ const updateSchema = z
     locationDetail: z.string().trim().max(500).nullable().optional(),
     category: CATEGORY.nullable().optional(),
     description: z.string().trim().min(1).max(2000).optional(),
+    severity: SEVERITY.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'Cần ít nhất một trường để cập nhật.' });
 
@@ -122,6 +126,7 @@ const listSchema = z
     // The shared report filter's "Ca", and "Hoàn thành vấn đề → đúng / sai".
     shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
     verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
+    severity: SEVERITY.optional(),
     page: z.coerce.number().int().positive().default(1),
     // Up to 500 for a report board that groups a period by branch and room.
     pageSize: z.coerce.number().int().positive().max(500).default(50),
@@ -302,6 +307,7 @@ export function createIssuesRouter(): Router {
         roomNumber: q.roomNumber,
         floorNumber: q.floorNumber,
         category: q.category,
+        severity: q.severity,
         now,
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,

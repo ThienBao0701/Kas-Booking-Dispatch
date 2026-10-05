@@ -30,6 +30,7 @@
  * and the whole repair history. Reception still operates no repair — accepting,
  * finishing and giving up a job remain the technical department's alone.
  */
+import type { Severity } from '../api/receptionReports';
 import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Pencil, Trash2, Undo2 } from 'lucide-react';
@@ -52,6 +53,7 @@ export function FacilityIssueBoard({
   summary = false,
   compact,
   section,
+  severity,
 }: {
   onLogged: () => void | Promise<void>;
   onToast: (message: string) => void;
@@ -63,10 +65,12 @@ export function FacilityIssueBoard({
   summary?: boolean;
   compact?: boolean;
   section?: SectionFrame;
+  /** "Mức độ" — one level, filtered by the server. */
+  severity?: Severity;
 }) {
   const issues = useQuery({
-    queryKey: [...FACILITY_BOARD_KEY, 'active'],
-    queryFn: () => issuesApi.list({ scope: 'active', pageSize: 100 }),
+    queryKey: [...FACILITY_BOARD_KEY, 'active', severity ?? ''],
+    queryFn: () => issuesApi.list({ scope: 'active', pageSize: 100, severity }),
     // Technicians update these independently of anything on this screen, so a
     // receptionist watching this board should see a status change without
     // having to leave the tab.

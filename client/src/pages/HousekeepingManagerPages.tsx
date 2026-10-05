@@ -107,7 +107,7 @@ function useScope(allowAll: boolean) {
         : 'Chưa chọn';
   const picker: ReactNode = isAdmin ? (
     <div className="w-full sm:w-72">
-      <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Chi nhánh</p>
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Chi nhánh</p>
       <BranchPicker value={choice} onChange={setChoice} branches={list} allowAll={allowAll} />
     </div>
   ) : null;
@@ -116,14 +116,15 @@ function useScope(allowAll: boolean) {
 
 function DateField({ date, onDate }: { date: string; onDate: (d: string) => void }) {
   return (
-    <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
-      Ngày
+    // The label on its own line, a modest gap, then the field — the KAS form rhythm.
+    <label className="block">
+      <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Ngày</span>
       <input
         type="date"
         value={date}
         onChange={(e) => e.target.value && onDate(e.target.value)}
         data-testid="hk-date"
-        className={`${FIELD} normal-case tracking-normal sm:w-44`}
+        className={`${FIELD} !mt-0 sm:w-44`}
       />
     </label>
   );

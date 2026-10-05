@@ -83,3 +83,34 @@ export function ReportSection({
     </section>
   );
 }
+
+/**
+ * ONE PART OF A SECTION — "Giặt ủi", "Dịch vụ khác", "Review" inside
+ * "V. Dịch vụ phòng, KPI". A ruled heading line with its own count, then the
+ * part's table drawn without a frame of its own: one container, several clearly
+ * separate parts, never their rows merged into one table.
+ */
+export function ReportSubsection({
+  title,
+  count,
+  testId,
+  children,
+}: {
+  title: string;
+  count?: ReactNode;
+  testId?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div data-testid={testId} className="border-t-rule border-line first:border-t-0">
+      <h4 className="flex items-center gap-2 bg-white px-4 pb-1.5 pt-3 text-sm font-semibold text-slate-800">
+        <span aria-hidden="true" className="h-3.5 w-1 rounded-full bg-brand-600" />
+        {title}
+        {count !== undefined ? <SectionCount value={count} /> : null}
+      </h4>
+      <div className="px-2 pb-2">
+        <div className="overflow-hidden rounded-lg border border-line-subtle">{children}</div>
+      </div>
+    </div>
+  );
+}

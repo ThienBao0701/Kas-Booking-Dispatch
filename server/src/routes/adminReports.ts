@@ -26,7 +26,7 @@ import {
 } from '../shift/handoverNoteService';
 import { listConversations } from '../chat/chatService';
 import { operationalReport } from '../reception/operationalReport';
-import { countByCategory, countReports, listReports, serializeReport } from '../reception/reportService';
+import { countByCategory, countReports, listReports, prioritiseJournal, serializeReport } from '../reception/reportService';
 import { sessionsCashSummary } from '../reception/cashService';
 import {
   OPEN_SHIFT_WARNING,
@@ -153,6 +153,8 @@ const drillDownQuery = z
     category: reportCategory.optional(),
     from: isoDay.optional(),
     to: isoDay.optional(),
+    // "Mức độ" on the three categories that carry one.
+    severity: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -485,7 +487,7 @@ export function createAdminReportsRouter(): Router {
         : q.shiftType
           ? { shiftSessionIds: sessionIds }
           : {};
-      const filter = { branchId: oneBranch, branchIds, category: q.category, ...periodScope };
+      const filter = { branchId: oneBranch, branchIds, category: q.category, severity: q.severity, ...periodScope };
 
       const [reports, counts, total] = await Promise.all([
         listReports(admin, filter),
@@ -504,8 +506,12 @@ export function createAdminReportsRouter(): Router {
       */
       const cashPeriod = period ?? { from: today, to: today };
 
+      // II and IV open what still needs doing first, by level; "Tất cả" stays chronological.
+      const ordered =
+        q.category === 'GUEST_REQUEST' || q.category === 'CUSTOMER_COMPLAINT' ? prioritiseJournal(reports) : reports;
+
       res.json({
-        reports: reports.map((r) => serializeReport(r, now)),
+        reports: ordered.map((r) => serializeReport(r, now)),
         counts,
         /*
           THE CAP IS DECLARED RATHER THAN APPLIED SILENTLY.

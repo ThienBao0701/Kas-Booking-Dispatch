@@ -3,6 +3,7 @@ import type {
   IssueAreaCategory,
   IssueAreaSubtype,
   IssueCategory,
+  IssueSeverity,
   IssueStatus,
   Prisma,
   UserRole,
@@ -40,6 +41,8 @@ import {
   supervisorSourceLabel,
 } from '../auth/branchScope';
 import { catalogFloor, catalogRoom } from '../room/branchRooms';
+import { notifyOperational } from '../push/pushService';
+import { DEFAULT_SEVERITY, SEVERITY_FIRST, SEVERITY_LABELS, parseSeverity, prioritise, severityLabel } from './severity';
 import {
   INSPECTION_RESULT_LABELS,
   inspectionEnabled,
@@ -255,6 +258,7 @@ const EDIT_FIELD_LABELS: Record<string, string> = {
   areaSubtype: 'Loại vị trí',
   locationDetail: 'Vị trí cụ thể',
   category: 'Loại sự cố',
+  severity: 'Mức độ',
 };
 
 /** An enum-valued column's old/new value, as a person reads it. */
@@ -265,6 +269,7 @@ function editValueLabel(field: string, value: string | null): string | null {
     return ISSUE_AREA_SUBTYPE_LABELS[value as keyof typeof ISSUE_AREA_SUBTYPE_LABELS] ?? value;
   }
   if (field === 'category') return ISSUE_CATEGORY_LABELS[value as IssueCategory] ?? value;
+  if (field === 'severity') return SEVERITY_LABELS[value as IssueSeverity] ?? value;
   return value;
 }
 
@@ -310,6 +315,9 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     /** The place as one line, so every screen says it the same way. */
     locationLabel: describeLocation(issue),
     category: issue.category,
+    /** "Mức độ"; null ("Chưa phân mức") only on incidents reported before it existed. */
+    severity: issue.severity,
+    severityLabel: severityLabel(issue.severity),
     description: issue.description,
     /** "Nguyên nhân" as the receptionist reported it — often empty. */
     reportedCause: issue.cause,
@@ -554,6 +562,8 @@ function optionalText(value: string | null | undefined): string | null {
 export interface CreateIssueInput extends AreaInput {
   branchId?: number;
   category?: IssueCategory | null;
+  /** "Mức độ" — Trung bình when omitted. */
+  severity?: IssueSeverity;
   description: string;
   /** "Nguyên nhân", if Reception already knows it. Optional. */
   cause?: string | null;
@@ -621,6 +631,7 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
       // Only some areas ask for a fault type; the rest store none rather than a
       // default nobody chose.
       category,
+      severity: input.severity === undefined ? DEFAULT_SEVERITY : parseSeverity(input.severity),
       description,
       // Kept exactly as reported. A technician's later determination is stored
       // on their attempt, never written over this.
@@ -791,6 +802,8 @@ export interface UpdateIssueInput {
   locationDetail?: string | null;
   category?: IssueCategory | null;
   description?: string;
+  /** "Mức độ" — corrected by whoever may correct the report, and audited. */
+  severity?: IssueSeverity;
 }
 
 /** The columns a correction may touch — the fields the report form itself asks for. */
@@ -802,6 +815,7 @@ const EDITABLE_ISSUE_FIELDS = [
   'locationDetail',
   'category',
   'description',
+  'severity',
 ] as const;
 
 /**
@@ -847,9 +861,11 @@ export async function updateIssue(
     (key) => input[key] !== undefined,
   );
   if (supplied.length === 0) throw ApiError.validation('Cần ít nhất một trường để cập nhật.');
-  const touchesArea = supplied.some((key) => key !== 'description' && key !== 'category');
+  const touchesArea = supplied.some((key) => key !== 'description' && key !== 'category' && key !== 'severity');
 
   const next: Partial<Record<(typeof EDITABLE_ISSUE_FIELDS)[number], string | null>> = {};
+
+  if (input.severity !== undefined) next.severity = parseSeverity(input.severity);
 
   if (input.description !== undefined) {
     const d = input.description.trim();
@@ -1032,30 +1048,43 @@ export async function assignIssues(
   });
 
   const updated = await Promise.all(unique.map((id) => loadIssue(id)));
-  await notifyAssigned(updated, technician.id, actor.fullName);
+  await notifyAssigned(updated, technician.id, now);
   return updated;
 }
 
 /**
- * "Bạn được giao xử lý sự cố TV tại Phòng 302 — 260 Lý Tự Trọng (giao bởi …)",
- * or, for a room's batch, "3 sự cố tại Phòng 206 — …: …". One row, to the one
- * technician, in the existing notification table.
+ * "Công việc kỹ thuật mới" — ONE notice per assignment, to the one technician:
+ * "CN 8 · Phòng 206 · Nước nóng" for one incident, "CN 8 · Phòng 206 · 3 vấn đề
+ * cần xử lý" for a room's batch, "CN 8 · 3 vấn đề cần xử lý" across places.
+ * Shown in the bell and pushed to the technician's devices; keyed by the
+ * assignment itself, so it exists once however the request is retried.
  */
-async function notifyAssigned(issues: IssueDetail[], technicianUserId: number, assignedBy: string): Promise<void> {
+async function notifyAssigned(issues: IssueDetail[], technicianUserId: number, assignedAt: Date): Promise<void> {
   const first = issues[0]!;
-  const what = (i: IssueDetail) => (i.category ? ISSUE_CATEGORY_LABELS[i.category] : i.description);
-  await prisma.notification.create({
-    data: {
+  const branch = `CN ${first.branch.branchNumber}`;
+  // A room is just "Phòng 206"; any other place keeps its full one-line name.
+  const place = (i: IssueDetail) =>
+    (i.areaCategory === 'ROOM' || !i.areaCategory) && i.roomNumber ? `Phòng ${i.roomNumber}` : describeLocation(i);
+  const places = new Set(issues.map(place));
+  const what = (i: IssueDetail) =>
+    i.category ? ISSUE_CATEGORY_LABELS[i.category] : i.description.length > 40 ? `${i.description.slice(0, 40)}…` : i.description;
+  const body =
+    issues.length === 1
+      ? `${branch} · ${place(first)} · ${what(first)}`
+      : places.size === 1
+        ? `${branch} · ${place(first)} · ${issues.length} vấn đề cần xử lý`
+        : `${branch} · ${issues.length} vấn đề cần xử lý`;
+  const ids = issues.map((i) => i.id).sort();
+  await notifyOperational([
+    {
       userId: technicianUserId,
-      title: 'Bạn được giao xử lý sự cố',
-      body:
-        issues.length === 1
-          ? `Sự cố ${first.category ? ISSUE_CATEGORY_LABELS[first.category] : 'sự cố'} tại ${describeLocation(first)} — ${first.branch.address}. Giao bởi ${assignedBy}.`
-          : `${issues.length} sự cố — ${first.branch.address}: ${issues
-              .map((i) => `${describeLocation(i)} (${what(i)})`)
-              .join('; ')}. Giao bởi ${assignedBy}.`,
+      kind: 'TECHNICAL_ASSIGNED',
+      title: 'Công việc kỹ thuật mới',
+      body,
+      link: '/app/technical/new',
+      dedupeKey: `TECHNICAL_ASSIGNED:${technicianUserId}:${ids[0]}+${ids.length}:${assignedAt.toISOString()}`,
     },
-  });
+  ]);
 }
 
 /**
@@ -2006,6 +2035,8 @@ export interface ListIssuesFilter {
   period?: ReportPeriod;
   /** "Hoàn thành vấn đề → Vấn đề báo cáo đúng / sai". */
   verdict?: 'CORRECT' | 'INCORRECT';
+  /** "Mức độ" — one level; every level (and "Chưa phân mức") when absent. */
+  severity?: IssueSeverity;
   now?: Date;
   skip: number;
   take: number;
@@ -2057,6 +2088,7 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
   if (filter.roomNumber) where.roomNumber = filter.roomNumber;
   if (filter.floorNumber) where.floorNumber = filter.floorNumber;
   if (filter.category) where.category = filter.category;
+  if (filter.severity) where.severity = filter.severity;
   if (filter.status) where.status = filter.status;
   if (filter.stage) where = { ...where, ...stageWhere(filter.stage) };
   if (filter.areaCategory) where.areaCategory = filter.areaCategory;
@@ -2104,11 +2136,51 @@ export async function listIssues(actor: Actor, filter: ListIssuesFilter): Promis
     };
   }
 
-  const [total, issues] = await prisma.$transaction([
+  /*
+    THE DEFAULT ORDER PUTS WHAT NEEDS ATTENTION FIRST. A queue of unresolved work
+    is ordered by level in the database (Cao → Trung bình → Thấp → Chưa phân
+    mức, newest first within one), so its pages keep that order. A mixed list
+    (the active board, a report period) keeps its newest-first page and then
+    lifts its unresolved incidents to the top by level. Completed lists and the
+    archive keep their date order untouched.
+  */
+  const order = issueListOrder(filter);
+  const [total, rows] = await prisma.$transaction([
     prisma.hotelIssue.count({ where }),
-    prisma.hotelIssue.findMany({ where, include: ISSUE_INCLUDE, orderBy: { createdAt: 'desc' }, skip: filter.skip, take: filter.take }),
+    prisma.hotelIssue.findMany({
+      where,
+      include: ISSUE_INCLUDE,
+      orderBy: order === 'OPEN_ONLY' ? [...SEVERITY_FIRST] : { createdAt: 'desc' },
+      skip: filter.skip,
+      take: filter.take,
+    }),
   ]);
+  const unresolved = new Set<IssueStatus>(outstandingStatuses());
+  const issues =
+    order === 'MIXED'
+      ? prioritise(rows, (i) => unresolved.has(i.status), (i) => i.severity, (i) => i.createdAt)
+      : rows;
   return { issues, total };
+}
+
+/**
+ * Which order a list is read in: only unresolved work (by level, in the
+ * database), finished work only (by date), or a mix (by level, then date).
+ */
+function issueListOrder(filter: ListIssuesFilter): 'OPEN_ONLY' | 'HISTORY' | 'MIXED' {
+  const finished = new Set<string>(['COMPLETED', 'AWAITING_INSPECTION']);
+  if (
+    filter.scope === 'archive' ||
+    filter.verdict ||
+    filter.completedFrom ||
+    filter.completedTo ||
+    (filter.status && finished.has(filter.status)) ||
+    (filter.stage && finished.has(filter.stage))
+  ) {
+    return 'HISTORY';
+  }
+  if (filter.outstanding || filter.assignment === 'UNASSIGNED' || filter.status || filter.stage) return 'OPEN_ONLY';
+  return 'MIXED';
 }
 
 export async function getIssue(id: string, actor: Actor): Promise<IssueDetail> {

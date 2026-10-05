@@ -423,7 +423,7 @@ describe('the overview', () => {
     const requests = within(overview).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách ký gửi')).toBeInTheDocument();
     // OVERVIEW = COMPACT: no times, no handling, no controls.
-    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái']);
     expect(within(within(requests).getByTestId('row-g1')).getByText('EZ305')).toBeInTheDocument();
     expect(within(within(requests).getByTestId('row-g1')).getByText('Gửi balo đen, 14h lấy')).toBeInTheDocument();
     // The status is the words and nothing beneath them.
@@ -435,7 +435,7 @@ describe('the overview', () => {
 
     const quality = within(overview).getByTestId('service-quality-table');
     expect(within(quality).getByText('Phòng ồn suốt đêm')).toBeInTheDocument();
-    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Trạng thái']);
+    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Mô tả', 'Trạng thái']);
     expect(within(quality).getByText('Đã tiếp nhận')).toBeInTheDocument();
     // The overview reads: no "Hoàn thành", no "Sửa", no "Hủy".
     expect(within(quality).queryByTestId('complete-r1')).not.toBeInTheDocument();
@@ -738,7 +738,9 @@ describe('the "Tổng" menu', () => {
     await userEvent.keyboard('{ArrowDown}');
     expect(items[1]).toHaveFocus();
     await userEvent.keyboard('{ArrowUp}{ArrowUp}');
-    // Up from the first wraps to the last: "Giao nhận hàng hóa của khách sạn".
+    // Up from the first wraps to the last: VII, after the six categories.
+    expect(within(menu).getByTestId('category-CONFIDENTIAL')).toHaveFocus();
+    await userEvent.keyboard('{ArrowUp}');
     expect(items[5]).toHaveFocus();
     await userEvent.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByTestId('category-menu')).not.toBeInTheDocument());
@@ -920,9 +922,13 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     expect(within(form).getByLabelText('Tên khách')).toBeInTheDocument();
     expect(within(form).getByLabelText('Mã EZ')).toBeInTheDocument();
     expect(within(form).getByLabelText('Mô tả')).toBeInTheDocument();
+    // "Mức độ": Cao | Trung bình | Thấp, Trung bình to start with.
+    const level = within(form).getByRole('radiogroup', { name: 'Mức độ' });
+    expect(within(level).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Cao', 'Trung bình', 'Thấp']);
+    expect(within(level).getByRole('radio', { name: 'Trung bình' })).toHaveAttribute('aria-checked', 'true');
     // No room, no staff, no priority or status — deliberately absent.
     expect(within(form).queryByTestId('service-quality-location')).not.toBeInTheDocument();
-    for (const absent of [/số phòng/i, /nhân viên/i, /ưu tiên/i, /mức độ/i, /trạng thái/i]) {
+    for (const absent of [/số phòng/i, /nhân viên/i, /ưu tiên/i, /trạng thái/i]) {
       expect(within(form).queryByText(absent)).not.toBeInTheDocument();
     }
     expect(within(form).queryAllByRole('combobox')).toHaveLength(0);
@@ -953,12 +959,13 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     await userEvent.type(screen.getByTestId('service-quality-guest'), 'Trần Thị B');
     await userEvent.type(screen.getByTestId('service-quality-ez'), 'EZ202');
     await userEvent.type(screen.getByTestId('service-quality-description'), 'Phòng ồn suốt đêm');
+    await userEvent.click(screen.getByTestId('service-quality-severity-HIGH'));
     await userEvent.click(screen.getByTestId('service-quality-form-add'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       category: 'CUSTOMER_COMPLAINT',
-      complaint: { guestName: 'Trần Thị B', ezCode: 'EZ202', description: 'Phòng ồn suốt đêm' },
+      complaint: { guestName: 'Trần Thị B', ezCode: 'EZ202', description: 'Phòng ồn suốt đêm', severity: 'HIGH' },
     });
 
     const table = await screen.findByTestId('service-quality-table');
@@ -999,6 +1006,7 @@ describe('vấn đề về chất lượng và dịch vụ', () => {
     expect(headersOf(table)).toEqual([
       'STT',
       'Tên khách',
+      'Mức độ',
       'Mã EZ',
       'Mô tả',
       'Trạng thái',
@@ -1375,9 +1383,13 @@ describe('dịch vụ phòng, KPI', () => {
     const tables = ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW'].map((t) =>
       within(groups).getByTestId(`room-service-table-${t}`),
     );
-    // In the fixed order, each under its own heading.
-    tables.forEach((table, i) => {
-      expect(within(table).getAllByRole('heading')[0]).toHaveTextContent(
+    // ONE container for "V. Dịch vụ phòng, KPI"; in the fixed order, each
+    // service a ruled part of it under its own heading.
+    expect(within(groups).getAllByRole('heading')[0]).toHaveTextContent('Dịch vụ phòng, KPI');
+    ['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW'].forEach((t, i) => {
+      const part = within(groups).getByTestId(`room-service-part-${t}`);
+      expect(part).toContainElement(tables[i]!);
+      expect(within(part).getAllByRole('heading')[0]).toHaveTextContent(
         ['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác', 'Review'][i]!,
       );
     });
@@ -1682,7 +1694,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       category: 'GUEST_REQUEST',
-      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy' },
+      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy', severity: 'MEDIUM' },
     });
 
     const table = await screen.findByTestId('guest-request-table');
@@ -1712,6 +1724,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     expect(headersOf(table)).toEqual([
       'STT',
       'Tên khách',
+      'Mức độ',
       'Mã EZ',
       'Nội dung',
       'Thời gian tiếp nhận',
@@ -1946,8 +1959,8 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     expect(screen.queryByTestId('facility-form')).not.toBeInTheDocument();
     expect(screen.queryByTestId('facility-issue')).not.toBeInTheDocument();
     expect(screen.queryByText(/chọn sự cố/i)).not.toBeInTheDocument();
-    // No select of any kind on this category.
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0);
+    // No select but the "Mức độ" filter (the server applies it).
+    expect(screen.queryAllByRole('combobox')).toEqual([screen.getByTestId('reception-severity')]);
   });
 
   it('shows the branch’s live incidents and their current status, immediately', async () => {
@@ -2285,6 +2298,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     expect(headersOf(board)).toEqual([
       'STT',
       'Khu vực',
+      'Mức độ',
       'Sự cố',
       'Nguyên nhân',
       'Thời gian báo cáo',
@@ -2409,7 +2423,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     const overview = await screen.findByTestId('report-overview');
     const board = within(overview).getByTestId('facility-board');
     expect(await within(board).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
-    expect(headersOf(board)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
+    expect(headersOf(board)).toEqual(['STT', 'Khu vực', 'Mức độ', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
     for (const detailOnly of ['Lần sửa', 'Người sửa', 'Thời gian báo cáo', 'Thời gian hoàn thành']) {
       expect(within(board).queryByRole('columnheader', { name: detailOnly })).not.toBeInTheDocument();
     }
@@ -2707,7 +2721,7 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     const page = await screen.findByTestId('completed-issues');
     const requests = within(page).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách Cũ')).toBeInTheDocument();
-    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(requests).getByText('Đã hoàn thành')).toBeInTheDocument();
     // Who entered it and who completed it — from the accounts.
     expect(within(requests).getByText('Nguyễn Văn A')).toBeInTheDocument();
@@ -2715,14 +2729,14 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
 
     const facility = within(page).getByTestId('completed-facility');
     expect(await within(facility).findByText('Bóng đèn cháy')).toBeInTheDocument();
-    expect(headersOf(facility)).toEqual(['STT', 'Khu vực', 'Sự cố', 'Nguyên nhân', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
+    expect(headersOf(facility)).toEqual(['STT', 'Khu vực', 'Mức độ', 'Sự cố', 'Nguyên nhân', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(facility).getByText('Đã hoàn thành')).toBeInTheDocument();
     expect(within(facility).getByText('Lễ tân Ba')).toBeInTheDocument();
     expect(within(facility).getByText('Kỹ thuật Bảo')).toBeInTheDocument();
 
     const quality = within(page).getByTestId('service-quality-table');
     expect(within(quality).getByText('Khách Phàn Nàn')).toBeInTheDocument();
-    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Mô tả', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
+    expect(headersOf(quality)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Mô tả', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
     expect(within(quality).getByText('Đã hoàn thành')).toBeInTheDocument();
     // Nobody recorded as completing it: "Hệ thống", never a blank.
     expect(within(quality).getByText('Nguyễn Văn A')).toBeInTheDocument();
@@ -2870,5 +2884,56 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
       ]),
     );
     expect(screen.getByTestId('completed-export-pdf').getAttribute('href')).toContain('/api/admin/reports/operational.pdf');
+  });
+});
+
+describe('"Mức độ" on II, III and IV', () => {
+  it('shows every request’s level and filters by it on the server', async () => {
+    const high = requestRow({ id: 'g-high' }, { guestName: 'Khách Gấp', severity: 'HIGH', severityLabel: 'Cao' });
+    const low = requestRow({ id: 'g-low' }, { guestName: 'Khách Thường', severity: 'LOW', severityLabel: 'Thấp' });
+    const legacy = requestRow({ id: 'g-old' }, { guestName: 'Khách Cũ', severity: null, severityLabel: 'Chưa phân mức' });
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({ status: 200, body: { reports: [high, low, legacy], archiveAfterHours: 12 } }),
+        'GET /api/reception/reports/active?severity=HIGH': () => ({ status: 200, body: { reports: [high], archiveAfterHours: 12 } }),
+      }),
+    );
+    renderApp('/app/reports');
+    await openCategory('GUEST_REQUEST');
+
+    const table = await screen.findByTestId('guest-request-table');
+    await within(table).findByText('Khách Gấp');
+    // Written, with its mark — never colour alone; an older request says so.
+    expect(within(within(table).getByTestId('row-g-high')).getByTestId('severity-badge')).toHaveTextContent('Cao');
+    expect(within(within(table).getByTestId('row-g-low')).getByTestId('severity-badge')).toHaveTextContent('Thấp');
+    expect(within(within(table).getByTestId('row-g-old')).getByTestId('severity-badge')).toHaveTextContent('Chưa phân mức');
+
+    // The server filters — the list is what it answers, not a hidden subset.
+    const filter = screen.getByTestId('reception-severity');
+    expect(within(filter).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tất cả mức độ', 'Cao', 'Trung bình', 'Thấp']);
+    await userEvent.selectOptions(filter, 'HIGH');
+    await waitFor(() => expect(within(screen.getByTestId('guest-request-table')).queryByText('Khách Thường')).not.toBeInTheDocument());
+    expect(within(screen.getByTestId('guest-request-table')).getByText('Khách Gấp')).toBeInTheDocument();
+  });
+
+  it('asks for the level when a request is recorded — Trung bình unless chosen', async () => {
+    const posted: unknown[] = [];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: requestRow() } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    await openCategory('GUEST_REQUEST');
+    await userEvent.click(await screen.findByTestId('category-add'));
+    await userEvent.type(screen.getByTestId('guest-request-guest'), 'Khách A');
+    await userEvent.type(screen.getByTestId('guest-request-content'), 'Thêm gối');
+    await userEvent.click(screen.getByTestId('guest-request-severity-LOW'));
+    await userEvent.click(screen.getByTestId('guest-request-form-add'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect((posted[0] as { guestRequest: { severity: string } }).guestRequest.severity).toBe('LOW');
   });
 });

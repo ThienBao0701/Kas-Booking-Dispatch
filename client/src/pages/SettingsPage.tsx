@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { UserPlus } from 'lucide-react';
+import { KeyRound, UserPlus } from 'lucide-react';
 import {
   adminUsersApi,
   type CreateUserInput,
@@ -19,6 +19,7 @@ import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
 import { DevToolsPanel } from '../components/DevToolsPanel';
 import { formatDateTime } from '../lib/format';
+import { CopyButton } from '../components/CopyButton';
 
 const inputClass =
   'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
@@ -30,6 +31,8 @@ export function SettingsPage() {
   const [editing, setEditing] = useState<ManagedUser | null>(null);
   /** "Xóa": the account about to be deleted, after a typed confirmation. */
   const [deleting, setDeleting] = useState<ManagedUser | null>(null);
+  /** "Đặt lại mật khẩu": the account getting a new temporary password. */
+  const [resetting, setResetting] = useState<ManagedUser | null>(null);
 
   // Admins included, so the "Admin / Quản trị" section lists them (read-only).
   // Under the ['admin-users'] prefix, so the invalidation below refreshes it.
@@ -83,6 +86,7 @@ export function SettingsPage() {
                 onToggle={(id, active) => toggle.mutate({ id, active })}
                 onEdit={setEditing}
                 onDelete={setDeleting}
+                onResetPassword={setResetting}
               />
             );
           })}
@@ -106,6 +110,16 @@ export function SettingsPage() {
           onClose={() => setDeleting(null)}
           onDeleted={() => {
             setDeleting(null);
+            void invalidate();
+          }}
+        />
+      ) : null}
+
+      {resetting ? (
+        <ResetPasswordModal
+          user={resetting}
+          onClose={() => {
+            setResetting(null);
             void invalidate();
           }}
         />
@@ -362,6 +376,7 @@ function DepartmentTable({
   onToggle,
   onEdit,
   onDelete,
+  onResetPassword,
 }: {
   role: UserRole;
   users: ManagedUser[];
@@ -369,6 +384,7 @@ function DepartmentTable({
   onToggle: (id: number, active: boolean) => void;
   onEdit: (user: ManagedUser) => void;
   onDelete: (user: ManagedUser) => void;
+  onResetPassword: (user: ManagedUser) => void;
 }) {
   const columns: DataColumn<ManagedUser>[] = [
     // Fixed shares, so the columns line up from one department's table to the next.
@@ -404,6 +420,23 @@ function DepartmentTable({
           <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-500">Đã khoá</span>
         ),
     },
+    /*
+      THE CREDENTIAL'S STATE — never the credential. A password is stored only
+      as a hash; nobody, the Admin included, can read one back. A temporary one
+      is shown once, at "Đặt lại mật khẩu", and must be changed at first login.
+    */
+    {
+      key: 'password',
+      header: 'Mật khẩu',
+      secondary: true,
+      className: 'whitespace-nowrap',
+      render: (u) =>
+        u.mustChangePassword ? (
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">Mật khẩu tạm — chờ đổi</span>
+        ) : (
+          <span className="text-xs text-slate-600">Đã đặt mật khẩu</span>
+        ),
+    },
     {
       key: 'lastLogin',
       header: 'Đăng nhập gần nhất',
@@ -433,6 +466,10 @@ function DepartmentTable({
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => onEdit(u)} data-testid={`edit-user-${u.id}`}>
               Sửa
+            </Button>
+            <Button variant="secondary" onClick={() => onResetPassword(u)} data-testid={`reset-password-${u.id}`}>
+              <KeyRound className="h-4 w-4" aria-hidden="true" />
+              Đặt lại mật khẩu
             </Button>
             <Button
               variant={u.active ? 'secondary' : 'primary'}
@@ -581,6 +618,139 @@ function CreateUserModal({
         ) : (
           <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{scopeNote(form.role ?? 'RECEPTIONIST')}</p>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+/* --------------------------- Đặt lại mật khẩu --------------------------- */
+
+/** The server's own rule: 8–72 characters, at least one letter and one digit. */
+function passwordProblem(value: string): string | null {
+  if (value.length < 8) return 'Mật khẩu phải có ít nhất 8 ký tự.';
+  if (value.length > 72) return 'Mật khẩu không được vượt quá 72 ký tự.';
+  if (!/[A-Za-z]/.test(value)) return 'Mật khẩu phải chứa ít nhất một chữ cái.';
+  if (!/[0-9]/.test(value)) return 'Mật khẩu phải chứa ít nhất một chữ số.';
+  return null;
+}
+
+/**
+ * A strong temporary password, made in THIS browser from the platform's
+ * cryptographic random source: 12 characters, upper and lower case and digits,
+ * none of the look-alikes (0/O, 1/l/I) a person reads aloud wrongly.
+ */
+function generateTemporaryPassword(length = 12): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const all = upper + lower + digits;
+  const pick = (set: string) => {
+    const n = new Uint32Array(1);
+    crypto.getRandomValues(n);
+    return set[n[0]! % set.length]!;
+  };
+  const chars = [pick(upper), pick(lower), pick(digits)];
+  while (chars.length < length) chars.push(pick(all));
+  // Shuffle, so the guaranteed kinds are not always in front.
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const n = new Uint32Array(1);
+    crypto.getRandomValues(n);
+    const j = n[0]! % (i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.join('');
+}
+
+/**
+ * "ĐẶT LẠI MẬT KHẨU" — a NEW temporary password, typed or generated here, set by
+ * the server as a hash and shown ONCE in this dialog, with "Sao chép mật khẩu".
+ * Once closed it is gone: no screen or endpoint can show it, or the old one,
+ * again. The account must change it at its next login.
+ */
+function ResetPasswordModal({ user, onClose }: { user: ManagedUser; onClose: () => void }) {
+  const [password, setPassword] = useState(() => generateTemporaryPassword());
+  const [done, setDone] = useState<string | null>(null);
+  const reset = useMutation({
+    mutationFn: (value: string) => adminUsersApi.resetPassword(user.id, value),
+    onSuccess: (_res, value) => setDone(value),
+  });
+  const problem = passwordProblem(password);
+
+  if (done) {
+    return (
+      <Modal
+        open
+        title="Mật khẩu mới"
+        onClose={onClose}
+        footer={
+          <Button onClick={onClose} data-testid="reset-password-close">
+            Đóng
+          </Button>
+        }
+      >
+        <div className="space-y-3" data-testid="reset-password-result">
+          <p className="text-sm text-slate-600">
+            Mật khẩu tạm của <span className="font-semibold text-slate-900">{user.fullName}</span> (
+            <span className="font-mono">{user.username}</span>):
+          </p>
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line-strong bg-slate-50 px-3 py-2.5">
+            <code className="flex-1 select-all break-all font-mono text-lg font-semibold tracking-wide text-slate-900" data-testid="reset-password-value">
+              {done}
+            </code>
+            <CopyButton value={done} label="Sao chép mật khẩu" text="Sao chép mật khẩu" />
+          </div>
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Mật khẩu chỉ hiển thị một lần. Sau khi đóng, không ai xem lại được. Người dùng phải đổi mật khẩu khi đăng nhập.
+          </p>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      open
+      title="Đặt lại mật khẩu"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Hủy
+          </Button>
+          <Button
+            onClick={() => reset.mutate(password)}
+            disabled={problem !== null}
+            loading={reset.isPending}
+            data-testid="reset-password-confirm"
+          >
+            Đặt lại mật khẩu
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-slate-600">
+          Tài khoản <span className="font-mono font-medium text-slate-900">{user.username}</span> — {user.fullName}. Mật khẩu
+          hiện tại sẽ không dùng được nữa và mọi phiên đăng nhập của tài khoản này kết thúc.
+        </p>
+        <label className="block text-sm font-medium text-slate-700">
+          <span className="mb-1.5 block">Mật khẩu tạm mới</span>
+          <span className="flex gap-2">
+            <input
+              className={`${inputClass} font-mono`}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              spellCheck={false}
+              data-testid="reset-password-input"
+            />
+            <Button variant="secondary" onClick={() => setPassword(generateTemporaryPassword())} data-testid="reset-password-generate">
+              Tạo mật khẩu mạnh
+            </Button>
+          </span>
+        </label>
+        {problem ? <p className="text-xs text-red-600">{problem}</p> : null}
+        {reset.isError ? <ErrorAlert>{toUserMessage(reset.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );

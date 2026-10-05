@@ -15,12 +15,14 @@ import { PAYMENT_SOURCE_FALLBACK } from './reportCategories';
 export const GUEST_REQUEST_EDIT: EditField[] = [
   { name: 'guestName', label: 'Tên khách', required: true },
   { name: 'ezCode', label: 'Mã EZ' },
+  { name: 'severity', label: 'Mức độ', kind: 'severity' },
   { name: 'note', label: 'Nội dung', kind: 'textarea', required: true },
 ];
 
 export const SERVICE_QUALITY_EDIT: EditField[] = [
   { name: 'guestName', label: 'Tên khách', required: true },
   { name: 'ezCode', label: 'Mã EZ' },
+  { name: 'severity', label: 'Mức độ', kind: 'severity' },
   { name: 'description', label: 'Mô tả', kind: 'textarea', required: true },
 ];
 
@@ -74,17 +76,9 @@ export function deliveryEditFields(options?: ReportOptions): EditField[] {
   ];
 }
 
-const METHOD_FALLBACK = [
-  { code: 'CASH', label: 'Tiền mặt' },
-  { code: 'TRANSFER', label: 'Chuyển khoản' },
-  { code: 'CARD', label: 'Cà thẻ' },
-  { code: 'DEBT', label: 'Công nợ' },
-];
-
 /** A payment's correctable fields — the ledger's own form, as a dialog. */
 export function paymentEditFields(options?: ReportOptions): EditField[] {
   const sources = options?.paymentSources ?? PAYMENT_SOURCE_FALLBACK;
-  const methods = options?.paymentMethods ?? METHOD_FALLBACK;
   return [
     { name: 'ezCode', label: 'Mã EZ' },
     {
@@ -95,14 +89,8 @@ export function paymentEditFields(options?: ReportOptions): EditField[] {
       options: sources.map((s) => ({ value: s, label: s })),
     },
     { name: 'guestName', label: 'Tên khách' },
-    {
-      name: 'method',
-      label: 'Phương thức thanh toán',
-      kind: 'select',
-      required: true,
-      options: methods.map((m) => ({ value: m.code, label: m.label })),
-    },
-    { name: 'amount', label: 'Thu tiền', kind: 'money', required: true },
+    // "Tổng tiền thu" and its methods — one transaction, corrected as a whole.
+    { name: 'allocations', label: 'Phương thức thanh toán', kind: 'allocations', required: true },
     { name: 'expense', label: 'Chi tiền', kind: 'money' },
     { name: 'note', label: 'Ghi chú', kind: 'textarea' },
   ];

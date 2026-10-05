@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  ShieldAlert,
   ConciergeBell,
   MessageSquareText,
   PackageCheck,
@@ -81,6 +82,9 @@ const HOUSEKEEPING_MANAGER_GROUP: NavItem = {
   children: HOUSEKEEPING_MANAGER_ITEMS,
 };
 
+/** "VII" — its full name, as the category is called everywhere. */
+const CONFIDENTIAL_TITLE = 'Báo cáo các vấn đề và tình hình quan trọng';
+
 const REPORT_GROUP: NavItem = {
   to: '/app/reports',
   label: 'Báo cáo vấn đề',
@@ -98,6 +102,8 @@ const REPORT_GROUP: NavItem = {
         { to: '/app/reports?category=CUSTOMER_COMPLAINT', label: CATEGORY_FALLBACK_LABELS.CUSTOMER_COMPLAINT, icon: ThumbsUp },
         { to: '/app/reports?category=ROOM_SERVICE', label: CATEGORY_FALLBACK_LABELS.ROOM_SERVICE, icon: Sparkles },
         { to: '/app/reports?category=HOTEL_DELIVERY', label: HOTEL_DELIVERY_TITLE, icon: PackageCheck },
+        // VII — private reports upward: the managers' and the Admin's inbox.
+        { to: '/app/reports/confidential', label: CONFIDENTIAL_TITLE, icon: ShieldAlert },
       ],
     },
     { to: '/app/reports/technical', label: 'Kỹ thuật', icon: Hammer },

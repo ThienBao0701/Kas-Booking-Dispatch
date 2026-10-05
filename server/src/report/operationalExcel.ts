@@ -208,6 +208,8 @@ export async function buildOperationalReportWorkbook(
     // The SHIFT's day, from the session — Ca C's 02:15 entries sit under the day it began.
     { header: 'Ngày ca', key: 'shiftDay', width: 12 },
     { header: 'STT', key: 'stt', width: 6 },
+    // "Mức độ" — Cao / Trung bình / Thấp; "Chưa phân mức" on older records.
+    { header: 'Mức độ', key: 'severity', width: 14 },
     { header: 'Tên khách', key: 'guest', width: 24 },
     { header: 'Mã EZ', key: 'ez', width: 16 },
     { header: 'Nội dung', key: 'content', width: 44 },
@@ -231,6 +233,7 @@ export async function buildOperationalReportWorkbook(
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
         stt: i + 1,
+        severity: row.guestRequest?.severityLabel ?? '',
         guest: row.guestRequest?.guestName ?? '',
         ez: row.guestRequest?.ezCode ?? '',
         // The note alone: a legacy "Ký gửi" has its own column on this sheet.
@@ -257,6 +260,9 @@ export async function buildOperationalReportWorkbook(
     { header: 'Ngày ca', key: 'shiftDay', width: 12 },
     { header: 'STT', key: 'stt', width: 6 },
     { header: 'Mã sự cố', key: 'issueId', width: 28 },
+    // "Mức độ" — Cao / Trung bình / Thấp; "Chưa phân mức" on older records.
+    { header: 'Mức độ', key: 'severity', width: 14 },
+
     { header: 'Khu vực / Vị trí', key: 'location', width: 30 },
     { header: 'Loại sự cố', key: 'category', width: 18 },
     { header: 'Mô tả', key: 'description', width: 46 },
@@ -308,6 +314,7 @@ export async function buildOperationalReportWorkbook(
         // The reference itself, so a row here can be found in the Technical
         // system it belongs to. This sheet holds no maintenance data of its own.
         issueId: row.facility?.issueId ?? '',
+        severity: issue?.severityLabel ?? '',
         location: issue?.locationLabel ?? '',
         category: issue?.category ?? '',
         description: issue?.description ?? '',
@@ -362,6 +369,8 @@ export async function buildOperationalReportWorkbook(
     // The SHIFT's day, from the session — Ca C's 02:15 entries sit under the day it began.
     { header: 'Ngày ca', key: 'shiftDay', width: 12 },
     { header: 'STT', key: 'stt', width: 6 },
+    // "Mức độ" — Cao / Trung bình / Thấp; "Chưa phân mức" on older records.
+    { header: 'Mức độ', key: 'severity', width: 14 },
     { header: 'Tên khách', key: 'guest', width: 24 },
     { header: 'Mã EZ', key: 'ez', width: 16 },
     { header: 'Mô tả', key: 'description', width: 56 },
@@ -384,6 +393,7 @@ export async function buildOperationalReportWorkbook(
         branch: branchLabel(section),
         shiftDay: hcmDayLabel(row.shiftDate),
         stt: i + 1,
+        severity: c?.severityLabel ?? '',
         guest: c?.guestName ?? '',
         ez: c?.ezCode ?? '',
         description: c?.description ?? '',

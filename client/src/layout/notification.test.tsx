@@ -66,3 +66,53 @@ describe('NotificationBell — content and states', () => {
     expect(await screen.findByText('Không thể tải thông báo.')).toBeInTheDocument();
   });
 });
+
+describe('NotificationBell — where a notice goes', () => {
+  it('opens the notice’s own work page and marks it read', async () => {
+    const read: string[] = [];
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTIONIST_USER } }),
+      'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 1 } }),
+      'GET /api/bookings/new?pageSize=100': () => ({
+        status: 200,
+        body: { bookings: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } },
+      }),
+      'GET /api/notifications?page=1&pageSize=15': () => ({
+        status: 200,
+        body: {
+          notifications: [
+            {
+              id: 'n9',
+              bookingId: null,
+              link: '/app/reports/confidential',
+              kind: null,
+              title: 'Công việc mới',
+              body: 'CN 1 · Phòng 101',
+              read: false,
+              createdAt: '2026-10-05T09:59:00.000Z',
+              readAt: null,
+            },
+          ],
+          unreadCount: 1,
+          pagination: { page: 1, pageSize: 15, total: 1, totalPages: 1 },
+        },
+      }),
+      'POST /api/notifications/n9/read': () => {
+        read.push('n9');
+        return { status: 200, body: { success: true } };
+      },
+      'GET /api/confidential-reports/options': () => ({
+        status: 200,
+        body: { title: 'x', categories: [], canSend: true, canRead: false, recipients: [] },
+      }),
+    });
+    const user = userEvent.setup();
+    renderApp('/app/new');
+    await user.click(await screen.findByRole('button', { name: /Thông báo/ }));
+    await user.click(await screen.findByText('Công việc mới'));
+    expect(await screen.findByRole('heading', { name: 'VII. Báo cáo các vấn đề và tình hình quan trọng' })).toBeInTheDocument();
+    expect(read).toEqual(['n9']);
+    // No push control for a role that is not sent pushes.
+    expect(screen.queryByTestId('push-control')).not.toBeInTheDocument();
+  });
+});

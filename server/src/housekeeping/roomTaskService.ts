@@ -26,6 +26,7 @@ import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch } from './workShiftService';
+import { notifyOperational } from '../push/pushService';
 
 export const TASK_INCLUDE = {
   branch: { select: { id: true, code: true, hotelName: true, address: true, branchNumber: true } },
@@ -333,7 +334,7 @@ export async function createTasks(
   });
   const taken = new Set(existing.map((e) => e.roomNumber));
   const now = clock.now();
-  const created: string[] = [];
+  const created: { id: string; roomNumber: string }[] = [];
   await client.$transaction(async (tx) => {
     for (const roomNumber of rooms.filter((r) => !taken.has(r))) {
       const task = await tx.housekeepingRoomTask.create({
@@ -354,22 +355,69 @@ export async function createTasks(
       });
       await recordEvent(tx, task.id, 'CREATED', actor, now, { statusCode, priority, note });
       if (person) await recordEvent(tx, task.id, 'ASSIGNED', actor, now, { fromId: null, fromName: null, toId: person.id, toName: person.fullName });
-      created.push(task.id);
+      created.push({ id: task.id, roomNumber });
     }
   });
-  if (person && created.length > 0) await notifyAssignee(person.id, rooms.filter((r) => !taken.has(r)), workDate, client);
+  if (person && created.length > 0) await notifyAssignee(person.id, branch.id, created, now, client);
   return { created: created.length, skipped: [...taken] };
 }
 
-async function notifyAssignee(userId: number, rooms: string[], workDate: string, client: PrismaClient, title = 'Bạn được giao phòng'): Promise<void> {
-  const [y, m, d] = workDate.split('-');
-  await client.notification.create({
-    data: {
-      userId,
-      title,
-      body: `Ngày ${d}/${m}/${y}: phòng ${rooms.join(', ')}.`,
-    },
-  });
+/**
+ * "Công việc buồng phòng mới" — ONE notice per assignment, however many rooms:
+ * "CN 1 · Phòng 101 · Dọn phòng", or "CN 1 · 3 phòng mới được giao". To the
+ * worker the rooms were given to (always of this branch), in the bell and on
+ * their devices; keyed by the assignment, so a retry cannot repeat it.
+ */
+async function notifyAssignee(
+  userId: number,
+  branchId: number,
+  tasks: { id: string; roomNumber: string }[],
+  at: Date,
+  client: PrismaClient,
+): Promise<void> {
+  const branch = await client.branch.findUnique({ where: { id: branchId }, select: { branchNumber: true } });
+  const one = tasks.length === 1 ? tasks[0]! : null;
+  const ids = tasks.map((t) => t.id).sort();
+  await notifyOperational(
+    [
+      {
+        userId,
+        kind: 'HOUSEKEEPING_ASSIGNED',
+        title: 'Công việc buồng phòng mới',
+        body: one
+          ? `CN ${branch?.branchNumber ?? ''} · Phòng ${one.roomNumber} · Dọn phòng`
+          : `CN ${branch?.branchNumber ?? ''} · ${tasks.length} phòng mới được giao`,
+        link: one ? `/app/inspections/room/${one.id}` : '/app/inspections',
+        dedupeKey: `HOUSEKEEPING_ASSIGNED:${userId}:${ids[0]}+${ids.length}:${at.toISOString()}`,
+      },
+    ],
+    client,
+  );
+}
+
+/** "Dọn lại phòng 101" — "CN 1 · Phòng 101 · Không đạt", then the reason, short. */
+async function notifyReclean(
+  userId: number,
+  branchId: number,
+  task: { id: string; roomNumber: string },
+  reason: string | null,
+  client: PrismaClient,
+): Promise<void> {
+  const branch = await client.branch.findUnique({ where: { id: branchId }, select: { branchNumber: true } });
+  const why = reason ? (reason.length > 100 ? `${reason.slice(0, 100)}…` : reason) : null;
+  await notifyOperational(
+    [
+      {
+        userId,
+        kind: 'HOUSEKEEPING_RECLEAN',
+        title: `Dọn lại phòng ${task.roomNumber}`,
+        body: `CN ${branch?.branchNumber ?? ''} · Phòng ${task.roomNumber} · Không đạt${why ? `\nLý do: ${why}` : ''}`,
+        link: `/app/inspections/room/${task.id}`,
+        dedupeKey: `HOUSEKEEPING_RECLEAN:${task.id}`,
+      },
+    ],
+    client,
+  );
 }
 
 /** "Sửa": the code, priority and instruction — before and after kept in the history. */
@@ -428,7 +476,7 @@ export async function assignTask(
       toName: person?.fullName ?? null,
     });
   });
-  if (person) await notifyAssignee(person.id, [row.roomNumber], row.workDate, client);
+  if (person) await notifyAssignee(person.id, row.branchId, [{ id, roomNumber: row.roomNumber }], now, client);
   return serializeTask(await loadTask(id, client), { money: true });
 }
 
@@ -531,7 +579,7 @@ export async function reviewTask(
     if (person) await recordEvent(tx, next.id, 'ASSIGNED', actor, now, { fromId: null, fromName: null, toId: person.id, toName: person.fullName });
     return next.id;
   });
-  if (nextId && person) await notifyAssignee(person.id, [row.roomNumber], row.workDate, client, 'Phòng cần dọn lại');
+  if (nextId && person) await notifyReclean(person.id, row.branchId, { id: nextId, roomNumber: row.roomNumber }, reason, client);
   return {
     task: serializeTask(await loadTask(id, client), { money: true }),
     reclean: nextId ? serializeTask(await loadTask(nextId, client), { money: true }) : null,

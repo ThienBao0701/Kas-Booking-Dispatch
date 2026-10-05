@@ -28,6 +28,10 @@ import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { groupDigits, parseVnd } from '../lib/money';
 import { EXPENSE_SOURCE } from '../lib/reportCategories';
+import { PaymentAllocations } from './PaymentAllocations';
+import { allocationState, linesOf, paymentMoneyPayload, type AllocationLine } from '../lib/paymentAllocations';
+import { SeverityPicker } from './Severity';
+import type { Severity } from '../api/receptionReports';
 
 /**
  * "Xóa" asks for a reason and says plainly what it is about to do.
@@ -179,8 +183,10 @@ export interface EditField {
    * `integer`: a whole number of at least 1, such as "Số đêm".
    * `count`: a whole number of at least 0, such as a review count.
    * `select`: one of `options`.
+   * `allocations`: a payment's "Tổng tiền thu" and its methods, as one editor.
+   * `severity`: "Mức độ" — Cao / Trung bình / Thấp.
    */
-  kind?: 'text' | 'textarea' | 'money' | 'integer' | 'count' | 'select';
+  kind?: 'text' | 'textarea' | 'money' | 'integer' | 'count' | 'select' | 'allocations' | 'severity';
   required?: boolean;
   placeholder?: string;
   /** The choices of a `select`, as `{ value: the server's code, label }`. */
@@ -235,12 +241,23 @@ export function RecordEditDialog({
   );
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /** A payment's total and methods — one transaction, corrected as a whole. */
+  const [money, setMoney] = useState<{ total: string; lines: AllocationLine[] }>(() =>
+    report.payment
+      ? { total: groupDigits(String(report.payment.amount)), lines: linesOf(report.payment) }
+      : { total: '', lines: [] },
+  );
+  const hasAllocations = fields.some((f) => f.kind === 'allocations');
+  const payout = block === 'payment' && draft.source === EXPENSE_SOURCE;
 
   const save = useMutation({
     mutationFn: () => {
       const payload: Record<string, unknown> = {};
       for (const f of fields) {
         const value = draft[f.name] ?? '';
+        if (f.kind === 'allocations') continue;
+        // A record from before the level existed keeps none until one is chosen.
+        if (f.kind === 'severity' && value === '') continue;
         payload[f.name] =
           f.kind === 'money'
             ? (parseVnd(value) ?? 0)
@@ -250,6 +267,7 @@ export function RecordEditDialog({
                 ? parseCount(value)
                 : value.trim();
       }
+      if (hasAllocations && !payout) Object.assign(payload, paymentMoneyPayload(money.total, money.lines));
       // A payment moved to "Chi tiền" is a pure cash payout — the server's rule.
       if (block === 'payment' && payload.source === EXPENSE_SOURCE) {
         payload.amount = 0;
@@ -267,6 +285,7 @@ export function RecordEditDialog({
 
   const everyFieldReady = fields.every((f) => {
     const value = (draft[f.name] ?? '').trim();
+    if (f.kind === 'allocations') return payout || allocationState(money.total, money.lines).valid;
     if (!f.required) return true;
     if (f.kind === 'money') return parseVnd(value) !== null;
     if (f.kind === 'integer') return parseWhole(value) !== null;
@@ -311,7 +330,29 @@ export function RecordEditDialog({
 
         <div className="grid gap-3 sm:grid-cols-2">
           {fields.map((f) =>
-            f.kind === 'money' ? (
+            f.kind === 'allocations' ? (
+              <div key={f.name} className="sm:col-span-2">
+                {payout ? (
+                  <p className="text-sm text-slate-600">Khoản chi tiền mặt — không ghi số tiền thu.</p>
+                ) : (
+                  <PaymentAllocations
+                    total={money.total}
+                    onTotal={(v) => setMoney((m) => ({ ...m, total: v }))}
+                    lines={money.lines}
+                    onLines={(v) => setMoney((m) => ({ ...m, lines: v }))}
+                    testId="record-edit-alloc"
+                  />
+                )}
+              </div>
+            ) : f.kind === 'severity' ? (
+              <div key={f.name} className="sm:col-span-2">
+                <SeverityPicker
+                  value={(draft[f.name] ?? '') as Severity | ''}
+                  onChange={(v) => setDraft((d) => ({ ...d, [f.name]: v }))}
+                  testId={`record-edit-${f.name}`}
+                />
+              </div>
+            ) : f.kind === 'money' ? (
               <MoneyInput
                 key={f.name}
                 label={f.label}

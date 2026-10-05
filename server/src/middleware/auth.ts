@@ -72,6 +72,8 @@ const RECEPTION_SUPERVISOR_ROUTES = [
   /^\/api\/hotel-deliveries(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+  /^\/api\/confidential-reports(\/|$)/,
 ];
 
 /**
@@ -95,6 +97,7 @@ const TECHNICAL_MANAGER_ROUTES = [
   /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
 ];
 
 function supervisorMayReach(req: Request): boolean {
@@ -124,6 +127,7 @@ const HOUSEKEEPING_ROUTES = [
   /^\/api\/hotel-deliveries(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
   // The room catalog and the branch of its own account.
   /^\/api\/branches\/\d+\/rooms$/,
   /^\/api\/branches$/,
@@ -141,6 +145,7 @@ const HOUSEKEEPING_MANAGER_ROUTES = [
   /^\/api\/branches(\/|$)/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
 ];
 
 function housekeepingMayReach(req: Request): boolean {

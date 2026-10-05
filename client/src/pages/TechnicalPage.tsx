@@ -28,6 +28,8 @@
  * from the loaded list — the lists are paginated, so a count taken from one
  * would show the size of the page and would change as somebody scrolled.
  */
+import { SeverityBadge, SeverityFilter } from '../components/Severity';
+import type { Severity } from '../api/receptionReports';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Navigate, NavLink, useParams } from 'react-router-dom';
@@ -143,6 +145,8 @@ export function TechnicalPage() {
   const config = QUEUES[key];
 
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
+  /** "Mức độ" — one level, filtered by the server; the queue is Cao first by default. */
+  const [severity, setSeverity] = useState<Severity | ''>('');
   /*
     "Đã hoàn thành" by the day the TECHNICIAN FINISHED (`completedAt`), on the
     server. Empty by default: the queue keeps showing its whole history until a
@@ -177,13 +181,14 @@ export function TechnicalPage() {
   const inspectionOn = counts.data?.counts.inspectionEnabled ?? false;
 
   const list = useQuery({
-    queryKey: ['issues', { technical: key, branchId: branchFilter, done: doneFiltered ? doneRange : null }],
+    queryKey: ['issues', { technical: key, branchId: branchFilter, done: doneFiltered ? doneRange : null, severity }],
     queryFn: () =>
       issuesApi.list({
         stage: config.stage,
         branchId: branchFilter ?? undefined,
         completedFrom: doneFiltered ? doneRange.from : undefined,
         completedTo: doneFiltered ? doneRange.to : undefined,
+        severity: severity || undefined,
         pageSize: 100,
       }),
     refetchInterval: POLL_MS,
@@ -258,6 +263,8 @@ export function TechnicalPage() {
           </NavLink>
         ))}
       </nav>
+
+      <SeverityFilter value={severity} onChange={setSeverity} testId="technical-severity" className="mb-4 sm:w-60" />
 
       {onCompleted ? (
         <section
@@ -340,6 +347,7 @@ export function TechnicalPage() {
                               {issue.category ? (
                                 <span className="text-sm text-slate-600">{issueCategoryLabel(issue)}</span>
                               ) : null}
+                              <SeverityBadge severity={issue.severity} label={issue.severityLabel} />
                               <IssueStageBadge issue={issue} />
                               {inspectionIsRelevant(issue) ? <IssueInspectionBadge issue={issue} /> : null}
                               {/* The desk corrected this report after it was filed — see the history below. */}

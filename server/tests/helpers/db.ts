@@ -160,6 +160,11 @@ export async function resetAll(): Promise<void> {
   // themselves. The proofs that point at a session are already gone with their
   // bookings, and that FK is SET NULL anyway.
   await resetShiftData();
+  // VII, push devices and the password-reset audit hold references to User (and Branch).
+  await testPrisma.confidentialReportRecipient.deleteMany();
+  await testPrisma.confidentialReport.deleteMany();
+  await testPrisma.pushSubscription.deleteMany();
+  await testPrisma.accountAudit.deleteMany();
   await testPrisma.session.deleteMany();
   await testPrisma.user.deleteMany();
   await testPrisma.branch.deleteMany();

@@ -482,8 +482,9 @@ describe('a new incident reaches the people who act on it', () => {
     await assignTo(admin, id, tech);
     const toTech = await testPrisma.notification.findMany({ where: { userId: techId } });
     expect(toTech).toHaveLength(1);
-    expect(toTech[0]!.title).toBe('Bạn được giao xử lý sự cố');
-    expect(toTech[0]!.body).toContain('Giao bởi');
+    // Short, and where: 'CN n · Phòng 301 · <loại sự cố>' — pushed as well as in the bell.
+    expect(toTech[0]).toMatchObject({ title: 'Công việc kỹ thuật mới', kind: 'TECHNICAL_ASSIGNED', link: '/app/technical/new' });
+    expect(toTech[0]!.body).toMatch(/^CN \d+ · Phòng 301 · \S/);
   });
 });
 

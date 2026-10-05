@@ -28,7 +28,7 @@ export const DELETED_ACCOUNT_USERNAME = '__deleted_account__';
 export const DELETED_ACCOUNT_NAME = 'Tài khoản đã xóa';
 
 /** Rows that are the account's own, deleted with it rather than re-pointed. */
-const PERSONAL_TABLES = new Set(['Session', 'Notification', 'ChatReadState', 'UserBranchAssignment']);
+const PERSONAL_TABLES = new Set(['Session', 'Notification', 'ChatReadState', 'UserBranchAssignment', 'PushSubscription']);
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

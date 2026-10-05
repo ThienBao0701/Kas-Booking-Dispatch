@@ -32,6 +32,8 @@
  * A TABLE, NOT A STACK OF CARDS. The full record, correction history and all,
  * is one click down inside the row.
  */
+import { SeverityFilter } from '../components/Severity';
+import type { Severity } from '../api/receptionReports';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -77,6 +79,7 @@ import {
   AdminServiceQualityTable,
 } from '../components/AdminOperationalTables';
 import { RoomServiceTotals } from '../components/OperationalTables';
+import { ReportSection, ReportSubsection } from '../components/ReportSection';
 import { formatVnd } from '../lib/money';
 import { formatDate, formatViWeekdayDate, hcmToday } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
@@ -131,6 +134,13 @@ export function AdminOperationalReportsPage() {
   }, [category, filter.branch]);
   const period = reportPeriod(filter, today);
   const range: DateRangeValue = period ?? { from: '', to: '' };
+  /*
+    "MỨC ĐỘ" on II, III and IV — applied by the server, and cleared when the
+    category changes: a level picked on one page must not silently narrow the next.
+  */
+  const [severityChoice, setSeverity] = useState<{ category: ReportCategory | null; value: Severity | '' }>({ category, value: '' });
+  const levelled = category === 'GUEST_REQUEST' || category === 'FACILITY_ISSUE' || category === 'CUSTOMER_COMPLAINT';
+  const severity = levelled && severityChoice.category === category && severityChoice.value ? severityChoice.value : undefined;
   const [exportOpen, setExportOpen] = useState(false);
   /** "+ Báo cáo vấn đề": the branch → category → form dialog. */
   const [creating, setCreating] = useState(false);
@@ -180,10 +190,11 @@ export function AdminOperationalReportsPage() {
     from: range.from,
     to: range.to,
     shiftType: filter.shiftType || undefined,
+    ...(severity && category !== 'FACILITY_ISSUE' ? { severity } : {}),
   };
 
   const data = useQuery({
-    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to, filter.shiftType],
+    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to, filter.shiftType, severity ?? ''],
     queryFn: () => adminReportsApi.operational(filters),
     enabled: branch !== null && rangeValid,
   });
@@ -269,6 +280,14 @@ export function AdminOperationalReportsPage() {
           branchCounts={unresolvedByBranch}
           testId="admin-filters"
         />
+        {levelled ? (
+          <SeverityFilter
+            value={severity ?? ''}
+            onChange={(value) => setSeverity({ category, value })}
+            testId="admin-severity"
+            className="mb-4 sm:w-60"
+          />
+        ) : null}
       </QueryState>
 
       {branch === null ? (
@@ -325,6 +344,7 @@ export function AdminOperationalReportsPage() {
               branchId={filters.branchId}
               range={range}
               shiftType={filters.shiftType}
+              severity={severity}
               isAdmin={isAdmin}
               onToast={setToast}
             />
@@ -468,18 +488,22 @@ function CategoryTable({
       */
       return <AdminRoomServiceTable {...props} serviceType="ROOM_SALE" title={label('ROOM_SERVICE')} rows={[]} />;
     }
+    /*
+      ONE CONTAINER FOR "V. DỊCH VỤ PHÒNG, KPI", one ruled part per service that
+      has rows — Giặt ủi, Dịch vụ khác, Review… — each with its own table and
+      total. The services keep their own columns; nothing is merged.
+    */
     return (
-      <div className="space-y-3">
-        {present.map((type) => (
-          <AdminRoomServiceTable
-            key={type}
-            {...props}
-            serviceType={type}
-            title={`${title} · ${serviceLabel(type)}`}
-            rows={rows.filter((r) => r.roomService?.serviceType === type)}
-          />
-        ))}
-      </div>
+      <ReportSection testId="admin-room-service-group" marker={marker} title={title} count={rows.length} aside={headerAction}>
+        {present.map((type) => {
+          const mine = rows.filter((r) => r.roomService?.serviceType === type);
+          return (
+            <ReportSubsection key={type} title={serviceLabel(type)} count={mine.length} testId={`admin-room-service-part-${type}`}>
+              <AdminRoomServiceTable {...props} section={undefined} embedded serviceType={type} title={serviceLabel(type)} rows={mine} />
+            </ReportSubsection>
+          );
+        })}
+      </ReportSection>
     );
   }
   return <AdminAllCategoriesTable {...props} labelOf={label} />;
@@ -705,9 +729,10 @@ function ShiftSummary({
 }
 
 /**
- * "TỔNG" — the overview: each category's count for the period, each a way into
- * its own page. The incidents count what is still unresolved (the branch
- * selector's number), since the incident page lists the incidents themselves.
+ * "TỔNG" — the overview: six COMPACT cards, each its numeral, its name and its
+ * count, and each a way into its own page. One row on a wide screen, the same
+ * height every one. The incidents count what is still unresolved (the branch
+ * selector's number) and turn red while any are — the one warning on the strip.
  */
 function ReportOverview({
   counts,
@@ -719,27 +744,37 @@ function ReportOverview({
   label: (c: ReportCategory) => string;
 }) {
   return (
-    <section aria-label="Tổng quan danh mục" data-testid="report-overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+    <section
+      aria-label="Tổng quan danh mục"
+      data-testid="report-overview"
+      className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6"
+    >
       {CATEGORY_ORDER.map((c) => {
         const facility = c === 'FACILITY_ISSUE';
         const n = facility ? unresolvedIncidents : (counts[c] ?? 0);
+        const warn = facility && n > 0;
         return (
           <Link
             key={c}
             to={`/app/reports?category=${c}`}
             data-testid={`overview-${c}`}
-            className="group flex items-center justify-between gap-3 rounded-2xl border border-line bg-white px-4 py-3 shadow-sm transition-colors hover:border-brand-600 hover:bg-brand-50/40"
+            data-warn={warn || undefined}
+            className={`group flex h-full min-h-[4rem] items-center justify-between gap-2 rounded-xl border bg-white px-3 py-2 shadow-sm transition-colors hover:border-brand-600 hover:bg-brand-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
+              warn ? 'border-red-300' : 'border-line'
+            }`}
           >
-            <span className="min-w-0">
-              <span className="block text-xs font-semibold text-slate-500">{CATEGORY_MARKERS[c]}</span>
-              <span className="block text-sm font-semibold leading-snug text-slate-900">{label(c)}</span>
-              <span className="block text-xs text-slate-500">{facility ? 'sự cố chưa xử lý' : 'bản ghi trong kỳ'}</span>
+            <span className="flex min-w-0 items-start gap-2">
+              <span
+                aria-hidden="true"
+                className={`mt-px inline-flex h-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded px-1 text-[10px] font-bold text-white ${
+                  warn ? 'bg-red-600' : 'bg-slate-700'
+                }`}
+              >
+                {CATEGORY_MARKERS[c]}
+              </span>
+              <span className="line-clamp-2 text-xs font-semibold leading-snug text-slate-800">{label(c)}</span>
             </span>
-            <span
-              className={`shrink-0 text-2xl font-bold tabular-nums ${facility && n > 0 ? 'text-red-600' : 'text-slate-900'}`}
-            >
-              {n}
-            </span>
+            <span className={`shrink-0 text-xl font-bold tabular-nums ${warn ? 'text-red-600' : 'text-slate-900'}`}>{n}</span>
           </Link>
         );
       })}
@@ -788,6 +823,7 @@ function AdminIncidentView({
   branchId,
   range,
   shiftType,
+  severity,
   isAdmin,
   onToast,
 }: {
@@ -795,6 +831,8 @@ function AdminIncidentView({
   range: DateRangeValue;
   /** The shared filter's "Ca" — the incidents reported on that shift. */
   shiftType?: string;
+  /** "Mức độ" — one level, filtered by the server. */
+  severity?: Severity;
   /** The period summary is the Admin's incident report; the managers do without it. */
   isAdmin: boolean;
   onToast: (message: string) => void;
@@ -807,7 +845,7 @@ function AdminIncidentView({
   const [returning, setReturning] = useState<Issue | null>(null);
   const [deleting, setDeleting] = useState<Issue | null>(null);
   const list = useQuery({
-    queryKey: ['issues', { admin: true, branchId, range, view, shiftType }],
+    queryKey: ['issues', { admin: true, branchId, range, view, shiftType, severity }],
     queryFn: () =>
       issuesApi.list({
         branchId,
@@ -817,6 +855,7 @@ function AdminIncidentView({
         shiftType: view === 'period' ? shiftType : undefined,
         outstanding: outstanding || undefined,
         assignment: view === 'unassigned' ? 'UNASSIGNED' : undefined,
+        severity,
         pageSize: 100,
       }),
     refetchInterval: 20_000,

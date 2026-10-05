@@ -159,7 +159,7 @@ describe('a Quản lý kỹ thuật works its ticked branches only', () => {
     const techId = await userIdOf(tech);
     expect((await techManager.post(`/api/issues/${mine}/assign`).send({ technicianUserId: techId })).status).toBe(200);
     expect((await techManager.post(`/api/issues/${other}/assign`).send({ technicianUserId: techId })).status).toBe(403);
-    const told = await testPrisma.notification.count({ where: { userId: techId, title: 'Bạn được giao xử lý sự cố' } });
+    const told = await testPrisma.notification.count({ where: { userId: techId, title: 'Công việc kỹ thuật mới' } });
     expect(told).toBe(1);
 
     // The technical report of its branches; nothing of Reception's.

@@ -29,6 +29,8 @@
  * THE ADMIN reads every branch; A RECEPTION MANAGER its branches (all eight for
  * the general manager); Reception its own. The server scopes every read.
  */
+import { SeverityFilter } from '../components/Severity';
+import type { Severity } from '../api/receptionReports';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -80,6 +82,8 @@ export function CompletedIssuesPage() {
   );
   const period = reportPeriod(filter, today);
   const branchId = reportBranchId(filter);
+  /** "Mức độ" — narrows II, III and IV (the server filters); deliveries have none. */
+  const [severity, setSeverity] = useState<Severity | ''>('');
   const shiftType = filter.shiftType || undefined;
 
   // The reader's branches from the server's scope (every active one for the Admin).
@@ -97,14 +101,14 @@ export function CompletedIssuesPage() {
   };
 
   const journal = useQuery({
-    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict],
-    queryFn: () => reportsApi.archive({ ...scope, verdict }),
+    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict, severity],
+    queryFn: () => reportsApi.archive({ ...scope, verdict, severity: severity || undefined }),
     enabled: period !== null,
     refetchOnWindowFocus: true,
   });
   const incidents = useQuery({
-    queryKey: [...FACILITY_BOARD_KEY, 'archive', scope, verdict],
-    queryFn: () => issuesApi.list({ scope: 'archive', ...scope, verdict, pageSize: 100 }),
+    queryKey: [...FACILITY_BOARD_KEY, 'archive', scope, verdict, severity],
+    queryFn: () => issuesApi.list({ scope: 'archive', ...scope, verdict, severity: severity || undefined, pageSize: 100 }),
     enabled: period !== null,
     refetchOnWindowFocus: true,
   });
@@ -185,6 +189,7 @@ export function CompletedIssuesPage() {
         branchCounts={supervisor ? unresolvedByBranch : undefined}
         testId="completed-filters"
       />
+      <SeverityFilter value={severity} onChange={setSeverity} testId="completed-severity" className="mb-4 sm:w-60" />
 
       {period === null ? (
         <p

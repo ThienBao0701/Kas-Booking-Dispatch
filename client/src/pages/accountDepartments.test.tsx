@@ -418,3 +418,50 @@ describe('locking and unlocking, from every section', () => {
     expect(await screen.findByRole('dialog', { name: 'Thêm tài khoản' })).toBeInTheDocument();
   });
 });
+
+describe('"Đặt lại mật khẩu"', () => {
+  it('sets a new temporary password — shown once, with a copy button — and never shows an existing one', async () => {
+    const posted: { temporaryPassword: string }[] = [];
+    mount(
+      {
+        'POST /api/admin/users/2/reset-password': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { success: true } };
+        },
+      },
+      [...USERS.slice(0, 4), user(7, 'RECEPTIONIST', { mustChangePassword: true })],
+    );
+    renderApp('/app/settings');
+
+    // The credential's STATE only — never a password.
+    const section = await screen.findByTestId('department-RECEPTIONIST');
+    expect(section).toHaveTextContent('Đã đặt mật khẩu');
+    expect(section).toHaveTextContent('Mật khẩu tạm — chờ đổi');
+
+    await userEvent.click(within(section).getByTestId('reset-password-2'));
+    const input = await screen.findByTestId('reset-password-input');
+    // A strong one is generated in the browser to start with: 12 characters, letters and digits.
+    const generated = (input as HTMLInputElement).value;
+    expect(generated).toMatch(/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{12}$/);
+    await userEvent.click(screen.getByTestId('reset-password-generate'));
+    expect((input as HTMLInputElement).value).not.toBe(generated);
+    // Or typed — refused below the server's rule.
+    await userEvent.clear(input);
+    await userEvent.type(input, 'abc');
+    expect(screen.getByTestId('reset-password-confirm')).toBeDisabled();
+    await userEvent.clear(input);
+    await userEvent.type(input, 'Tam2026xyz');
+    await userEvent.click(screen.getByTestId('reset-password-confirm'));
+
+    await waitFor(() => expect(posted).toEqual([{ temporaryPassword: 'Tam2026xyz' }]));
+    const result = await screen.findByTestId('reset-password-result');
+    expect(within(result).getByTestId('reset-password-value')).toHaveTextContent('Tam2026xyz');
+    expect(within(result).getByRole('button', { name: 'Sao chép mật khẩu' })).toBeInTheDocument();
+    expect(result).toHaveTextContent('Mật khẩu chỉ hiển thị một lần');
+
+    // Closed, it is gone — the screen has no way to show it again.
+    await userEvent.click(screen.getByTestId('reset-password-close'));
+    await waitFor(() => expect(screen.queryByTestId('reset-password-result')).not.toBeInTheDocument());
+    expect(screen.queryByText('Tam2026xyz')).not.toBeInTheDocument();
+  });
+});

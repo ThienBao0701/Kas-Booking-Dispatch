@@ -58,6 +58,8 @@ import { CASH_KEY, REPORTS_KEY } from '../lib/reportKeys';
 import { EXPENSE_SOURCE, PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
 import { SourceTag } from './SourceTag';
 import { useShiftCash } from '../hooks/useShiftCash';
+import { PaymentAllocations } from './PaymentAllocations';
+import { allocationState, linesOf, paymentMoneyPayload, type AllocationLine } from '../lib/paymentAllocations';
 
 /**
  * The selector's words before the server has spoken — a fallback copy of its
@@ -441,8 +443,10 @@ const EMPTY_FORM = {
   ezCode: '',
   source: '',
   guestName: '',
-  method: 'CASH' as PaymentMethod,
-  amount: '',
+  /** "Tổng tiền thu". */
+  total: '',
+  /** "Phương thức thanh toán" — one line per method. */
+  lines: [{ method: 'CASH', amount: '' }] as AllocationLine[],
   expense: '',
   note: '',
 };
@@ -536,9 +540,9 @@ export function NewPaymentForm({
           ezCode: form.ezCode.trim() || undefined,
           source: form.source,
           guestName: form.guestName.trim() || undefined,
-          method: payout ? 'CASH' : form.method,
-          // Parsed at the boundary: the grouped display never leaves the field.
-          amount: payout ? 0 : (parseVnd(form.amount) ?? 0),
+          // ONE transaction: the total and the methods that paid it. Parsed at the
+          // boundary — the grouped display never leaves the field.
+          ...(payout ? { method: 'CASH' as const, amount: 0 } : paymentMoneyPayload(form.total, form.lines)),
           expense: parseVndOrZero(form.expense),
           note: form.note.trim() || undefined,
         },
@@ -554,8 +558,8 @@ export function NewPaymentForm({
 
   // The server refuses a payment without a source; the form says so first.
   const missingSource = form.source === '';
-  // A payout needs its amount above zero; any other payment needs "Thu tiền".
-  const amountReady = payout ? parseVndOrZero(form.expense) > 0 : parseVnd(form.amount) !== null;
+  // A payout needs its amount above zero; any other payment a total its methods add up to.
+  const amountReady = payout ? parseVndOrZero(form.expense) > 0 : allocationState(form.total, form.lines).valid;
   const ready = amountReady && !missingSource;
 
   return (
@@ -572,10 +576,11 @@ export function NewPaymentForm({
 
       {/*
         THREE ROWS: the booking, the money, then a note. Mã EZ, Nguồn and Tên
-        khách; then Phương thức, Thu tiền and Chi tiền; then Ghi chú. There is NO
-        separate Công nợ box: Công nợ is a payment METHOD, and the amount typed in
-        "Thu tiền" belongs wherever the chosen method says it does. No room — the
-        booking reference finds it.
+        khách; then "Tổng tiền thu" with its methods, and Chi tiền; then Ghi chú.
+        There is NO separate Công nợ box: Công nợ is a payment METHOD. A guest who
+        pays 500.000 cash and 500.000 by transfer is ONE transaction with two
+        method lines — never two transactions. No room — the booking reference
+        finds it.
 
         "NHÂN VIÊN" IS NOT A FIELD. It is whoever is on the open shift, decided by
         the server — so it is shown, not asked for.
@@ -622,31 +627,16 @@ export function NewPaymentForm({
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-3" data-testid="payment-row-money">
-          <div className="space-y-1.5">
-            <label htmlFor="payment-method" className="block whitespace-nowrap text-sm font-medium text-slate-700">
-              Phương thức thanh toán
-            </label>
-            <select
-              id="payment-method"
-              value={form.method}
-              onChange={(e) => set('method', e.target.value as PaymentMethod)}
-              data-testid="payment-method"
-              className={selectClass}
-            >
-              {(methods ?? METHOD_FALLBACK).map((m) => (
-                <option key={m.code} value={m.code}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+          <div className="sm:col-span-2">
+            <PaymentAllocations
+              total={form.total}
+              onTotal={(v) => set('total', v)}
+              lines={form.lines}
+              onLines={(v) => set('lines', v)}
+              methods={methods ?? METHOD_FALLBACK}
+              testId="payment"
+            />
           </div>
-          <MoneyInput
-            label="Thu tiền"
-            required
-            value={form.amount}
-            onChange={(v) => set('amount', v)}
-            data-testid="payment-amount"
-          />
           <MoneyInput
             label="Chi tiền"
             value={form.expense}
@@ -926,8 +916,8 @@ function EditRow({
     ezCode: p.ezCode ?? '',
     source: p.source ?? '',
     guestName: p.guestName ?? '',
-    method: p.method,
-    amount: groupDigits(String(p.amount)),
+    total: groupDigits(String(p.amount)),
+    lines: linesOf(p),
     expense: groupDigits(String(p.expense)),
     note: p.note ?? '',
   });
@@ -941,8 +931,9 @@ function EditRow({
           source: draft.source,
           guestName: draft.guestName.trim(),
           // A "Chi tiền" row is a pure cash payout: no amount collected, cash only.
-          method: draft.source === EXPENSE_SOURCE ? 'CASH' : draft.method,
-          amount: draft.source === EXPENSE_SOURCE ? 0 : (parseVnd(draft.amount) ?? 0),
+          ...(draft.source === EXPENSE_SOURCE
+            ? { method: 'CASH' as const, amount: 0 }
+            : paymentMoneyPayload(draft.total, draft.lines)),
           expense: parseVndOrZero(draft.expense),
           note: draft.note.trim(),
         },
@@ -976,32 +967,24 @@ function EditRow({
         />
       </td>
       {/*
-        ONE AMOUNT AND ONE METHOD, across the four amount columns — not an amount
-        box per column. The columns are a RENDERING of (method, amount); a box
-        each would let a row be both cash and card at once.
+        THE TRANSACTION'S METHODS, across the four amount columns: its total and
+        one line per method — add one, change an amount, remove one. Still ONE
+        row; Lưu waits until the lines add up to the total, and the server checks
+        it again.
       */}
-      <td className="px-2 py-2 align-top" colSpan={4}>
-        <div className="flex gap-1">
-          <select
-            className={cell}
-            value={draft.method}
-            data-testid={`payment-edit-method-${row.id}`}
-            onChange={(e) => setDraft({ ...draft, method: e.target.value as PaymentMethod })}
-          >
-            {METHOD_FALLBACK.map((m) => (
-              <option key={m.code} value={m.code}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-          <input
-            className={`${cell} text-right tabular-nums`}
-            inputMode="numeric"
-            value={draft.amount}
-            data-testid={`payment-edit-amount-${row.id}`}
-            onChange={(e) => setDraft({ ...draft, amount: groupDigits(e.target.value) })}
+      <td className="min-w-[16rem] px-2 py-2 align-top" colSpan={4}>
+        {draft.source === EXPENSE_SOURCE ? (
+          <span className="text-xs text-slate-500">Khoản chi — không ghi số tiền thu.</span>
+        ) : (
+          <PaymentAllocations
+            compact
+            total={draft.total}
+            onTotal={(v) => setDraft((d) => ({ ...d, total: v }))}
+            lines={draft.lines}
+            onLines={(v) => setDraft((d) => ({ ...d, lines: v }))}
+            testId={`payment-edit-alloc-${row.id}`}
           />
-        </div>
+        )}
       </td>
       <td className="px-2 py-2 align-top">
         <input
@@ -1025,7 +1008,7 @@ function EditRow({
         <button
           type="button"
           onClick={() => save.mutate()}
-          disabled={save.isPending}
+          disabled={save.isPending || (draft.source !== EXPENSE_SOURCE && !allocationState(draft.total, draft.lines).valid)}
           data-testid={`payment-save-${row.id}`}
           className="ml-1 inline-flex items-center gap-1 rounded-lg border border-brand-600 bg-brand-50 px-2 py-1 text-xs font-medium text-brand-700"
         >

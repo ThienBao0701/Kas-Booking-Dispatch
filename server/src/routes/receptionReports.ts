@@ -38,6 +38,7 @@ import { captureShiftContext, requireOpenSession } from '../shift/shiftService';
 import { COMPLETION_ARCHIVE_HOURS } from '../reception/completionArchive';
 import { resolveReportPeriod } from '../reception/businessDate';
 import { HOTEL_DELIVERY_ARCHIVE_HOURS } from '../reception/deliveryLifecycle';
+import { SEVERITIES, SEVERITY_LABELS } from '../issue/severity';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
@@ -63,6 +64,8 @@ const METHOD = z.enum(['CASH', 'TRANSFER', 'CARD', 'DEBT']);
 const DEPARTMENT = z.enum(['RECEPTION', 'HOUSEKEEPING', 'TECHNICAL']);
 const SERVICE = z.enum(['ROOM_SALE', 'UPGRADE', 'SMOKING', 'LAUNDRY', 'OTHER', 'REVIEW']);
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** "Mức độ" — exactly these three; a new record without one is Trung bình. */
+const SEVERITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
 
 /**
  * A money field, on the wire.
@@ -94,12 +97,19 @@ const text = (max: number) => z.string().trim().max(max);
   rule (`PAYMENT_SOURCES`), because a correction must be allowed to leave an
   older row's free-text source alone.
 */
+/** One method's part of a transaction. Which combinations are valid is the service's rule. */
+const allocationSchema = z.object({ method: METHOD, amount: money });
+
 const paymentSchema = z.object({
   ezCode: text(100).optional(),
   source: text(100).optional(),
   guestName: text(200).optional(),
-  method: METHOD,
+  /** The older single-method body; `allocations` is the current one. */
+  method: METHOD.optional(),
+  /** "Tổng tiền thu". */
   amount: money,
+  /** "Phương thức thanh toán" — one line per method, summing to `amount`. */
+  allocations: z.array(allocationSchema).min(1).max(4).optional(),
   receivable: money.optional(),
   expense: money.optional(),
   note: text(2000).optional(),
@@ -109,6 +119,7 @@ const guestRequestSchema = z.object({
   guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
   ezCode: text(100).optional(),
   note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
+  severity: SEVERITY.optional(),
 });
 
 /**
@@ -128,6 +139,7 @@ const complaintSchema = z.object({
   guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
   ezCode: text(100).optional(),
   description: text(4000).min(1, 'Vui lòng nhập mô tả.'),
+  severity: SEVERITY.optional(),
 });
 
 const roomServiceSchema = z.object({
@@ -218,6 +230,7 @@ const archiveSchema = z
     // The shared report filter's "Ca" and the two completion views.
     shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
     verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
+    severity: SEVERITY.optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -229,6 +242,9 @@ const archiveSchema = z
   });
 
 const openingCashSchema = z.object({ openingCash: money });
+
+/** II and IV on the desk's screen, optionally one level only. */
+const activeSchema = z.object({ severity: SEVERITY.optional() });
 
 function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
   return {
@@ -281,6 +297,7 @@ export function createReceptionReportsRouter(): Router {
         deliveryDepartments: DELIVERY_DEPARTMENTS.map((d) => ({ code: d, label: DELIVERY_DEPARTMENT_LABELS[d] })),
         deliveryTitle: HOTEL_DELIVERY_TITLE,
         deliveryArchiveHours: HOTEL_DELIVERY_ARCHIVE_HOURS,
+        severities: SEVERITIES.map((s) => ({ code: s, label: SEVERITY_LABELS[s] })),
       });
     },
   );
@@ -321,8 +338,9 @@ export function createReceptionReportsRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const now = getClock().now();
+      const q = activeSchema.parse(req.query);
       const shift = await captureShiftContext(actor(user));
-      const { reports, totals } = await listActiveJournal(actor(user), now, shift.shiftSessionId);
+      const { reports, totals } = await listActiveJournal(actor(user), now, shift.shiftSessionId, undefined, q.severity);
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),
         // Each category's full count: the list is a page, and the screen says so.
@@ -357,6 +375,7 @@ export function createReceptionReportsRouter(): Router {
         period,
         verdict: q.verdict,
         branchId: q.branchId,
+        severity: q.severity,
       });
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),

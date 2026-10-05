@@ -15,6 +15,7 @@
  * ALL THREE SHARE `DataTable`, so a row is the same height, money is right
  * aligned and the empty state reads the same wherever the receptionist is.
  */
+import { SeverityBadge } from './Severity';
 import { useState } from 'react';
 import { SourceTag } from './SourceTag';
 import { GUEST_REQUEST_EDIT, SERVICE_QUALITY_EDIT, roomServiceEditFields } from '../lib/recordEdit';
@@ -51,6 +52,8 @@ interface TableProps {
   compact?: boolean;
   /** Drawn as one section of the reception overview. */
   section?: SectionFrame;
+  /** The table alone, inside a section someone else draws (a part of "V"). */
+  embedded?: boolean;
   /**
    * 'summary' — the OVERVIEW's and the archive's compact form: STT, Tên khách,
    * Mã EZ, the content, and a status that is only "Đã tiếp nhận" or "Đã hoàn
@@ -232,6 +235,12 @@ export function GuestRequestTable({
         </>
       ),
     },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
+    },
     { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
     {
       key: 'content',
@@ -261,6 +270,12 @@ export function GuestRequestTable({
           <VoidedNote report={r} />
         </>
       ),
+    },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
     },
     {
       key: 'ez',
@@ -440,6 +455,12 @@ export function ServiceQualityTable({
         </>
       ),
     },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
+    },
     { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.complaint?.ezCode || '—' },
     {
       key: 'description',
@@ -468,6 +489,12 @@ export function ServiceQualityTable({
           <VoidedNote report={r} />
         </>
       ),
+    },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'whitespace-nowrap',
+      render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
     },
     {
       key: 'ez',
@@ -594,6 +621,7 @@ export function RoomServiceTable({
   onRetry,
   compact,
   section,
+  embedded,
 }: TableProps & {
   serviceType: RoomServiceType;
   serviceLabel: string;
@@ -713,6 +741,7 @@ export function RoomServiceTable({
         onRetry={onRetry}
         compact={compact}
         section={section}
+        embedded={embedded}
         emptyTitle={`Chưa có ${serviceLabel.toLowerCase()} nào`}
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm dịch vụ."
         actions={(row: OperationalReport) => (

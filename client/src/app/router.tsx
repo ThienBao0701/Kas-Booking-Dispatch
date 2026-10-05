@@ -36,6 +36,7 @@ import { HistoryPage } from '../pages/HistoryPage';
 import { OperationalReportsPage } from '../pages/OperationalReportsPage';
 import { CompletedIssuesPage } from '../pages/CompletedIssuesPage';
 import { TechnicalReportPage } from '../pages/TechnicalReportPage';
+import { ConfidentialReportsPage } from '../pages/ConfidentialReportsPage';
 import { HousekeepingRoomPage } from '../pages/HousekeepingRoomPage';
 import { HousekeepingKpiPage } from '../pages/HousekeepingKpiPage';
 import {
@@ -186,6 +187,8 @@ export function AppRoutes() {
           {/* "Báo cáo vấn đề" → "Kỹ thuật" and "Buồng phòng". */}
           <Route path="reports/technical" element={<RequireRole role={TECHNICAL_REPORT_ROLES}><TechnicalReportPage /></RequireRole>} />
           <Route path="reports/housekeeping" element={<RequireRole role={SUPERVISION_ROLES}><AdminHousekeepingPage /></RequireRole>} />
+          {/* "VII" — private reports upward; who may send and who may read is the server's. */}
+          <Route path="reports/confidential" element={<RequireRole role={REPORT_ROLES}><ConfidentialReportsPage /></RequireRole>} />
           {/* The 12-hour completion archive — a query over the same records; the Admin reads every branch. */}
           <Route
             path="completed-issues"

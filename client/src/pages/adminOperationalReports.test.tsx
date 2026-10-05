@@ -597,8 +597,9 @@ describe('choosing a branch', () => {
     ]);
     expect(screen.getByTestId('overview-PAYMENT')).toHaveTextContent('Theo dõi thanh toán');
     expect(screen.getByTestId('overview-ROOM_SERVICE')).toHaveTextContent(/Dịch vụ phòng, KPI.*2$/);
-    // The incident card counts what is unresolved — the branch selector's number.
-    expect(screen.getByTestId('overview-FACILITY_ISSUE')).toHaveTextContent('sự cố chưa xử lý');
+    // Compact: numeral, name and count only — the secondary captions are gone.
+    expect(overview).not.toHaveTextContent('bản ghi trong kỳ');
+    expect(overview).not.toHaveTextContent('sự cố chưa xử lý');
     // The sixth category, printed in full on this screen.
     expect(screen.getByTestId('overview-HOTEL_DELIVERY')).toHaveTextContent('Giao nhận hàng hóa của khách sạn');
 
@@ -681,9 +682,8 @@ describe('each category is a table', () => {
       'Tên khách',
       'Mã EZ',
       'Nguồn',
-      'Phương thức',
-      // The headline figure, kept primary so a phone still shows an amount.
-      'Thu tiền',
+      // No "Phương thức" and no "Thu tiền": the allocations below ARE the money,
+      // one transaction's amount under each method that paid it.
       'Tiền mặt',
       'Thu CK',
       'Cà thẻ',
@@ -703,8 +703,10 @@ describe('each category is a table', () => {
     expect(within(row).getByText('EZ123')).toBeInTheDocument();
     expect(within(row).getByText('Booking.com')).toBeInTheDocument();
     expect(within(row).getByText('Nguyễn Khách')).toBeInTheDocument();
-    // Twice over: once as Số tiền, once in the per-method split.
-    expect(within(row).getAllByText('300.000 ₫')).toHaveLength(2);
+    // Once, under the method that paid it — no second "Thu tiền" copy.
+    expect(within(row).getAllByText('300.000 ₫')).toHaveLength(1);
+    expect(headers).not.toContain('Phương thức');
+    expect(headers).not.toContain('Thu tiền');
   });
 
   it('lays the guest requests out with both actors', async () => {
@@ -721,6 +723,7 @@ describe('each category is a table', () => {
     expect(headers.slice(1)).toEqual([
       'STT',
       'Tên khách',
+      'Mức độ',
       'Mã EZ',
       'Nội dung',
       'Thời gian tiếp nhận',
@@ -875,6 +878,7 @@ describe('each category is a table', () => {
     expect(headers.slice(1)).toEqual([
       'STT',
       'Tên khách',
+      'Mức độ',
       'Mã EZ',
       'Mô tả',
       'Trạng thái',
@@ -899,7 +903,12 @@ describe('each category is a table', () => {
     await openCategory('ROOM_SERVICE');
 
     const upgrade = await screen.findByTestId('admin-table-ROOM_SERVICE-UPGRADE');
-    expect(within(upgrade).getByRole('heading')).toHaveTextContent('Upgrade');
+    // ONE container for "V. Dịch vụ phòng, KPI"; each service a ruled part of it.
+    const group = screen.getAllByTestId('admin-room-service-group')[0]!;
+    expect(within(group).getAllByRole('heading')[0]).toHaveTextContent('Dịch vụ phòng, KPI');
+    expect(within(group).getByTestId('admin-room-service-part-UPGRADE')).toContainElement(upgrade);
+    expect(within(group).getByTestId('admin-room-service-part-UPGRADE')).toHaveTextContent('Upgrade');
+    expect(within(group).getByTestId('admin-room-service-part-LAUNDRY')).toHaveTextContent('Giặt ủi');
     const upgradeHeaders = within(upgrade).getAllByRole('columnheader').map((h) => h.textContent);
     expect(upgradeHeaders.slice(1)).toEqual([
       'STT',
@@ -1007,7 +1016,9 @@ describe('each category is a table', () => {
     ] as const;
     const tables = sections.map(([id, row, heading]) => {
       const table = within(frame).getByTestId(id);
-      expect(within(table).getAllByRole('heading')[0]).toHaveTextContent(heading);
+      // V's parts sit inside ONE section, which carries the category's heading.
+      const framed = id.startsWith('admin-table-ROOM_SERVICE') ? table.closest<HTMLElement>('[data-testid="admin-room-service-group"]')! : table;
+      expect(within(framed).getAllByRole('heading')[0]).toHaveTextContent(heading);
       expect(within(table).getByTestId(`row-${row}`)).toBeInTheDocument();
       return table;
     });
@@ -1360,7 +1371,7 @@ describe('"+ Báo cáo vấn đề" — the Admin enters a record for ONE branch
     }
     await userEvent.click(within(dialog).getByTestId('create-category-PAYMENT'));
     await userEvent.selectOptions(await within(dialog).findByTestId('payment-source'), 'Booking');
-    await userEvent.type(within(dialog).getByTestId('payment-amount'), '500000');
+    await userEvent.type(within(dialog).getByTestId('payment-total'), '500000');
     await userEvent.click(within(dialog).getByTestId('payment-add'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
