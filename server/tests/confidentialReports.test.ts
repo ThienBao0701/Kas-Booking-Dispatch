@@ -4,6 +4,7 @@
  *   12  each sender is offered exactly its superiors, nearest first, the Admin
  *       always among them (added whether ticked or not) — and nobody else
  *   13  … never another branch's Quản lý lễ tân, a peer or a lower role
+ *   13c a branch with no manager still shows the group, and reaches no other branch's
  *   13b every allowed combination is accepted; the Admin, ticked or not, is
  *       one reader per Admin account — never twice, however many Admins
  *   14  every Admin always reads it, chosen or not — even one created later
@@ -110,7 +111,16 @@ describe('who may be addressed', () => {
     // Tổng quản lý lễ tân → Admin.
     expect(offered((await general.get('/api/confidential-reports/options')).body)).toEqual([[ids.admin, 'ADMIN', true]]);
     // Admin → nobody above it.
-    expect((await admin.get('/api/confidential-reports/options')).body).toMatchObject({ canSend: false, canRead: true, recipients: [] });
+    expect((await admin.get('/api/confidential-reports/options')).body).toMatchObject({
+      canSend: false,
+      canRead: true,
+      recipients: [],
+      recipientRoles: [],
+    });
+    // The role groups of "Gửi đến", nearest first, per level.
+    expect(options.recipientRoles).toEqual(['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN']);
+    expect((await rm1.get('/api/confidential-reports/options')).body.recipientRoles).toEqual(['RECEPTION_GENERAL_MANAGER', 'ADMIN']);
+    expect((await general.get('/api/confidential-reports/options')).body.recipientRoles).toEqual(['ADMIN']);
 
     expect((await send(letan1, { recipientIds: [ids.rm1, ids.tongql] })).status).toBe(201);
     // Naming the Admin is allowed — and changes nothing: it is one reader, once.
@@ -150,6 +160,20 @@ describe('who may be addressed', () => {
       ids.tongql,
       ids.admin,
     ]);
+  });
+});
+
+describe('a branch with no Quản lí lễ tân', () => {
+  it('13c. its receptionist is still offered the "Quản lí lễ tân" group — empty — and cannot reach another branch’s', async () => {
+    const cn3 = (await testPrisma.branch.findFirstOrThrow({ where: { id: { notIn: [cn1, cn2] } }, orderBy: { id: 'asc' } })).id;
+    await createReceptionist(cn3, { username: 'letan3', fullName: 'Lễ tân CN3', mustChangePassword: false });
+    // Its own app: the shared one's login rate limit is spent by beforeAll and test 14.
+    const letan3 = (await loginAgent(createApp(), 'letan3', RECEPTIONIST_PASSWORD)).agent;
+    const options = (await letan3.get('/api/confidential-reports/options')).body;
+    expect(options.recipientRoles).toEqual(['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN']);
+    expect(options.recipients.map((r: { id: number }) => r.id)).toEqual([ids.tongql, ids.admin]);
+    expect((await send(letan3, { recipientIds: [ids.rm1] })).status).toBe(403);
+    expect((await send(letan3, { recipientIds: [ids.tongql] })).status).toBe(201);
   });
 });
 

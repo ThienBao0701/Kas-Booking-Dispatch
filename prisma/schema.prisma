@@ -654,6 +654,7 @@ model User {
   pushSubscriptions        PushSubscription[]
   accountAuditsReceived    AccountAudit[]                @relation("AccountAuditTarget")
   accountAuditsMade        AccountAudit[]                @relation("AccountAuditActor")
+  adminOverrideSet         AdminOverrideCredential[]     @relation("AdminOverrideSetBy")
 
   @@index([branchId])
   @@index([role])
@@ -3526,6 +3527,14 @@ model PushSubscription {
 enum AccountAuditAction {
   /// "Đặt lại mật khẩu" by the Admin. The password itself is never recorded.
   PASSWORD_RESET
+  /// A sign-in to `userId` with the Admin Override Password. The person typing
+  /// it cannot be identified, so the actor is the Admin who set the override
+  /// password that was used.
+  ADMIN_OVERRIDE_LOGIN
+  /// The Admin Override Password was set or changed (`userId` = the Admin).
+  ADMIN_OVERRIDE_SET
+  /// The Admin Override Password was turned off (`userId` = the Admin).
+  ADMIN_OVERRIDE_CLEARED
 }
 
 /// WHAT AN ADMIN DID TO AN ACCOUNT'S CREDENTIALS — who, when, which account.
@@ -3542,4 +3551,17 @@ model AccountAudit {
   actor User @relation("AccountAuditActor", fields: [actorUserId], references: [id])
 
   @@index([userId, createdAt])
+}
+
+/// THE ADMIN OVERRIDE PASSWORD — at most ONE row (id = 1), absent when off.
+/// Only its bcrypt hash is stored; no endpoint returns it. It signs in as any
+/// non-Admin account without that account's own password (see routes/auth.ts).
+model AdminOverrideCredential {
+  id                Int      @id @default(1)
+  passwordHash      String
+  setByUserId       Int
+  setByNameSnapshot String
+  updatedAt         DateTime @updatedAt
+
+  setBy User @relation("AdminOverrideSetBy", fields: [setByUserId], references: [id])
 }

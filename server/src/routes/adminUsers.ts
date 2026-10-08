@@ -9,6 +9,7 @@ import { serializeManagedUser } from '../auth/serialize';
 import { sessionStore } from '../auth/session';
 import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware/auth';
 import { DELETED_ACCOUNT_USERNAME, deleteAccount } from '../auth/deleteAccount';
+import { adminOverrideStatus, clearAdminOverridePassword, setAdminOverridePassword } from '../auth/adminOverride';
 
 /**
  * The roles this endpoint may create. ADMIN is deliberately absent: an
@@ -112,6 +113,14 @@ const updateUserSchema = z
   });
 
 const resetPasswordSchema = z.object({ temporaryPassword: passwordSchema });
+
+/** The same rule as every account's password, typed twice. */
+const overridePasswordSchema = z
+  .object({ password: passwordSchema, confirmPassword: z.string() })
+  .refine((v) => v.password === v.confirmPassword, {
+    message: 'Mật khẩu xác nhận không khớp.',
+    path: ['confirmPassword'],
+  });
 
 const listQuerySchema = z.object({
   branchId: z.coerce.number().int().positive().optional(),
@@ -376,6 +385,34 @@ export function createAdminUsersRouter(): Router {
       // Existing sessions must stop granting access immediately.
       await sessionStore.destroyByUserId(id);
       res.json({ user: serializeManagedUser(updated) });
+    })().catch(next);
+  });
+
+  /*
+    "MẬT KHẨU GHI ĐÈ ADMIN" — Admin only, on its own prefix. The password is
+    written as a hash and never returned: the status says only whether one is set,
+    when and by whom.
+  */
+  router.use('/admin/override-password', requireAuth, requirePasswordChanged, requireAdmin);
+
+  router.get('/admin/override-password', (_req, res, next) => {
+    (async () => {
+      res.json(await adminOverrideStatus());
+    })().catch(next);
+  });
+
+  router.put('/admin/override-password', (req, res, next) => {
+    (async () => {
+      const { password } = overridePasswordSchema.parse(req.body);
+      await setAdminOverridePassword(req.currentUser!, password);
+      res.json(await adminOverrideStatus());
+    })().catch(next);
+  });
+
+  router.delete('/admin/override-password', (req, res, next) => {
+    (async () => {
+      await clearAdminOverridePassword(req.currentUser!);
+      res.json(await adminOverrideStatus());
     })().catch(next);
   });
 

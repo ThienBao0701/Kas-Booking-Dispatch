@@ -20,6 +20,8 @@ export interface ConfidentialOptions {
   canRead: boolean;
   /** THIS account's superiors, nearest first — the server's list, the Admin always among them. */
   recipients: ConfidentialRecipient[];
+  /** The role groups "Gửi đến" shows, nearest first — present even with no account. */
+  recipientRoles: string[];
 }
 
 export interface ConfidentialReport {

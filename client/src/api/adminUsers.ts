@@ -91,3 +91,17 @@ export const adminUsersApi = {
   resetPassword: (id: number, temporaryPassword: string) =>
     api.post<{ success: true }>(`/admin/users/${id}/reset-password`, { temporaryPassword }),
 };
+
+/** "Mật khẩu ghi đè Admin": whether one is set — never the password itself. */
+export interface AdminOverrideStatus {
+  configured: boolean;
+  updatedAt: string | null;
+  setByName: string | null;
+}
+
+export const adminOverrideApi = {
+  status: () => api.get<AdminOverrideStatus>('/admin/override-password'),
+  set: (password: string, confirmPassword: string) =>
+    api.put<AdminOverrideStatus>('/admin/override-password', { password, confirmPassword }),
+  clear: () => api.del<AdminOverrideStatus>('/admin/override-password'),
+};

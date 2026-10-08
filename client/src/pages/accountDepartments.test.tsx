@@ -10,6 +10,8 @@
  *      empty; any other department appears only once it has accounts.
  *   4. Locking and unlocking still work, through the same endpoints as before.
  *   5. Admin accounts are listed read-only — nothing here can lock one.
+ *   6. "Mật khẩu ghi đè Admin" is set (typed twice), changed or turned off here,
+ *      and never shown — only whether one is set.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -63,6 +65,7 @@ function mount(extra: Record<string, (init: RequestInit) => { status: number; bo
     'GET /api/admin/users?includeAdmins=true': () => ({ status: 200, body: { users } }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
     'GET /api/dev-test/status': () => ({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'x' } } }),
+    'GET /api/admin/override-password': () => ({ status: 200, body: { configured: false, updatedAt: null, setByName: null } }),
     ...extra,
   });
 }
@@ -463,5 +466,72 @@ describe('"Đặt lại mật khẩu"', () => {
     await userEvent.click(screen.getByTestId('reset-password-close'));
     await waitFor(() => expect(screen.queryByTestId('reset-password-result')).not.toBeInTheDocument());
     expect(screen.queryByText('Tam2026xyz')).not.toBeInTheDocument();
+  });
+});
+
+describe('"Mật khẩu ghi đè Admin"', () => {
+  const OVERRIDE = 'Ghide2026x';
+
+  it('sets it — typed twice, sent once — and shows only that it is set, never the password', async () => {
+    const sent: unknown[] = [];
+    let configured = false;
+    const status = () => ({
+      configured,
+      updatedAt: configured ? '2026-10-08T03:00:00.000Z' : null,
+      setByName: configured ? 'Quản trị viên' : null,
+    });
+    mount({
+      'GET /api/admin/override-password': () => ({ status: 200, body: status() }),
+      'PUT /api/admin/override-password': (init) => {
+        sent.push(JSON.parse(String(init.body)));
+        configured = true;
+        return { status: 200, body: status() };
+      },
+    });
+    renderApp('/app/settings');
+
+    const panel = await screen.findByTestId('admin-override-panel');
+    expect(await within(panel).findByTestId('admin-override-status')).toHaveTextContent('Chưa đặt');
+    expect(within(panel).queryByTestId('admin-override-clear')).not.toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByTestId('admin-override-set'));
+    const password = screen.getByTestId('admin-override-password');
+    const confirm = screen.getByTestId('admin-override-confirm');
+    expect(password).toHaveAttribute('type', 'password');
+    expect(confirm).toHaveAttribute('type', 'password');
+    await userEvent.type(password, OVERRIDE);
+    await userEvent.type(confirm, 'Khac2026x');
+    expect(screen.getByText('Mật khẩu xác nhận không khớp.')).toBeInTheDocument();
+    expect(screen.getByTestId('admin-override-save')).toBeDisabled();
+    await userEvent.clear(confirm);
+    await userEvent.type(confirm, OVERRIDE);
+    await userEvent.click(screen.getByTestId('admin-override-save'));
+
+    await waitFor(() => expect(sent).toEqual([{ password: OVERRIDE, confirmPassword: OVERRIDE }]));
+    await waitFor(() => expect(screen.getByTestId('admin-override-status')).toHaveTextContent('Đang bật'));
+    expect(screen.getByTestId('admin-override-status')).toHaveTextContent('Quản trị viên');
+    expect(screen.getByTestId('admin-override-set')).toHaveTextContent('Đổi mật khẩu');
+    expect(document.body).not.toHaveTextContent(OVERRIDE);
+  });
+
+  it('turns it off after a confirmation', async () => {
+    let deleted = 0;
+    mount({
+      'GET /api/admin/override-password': () => ({
+        status: 200,
+        body: { configured: true, updatedAt: '2026-10-08T03:00:00.000Z', setByName: 'Quản trị viên' },
+      }),
+      'DELETE /api/admin/override-password': () => {
+        deleted += 1;
+        return { status: 200, body: { configured: false, updatedAt: null, setByName: null } };
+      },
+    });
+    renderApp('/app/settings');
+
+    await userEvent.click(await screen.findByTestId('admin-override-clear'));
+    expect(deleted).toBe(0);
+    await userEvent.click(screen.getByTestId('admin-override-clear-confirm'));
+    await waitFor(() => expect(deleted).toBe(1));
+    await waitFor(() => expect(screen.getByTestId('admin-override-status')).toHaveTextContent('Chưa đặt'));
   });
 });

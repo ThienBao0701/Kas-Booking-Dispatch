@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyRound, UserPlus } from 'lucide-react';
+import { KeyRound, ShieldCheck, UserPlus } from 'lucide-react';
 import {
+  adminOverrideApi,
   adminUsersApi,
+  type AdminOverrideStatus,
   type CreateUserInput,
   type ManagedUser,
   requiresBranch,
@@ -124,6 +126,8 @@ export function SettingsPage() {
           }}
         />
       ) : null}
+
+      <AdminOverridePanel />
 
       {/* Development-only demo data tools (hidden unless the server enables them). */}
       <DevToolsPanel />
@@ -751,6 +755,170 @@ function ResetPasswordModal({ user, onClose }: { user: ManagedUser; onClose: () 
         </label>
         {problem ? <p className="text-xs text-red-600">{problem}</p> : null}
         {reset.isError ? <ErrorAlert>{toUserMessage(reset.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/* ------------------------- Mật khẩu ghi đè Admin ------------------------- */
+
+/**
+ * "MẬT KHẨU GHI ĐÈ ADMIN" — one password that signs in as any non-Admin account
+ * (its username + this password), audited on the server. Set, changed or turned
+ * off here; it is never shown, only whether one is set. This page is Admin-only.
+ */
+function AdminOverridePanel() {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const status = useQuery({ queryKey: ['admin-override'], queryFn: () => adminOverrideApi.status() });
+  const clear = useMutation({
+    mutationFn: () => adminOverrideApi.clear(),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['admin-override'], data);
+      setConfirmingClear(false);
+    },
+  });
+  const s = status.data;
+
+  return (
+    <section
+      data-testid="admin-override-panel"
+      className="mt-4 rounded-xl border-section border-line bg-white px-4 py-4 shadow-sm"
+    >
+      <div className="flex flex-wrap items-start gap-3">
+        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" aria-hidden="true" />
+        <div className="mr-auto min-w-0">
+          <h2 className="text-[15px] font-semibold text-slate-900">Mật khẩu ghi đè Admin</h2>
+          <p className="mt-0.5 text-sm text-slate-600">
+            Đăng nhập vào tài khoản không phải Admin bằng tên đăng nhập của tài khoản và mật khẩu này. Mỗi lần dùng đều được
+            ghi lại. Mật khẩu không bao giờ được hiển thị.
+          </p>
+          <p className="mt-1 text-sm" data-testid="admin-override-status">
+            {status.isLoading ? (
+              <span className="text-slate-500">Đang tải…</span>
+            ) : s?.configured ? (
+              <span className="font-medium text-emerald-700">
+                Đang bật{s.updatedAt ? ` · cập nhật ${formatDateTime(s.updatedAt)}` : ''}
+                {s.setByName ? ` bởi ${s.setByName}` : ''}
+              </span>
+            ) : (
+              <span className="font-medium text-slate-500">Chưa đặt</span>
+            )}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => setEditing(true)} data-testid="admin-override-set">
+            <KeyRound className="h-4 w-4" aria-hidden="true" />
+            {s?.configured ? 'Đổi mật khẩu' : 'Đặt mật khẩu'}
+          </Button>
+          {s?.configured ? (
+            <Button variant="secondary" onClick={() => setConfirmingClear(true)} data-testid="admin-override-clear">
+              Tắt
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      {status.isError ? <ErrorAlert>{toUserMessage(status.error)}</ErrorAlert> : null}
+
+      {editing ? (
+        <AdminOverrideModal
+          onClose={() => setEditing(false)}
+          onSaved={(data) => {
+            queryClient.setQueryData(['admin-override'], data);
+            setEditing(false);
+          }}
+        />
+      ) : null}
+      {confirmingClear ? (
+        <Modal
+          open
+          title="Tắt mật khẩu ghi đè"
+          onClose={() => setConfirmingClear(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirmingClear(false)}>
+                Hủy
+              </Button>
+              <Button onClick={() => clear.mutate()} loading={clear.isPending} data-testid="admin-override-clear-confirm">
+                Tắt
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-600">
+            Mật khẩu ghi đè sẽ không dùng được nữa và mọi phiên đăng nhập bằng mật khẩu này kết thúc.
+          </p>
+          {clear.isError ? <ErrorAlert>{toUserMessage(clear.error)}</ErrorAlert> : null}
+        </Modal>
+      ) : null}
+    </section>
+  );
+}
+
+function AdminOverrideModal({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: (status: AdminOverrideStatus) => void;
+}) {
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const save = useMutation({ mutationFn: () => adminOverrideApi.set(password, confirm), onSuccess: onSaved });
+  const problem = password ? passwordProblem(password) : null;
+  const mismatch = confirm.length > 0 && confirm !== password;
+
+  return (
+    <Modal
+      open
+      title="Mật khẩu ghi đè Admin"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Hủy
+          </Button>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={!password || problem !== null || confirm !== password}
+            loading={save.isPending}
+            data-testid="admin-override-save"
+          >
+            Lưu
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-slate-600">
+          Mật khẩu cũ (nếu có) sẽ không dùng được nữa và mọi phiên đăng nhập bằng mật khẩu cũ kết thúc.
+        </p>
+        <label className="block text-sm font-medium text-slate-700">
+          <span className="mb-1.5 block">Mật khẩu mới</span>
+          <input
+            type="password"
+            className={inputClass}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+            data-testid="admin-override-password"
+          />
+        </label>
+        {problem ? <p className="text-xs text-red-600">{problem}</p> : null}
+        <label className="block text-sm font-medium text-slate-700">
+          <span className="mb-1.5 block">Xác nhận mật khẩu mới</span>
+          <input
+            type="password"
+            className={inputClass}
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+            data-testid="admin-override-confirm"
+          />
+        </label>
+        {mismatch ? <p className="text-xs text-red-600">Mật khẩu xác nhận không khớp.</p> : null}
+        {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );

@@ -75,6 +75,18 @@ export function canRead(role: UserRole): boolean {
 const UPWARD_ORDER: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
 
 /**
+ * THE ROLES A SENDER MAY ADDRESS, nearest first — whether or not an account of
+ * that role exists right now. The sender's form shows exactly these, so a
+ * receptionist always sees "Quản lí lễ tân" even when its branch has none yet.
+ */
+export function allowedRecipientRoles(role: UserRole): UserRole[] {
+  if (role === 'RECEPTIONIST') return [...UPWARD_ORDER];
+  if (role === 'RECEPTION_MANAGER') return ['RECEPTION_GENERAL_MANAGER', 'ADMIN'];
+  if (role === 'RECEPTION_GENERAL_MANAGER') return ['ADMIN'];
+  return [];
+}
+
+/**
  * THE SUPERIORS THIS SENDER MAY ADDRESS, nearest first:
  *
  *   Lễ tân           its OWN branch's Quản lý lễ tân, the Tổng quản lý lễ tân, Admin

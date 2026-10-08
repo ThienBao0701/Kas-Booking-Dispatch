@@ -165,6 +165,7 @@ export async function resetAll(): Promise<void> {
   await testPrisma.confidentialReport.deleteMany();
   await testPrisma.pushSubscription.deleteMany();
   await testPrisma.accountAudit.deleteMany();
+  await testPrisma.adminOverrideCredential.deleteMany();
   await testPrisma.session.deleteMany();
   await testPrisma.user.deleteMany();
   await testPrisma.branch.deleteMany();

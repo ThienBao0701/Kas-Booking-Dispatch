@@ -224,17 +224,19 @@ function ComposeDialog({
   onClose,
   onSent,
 }: {
-  options: { categories: { code: ConfidentialCategory; label: string }[]; recipients: ConfidentialRecipient[] };
+  options: { categories: { code: ConfidentialCategory; label: string }[]; recipients: ConfidentialRecipient[]; recipientRoles: string[] };
   onClose: () => void;
   onSent: () => void;
 }) {
   const [category, setCategory] = useState<ConfidentialCategory | null>(null);
   const [content, setContent] = useState('');
   const [chosen, setChosen] = useState<string[]>([]);
-  // Only the roles the server offered this sender — never one it did not.
-  const groups = RECIPIENT_GROUPS.map((g) => ({ ...g, ids: options.recipients.filter((r) => r.role === g.role).map((r) => r.id) })).filter(
-    (g) => g.ids.length > 0,
-  );
+  // Exactly the roles the server allows this sender — each shown even when it
+  // has no account yet, so the hierarchy is always visible.
+  const groups = RECIPIENT_GROUPS.filter((g) => options.recipientRoles.includes(g.role)).map((g) => ({
+    ...g,
+    ids: options.recipients.filter((r) => r.role === g.role).map((r) => r.id),
+  }));
   const send = useMutation({
     mutationFn: () =>
       confidentialApi.send({
@@ -326,20 +328,30 @@ function ComposeDialog({
               every report whether it is ticked or not.
             */}
             <ul className="space-y-1.5" data-testid="confidential-recipients">
-              {groups.map((g) => (
-                <li key={g.role}>
-                  <label className="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm hover:bg-slate-50">
-                    <input
-                      type="checkbox"
-                      checked={chosen.includes(g.role)}
-                      onChange={(e) => setChosen((c) => (e.target.checked ? [...c, g.role] : c.filter((x) => x !== g.role)))}
-                      data-testid={`confidential-recipient-${g.role}`}
-                      className="h-4 w-4 rounded border-line-strong text-brand-600"
-                    />
-                    <span className="font-medium text-slate-900">{g.label}</span>
-                  </label>
-                </li>
-              ))}
+              {groups.map((g) => {
+                // A manager role with no account (e.g. no Quản lí lễ tân assigned
+                // to this branch yet) is shown but cannot be ticked: nobody would
+                // receive it. The Admin is always selectable.
+                const empty = g.ids.length === 0 && g.role !== 'ADMIN';
+                return (
+                  <li key={g.role}>
+                    <label
+                      className={`flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm ${empty ? 'bg-slate-50' : 'hover:bg-slate-50'}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={chosen.includes(g.role)}
+                        disabled={empty}
+                        onChange={(e) => setChosen((c) => (e.target.checked ? [...c, g.role] : c.filter((x) => x !== g.role)))}
+                        data-testid={`confidential-recipient-${g.role}`}
+                        className="h-4 w-4 rounded border-line-strong text-brand-600"
+                      />
+                      <span className="font-medium text-slate-900">{g.label}</span>
+                      {empty ? <span className="text-xs text-slate-500">— chưa có tài khoản</span> : null}
+                    </label>
+                  </li>
+                );
+              })}
             </ul>
           </fieldset>
           {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}

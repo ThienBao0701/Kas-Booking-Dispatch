@@ -13,6 +13,7 @@ import {
   CONFIDENTIAL_CATEGORY_LABELS,
   CONFIDENTIAL_TITLE,
   MAX_CONFIDENTIAL_LENGTH,
+  allowedRecipientRoles,
   allowedRecipients,
   canRead,
   canSend,
@@ -55,6 +56,8 @@ export function createConfidentialReportsRouter(): Router {
         canSend: canSend(me.role),
         canRead: canRead(me.role),
         recipients: canSend(me.role) ? await allowedRecipients(me) : [],
+        /** The role groups of "Gửi đến", nearest first — shown even when empty. */
+        recipientRoles: allowedRecipientRoles(me.role),
       });
     })().catch(next);
   });

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import type { ConfidentialRecipient } from '../api/confidentialReports';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -109,6 +110,7 @@ describe('sending a confidential report', () => {
             categories: CATEGORIES,
             canSend: true,
             canRead: false,
+            recipientRoles: ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'],
             recipients: [
               { id: 9, fullName: 'Quản lý Một', role: 'RECEPTION_MANAGER', roleLabel: 'Quản lý lễ tân', always: false },
               { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý', always: false },
@@ -162,12 +164,12 @@ describe('sending a confidential report', () => {
 });
 
 describe('the "Gửi đến" choices follow the sender’s level', () => {
-  const offer = (user: unknown, recipients: unknown[], sent: unknown[]) =>
+  const offer = (user: unknown, recipients: ConfidentialRecipient[], sent: unknown[], roles: string[]) =>
     installApiMock(
       shell(user, {
         'GET /api/confidential-reports/options': () => ({
           status: 200,
-          body: { title: 'x', categories: CATEGORIES, canSend: true, canRead: true, recipients },
+          body: { title: 'x', categories: CATEGORIES, canSend: true, canRead: true, recipients, recipientRoles: roles },
         }),
         'GET /api/confidential-reports': () => ({ status: 200, body: { reports: [], counts: { unread: 0, read: 0 } } }),
         'POST /api/confidential-reports': (init) => {
@@ -194,6 +196,7 @@ describe('the "Gửi đến" choices follow the sender’s level', () => {
         { id: 2, fullName: 'Admin Hai', role: 'ADMIN', roleLabel: 'Admin', always: true },
       ],
       sent,
+      ['RECEPTION_GENERAL_MANAGER', 'ADMIN'],
     );
     await compose();
     expect(recipientLabels()).toEqual(['Tổng quản lí lễ tân', 'Admin']);
@@ -206,12 +209,35 @@ describe('the "Gửi đến" choices follow the sender’s level', () => {
     );
   });
 
+  it('a Lễ tân whose branch has no Quản lí lễ tân yet still sees that group — marked empty — beside the Admin', async () => {
+    const sent: unknown[] = [];
+    offer(
+      RECEPTIONIST_USER,
+      [
+        { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý', always: false },
+        { id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true },
+      ],
+      sent,
+      ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'],
+    );
+    await compose();
+    expect(recipientLabels()).toEqual(['Quản lí lễ tân (Giám sát)— chưa có tài khoản', 'Tổng quản lí lễ tân', 'Admin']);
+    expect(screen.getByTestId('confidential-recipient-RECEPTION_MANAGER')).toBeDisabled();
+    expect(screen.getByTestId('confidential-recipient-RECEPTION_GENERAL_MANAGER')).toBeEnabled();
+    expect(screen.getByTestId('confidential-recipient-ADMIN')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('confidential-recipient-RECEPTION_GENERAL_MANAGER'));
+    await userEvent.click(screen.getByTestId('confidential-recipient-ADMIN'));
+    await userEvent.click(screen.getByTestId('confidential-send'));
+    await waitFor(() => expect(sent).toEqual([{ category: 'PROCESS_RULES', content: 'Quy trình bàn giao ca', recipientIds: [10, 1] }]));
+  });
+
   it('a Tổng quản lí lễ tân has the Admin as its only choice', async () => {
     const sent: unknown[] = [];
     offer(
       { ...MANAGER_USER, id: 10, username: 'tongql', fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', managedBranchIds: [] },
       [{ id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true }],
       sent,
+      ['ADMIN'],
     );
     await compose();
     expect(recipientLabels()).toEqual(['Admin']);
@@ -228,7 +254,7 @@ describe('reading the inbox', () => {
       shell(MANAGER_USER, {
         'GET /api/confidential-reports/options': () => ({
           status: 200,
-          body: { title: 'x', categories: CATEGORIES, canSend: true, canRead: true, recipients: [] },
+          body: { title: 'x', categories: CATEGORIES, canSend: true, canRead: true, recipients: [], recipientRoles: ['RECEPTION_GENERAL_MANAGER', 'ADMIN'] },
         }),
         'GET /api/confidential-reports': () => ({
           status: 200,
