@@ -55,9 +55,40 @@ if (-not (Test-Path $releaseDir)) { New-Item -ItemType Directory -Path $releaseD
 
 Write-Host "Kas $version -> $stage" -ForegroundColor Cyan
 
+# --- 0. Provenance ----------------------------------------------------------
+# kas-release.json stamps `git rev-parse HEAD` into the release. That stamp is
+# only true when what gets built IS that commit — so a working tree with
+# uncommitted or untracked changes is refused rather than packaged under a
+# commit it does not match. (.env, dist and release are git-ignored and do not
+# count.)
+$previousPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+Push-Location $RepoRoot
+try {
+    # Captured WITHOUT a pipe, for the same $LASTEXITCODE reason as the commit
+    # stamp below.
+    $dirty = & git status --porcelain
+    $gitStatusCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousPreference
+    Pop-Location
+}
+if ($gitStatusCode -ne 0) { throw 'Khong doc duoc git status - khong the xac nhan ban build dung commit.' }
+if ($dirty) {
+    Write-Host ($dirty -join [Environment]::NewLine)
+    throw 'Thu muc lam viec con thay doi chua commit. Commit hoac bo cac thay doi tren roi dong goi lai.'
+}
+
 # --- 1. Build ---------------------------------------------------------------
 if (-not $SkipBuild) {
     Write-Host 'Dang build...' -ForegroundColor Cyan
+    # tsc never empties its output folder, so compiled files of a source that
+    # was since deleted would stay in server\dist and ship. Start both outputs
+    # empty: the payload is exactly what this commit builds.
+    foreach ($output in 'server\dist', 'client\dist') {
+        $outputPath = Join-Path $RepoRoot $output
+        if (Test-Path $outputPath) { Remove-Item $outputPath -Recurse -Force }
+    }
     Push-Location $RepoRoot
     try {
         & npm.cmd run build
@@ -65,7 +96,10 @@ if (-not $SkipBuild) {
     } finally { Pop-Location }
 }
 
-foreach ($required in 'server\dist\index.js', 'server\dist\launcher\cli.js', 'client\dist\index.html') {
+# server\dist\service\runner.js is what Kas.cmd and KasService.cmd start. (The
+# old server\dist\launcher\cli.js was removed with the production runner; a
+# check still naming it only passed on a machine with a stale build left over.)
+foreach ($required in 'server\dist\index.js', 'server\dist\service\runner.js', 'client\dist\index.html') {
     if (-not (Test-Path (Join-Path $RepoRoot $required))) {
         throw "Thieu $required. Chay 'npm run build' truoc."
     }

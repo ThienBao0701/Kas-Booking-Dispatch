@@ -635,6 +635,40 @@ describe('the packager ships what a deployment needs', () => {
     ).scripts;
     expect(scripts.release).toContain('Package-Kas.ps1');
   });
+
+  /** Comments name the old file to explain the fix; only statements are pinned. */
+  const code = packager
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+
+  it('requires the runner Kas.cmd and KasService.cmd start — not the launcher that was removed', () => {
+    // THE BUG: the required-file check still named server\dist\launcher\cli.js,
+    // deleted with the production runner. A clean build failed it; a machine
+    // with a stale build passed it and packaged the leftover.
+    const root = path.resolve(__dirname, '..', '..');
+    for (const entry of ['Kas.cmd', 'KasService.cmd']) {
+      expect(fs.readFileSync(path.join(root, entry), 'utf8')).toContain('server\\dist\\service\\runner.js');
+    }
+    expect(fs.existsSync(path.join(root, 'server', 'src', 'service', 'runner.ts'))).toBe(true);
+    expect(fs.existsSync(path.join(root, 'server', 'src', 'launcher', 'cli.ts'))).toBe(false);
+    expect(code).toContain("'server\\dist\\service\\runner.js'");
+    expect(code).not.toContain('launcher\\cli.js');
+  });
+
+  it('builds into empty output folders, so nothing a deleted source left behind ships', () => {
+    const clean = code.indexOf("foreach ($output in 'server\\dist', 'client\\dist')");
+    expect(clean).toBeGreaterThan(-1);
+    expect(code.indexOf('Remove-Item $outputPath -Recurse -Force')).toBeGreaterThan(clean);
+    expect(clean).toBeLessThan(code.indexOf('& npm.cmd run build'));
+  });
+
+  it('refuses a working tree with uncommitted changes, so the stamped commit is what was built', () => {
+    const status = code.indexOf('& git status --porcelain');
+    expect(status).toBeGreaterThan(-1);
+    expect(code).toMatch(/if \(\$dirty\) \{[\s\S]*?throw /);
+    expect(status).toBeLessThan(code.indexOf('& npm.cmd run build'));
+  });
 });
 
 /* ================================================================== */
