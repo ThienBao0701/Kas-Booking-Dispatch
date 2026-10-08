@@ -514,6 +514,24 @@ describe('"Mật khẩu ghi đè Admin"', () => {
     expect(document.body).not.toHaveTextContent(OVERRIDE);
   });
 
+  it('a failed status read is not shown as "Chưa đặt" — and a failed save shows the server’s reason', async () => {
+    const MIGRATE = 'Cơ sở dữ liệu chưa được cập nhật. Chạy: npm run db:migrate rồi khởi động lại máy chủ.';
+    const failure = () => ({ status: 500, body: { error: { code: 'INTERNAL_ERROR', message: MIGRATE } } });
+    mount({ 'GET /api/admin/override-password': failure, 'PUT /api/admin/override-password': failure });
+    renderApp('/app/settings');
+
+    const panel = await screen.findByTestId('admin-override-panel');
+    await waitFor(() => expect(within(panel).getByTestId('admin-override-status')).toHaveTextContent('Không tải được trạng thái'));
+    expect(within(panel).getByTestId('admin-override-status')).not.toHaveTextContent('Chưa đặt');
+    expect(within(panel).getByText(MIGRATE)).toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByTestId('admin-override-set'));
+    await userEvent.type(screen.getByTestId('admin-override-password'), OVERRIDE);
+    await userEvent.type(screen.getByTestId('admin-override-confirm'), OVERRIDE);
+    await userEvent.click(screen.getByTestId('admin-override-save'));
+    expect(await within(screen.getByRole('dialog')).findByText(MIGRATE)).toBeInTheDocument();
+  });
+
   it('turns it off after a confirmation', async () => {
     let deleted = 0;
     mount({

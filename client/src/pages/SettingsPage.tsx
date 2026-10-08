@@ -797,7 +797,10 @@ function AdminOverridePanel() {
           <p className="mt-1 text-sm" data-testid="admin-override-status">
             {status.isLoading ? (
               <span className="text-slate-500">Đang tải…</span>
-            ) : s?.configured ? (
+            ) : !s ? (
+              // Unknown is not "Chưa đặt": a failed status read says so.
+              <span className="font-medium text-red-700">Không tải được trạng thái</span>
+            ) : s.configured ? (
               <span className="font-medium text-emerald-700">
                 Đang bật{s.updatedAt ? ` · cập nhật ${formatDateTime(s.updatedAt)}` : ''}
                 {s.setByName ? ` bởi ${s.setByName}` : ''}

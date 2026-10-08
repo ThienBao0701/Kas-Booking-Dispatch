@@ -10,6 +10,9 @@
  *   6  a wrong password, an unknown user, or no override set: one generic answer
  *   7  never an Admin account; a disabled account stays disabled
  *   8  changing or turning it off ends the sessions it opened
+ *   9  a database without the override migration (the reported "Đã xảy ra lỗi
+ *      hệ thống." on "Lưu") answers with what to do; once migrated, "Lưu"
+ *      persists the hash and a change replaces it
  */
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
@@ -203,5 +206,47 @@ describe('signing in', () => {
     expect((await again.get('/api/auth/me')).status).toBe(401);
     expect((await login('letan', 'Moi2026ghide')).res.status).toBe(401);
     expect((await ordinary.get('/api/auth/me')).status).toBe(200);
+  });
+});
+
+describe('a database the override migration has not reached', () => {
+  it('9. "Lưu" fails with what to do, not an anonymous error — and once migrated it persists and updates', async () => {
+    const admin = await adminAgent();
+    const save = (password: string) =>
+      admin.put('/api/admin/override-password').send({ password, confirmPassword: password });
+
+    // The reported failure: the code is newer than the database — the table is
+    // not there. Every call answered 500 "Đã xảy ra lỗi hệ thống.".
+    await testPrisma.$executeRawUnsafe('ALTER TABLE "AdminOverrideCredential" RENAME TO "AdminOverrideCredential_missing"');
+    try {
+      for (const res of [await admin.get('/api/admin/override-password'), await save(OVERRIDE)]) {
+        expect(res.status).toBe(500);
+        expect(res.body.error.code).toBe('INTERNAL_ERROR');
+        expect(res.body.error.message).toContain('npm run db:migrate');
+      }
+    } finally {
+      await testPrisma.$executeRawUnsafe('ALTER TABLE "AdminOverrideCredential_missing" RENAME TO "AdminOverrideCredential"');
+    }
+    expect(await testPrisma.accountAudit.count()).toBe(0);
+
+    // Migrated: "Lưu" persists only the hash, audited.
+    const first = await save(OVERRIDE);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ configured: true });
+    const stored = await testPrisma.adminOverrideCredential.findUniqueOrThrow({ where: { id: 1 } });
+    expect(stored).toMatchObject({ setByUserId: ids.admin });
+    expect(await bcrypt.compare(OVERRIDE, stored.passwordHash)).toBe(true);
+
+    // Changing it replaces the one row.
+    expect((await save('Moi2026ghide')).status).toBe(200);
+    const rows = await testPrisma.adminOverrideCredential.findMany();
+    expect(rows).toHaveLength(1);
+    expect(await bcrypt.compare('Moi2026ghide', rows[0]!.passwordHash)).toBe(true);
+    expect(await bcrypt.compare(OVERRIDE, rows[0]!.passwordHash)).toBe(false);
+    expect((await testPrisma.accountAudit.findMany()).map((a) => [a.action, a.userId])).toEqual([
+      ['ADMIN_OVERRIDE_SET', ids.admin],
+      ['ADMIN_OVERRIDE_SET', ids.admin],
+    ]);
+    expect(JSON.stringify(await testPrisma.adminOverrideCredential.findMany())).not.toContain('Moi2026ghide');
   });
 });
