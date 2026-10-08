@@ -4,8 +4,8 @@
  *   Lễ tân  ──▶  Quản lý lễ tân (its own branch)  ──▶  Tổng quản lý  ──▶  Admin
  *
  * WHO MAY READ ONE: the superiors the sender chose, and every Admin — always.
- * The Admin is SHOWN to the sender as a recipient that cannot be removed, and
- * the server adds every active Admin whatever the request says. Nobody
+ * The Admin is SHOWN to the sender as an ordinary choice, and the server adds
+ * every active Admin whether it is chosen or not. Nobody
  * else: not the sender's peers, not the sender (it is not in their inbox), not
  * another branch, not Buồng phòng or Kỹ thuật. A report outside the reader's
  * reach answers 404 — its existence is not confirmed either.
@@ -82,8 +82,8 @@ const UPWARD_ORDER: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENER
  *   Tổng quản lý     Admin
  *   Admin            nobody — it cannot send
  *
- * Every Admin is listed with `always: true`: shown to the sender, ticked and
- * not removable — the server adds every active Admin to every report anyway.
+ * Every Admin is listed with `always: true`: the sender may tick it or not —
+ * the server adds every active Admin to every report anyway, once.
  * Never a peer, a lower role or another branch's manager. A receptionist with no
  * branch matches no manager (fail closed); its report still reaches the Admin.
  */

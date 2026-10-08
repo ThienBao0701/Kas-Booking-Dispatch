@@ -30,6 +30,17 @@ import { formatDateTime } from '../lib/format';
 const KEY = ['confidential-reports'];
 const TITLE = 'VII. Báo cáo các vấn đề và tình hình quan trọng';
 
+/**
+ * "Gửi đến": one checkbox per superior ROLE, nearest first. Ticking one names
+ * every account of that role the server offered (its own branch's managers for a
+ * receptionist; every active Admin).
+ */
+const RECIPIENT_GROUPS: readonly { role: string; label: string }[] = [
+  { role: 'RECEPTION_MANAGER', label: 'Quản lí lễ tân (Giám sát)' },
+  { role: 'RECEPTION_GENERAL_MANAGER', label: 'Tổng quản lí lễ tân' },
+  { role: 'ADMIN', label: 'Admin' },
+];
+
 export function ConfidentialReportsPage() {
   const options = useQuery({ queryKey: [...KEY, 'options'], queryFn: () => confidentialApi.options() });
   const [composing, setComposing] = useState(false);
@@ -219,9 +230,18 @@ function ComposeDialog({
 }) {
   const [category, setCategory] = useState<ConfidentialCategory | null>(null);
   const [content, setContent] = useState('');
-  const [chosen, setChosen] = useState<number[]>([]);
+  const [chosen, setChosen] = useState<string[]>([]);
+  // Only the roles the server offered this sender — never one it did not.
+  const groups = RECIPIENT_GROUPS.map((g) => ({ ...g, ids: options.recipients.filter((r) => r.role === g.role).map((r) => r.id) })).filter(
+    (g) => g.ids.length > 0,
+  );
   const send = useMutation({
-    mutationFn: () => confidentialApi.send({ category: category!, content: content.trim(), recipientIds: chosen }),
+    mutationFn: () =>
+      confidentialApi.send({
+        category: category!,
+        content: content.trim(),
+        recipientIds: groups.filter((g) => chosen.includes(g.role)).flatMap((g) => g.ids),
+      }),
     onSuccess: onSent,
   });
   const label = options.categories.find((c) => c.code === category)?.label;
@@ -301,45 +321,25 @@ function ComposeDialog({
           <fieldset>
             <legend className="mb-1.5 text-sm font-medium text-slate-700">Gửi đến</legend>
             {/*
-              THE SENDER'S SUPERIORS, nearest first, as the server lists them. The
-              Admin is one of them, ticked and locked: it always receives the
-              report, and the server adds it whatever is ticked here.
+              THE SENDER'S SUPERIORS, nearest first, as the server allows them. The
+              Admin is an ordinary choice here; the server adds every Admin to
+              every report whether it is ticked or not.
             */}
             <ul className="space-y-1.5" data-testid="confidential-recipients">
-              {options.recipients
-                .filter((r) => !r.always)
-                .map((r) => (
-                  <li key={r.id}>
-                    <label className="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm hover:bg-slate-50">
-                      <input
-                        type="checkbox"
-                        checked={chosen.includes(r.id)}
-                        onChange={(e) => setChosen((c) => (e.target.checked ? [...c, r.id] : c.filter((x) => x !== r.id)))}
-                        data-testid={`confidential-recipient-${r.id}`}
-                        className="h-4 w-4 rounded border-line-strong text-brand-600"
-                      />
-                      <span className="font-medium text-slate-900">{r.fullName}</span>
-                      <span className="text-xs text-slate-500">{r.roleLabel}</span>
-                    </label>
-                  </li>
-                ))}
-              {/* One line for the Admin however many Admin accounts there are. */}
-              {options.recipients.some((r) => r.always) ? (
-                <li>
-                  <label className="flex items-center gap-2.5 rounded-lg border border-line bg-slate-50 px-3 py-2 text-sm">
+              {groups.map((g) => (
+                <li key={g.role}>
+                  <label className="flex items-center gap-2.5 rounded-lg border border-line px-3 py-2 text-sm hover:bg-slate-50">
                     <input
                       type="checkbox"
-                      checked
-                      disabled
-                      readOnly
-                      data-testid="confidential-recipient-admin"
-                      className="h-4 w-4 rounded border-line-strong text-brand-600 disabled:opacity-70"
+                      checked={chosen.includes(g.role)}
+                      onChange={(e) => setChosen((c) => (e.target.checked ? [...c, g.role] : c.filter((x) => x !== g.role)))}
+                      data-testid={`confidential-recipient-${g.role}`}
+                      className="h-4 w-4 rounded border-line-strong text-brand-600"
                     />
-                    <span className="font-medium text-slate-900">Admin</span>
-                    <span className="text-xs text-slate-500">— Admin luôn nhận</span>
+                    <span className="font-medium text-slate-900">{g.label}</span>
                   </label>
                 </li>
-              ) : null}
+              ))}
             </ul>
           </fieldset>
           {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}

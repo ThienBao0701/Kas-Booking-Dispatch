@@ -7,7 +7,7 @@ export interface ConfidentialRecipient {
   fullName: string;
   role: string;
   roleLabel: string;
-  /** The Admin: always a recipient — shown ticked, not removable. */
+  /** The Admin: always a recipient, whether the sender ticks it or not. */
   always: boolean;
 }
 

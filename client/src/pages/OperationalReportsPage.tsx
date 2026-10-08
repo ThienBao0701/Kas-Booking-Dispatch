@@ -680,9 +680,8 @@ function TotalMenu({
             })}
             {/*
               VII is not a journal category: it is a private report to the
-              desk's superiors, on its own page — so it is a link, set apart.
+              desk's superiors, on its own page — so it is a link.
             */}
-            <div role="separator" className="my-1 border-t border-line" />
             <button
               ref={(el) => {
                 itemRefs.current[CATEGORY_ORDER.length] = el;
@@ -696,7 +695,6 @@ function TotalMenu({
               data-testid="category-CONFIDENTIAL"
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-brand-50 hover:text-brand-800 focus:bg-brand-50 focus:text-brand-800 focus:outline-none"
             >
-              <span className="text-xs font-bold text-slate-500">VII</span>
               Báo cáo các vấn đề và tình hình quan trọng
             </button>
           </div>

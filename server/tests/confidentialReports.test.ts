@@ -2,8 +2,10 @@
  * "VII. BÁO CÁO CÁC VẤN ĐỀ VÀ TÌNH HÌNH QUAN TRỌNG" — private, upward, kept.
  *
  *   12  each sender is offered exactly its superiors, nearest first, the Admin
- *       always among them (ticked, not removable) — and nobody else
+ *       always among them (added whether ticked or not) — and nobody else
  *   13  … never another branch's Quản lý lễ tân, a peer or a lower role
+ *   13b every allowed combination is accepted; the Admin, ticked or not, is
+ *       one reader per Admin account — never twice, however many Admins
  *   14  every Admin always reads it, chosen or not — even one created later
  *   15  peers, the sender, other branches and other departments cannot
  *   16  a manager reads only what was addressed to it
@@ -84,7 +86,7 @@ const inbox = async (agent: Agent) =>
   };
 
 describe('who may be addressed', () => {
-  it('12. each sender is offered exactly its superiors, nearest first — the Admin always, ticked', async () => {
+  it('12. each sender is offered exactly its superiors, nearest first — the Admin always among them', async () => {
     const options = (await letan1.get('/api/confidential-reports/options')).body;
     expect(options.categories.map((c: { label: string }) => c.label)).toEqual([
       'Môi trường làm việc',
@@ -148,6 +150,59 @@ describe('who may be addressed', () => {
       ids.tongql,
       ids.admin,
     ]);
+  });
+});
+
+describe('every allowed combination, the Admin always once', () => {
+  const readers = async (agent: Agent, recipientIds: number[]) => {
+    const res = await send(agent, { recipientIds });
+    expect(res.status).toBe(201);
+    const rows = await testPrisma.confidentialReportRecipient.findMany({ where: { reportId: res.body.report.id } });
+    return rows.map((r) => r.userId).sort((a, b) => a - b);
+  };
+  const sorted = (...xs: number[]) => xs.sort((a, b) => a - b);
+
+  it('13b. Lễ tân → QL / TQL / Admin; QL → TQL / Admin; TQL → Admin — the Admin added when not ticked, never doubled', async () => {
+    // Lễ tân: any combination of its three.
+    expect(await readers(letan1, [ids.rm1!])).toEqual(sorted(ids.rm1!, ids.admin!));
+    expect(await readers(letan1, [ids.tongql!])).toEqual(sorted(ids.tongql!, ids.admin!));
+    expect(await readers(letan1, [ids.admin!])).toEqual([ids.admin]);
+    expect(await readers(letan1, [ids.rm1!, ids.tongql!])).toEqual(sorted(ids.rm1!, ids.tongql!, ids.admin!));
+    expect(await readers(letan1, [ids.rm1!, ids.admin!])).toEqual(sorted(ids.rm1!, ids.admin!));
+    expect(await readers(letan1, [ids.rm1!, ids.tongql!, ids.admin!])).toEqual(sorted(ids.rm1!, ids.tongql!, ids.admin!));
+    // Quản lý lễ tân: the Tổng quản lý and/or the Admin.
+    expect(await readers(rm1, [ids.tongql!])).toEqual(sorted(ids.tongql!, ids.admin!));
+    expect(await readers(rm1, [ids.admin!])).toEqual([ids.admin]);
+    expect(await readers(rm1, [ids.tongql!, ids.admin!])).toEqual(sorted(ids.tongql!, ids.admin!));
+    // Tổng quản lý lễ tân: the Admin, ticked or not.
+    expect(await readers(general, [ids.admin!])).toEqual([ids.admin]);
+    expect(await readers(general, [])).toEqual([ids.admin]);
+    // The same id twice is still one reader.
+    expect(await readers(letan1, [ids.admin!, ids.admin!, ids.rm1!, ids.rm1!])).toEqual(sorted(ids.rm1!, ids.admin!));
+    // Outside the hierarchy: refused, and nothing stored.
+    const before = await testPrisma.confidentialReport.count();
+    for (const [agent, wrong] of [
+      [rm1, ids.rm1!],
+      [rm1, ids.letan1!],
+      [general, ids.tongql!],
+      [general, ids.rm1!],
+      [letan2, ids.rm1!],
+    ] as const) {
+      expect((await send(agent, { recipientIds: [wrong] })).status).toBe(403);
+    }
+    expect(await testPrisma.confidentialReport.count()).toBe(before);
+
+    // Two Admin accounts: ONE "Admin" choice the client expands to both — each
+    // reads it exactly once, ticked or not.
+    const adminBa = (
+      await createUser({ username: 'adminba', password: PASSWORD, fullName: 'Admin Ba', role: 'ADMIN', branchId: null, mustChangePassword: false })
+    ).id;
+    const offered = (await letan1.get('/api/confidential-reports/options')).body.recipients as { id: number; always: boolean }[];
+    expect(offered.filter((r) => r.always).map((r) => r.id).sort((a, b) => a - b)).toEqual(sorted(ids.admin!, adminBa));
+    expect(await readers(letan1, [ids.rm1!, ids.admin!, adminBa])).toEqual(sorted(ids.rm1!, ids.admin!, adminBa));
+    expect(await readers(letan1, [ids.rm1!])).toEqual(sorted(ids.rm1!, ids.admin!, adminBa));
+    expect(await readers(general, [adminBa])).toEqual(sorted(ids.admin!, adminBa));
+    await testPrisma.user.update({ where: { id: adminBa }, data: { active: false } });
   });
 });
 

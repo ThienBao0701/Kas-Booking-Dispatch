@@ -2,8 +2,9 @@
  * "VII. BÁO CÁO CÁC VẤN ĐỀ VÀ TÌNH HÌNH QUAN TRỌNG" — on screen.
  *
  *   1. A receptionist sends: one of exactly four kinds, the content, and the
- *      superiors the SERVER offers; the Admin is never chosen by hand. It sees
- *      no list of what it sent.
+ *      superiors the SERVER offers — one checkbox per role, the Admin an
+ *      ordinary, selectable choice. It sees no list of what it sent. A manager
+ *      is offered the Tổng quản lí and the Admin; the Tổng quản lí the Admin.
  *   2. A manager reads its inbox — "Chưa đọc" / "Đã đọc" — and opening a report
  *      shows it in full and marks it read for this reader.
  */
@@ -18,6 +19,11 @@ afterEach(() => {
 });
 
 type Handler = (init: RequestInit) => { status: number; body?: unknown };
+
+const recipientLabels = () =>
+  within(screen.getByTestId('confidential-recipients'))
+    .getAllByRole('checkbox')
+    .map((b) => b.closest('label')!.textContent);
 
 const MANAGER_USER = {
   id: 9,
@@ -92,7 +98,7 @@ function report(id: string, over: Record<string, unknown> = {}) {
 }
 
 describe('sending a confidential report', () => {
-  it('offers exactly four kinds, the server’s superiors, and sends once — the Admin added by the system', async () => {
+  it('offers exactly four kinds, the server’s superiors by role, and sends once — the Admin selectable', async () => {
     const sent: unknown[] = [];
     installApiMock(
       shell(RECEPTIONIST_USER, {
@@ -107,6 +113,8 @@ describe('sending a confidential report', () => {
               { id: 9, fullName: 'Quản lý Một', role: 'RECEPTION_MANAGER', roleLabel: 'Quản lý lễ tân', always: false },
               { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý', always: false },
               { id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true },
+              // A second Admin account is still ONE "Admin" checkbox.
+              { id: 2, fullName: 'Admin Hai', role: 'ADMIN', roleLabel: 'Admin', always: true },
             ],
           },
         }),
@@ -129,27 +137,87 @@ describe('sending a confidential report', () => {
     await userEvent.click(screen.getByTestId('confidential-category-COLLEAGUES'));
     expect(screen.getByTestId('confidential-chosen')).toHaveTextContent('Đồng nghiệp, nhân viên');
 
-    // The server's superiors, nearest first — the Admin visible, ticked and locked.
-    const recipients = screen.getByTestId('confidential-recipients');
-    const boxes = within(recipients).getAllByRole('checkbox');
-    expect(boxes.map((b) => b.closest('label')!.textContent)).toEqual([
-      'Quản lý MộtQuản lý lễ tân',
-      'Tổng quản lýTổng quản lý',
-      'Admin— Admin luôn nhận',
-    ]);
-    expect(screen.getByTestId('confidential-recipient-admin')).toBeChecked();
-    expect(screen.getByTestId('confidential-recipient-admin')).toBeDisabled();
-    expect(screen.getByTestId('confidential-recipient-9')).not.toBeChecked();
-    expect(screen.getByTestId('confidential-recipient-9')).toBeEnabled();
+    // Exactly three choices, nearest first — every one unticked and selectable.
+    expect(recipientLabels()).toEqual(['Quản lí lễ tân (Giám sát)', 'Tổng quản lí lễ tân', 'Admin']);
+    for (const box of within(screen.getByTestId('confidential-recipients')).getAllByRole('checkbox')) {
+      expect(box).toBeEnabled();
+      expect(box).not.toBeChecked();
+    }
+    expect(screen.queryByText(/Admin luôn nhận/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('confidential-recipient-ADMIN'));
+    expect(screen.getByTestId('confidential-recipient-ADMIN')).toBeChecked();
+    await userEvent.click(screen.getByTestId('confidential-recipient-ADMIN'));
+    expect(screen.getByTestId('confidential-recipient-ADMIN')).not.toBeChecked();
 
     expect(screen.getByTestId('confidential-send')).toBeDisabled();
     await userEvent.type(screen.getByTestId('confidential-content'), 'Đồng nghiệp ca C thường xuyên đến muộn');
-    await userEvent.click(screen.getByTestId('confidential-recipient-9'));
+    await userEvent.click(screen.getByTestId('confidential-recipient-RECEPTION_MANAGER'));
     await userEvent.click(screen.getByTestId('confidential-send'));
+    // The Admin unticked is simply not named — the server adds it anyway.
     await waitFor(() =>
       expect(sent).toEqual([{ category: 'COLLEAGUES', content: 'Đồng nghiệp ca C thường xuyên đến muộn', recipientIds: [9] }]),
     );
     expect(await screen.findByText('Đã gửi báo cáo tới cấp trên.')).toBeInTheDocument();
+  });
+});
+
+describe('the "Gửi đến" choices follow the sender’s level', () => {
+  const offer = (user: unknown, recipients: unknown[], sent: unknown[]) =>
+    installApiMock(
+      shell(user, {
+        'GET /api/confidential-reports/options': () => ({
+          status: 200,
+          body: { title: 'x', categories: CATEGORIES, canSend: true, canRead: true, recipients },
+        }),
+        'GET /api/confidential-reports': () => ({ status: 200, body: { reports: [], counts: { unread: 0, read: 0 } } }),
+        'POST /api/confidential-reports': (init) => {
+          sent.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: { id: 'x1', createdAt: '2026-10-05T03:00:00.000Z' } } };
+        },
+      }),
+    );
+
+  async function compose() {
+    renderApp('/app/reports/confidential');
+    await userEvent.click(await screen.findByTestId('confidential-new'));
+    await userEvent.click(await screen.findByTestId('confidential-category-PROCESS_RULES'));
+    await userEvent.type(screen.getByTestId('confidential-content'), 'Quy trình bàn giao ca');
+  }
+
+  it('a Quản lí lễ tân chooses among the Tổng quản lí lễ tân and the Admin — both at once', async () => {
+    const sent: unknown[] = [];
+    offer(
+      MANAGER_USER,
+      [
+        { id: 10, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', roleLabel: 'Tổng quản lý', always: false },
+        { id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true },
+        { id: 2, fullName: 'Admin Hai', role: 'ADMIN', roleLabel: 'Admin', always: true },
+      ],
+      sent,
+    );
+    await compose();
+    expect(recipientLabels()).toEqual(['Tổng quản lí lễ tân', 'Admin']);
+    expect(screen.getByTestId('confidential-recipient-ADMIN')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('confidential-recipient-RECEPTION_GENERAL_MANAGER'));
+    await userEvent.click(screen.getByTestId('confidential-recipient-ADMIN'));
+    await userEvent.click(screen.getByTestId('confidential-send'));
+    await waitFor(() =>
+      expect(sent).toEqual([{ category: 'PROCESS_RULES', content: 'Quy trình bàn giao ca', recipientIds: [10, 1, 2] }]),
+    );
+  });
+
+  it('a Tổng quản lí lễ tân has the Admin as its only choice', async () => {
+    const sent: unknown[] = [];
+    offer(
+      { ...MANAGER_USER, id: 10, username: 'tongql', fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER', managedBranchIds: [] },
+      [{ id: 1, fullName: 'Quản trị viên', role: 'ADMIN', roleLabel: 'Admin', always: true }],
+      sent,
+    );
+    await compose();
+    expect(recipientLabels()).toEqual(['Admin']);
+    await userEvent.click(screen.getByTestId('confidential-recipient-ADMIN'));
+    await userEvent.click(screen.getByTestId('confidential-send'));
+    await waitFor(() => expect(sent).toEqual([{ category: 'PROCESS_RULES', content: 'Quy trình bàn giao ca', recipientIds: [1] }]));
   });
 });
 

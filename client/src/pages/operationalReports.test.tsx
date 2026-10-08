@@ -747,6 +747,18 @@ describe('the "Tổng" menu', () => {
     expect(screen.getByTestId('report-total')).toHaveFocus();
   });
 
+  it('lists "Báo cáo các vấn đề và tình hình quan trọng" last — no "VII" prefix, no divider above it', async () => {
+    installApiMock(shellRoutes(RECEPTIONIST_USER));
+    renderApp('/app/reports');
+
+    const menu = await openTotalMenu();
+    const item = within(menu).getByTestId('category-CONFIDENTIAL');
+    expect(item).toHaveTextContent(/^Báo cáo các vấn đề và tình hình quan trọng$/);
+    expect(within(menu).queryByText('VII')).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('separator')).not.toBeInTheDocument();
+    expect(item.previousElementSibling).toBe(within(menu).getAllByRole('menuitemradio')[5]);
+  });
+
   it('shows no form while choosing', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
