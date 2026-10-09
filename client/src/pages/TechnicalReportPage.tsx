@@ -16,13 +16,16 @@
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Eye, RefreshCw, Undo2, Trash2, UserPlus, Wrench } from 'lucide-react';
+import { CheckCircle2, Download, Eye, Forward, HardHat, RefreshCw, Undo2, Trash2, UserPlus, Wrench } from 'lucide-react';
 import { ISSUE_CATEGORIES, issueCategoryLabel, issuesApi, type Issue, type IssueCategory } from '../api/issues';
 import { branchesApi } from '../api/bookings';
 import { adminBranchesApi } from '../api/adminBranches';
 import { operationalPdfUrl, operationalXlsxUrl } from '../api/receptionReports';
 import { useAuth } from '../auth/AuthProvider';
-import { branchLabel, isTechnicalAssigner, type Branch } from '../auth/types';
+import { branchLabel, isTechnicalAssigner, isTechnicalManagerRole, type Branch, type UserRole } from '../auth/types';
+import { can } from '../auth/capabilities';
+import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog } from '../components/TechnicalDispatchDialogs';
+import { formatVnd } from '../lib/money';
 import { useBranchRooms } from '../hooks/useBranchRooms';
 import { useIssueSummary } from '../hooks/useIssueSummary';
 import { EmptyState } from '../components/EmptyState';
@@ -49,8 +52,10 @@ const FIELD =
 /** "Tình trạng" at a glance — the server's assignment state, plus the two histories. */
 const BUCKETS = [
   { key: 'UNASSIGNED', label: 'Chờ giao kỹ thuật' },
+  { key: 'MANAGER_ASSIGNED', label: 'Đã giao quản lý kỹ thuật' },
   { key: 'ASSIGNED', label: 'Đã giao' },
   { key: 'IN_PROGRESS', label: 'Đang sửa' },
+  { key: 'EXTERNAL', label: 'Kĩ thuật bên ngoài' },
   { key: 'COMPLETED', label: 'Đã hoàn thành' },
   { key: 'CANNOT_REPAIR', label: 'Không sửa được' },
   { key: 'REASSIGNED', label: 'Đã giao lại' },
@@ -62,10 +67,14 @@ function inBucket(issue: Issue, bucket: Bucket): boolean {
   switch (bucket) {
     case 'UNASSIGNED':
       return issue.assignmentState === 'UNASSIGNED';
+    case 'MANAGER_ASSIGNED':
+      return issue.assignmentState === 'MANAGER_ASSIGNED';
     case 'ASSIGNED':
       return issue.assignmentState === 'ASSIGNED';
     case 'IN_PROGRESS':
       return issue.assignmentState === 'IN_PROGRESS';
+    case 'EXTERNAL':
+      return issue.assignmentState === 'EXTERNAL_IN_PROGRESS';
     case 'COMPLETED':
       return issue.status === 'COMPLETED';
     case 'CANNOT_REPAIR':
@@ -102,6 +111,10 @@ export function TechnicalReportPage() {
   const [viewing, setViewing] = useState<Issue | null>(null);
   const [returning, setReturning] = useState<Issue | null>(null);
   const [deleting, setDeleting] = useState<Issue | null>(null);
+  /** "Giao việc" (Tổng QLKT), "Thuê ngoài" and "Hoàn thành thuê ngoài" (QLKT). */
+  const [giving, setGiving] = useState<Issue | null>(null);
+  const [hiring, setHiring] = useState<Issue | null>(null);
+  const [completing, setCompleting] = useState<Issue | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const branches = useQuery({
@@ -159,7 +172,7 @@ export function TechnicalReportPage() {
   return (
     <div>
       <PageHeader
-        title={user?.role === 'TECHNICAL_MANAGER' ? 'Quản lý sự cố kỹ thuật' : 'Báo cáo kỹ thuật'}
+        title={isTechnicalManagerRole(user?.role) ? 'Quản lý sự cố kỹ thuật' : 'Báo cáo kỹ thuật'}
         description="Sự cố theo chi nhánh và phòng: tình trạng, người sửa, kết quả và từng giai đoạn sửa chữa."
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -298,7 +311,12 @@ export function TechnicalReportPage() {
                     </span>
                   </h2>
                   {g.rooms.map((roomGroup) => {
-                    const waiting = roomGroup.issues.filter((i) => i.status === 'NEW');
+                    // Waiting, and — for a Quản lý kỹ thuật — not held by another manager.
+                    const waiting = roomGroup.issues.filter(
+                      (i) =>
+                        i.status === 'NEW' &&
+                        !(user?.role === 'TECHNICAL_MANAGER' && i.assignedManager && i.assignedManager.id !== user.id),
+                    );
                     return (
                       <article
                         key={roomGroup.key}
@@ -329,9 +347,14 @@ export function TechnicalReportPage() {
                               key={issue.id}
                               issue={issue}
                               canManage={canAssign}
+                              role={user?.role}
+                              userId={user?.id}
                               onView={() => setViewing(issue)}
                               onReturn={() => setReturning(issue)}
                               onDelete={() => setDeleting(issue)}
+                              onGive={() => setGiving(issue)}
+                              onHire={() => setHiring(issue)}
+                              onCompleteExternal={() => setCompleting(issue)}
                             />
                           ))}
                         </ul>
@@ -380,6 +403,39 @@ export function TechnicalReportPage() {
           }}
         />
       ) : null}
+      {giving ? (
+        <GiveWorkDialog
+          issue={giving}
+          onClose={() => setGiving(null)}
+          onDone={(message) => {
+            setGiving(null);
+            void list.refetch();
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {hiring ? (
+        <ExternalDispatchDialog
+          issue={hiring}
+          onClose={() => setHiring(null)}
+          onDone={(message) => {
+            setHiring(null);
+            void list.refetch();
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {completing ? (
+        <CompleteExternalDialog
+          issue={completing}
+          onClose={() => setCompleting(null)}
+          onDone={(message) => {
+            setCompleting(null);
+            void list.refetch();
+            setToast(message);
+          }}
+        />
+      ) : null}
       {viewing ? (
         <Modal open size="4xl" title="Chi tiết sự cố" onClose={() => setViewing(null)}>
           <IssueLifecycleDetail issue={viewing} />
@@ -398,18 +454,37 @@ export function TechnicalReportPage() {
 function IssueRow({
   issue,
   canManage,
+  role,
+  userId,
   onView,
   onReturn,
   onDelete,
+  onGive,
+  onHire,
+  onCompleteExternal,
 }: {
   issue: Issue;
   canManage: boolean;
+  role: UserRole | undefined;
+  userId: number | undefined;
   onView: () => void;
   onReturn: () => void;
   onDelete: () => void;
+  onGive: () => void;
+  onHire: () => void;
+  onCompleteExternal: () => void;
 }) {
   const last = issue.attempts[issue.attempts.length - 1];
   const open = issue.status === 'NEW' || issue.status === 'IN_PROGRESS';
+  // Waiting for someone to take it: NEW and not yet given to a technician.
+  const waiting = issue.status === 'NEW' && !issue.assignedTechnician;
+  const heldByOther = role === 'TECHNICAL_MANAGER' && !!issue.assignedManager && issue.assignedManager.id !== userId;
+  const external = issue.externalWork ?? null;
+  // The server decides who may complete it; the button follows the same rule.
+  const mayCompleteExternal =
+    !!external &&
+    can(role, 'technical.completeExternal') &&
+    (role === 'TECHNICAL_GENERAL_MANAGER' || external.assignedById === userId);
   const action =
     'inline-flex items-center gap-1.5 rounded-lg border border-line-strong bg-white px-2.5 py-1.5 text-sm text-slate-700 hover:bg-slate-50';
   return (
@@ -437,6 +512,35 @@ function IssueRow({
               <dt className="inline text-slate-500">Kỹ thuật: </dt>
               <dd className="inline font-medium">{issue.assignedTechnician?.name ?? last?.technicianName ?? 'Chưa giao'}</dd>
             </div>
+            {issue.assignedManager ? (
+              <div className="sm:col-span-2" data-testid={`tr-manager-${issue.id}`}>
+                <dt className="inline text-slate-500">Quản lý kỹ thuật: </dt>
+                <dd className="inline">
+                  <span className="font-medium">{issue.assignedManager.name}</span>
+                  {issue.assignedManager.assignedByName ? ` · giao bởi ${issue.assignedManager.assignedByName}` : ''}
+                  {issue.assignedManager.assignedAt ? ` · ${formatDateTime(issue.assignedManager.assignedAt)}` : ''}
+                  {issue.assignedManager.note ? <span className="block whitespace-pre-wrap text-slate-600">Hướng dẫn: {issue.assignedManager.note}</span> : null}
+                </dd>
+              </div>
+            ) : null}
+            {external ? (
+              <div className="sm:col-span-2" data-testid={`tr-external-${issue.id}`}>
+                <dt className="inline text-slate-500">Kĩ thuật bên ngoài: </dt>
+                <dd className="inline">
+                  <span className="font-medium">{external.contractor?.name}</span>
+                  {external.contractor?.company ? ` — ${external.contractor.company}` : ` (${external.contractor?.typeLabel})`}
+                  {external.contractor?.phone ? ` · ${external.contractor.phone}` : ''}
+                </dd>
+              </div>
+            ) : null}
+            {(issue.dispatches ?? []).some((d) => d.repairCost !== null) ? (
+              <div>
+                <dt className="inline text-slate-500">Chi phí sửa chữa: </dt>
+                <dd className="inline font-medium">
+                  {formatVnd((issue.dispatches ?? []).reduce((sum, d) => sum + (d.repairCost ?? 0), 0))}
+                </dd>
+              </div>
+            ) : null}
             <div>
               <dt className="inline text-slate-500">Nguyên nhân: </dt>
               <dd className="inline">{issue.cause ?? 'Chưa xác định'}</dd>
@@ -467,6 +571,24 @@ function IssueRow({
             <Eye className="h-4 w-4" aria-hidden="true" />
             Chi tiết
           </button>
+          {waiting && can(role, 'technical.dispatchToManager') ? (
+            <button type="button" onClick={onGive} data-testid={`tr-give-${issue.id}`} className={action}>
+              <Forward className="h-4 w-4" aria-hidden="true" />
+              Giao việc
+            </button>
+          ) : null}
+          {waiting && can(role, 'technical.dispatchExternal') && !heldByOther ? (
+            <button type="button" onClick={onHire} data-testid={`tr-hire-${issue.id}`} className={action}>
+              <HardHat className="h-4 w-4" aria-hidden="true" />
+              Thuê ngoài
+            </button>
+          ) : null}
+          {mayCompleteExternal ? (
+            <button type="button" onClick={onCompleteExternal} data-testid={`tr-complete-external-${issue.id}`} className={action}>
+              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+              Hoàn thành thuê ngoài
+            </button>
+          ) : null}
           {canManage && issue.status === 'NEW' && issue.assignedTechnician ? (
             <button type="button" onClick={onReturn} data-testid={`tr-unassign-${issue.id}`} className={action}>
               <Undo2 className="h-4 w-4" aria-hidden="true" />

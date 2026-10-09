@@ -236,7 +236,9 @@ export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'ADMIN') return ADMIN_NAV;
   if (role === 'BOOKING_DEPARTMENT') return BOOKING_DEPARTMENT_NAV;
   if (role === 'TECHNICAL') return TECHNICAL_NAV;
-  if (role === 'TECHNICAL_MANAGER') return TECHNICAL_MANAGER_NAV;
+  // Quản lý kỹ thuật and Tổng quản lý kỹ thuật share the incident workspace;
+  // the server scopes each to its own ticked branches.
+  if (role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER') return TECHNICAL_MANAGER_NAV;
   if (role === 'HOUSEKEEPING') return HOUSEKEEPING_NAV;
   if (role === 'HOUSEKEEPING_MANAGER') return HOUSEKEEPING_MANAGER_NAV;
   if (role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER') return RECEPTION_MANAGER_NAV;

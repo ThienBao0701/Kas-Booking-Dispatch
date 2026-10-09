@@ -9,6 +9,7 @@ import { serializeManagedUser } from '../auth/serialize';
 import { sessionStore } from '../auth/session';
 import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware/auth';
 import { DELETED_ACCOUNT_USERNAME, deleteAccount } from '../auth/deleteAccount';
+import { BRANCH_SET_ROLES as SHARED_BRANCH_SET_ROLES } from '../auth/branchScope';
 import { adminOverrideStatus, clearAdminOverridePassword, setAdminOverridePassword } from '../auth/adminOverride';
 
 /**
@@ -25,6 +26,8 @@ const MANAGEABLE_ROLES = [
   'RECEPTION_GENERAL_MANAGER',
   // Quản lý buồng phòng: exactly ONE branch, held in `branchId` like a receptionist's.
   'HOUSEKEEPING_MANAGER',
+  // Tổng quản lý kỹ thuật: a SET of ticked branches, like a Quản lý kỹ thuật.
+  'TECHNICAL_GENERAL_MANAGER',
 ] as const;
 
 /**
@@ -42,10 +45,11 @@ const GLOBAL_ROLES: readonly string[] = [
   // Several branches, through UserBranchAssignment — never one `branchId`.
   'RECEPTION_MANAGER',
   'TECHNICAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
 ];
 
-/** The roles whose branches are a SET of ticked boxes (at least one). */
-const BRANCH_SET_ROLES: readonly string[] = ['RECEPTION_MANAGER', 'TECHNICAL_MANAGER'];
+/** The roles whose branches are a SET of ticked boxes (at least one) — `auth/branchScope.ts`'s list. */
+const BRANCH_SET_ROLES: readonly string[] = SHARED_BRANCH_SET_ROLES;
 
 /** Vietnamese department names, for the messages this endpoint returns. */
 const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
@@ -53,6 +57,7 @@ const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   BOOKING_DEPARTMENT: 'bộ phận đặt phòng',
   TECHNICAL: 'bộ phận kỹ thuật',
   TECHNICAL_MANAGER: 'quản lý kỹ thuật',
+  TECHNICAL_GENERAL_MANAGER: 'tổng quản lý kỹ thuật',
   HOUSEKEEPING: 'bộ phận buồng phòng',
   RECEPTION_MANAGER: 'quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'tổng quản lý lễ tân',
@@ -96,7 +101,7 @@ const createUserSchema = z
     path: ['branchIds'],
   })
   .refine((v) => BRANCH_SET_ROLES.includes(v.role) || v.branchIds === undefined, {
-    message: 'Chỉ quản lý lễ tân và quản lý kỹ thuật mới được gán nhiều chi nhánh.',
+    message: 'Chỉ quản lý lễ tân, quản lý kỹ thuật và tổng quản lý kỹ thuật mới được gán nhiều chi nhánh.',
     path: ['branchIds'],
   });
 
@@ -281,7 +286,7 @@ export function createAdminUsersRouter(): Router {
       let managed: number[] | null = null;
       if (body.branchIds !== undefined) {
         if (!BRANCH_SET_ROLES.includes(existing.role)) {
-          throw ApiError.validation('Chỉ quản lý lễ tân và quản lý kỹ thuật mới được gán nhiều chi nhánh.');
+          throw ApiError.validation('Chỉ quản lý lễ tân, quản lý kỹ thuật và tổng quản lý kỹ thuật mới được gán nhiều chi nhánh.');
         }
         managed = await usableBranchIds(body.branchIds);
       }

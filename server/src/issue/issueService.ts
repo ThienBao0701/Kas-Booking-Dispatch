@@ -10,6 +10,8 @@ import type {
 } from '@prisma/client';
 import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db/prisma';
+import { assertCan, can } from '../auth/capabilities';
+import { roleLabel } from '../auth/roleLabels';
 import { ApiError } from '../lib/errors';
 import { parseCompletionVerdict, verdictWhere } from '../completion/verdict';
 import { issuePeriodWhere, type ReportPeriod } from '../reception/businessDate';
@@ -85,6 +87,7 @@ export function issueVisibilityWhere(actor: Actor, requestedBranchId?: number): 
     case 'RECEPTION_GENERAL_MANAGER':
     case 'RECEPTION_MANAGER':
     case 'TECHNICAL_MANAGER':
+    case 'TECHNICAL_GENERAL_MANAGER':
       return scopedBranchFilter(actor, requestedBranchId);
     case 'TECHNICAL':
       return {
@@ -155,6 +158,8 @@ export const ISSUE_INCLUDE = {
   shiftSession: { select: { id: true, shiftType: true, receptionistName: true } },
   /// Oldest first: every assignment and reassignment.
   assignments: { orderBy: { createdAt: 'asc' } },
+  /// Oldest first: hand-offs to a Quản lý kỹ thuật and to outside contractors.
+  dispatches: { orderBy: { createdAt: 'asc' } },
   /// Oldest first: the repair, stage by stage ("Giai đoạn 1", "Giai đoạn 2", …).
   stages: { orderBy: { stageNumber: 'asc' } },
   /// The likely-repeat link: the earlier completed incident and who finished it.
@@ -285,7 +290,59 @@ export function serializeIssueEdit(edit: IssueDetail['edits'][number]) {
   };
 }
 
-export function serializeIssue(issue: IssueDetail, now: Date = getClock().now()) {
+/** The open outside-contractor hand-off of an incident, if any. */
+function openExternal(issue: Pick<IssueDetail, 'dispatches'>) {
+  return issue.dispatches.find((d) => d.kind === 'TO_EXTERNAL' && d.completedAt === null && d.endedAt === null) ?? null;
+}
+
+/**
+ * One hand-off as a reader sees it. An outside contractor's contact (phone,
+ * speciality, company) is shown ONLY to a reader with `technical.viewContractor`
+ * — the technical managers and the Admin; anyone else sees that the work went
+ * outside, to whom by name, and nothing to call.
+ */
+function serializeDispatch(d: IssueDetail['dispatches'][number], viewerRole: UserRole | undefined) {
+  const contact = can(viewerRole, 'technical.viewContractor');
+  return {
+    id: d.id,
+    kind: d.kind,
+    assignedById: d.assignedByUserId,
+    assignedByName: d.assignedByNameSnapshot,
+    assignedByRole: d.assignedByRole,
+    assignedByRoleLabel: roleLabel(d.assignedByRole),
+    note: d.note,
+    createdAt: d.createdAt.toISOString(),
+    manager: d.managerUserId ? { id: d.managerUserId, name: d.managerNameSnapshot ?? '—' } : null,
+    previousManagerName: d.previousManagerNameSnapshot,
+    contractor:
+      d.kind === 'TO_EXTERNAL'
+        ? {
+            name: d.contractorName,
+            type: d.contractorType,
+            typeLabel: d.contractorType === 'COMPANY' ? 'Công ty' : 'Cá nhân',
+            phone: contact ? d.contractorPhone : null,
+            specialty: contact ? d.contractorSpecialty : null,
+            company: contact ? d.contractorCompany : null,
+          }
+        : null,
+    repairCost: d.repairCost,
+    completedAt: d.completedAt ? d.completedAt.toISOString() : null,
+    completedByName: d.completedByNameSnapshot,
+    completionNote: d.completionNote,
+    endedAt: d.endedAt ? d.endedAt.toISOString() : null,
+  };
+}
+
+/**
+ * `viewerRole` decides only what an outside contractor's contact shows (see
+ * `serializeDispatch`); every other field is the same for every reader the
+ * route already admitted.
+ */
+export function serializeIssue(issue: IssueDetail, now: Date = getClock().now(), viewerRole?: UserRole) {
+  const hideContact = !can(viewerRole, 'technical.viewContractor');
+  const externals = issue.dispatches.filter((d) => d.kind === 'TO_EXTERNAL');
+  const externalAttemptIds = new Set(externals.map((d) => d.attemptId).filter((x): x is string => x !== null));
+  const externalPhones = new Set(externals.map((d) => d.contractorPhone).filter((x): x is string => x !== null));
   /*
     The CURRENT assignment's elapsed time, from the incident's own columns.
 
@@ -343,7 +400,8 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     acceptedByName: issue.acceptedByNameSnapshot ?? issue.acceptedBy?.fullName ?? null,
     acceptedAt: issue.acceptedAt ? issue.acceptedAt.toISOString() : null,
     technicianName: issue.technicianName,
-    technicianPhone: issue.technicianPhone,
+    // An outside contractor's phone is contact data: only for `technical.viewContractor`.
+    technicianPhone: hideContact && externalPhones.has(issue.technicianPhone ?? '') ? null : issue.technicianPhone,
     completedBy: actorView(issue.completedBy),
     completedByName: issue.completedByNameSnapshot ?? issue.completedBy?.fullName ?? null,
     completedAt: issue.completedAt ? issue.completedAt.toISOString() : null,
@@ -360,7 +418,10 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
     durationLabel: formatDuration(currentDuration),
 
     /** Every attempt anybody has made, oldest first. Empty on legacy rows. */
-    attempts: issue.attempts.map((a) => serializeAttempt(a, now)),
+    attempts: issue.attempts.map((a) => {
+      const view = serializeAttempt(a, now);
+      return hideContact && externalAttemptIds.has(a.id) ? { ...view, technicianPhone: null } : view;
+    }),
     /** Every correction made after the report was filed, oldest first. */
     edits: issue.edits.map(serializeIssueEdit),
     cannotRepairCount,
@@ -390,12 +451,31 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now())
       reassigned: a.previousTechnicianUserId !== null,
       assignedByName: a.assignedByNameSnapshot,
       assignedByRole: a.assignedByRole,
+      /** The assigner's work instructions, when given. */
+      note: a.note,
       createdAt: a.createdAt.toISOString(),
       /** "Chuyển về chờ giao kỹ thuật": who took it back, and when. */
       returnedAt: a.returnedAt ? a.returnedAt.toISOString() : null,
       returnedByName: a.returnedByNameSnapshot,
     })),
     ...assignmentState(issue, cannotRepairCount),
+    /** "Giao việc → Nhân sự": the Quản lý kỹ thuật holding the work now, who gave it, and the instructions. */
+    assignedManager: issue.assignedManagerUserId
+      ? {
+          id: issue.assignedManagerUserId,
+          name: issue.assignedManagerNameSnapshot ?? '—',
+          assignedAt: issue.assignedManagerAt ? issue.assignedManagerAt.toISOString() : null,
+          assignedByName: issue.assignedManagerByNameSnapshot,
+          note: issue.assignedManagerNote,
+        }
+      : null,
+    /** The dispatch chain, oldest first: managers and outside contractors, with the cost. */
+    dispatches: issue.dispatches.map((d) => serializeDispatch(d, viewerRole)),
+    /** The outside contractor working on it now, if any. */
+    externalWork: (() => {
+      const open = openExternal(issue);
+      return open ? serializeDispatch(open, viewerRole) : null;
+    })(),
     /** The repair, stage by stage, oldest first — never overwritten. */
     stages: issue.stages.map(serializeStage),
     /**
@@ -463,30 +543,35 @@ export function serializeStage(stage: IssueDetail['stages'][number]) {
  */
 export type AssignmentState =
   | 'UNASSIGNED'
+  | 'MANAGER_ASSIGNED'
   | 'ASSIGNED'
   | 'IN_PROGRESS'
+  | 'EXTERNAL_IN_PROGRESS'
   | 'AWAITING_REASSIGNMENT'
   | 'AWAITING_INSPECTION'
   | 'COMPLETED';
 
 export const ASSIGNMENT_STATE_LABELS: Record<AssignmentState, string> = {
   UNASSIGNED: 'Chưa giao kỹ thuật',
+  MANAGER_ASSIGNED: 'Đã giao quản lý kỹ thuật',
   ASSIGNED: 'Đã giao — chờ tiếp nhận',
   IN_PROGRESS: 'Đang sửa',
+  EXTERNAL_IN_PROGRESS: 'Kĩ thuật bên ngoài đang sửa',
   AWAITING_REASSIGNMENT: 'Không sửa được — chờ giao lại',
   AWAITING_INSPECTION: 'Chờ nghiệm thu',
   COMPLETED: 'Đã hoàn thành',
 };
 
 function assignmentState(
-  issue: Pick<IssueDetail, 'status' | 'assignedTechnicianUserId' | 'attempts'>,
+  issue: Pick<IssueDetail, 'status' | 'assignedTechnicianUserId' | 'attempts' | 'assignedManagerUserId' | 'dispatches'>,
   cannotRepairCount: number,
 ): { assignmentState: AssignmentState; assignmentStateLabel: string } {
   let state: AssignmentState;
   if (issue.status === 'COMPLETED') state = 'COMPLETED';
   else if (issue.status === 'AWAITING_INSPECTION') state = 'AWAITING_INSPECTION';
-  else if (issue.status === 'IN_PROGRESS') state = 'IN_PROGRESS';
+  else if (issue.status === 'IN_PROGRESS') state = openExternal(issue) ? 'EXTERNAL_IN_PROGRESS' : 'IN_PROGRESS';
   else if (issue.assignedTechnicianUserId !== null) state = 'ASSIGNED';
+  else if (issue.assignedManagerUserId !== null) state = 'MANAGER_ASSIGNED';
   else if (cannotRepairCount > 0 && issue.attempts.at(-1)?.outcome === 'CANNOT_REPAIR') {
     state = 'AWAITING_REASSIGNMENT';
   } else state = 'UNASSIGNED';
@@ -775,8 +860,12 @@ async function notifyNewIssue(branchAddress: string, issue: IssueDetail): Promis
       OR: [
         { role: { in: ['ADMIN', 'RECEPTION_GENERAL_MANAGER'] } },
         { role: 'RECEPTION_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
-        // The Quản lý kỹ thuật of that branch assigns the repair.
-        { role: 'TECHNICAL_MANAGER', branchAssignments: { some: { branchId: issue.branchId } } },
+        // The Quản lý kỹ thuật and the Tổng quản lý kỹ thuật of that branch
+        // receive it: one of them gives the repair to someone.
+        {
+          role: { in: ['TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'] },
+          branchAssignments: { some: { branchId: issue.branchId } },
+        },
       ],
     },
     select: { id: true },
@@ -959,7 +1048,7 @@ export async function updateIssue(
  */
 export async function assignIssue(
   id: string,
-  input: { technicianUserId: number },
+  input: { technicianUserId: number; note?: string | null },
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
@@ -979,19 +1068,22 @@ export async function assignIssue(
  */
 export async function assignIssues(
   ids: readonly string[],
-  input: { technicianUserId: number },
+  input: { technicianUserId: number; note?: string | null },
   actor: Actor,
   clock: Clock = getClock(),
 ): Promise<IssueDetail[]> {
   if (!isTechnicalAssigner(actor.role)) {
     throw ApiError.forbidden('Chỉ Admin, quản lý lễ tân hoặc quản lý kỹ thuật mới giao được kỹ thuật.');
   }
+  const note = optionalText(input.note);
+  if (note && note.length > 2000) throw ApiError.validation('Ghi chú quá dài.');
   const unique = [...new Set(ids)];
   if (unique.length === 0) throw ApiError.validation('Vui lòng chọn ít nhất một sự cố.');
   const issues = await Promise.all(unique.map((id) => loadIssue(id)));
   const scope = branchScopeOf(actor);
   for (const issue of issues) {
     if (!scopeIncludes(scope, issue.branchId)) throw ApiError.branchAccessDenied();
+    assertManagerHolds(issue, actor);
     if (issue.status !== 'NEW') {
       throw ApiError.conflict(
         issue.status === 'IN_PROGRESS'
@@ -1041,6 +1133,7 @@ export async function assignIssues(
           assignedByUserId: actor.id,
           assignedByNameSnapshot: actor.fullName,
           assignedByRole: actor.role,
+          note,
           createdAt: now,
         },
       });
@@ -1209,6 +1302,340 @@ export async function voidIssue(
       },
     });
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * The dispatch chain: Tổng quản lý kỹ thuật → Quản lý kỹ thuật →
+ * kĩ thuật khách sạn / kĩ thuật bên ngoài
+ * ------------------------------------------------------------------ */
+
+/**
+ * ONCE A TỔNG QUẢN LÝ KỸ THUẬT HAS GIVEN AN INCIDENT TO ONE QUẢN LÝ KỸ THUẬT,
+ * THAT MANAGER OWNS ITS NEXT STEP: another Quản lý kỹ thuật of the same branch
+ * cannot hand it to a technician or a contractor. The Tổng quản lý kỹ thuật, the
+ * Admin and the reception supervisors keep the rights they already had.
+ */
+function assertManagerHolds(issue: Pick<IssueDetail, 'assignedManagerUserId'>, actor: Actor): void {
+  if (actor.role === 'TECHNICAL_MANAGER' && issue.assignedManagerUserId !== null && issue.assignedManagerUserId !== actor.id) {
+    throw ApiError.forbidden('Sự cố đã được giao cho quản lý kỹ thuật khác.');
+  }
+}
+
+/** Required free text, trimmed, within a length. */
+function requiredText(value: unknown, label: string, max: number): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) throw ApiError.validation(`Vui lòng nhập ${label}.`);
+  if (text.length > max) throw ApiError.validation(`${label[0]!.toUpperCase()}${label.slice(1)} quá dài.`);
+  return text;
+}
+
+/**
+ * A phone number as people write it — digits with spaces, dots, dashes, a
+ * leading + or brackets — holding 8 to 15 digits. Stored as typed.
+ */
+export function assertPhone(value: unknown): string {
+  const phone = requiredText(value, 'số điện thoại', 30);
+  const digits = phone.replace(/\D/g, '');
+  if (!/^[0-9+().\s-]+$/.test(phone) || digits.length < 8 || digits.length > 15) {
+    throw ApiError.validation('Số điện thoại không hợp lệ.');
+  }
+  return phone;
+}
+
+/** The largest cost the column holds (PostgreSQL INTEGER), in whole đồng. */
+const MAX_REPAIR_COST = 2_147_483_647;
+
+/** A repair cost: a whole, non-negative number of đồng — 0 is a real answer, a blank is not. */
+export function assertRepairCost(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
+    throw ApiError.validation('Vui lòng nhập chi phí sửa chữa hợp lệ (số tiền, có thể là 0).');
+  }
+  if (value < 0) throw ApiError.validation('Chi phí sửa chữa không được âm.');
+  if (value > MAX_REPAIR_COST) throw ApiError.validation('Chi phí sửa chữa vượt quá giới hạn.');
+  return value;
+}
+
+/** The Quản lý kỹ thuật accounts that cover a branch — "Giao việc → Nhân sự"'s list. */
+export async function listDispatchManagers(actor: Actor, branchId: number): Promise<{ id: number; fullName: string }[]> {
+  assertCan(actor.role, 'technical.dispatchToManager', 'Chỉ tổng quản lý kỹ thuật mới giao việc cho quản lý kỹ thuật.');
+  if (!scopeIncludes(branchScopeOf(actor), branchId)) throw ApiError.branchAccessDenied();
+  return prisma.user.findMany({
+    where: { role: 'TECHNICAL_MANAGER', active: true, branchAssignments: { some: { branchId } } },
+    select: { id: true, fullName: true },
+    orderBy: { fullName: 'asc' },
+  });
+}
+
+/**
+ * "GIAO VIỆC → NHÂN SỰ" — a Tổng quản lý kỹ thuật gives a waiting incident to a
+ * Quản lý kỹ thuật of the incident's branch, with required instructions.
+ *
+ * The incident stays NEW (nobody repairs it yet) and stays one incident: the
+ * hand-off is a row of `HotelIssueDispatch` plus the current-holder columns.
+ * Giving it to another manager ends the previous hand-off and names it.
+ */
+export async function dispatchToManager(
+  id: string,
+  input: { managerUserId: number; note: unknown },
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  assertCan(actor.role, 'technical.dispatchToManager', 'Chỉ tổng quản lý kỹ thuật mới giao việc cho quản lý kỹ thuật.');
+  const note = requiredText(input.note, 'ghi chú / hướng dẫn công việc', 2000);
+  const issue = await loadIssue(id);
+  if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
+  if (issue.status !== 'NEW' || issue.assignedTechnicianUserId !== null) {
+    throw ApiError.conflict(
+      issue.status === 'NEW'
+        ? 'Sự cố đã được giao cho kỹ thuật viên — chuyển về chờ giao trước khi giao quản lý kỹ thuật.'
+        : 'Sự cố đang được sửa hoặc đã hoàn thành, không thể giao lại.',
+      { status: issue.status },
+    );
+  }
+  const manager = await prisma.user.findFirst({
+    where: {
+      id: input.managerUserId,
+      role: 'TECHNICAL_MANAGER',
+      active: true,
+      branchAssignments: { some: { branchId: issue.branchId } },
+    },
+    select: { id: true, fullName: true },
+  });
+  if (!manager) throw ApiError.validation('Quản lý kỹ thuật không hợp lệ hoặc không phụ trách chi nhánh này.');
+  if (issue.assignedManagerUserId === manager.id) {
+    throw ApiError.conflict('Sự cố đã được giao cho quản lý kỹ thuật này.');
+  }
+  const now = clock.now();
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.hotelIssue.updateMany({
+      where: {
+        id,
+        ...LIVE_ISSUE,
+        status: 'NEW',
+        assignedTechnicianUserId: null,
+        assignedManagerUserId: issue.assignedManagerUserId,
+      },
+      data: {
+        assignedManagerUserId: manager.id,
+        assignedManagerNameSnapshot: manager.fullName,
+        assignedManagerAt: now,
+        assignedManagerByUserId: actor.id,
+        assignedManagerByNameSnapshot: actor.fullName,
+        assignedManagerNote: note,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await tx.hotelIssueDispatch.updateMany({
+      where: { issueId: id, kind: 'TO_MANAGER', endedAt: null },
+      data: { endedAt: now },
+    });
+    await tx.hotelIssueDispatch.create({
+      data: {
+        issueId: id,
+        branchId: issue.branchId,
+        kind: 'TO_MANAGER',
+        assignedByUserId: actor.id,
+        assignedByNameSnapshot: actor.fullName,
+        assignedByRole: actor.role,
+        note,
+        createdAt: now,
+        managerUserId: manager.id,
+        managerNameSnapshot: manager.fullName,
+        previousManagerUserId: issue.assignedManagerUserId,
+        previousManagerNameSnapshot: issue.assignedManagerNameSnapshot,
+      },
+    });
+  });
+  await notifyOperational([
+    {
+      userId: manager.id,
+      kind: 'TECHNICAL_ASSIGNED',
+      title: 'Công việc kỹ thuật được giao',
+      body: `CN ${issue.branch.branchNumber} · ${describeLocation(issue)} · ${issue.description.slice(0, 60)} — giao bởi ${actor.fullName}`,
+      link: '/app/reports/technical',
+      dedupeKey: `TECHNICAL_MANAGER_ASSIGNED:${manager.id}:${id}:${now.toISOString()}`,
+    },
+  ]);
+  return loadIssue(id);
+}
+
+export interface ExternalDispatchInput {
+  name?: unknown;
+  phone?: unknown;
+  specialty?: unknown;
+  type?: unknown;
+  company?: unknown;
+  note?: unknown;
+}
+
+/**
+ * "GIAO CHO KĨ THUẬT BÊN NGOÀI" — a Quản lý kỹ thuật hires an outside person or
+ * company for a waiting incident. No account is created: the contractor is a
+ * contact record of this hand-off. The work starts now (NEW → IN_PROGRESS) as an
+ * ordinary repair attempt naming the contractor, so every repair report counts
+ * it like any other; the manager who hired it is responsible for completing it
+ * and recording the cost.
+ */
+export async function dispatchExternal(
+  id: string,
+  input: ExternalDispatchInput,
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  assertCan(actor.role, 'technical.dispatchExternal', 'Chỉ quản lý kỹ thuật mới giao cho kĩ thuật bên ngoài.');
+  const name = requiredText(input.name, 'họ và tên', 200);
+  const phone = assertPhone(input.phone);
+  const specialty = requiredText(input.specialty, 'chuyên môn', 200);
+  if (input.type !== 'INDIVIDUAL' && input.type !== 'COMPANY') {
+    throw ApiError.validation('Vui lòng chọn loại: Cá nhân hoặc Công ty.');
+  }
+  const type = input.type;
+  const company = type === 'COMPANY' ? requiredText(input.company, 'tên công ty', 200) : null;
+  const note = requiredText(input.note, 'ghi chú / hướng dẫn công việc', 2000);
+
+  const issue = await loadIssue(id);
+  if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
+  assertManagerHolds(issue, actor);
+  if (issue.status !== 'NEW' || issue.assignedTechnicianUserId !== null) {
+    throw ApiError.conflict(
+      issue.status === 'NEW'
+        ? 'Sự cố đã được giao cho kỹ thuật viên — chuyển về chờ giao trước khi thuê ngoài.'
+        : 'Sự cố đang được sửa hoặc đã hoàn thành.',
+      { status: issue.status },
+    );
+  }
+  const now = clock.now();
+  const worker = company ? `${name} (${company})` : name;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.hotelIssue.updateMany({
+        where: { id, ...LIVE_ISSUE, status: 'NEW', assignedTechnicianUserId: null },
+        data: {
+          status: 'IN_PROGRESS',
+          acceptedByUserId: actor.id,
+          acceptedByNameSnapshot: actor.fullName,
+          acceptedAt: now,
+          technicianName: worker,
+          technicianPhone: phone,
+        },
+      });
+      if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+      const previous = await tx.technicalRepairAttempt.count({ where: { issueId: id } });
+      const attempt = await tx.technicalRepairAttempt.create({
+        data: {
+          issueId: id,
+          attemptNumber: previous + 1,
+          technicianUserId: null,
+          technicianNameSnapshot: worker,
+          technicianPhone: phone,
+          acceptedByNameSnapshot: actor.fullName,
+          acceptedAt: now,
+        },
+        select: { id: true },
+      });
+      await tx.hotelIssueDispatch.create({
+        data: {
+          issueId: id,
+          branchId: issue.branchId,
+          kind: 'TO_EXTERNAL',
+          assignedByUserId: actor.id,
+          assignedByNameSnapshot: actor.fullName,
+          assignedByRole: actor.role,
+          note,
+          createdAt: now,
+          contractorName: name,
+          contractorPhone: phone,
+          contractorSpecialty: specialty,
+          contractorType: type,
+          contractorCompany: company,
+          attemptId: attempt.id,
+        },
+      });
+    });
+  } catch (error) {
+    if (
+      error instanceof PrismaNS.PrismaClientKnownRequestError &&
+      error.code === 'P2002' &&
+      (String(error.meta?.target ?? '').includes(ONE_OPEN_ATTEMPT) || String(error.meta?.target ?? '').includes('attemptNumber'))
+    ) {
+      throw ApiError.conflict('Sự cố này vừa được người khác tiếp nhận.', { status: 'IN_PROGRESS' });
+    }
+    throw error;
+  }
+  const updated = await loadIssue(id);
+  await notifyReporterStatus(updated, 'IN_PROGRESS');
+  return updated;
+}
+
+export interface ExternalCompletionInput {
+  repairCost?: unknown;
+  verdict?: 'CORRECT' | 'INCORRECT' | null;
+  resolution?: string | null;
+  incorrectReason?: string | null;
+}
+
+/**
+ * "HOÀN THÀNH" OF OUTSIDE WORK — by the Quản lý kỹ thuật who hired the
+ * contractor (or a Tổng quản lý kỹ thuật of the branch), and only with the
+ * repair cost: a missing or invalid amount blocks it; 0 is allowed. The cost,
+ * who recorded it and when go on the hand-off row; the attempt closes as
+ * COMPLETED; the incident closes (COMPLETED) — the responsible manager's own
+ * confirmation is the acceptance of outside work. Guarded on the open state, so
+ * a second press finds it already complete and writes nothing twice.
+ */
+export async function completeExternal(
+  id: string,
+  input: ExternalCompletionInput,
+  actor: Actor,
+  clock: Clock = getClock(),
+): Promise<IssueDetail> {
+  assertCan(actor.role, 'technical.completeExternal', 'Chỉ quản lý kỹ thuật mới hoàn thành công việc thuê ngoài.');
+  const repairCost = assertRepairCost(input.repairCost);
+  const verdict = parseCompletionVerdict({ verdict: input.verdict, resolution: input.resolution, incorrectReason: input.incorrectReason });
+  const issue = await loadIssue(id);
+  if (!scopeIncludes(branchScopeOf(actor), issue.branchId)) throw ApiError.branchAccessDenied();
+  const open = openExternal(issue);
+  if (!open || issue.status !== 'IN_PROGRESS') {
+    throw ApiError.conflict(
+      issue.status === 'COMPLETED' ? 'Sự cố này đã hoàn thành trước đó.' : 'Sự cố không có công việc thuê ngoài đang mở.',
+      { status: issue.status },
+    );
+  }
+  if (actor.role === 'TECHNICAL_MANAGER' && open.assignedByUserId !== actor.id) {
+    throw ApiError.forbidden('Chỉ quản lý kỹ thuật đã thuê ngoài mới hoàn thành được công việc này.');
+  }
+  const now = clock.now();
+  const result =
+    verdict.reportVerdict === 'INCORRECT' ? `Báo cáo sai: ${verdict.incorrectReason}` : verdict.resolution;
+  await prisma.$transaction(async (tx) => {
+    const done = await tx.hotelIssueDispatch.updateMany({
+      where: { id: open.id, completedAt: null, endedAt: null },
+      data: {
+        repairCost,
+        completedAt: now,
+        completedByUserId: actor.id,
+        completedByNameSnapshot: actor.fullName,
+        completionNote: result,
+      },
+    });
+    if (done.count === 0) throw ApiError.conflict('Công việc thuê ngoài này đã được hoàn thành.');
+    const { count } = await tx.hotelIssue.updateMany({
+      where: { id, ...LIVE_ISSUE, status: 'IN_PROGRESS' },
+      data: {
+        status: 'COMPLETED',
+        completedByUserId: actor.id,
+        completedByNameSnapshot: actor.fullName,
+        completedAt: now,
+        reportVerdict: verdict.reportVerdict,
+        incorrectReason: verdict.incorrectReason,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordAttemptOutcome(tx, id, 'COMPLETED', null, now, issue, { cause: null, result });
+  });
+  const updated = await loadIssue(id);
+  await notifyReporterStatus(updated, 'COMPLETED');
+  return updated;
 }
 
 /** The active technicians an incident can be given to — full names, never usernames. */

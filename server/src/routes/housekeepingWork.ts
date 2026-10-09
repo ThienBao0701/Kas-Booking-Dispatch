@@ -27,6 +27,7 @@ import {
   myTasks,
   openTask,
   saveCleaning,
+  startTask,
   reviewTask,
   roomHistory,
   updateTask,
@@ -238,6 +239,13 @@ export function createHousekeepingWorkRouter(): Router {
     (async () => {
       const { issues } = issuesSchema.parse(req.body ?? {});
       res.status(201).json({ task: await inspectTask(actorOf(req), req.params.id!, { issues }, getClock()) });
+    })().catch(next);
+  });
+
+  // "Bắt đầu dọn" — the explicit start; nothing else starts the cleaning time.
+  router.post('/housekeeping/work/tasks/:id/start', ...gate, (req, res, next) => {
+    (async () => {
+      res.json({ task: await startTask(actorOf(req), req.params.id!, getClock()) });
     })().catch(next);
   });
 

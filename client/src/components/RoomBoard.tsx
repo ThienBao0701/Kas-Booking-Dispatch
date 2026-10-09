@@ -20,6 +20,7 @@ import type { RoomTask } from '../api/roomWork';
 
 const STATE_STYLE: Record<RoomTask['state'], string> = {
   NOT_STARTED: 'border-slate-300 bg-slate-100 text-slate-700 hover:bg-slate-200',
+  INSPECTED: 'border-amber-400 bg-amber-50 text-amber-900 hover:bg-amber-100',
   IN_PROGRESS: 'border-blue-500 bg-blue-50 text-blue-800 hover:bg-blue-100',
   COMPLETED: 'border-line bg-white text-slate-900 hover:bg-slate-50',
 };
@@ -29,6 +30,9 @@ export function RoomStateLegend() {
     <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600" data-testid="room-legend">
       <span className="inline-flex items-center gap-1.5">
         <span className="h-3 w-5 rounded border border-slate-300 bg-slate-100" aria-hidden="true" /> Chưa bắt đầu
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-3 w-5 rounded border border-amber-400 bg-amber-50" aria-hidden="true" /> Đã kiểm tra
       </span>
       <span className="inline-flex items-center gap-1.5">
         <span className="h-3 w-5 rounded border border-blue-500 bg-blue-50" aria-hidden="true" /> Đang dọn

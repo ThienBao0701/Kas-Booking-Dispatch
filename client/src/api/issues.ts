@@ -267,6 +267,12 @@ export interface Issue {
   /** Where the job stands in the assignment model, and how to say it. */
   assignmentState?: AssignmentState;
   assignmentStateLabel?: string;
+  /** "Giao việc → Nhân sự": the Quản lý kỹ thuật holding the work now. */
+  assignedManager?: IssueManagerHandoff | null;
+  /** The dispatch chain, oldest first: managers and outside contractors, with the cost. */
+  dispatches?: IssueDispatch[];
+  /** The outside contractor working on it now, if any. */
+  externalWork?: IssueDispatch | null;
   /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor filed it. */
   sourceLabel?: string | null;
   /** The earlier completed incident at this room with this fault, if any. */
@@ -284,11 +290,62 @@ export interface Issue {
 
 export type AssignmentState =
   | 'UNASSIGNED'
+  | 'MANAGER_ASSIGNED'
   | 'ASSIGNED'
   | 'IN_PROGRESS'
+  | 'EXTERNAL_IN_PROGRESS'
   | 'AWAITING_REASSIGNMENT'
   | 'AWAITING_INSPECTION'
   | 'COMPLETED';
+
+/** The current hand-off to a Quản lý kỹ thuật. */
+export interface IssueManagerHandoff {
+  id: number;
+  name: string;
+  assignedAt: string | null;
+  assignedByName: string | null;
+  note: string | null;
+}
+
+/**
+ * One hand-off of the dispatch chain. An outside contractor's phone, speciality
+ * and company are null unless the reader may see them (the server decides).
+ */
+export interface IssueDispatch {
+  id: string;
+  kind: 'TO_MANAGER' | 'TO_EXTERNAL';
+  /** Who made the hand-off — the responsible manager of an outside job. */
+  assignedById: number;
+  assignedByName: string;
+  assignedByRole: string;
+  assignedByRoleLabel: string | null;
+  note: string;
+  createdAt: string;
+  manager: { id: number; name: string } | null;
+  previousManagerName: string | null;
+  contractor: {
+    name: string | null;
+    type: 'INDIVIDUAL' | 'COMPANY' | null;
+    typeLabel: string;
+    phone: string | null;
+    specialty: string | null;
+    company: string | null;
+  } | null;
+  repairCost: number | null;
+  completedAt: string | null;
+  completedByName: string | null;
+  completionNote: string | null;
+  endedAt: string | null;
+}
+
+export interface ExternalDispatchInput {
+  name: string;
+  phone: string;
+  specialty: string;
+  type: 'INDIVIDUAL' | 'COMPANY';
+  company?: string;
+  note: string;
+}
 
 /** One assignment: who got the job, from whom, by whom, when. */
 /** "Hoàn thành": was the report right? */
@@ -328,6 +385,8 @@ export interface IssueAssignment {
   reassigned: boolean;
   assignedByName: string;
   assignedByRole: string;
+  /** The assigner's work instructions, when given. */
+  note?: string | null;
   createdAt: string;
   /** "Chuyển về chờ giao kỹ thuật": who took it back, and when. */
   returnedAt?: string | null;
@@ -597,9 +656,27 @@ export const issuesApi = {
   statistics: (params: { days?: number; branchId?: number; technicianUserId?: number } = {}) =>
     api.get<{ statistics: IncidentStatistics }>(`/issues/statistics${query(params)}`),
 
-  /** "Giao kỹ thuật" — give the incident to a technician, or move it. */
-  assign: (id: string, technicianUserId: number) =>
-    api.post<{ issue: Issue }>(`/issues/${id}/assign`, { technicianUserId }),
+  /** "Giao kỹ thuật" — give the incident to a technician, or move it (with optional instructions). */
+  assign: (id: string, technicianUserId: number, note?: string) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/assign`, note ? { technicianUserId, note } : { technicianUserId }),
+
+  /** "Giao việc → Nhân sự": the Quản lý kỹ thuật who cover a branch. */
+  managers: (branchId: number) =>
+    api.get<{ managers: { id: number; fullName: string }[] }>(`/issues/managers${query({ branchId })}`),
+
+  /** Tổng quản lý kỹ thuật → Quản lý kỹ thuật, with required instructions. */
+  dispatchToManager: (id: string, managerUserId: number, note: string) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/dispatch-manager`, { managerUserId, note }),
+
+  /** Quản lý kỹ thuật → kĩ thuật bên ngoài. */
+  dispatchExternal: (id: string, input: ExternalDispatchInput) =>
+    api.post<{ issue: Issue }>(`/issues/${id}/dispatch-external`, input),
+
+  /** Outside work done — the repair cost is required (0 allowed). */
+  completeExternal: (
+    id: string,
+    input: { repairCost: number; verdict: ReportVerdict; resolution?: string; incorrectReason?: string },
+  ) => api.post<{ issue: Issue }>(`/issues/${id}/complete-external`, input),
 
   /** Active technicians by full name, for the assignment picker. */
   technicians: () => api.get<{ technicians: { id: number; fullName: string }[] }>('/issues/technicians'),
@@ -633,8 +710,8 @@ export const issuesApi = {
   ) => api.post<{ issue: Issue }>(`/issues/${id}/complete`, input),
 
   /** "Giao kỹ thuật" for a room's chosen incidents, together. */
-  assignMany: (issueIds: string[], technicianUserId: number) =>
-    api.post<{ issues: Issue[] }>('/issues/assign', { issueIds, technicianUserId }),
+  assignMany: (issueIds: string[], technicianUserId: number, note?: string) =>
+    api.post<{ issues: Issue[] }>('/issues/assign', note ? { issueIds, technicianUserId, note } : { issueIds, technicianUserId }),
 
   /** "Chuyển về chờ giao kỹ thuật". */
   unassign: (id: string) => api.post<{ issue: Issue }>(`/issues/${id}/unassign`, {}),

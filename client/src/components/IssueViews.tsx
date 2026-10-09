@@ -43,6 +43,7 @@ import {
   type IssueStage,
   type RepairAttempt,
 } from '../api/issues';
+import { IssueDispatchHistory } from './TechnicalDispatchDialogs';
 import { formatDateTime } from '../lib/format';
 
 /**
@@ -546,6 +547,7 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
 
       <IssueStageTimeline issue={issue} />
       <IssueRepeatNote issue={issue} />
+      <IssueDispatchHistory issue={issue} />
       <IssueAssignmentHistory issue={issue} />
       <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
     </div>
@@ -646,6 +648,7 @@ export function IssueAssignmentHistory({
               : `Giao cho ${a.technicianName}`}
             {' · bởi '}
             {a.assignedByName}
+            {a.note ? <span className="block whitespace-pre-wrap text-slate-700">Ghi chú: {a.note}</span> : null}
             {a.returnedAt ? (
               <span className="block text-amber-800">
                 ↩ Chuyển về chờ giao kỹ thuật · {formatDateTime(a.returnedAt)} · bởi {a.returnedByName ?? '—'}

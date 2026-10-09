@@ -70,7 +70,13 @@ const BOOKING_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTIONIST'];
  * "Báo cáo vấn đề → Kỹ thuật": the supervisors and the Quản lý kỹ thuật, each
  * over its own branches (the server scopes every row).
  */
-const TECHNICAL_REPORT_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER'];
+const TECHNICAL_REPORT_ROLES: readonly UserRole[] = [
+  'ADMIN',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+  'TECHNICAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
+];
 
 /**
  * "Báo cáo vấn đề" and "Buồng phòng" as the reception SUPERVISORS see them —
@@ -93,8 +99,10 @@ function RoleLanding() {
   // Without this, a technician landed on the receptionist inbox — a branch-scoped
   // screen they have no branch for, so it was permanently empty.
   if (user?.role === 'TECHNICAL') return <Navigate to="/app/technical/new" replace />;
-  // Quản lý kỹ thuật's own work: the incidents of its branches.
-  if (user?.role === 'TECHNICAL_MANAGER') return <Navigate to="/app/reports/technical" replace />;
+  // Quản lý kỹ thuật's / Tổng quản lý kỹ thuật's own work: the incidents of its branches.
+  if (user?.role === 'TECHNICAL_MANAGER' || user?.role === 'TECHNICAL_GENERAL_MANAGER') {
+    return <Navigate to="/app/reports/technical" replace />;
+  }
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
   if (user?.role === 'HOUSEKEEPING_MANAGER') return <Navigate to="/app/hk/overview" replace />;

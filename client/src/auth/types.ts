@@ -32,7 +32,9 @@ export type UserRole =
   | 'RECEPTION_MANAGER'
   | 'RECEPTION_GENERAL_MANAGER'
   /** "Quản lý buồng phòng" — the housekeeping of exactly one branch (`branch`). */
-  | 'HOUSEKEEPING_MANAGER';
+  | 'HOUSEKEEPING_MANAGER'
+  /** "Tổng quản lý kỹ thuật" — the incidents of its ticked branches, handed to a Quản lý kỹ thuật or a technician. */
+  | 'TECHNICAL_GENERAL_MANAGER';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -45,6 +47,7 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   RECEPTION_MANAGER: 'Quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
   HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
+  TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
 };
 
 /** Who runs the daily room work: the Admin (every branch), the Quản lý buồng phòng (its one). */
@@ -63,9 +66,14 @@ export const RECEPTION_SUPERVISOR_ROLES: readonly UserRole[] = [
   'RECEPTION_GENERAL_MANAGER',
 ];
 
-/** Who gives an incident to a technician: the reception supervisors and the Quản lý kỹ thuật. */
+/** Who gives an incident to a technician: the reception supervisors and the two technical managers. */
 export function isTechnicalAssigner(role: UserRole | undefined): boolean {
-  return isReceptionSupervisor(role) || role === 'TECHNICAL_MANAGER';
+  return isReceptionSupervisor(role) || role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER';
+}
+
+/** The technical managers' workspace — "Quản lý sự cố kỹ thuật". */
+export function isTechnicalManagerRole(role: UserRole | undefined): boolean {
+  return role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER';
 }
 
 export function isReceptionSupervisor(role: UserRole | undefined): boolean {

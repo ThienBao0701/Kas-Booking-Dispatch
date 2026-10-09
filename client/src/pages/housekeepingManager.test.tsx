@@ -47,7 +47,7 @@ const MANAGER: AuthUser = {
 
 const CATALOG = {
   statusCodes: ['OUT', 'OC', 'VC'],
-  states: { NOT_STARTED: 'Chưa bắt đầu', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
+  states: { NOT_STARTED: 'Chưa bắt đầu', INSPECTED: 'Đã kiểm tra', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
   linen: [{ code: 'BED_SHEET', label: 'Ga giường' }],
   linenSizes: [
     { code: 'K', label: 'King' },

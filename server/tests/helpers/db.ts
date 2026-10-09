@@ -57,6 +57,9 @@ export async function resetIssueData(): Promise<void> {
   // reference to User, so it is named here to keep the reset working if the
   // cascade is ever relaxed.
   await testPrisma.hotelIssueEdit.deleteMany();
+  // The dispatch chain cascades from the incident but holds RESTRICT references
+  // to User and Branch — named here for the same reason as the edits above.
+  await testPrisma.hotelIssueDispatch.deleteMany();
   await testPrisma.technicalRepairAttempt.deleteMany();
   await testPrisma.hotelIssue.deleteMany();
 }

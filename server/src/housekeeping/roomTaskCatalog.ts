@@ -15,8 +15,14 @@ import { ApiError } from '../lib/errors';
 export const ROOM_STATUS_CODES = ['OUT', 'OC', 'VC'] as const;
 export type RoomStatusCode = (typeof ROOM_STATUS_CODES)[number];
 
+/**
+ * Chưa bắt đầu (chờ kiểm phòng) → Đã kiểm tra (chờ bắt đầu dọn) → Đang dọn →
+ * Hoàn thành. Inspection and cleaning are separate steps: saving the inspection
+ * never starts the cleaning time — only "Bắt đầu dọn" does.
+ */
 export const ROOM_WORK_STATE_LABELS = {
   NOT_STARTED: 'Chưa bắt đầu',
+  INSPECTED: 'Đã kiểm tra',
   IN_PROGRESS: 'Đang dọn',
   COMPLETED: 'Hoàn thành',
 } as const;

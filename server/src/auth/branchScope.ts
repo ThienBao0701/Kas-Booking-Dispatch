@@ -49,17 +49,29 @@ export function isReceptionSupervisor(role: UserRole): role is ReceptionSupervis
 }
 
 /**
- * WHO MAY GIVE AN INCIDENT TO A TECHNICIAN — the reception supervisors and the
- * Quản lý kỹ thuật, each within its own branch scope (checked per incident).
+ * WHO MAY GIVE AN INCIDENT TO A TECHNICIAN — the reception supervisors, the
+ * Quản lý kỹ thuật and the Tổng quản lý kỹ thuật, each within its own branch
+ * scope (checked per incident).
  */
-export const TECHNICAL_ASSIGNER_ROLES = [...RECEPTION_SUPERVISOR_ROLES, 'TECHNICAL_MANAGER'] as const;
+export const TECHNICAL_ASSIGNER_ROLES = [
+  ...RECEPTION_SUPERVISOR_ROLES,
+  'TECHNICAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
+] as const;
 
 export function isTechnicalAssigner(role: UserRole): boolean {
   return (TECHNICAL_ASSIGNER_ROLES as readonly string[]).includes(role);
 }
 
-/** The roles with a branch SET on the account (UserBranchAssignment rows). */
-export const BRANCH_SET_ROLES: readonly UserRole[] = ['RECEPTION_MANAGER', 'TECHNICAL_MANAGER'];
+/**
+ * The roles with a branch SET on the account (UserBranchAssignment rows) — the
+ * one list the session loader, the scope and the Admin's account screen share.
+ */
+export const BRANCH_SET_ROLES: readonly UserRole[] = ['RECEPTION_MANAGER', 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'];
+
+export function hasBranchSet(role: UserRole): boolean {
+  return BRANCH_SET_ROLES.includes(role);
+}
 
 /** "Admin tạo" and its siblings — how a supervisor-entered record is labelled. */
 export const SUPERVISOR_SOURCE_LABELS: Record<ReceptionSupervisorRole, string> = {
@@ -83,9 +95,11 @@ export function branchScopeOf(actor: ScopeSubject): BranchScope {
     case 'ADMIN':
     case 'RECEPTION_GENERAL_MANAGER':
       return 'ALL';
-    // Quản lý lễ tân and Quản lý kỹ thuật: the branches ticked on the account.
+    // Quản lý lễ tân, Quản lý kỹ thuật and Tổng quản lý kỹ thuật: the branches
+    // ticked on the account — never all of them by the role alone.
     case 'RECEPTION_MANAGER':
     case 'TECHNICAL_MANAGER':
+    case 'TECHNICAL_GENERAL_MANAGER':
       return actor.managedBranchIds ?? [];
     // Lễ tân, Buồng phòng and Quản lý buồng phòng: the one branch on the account.
     case 'RECEPTIONIST':

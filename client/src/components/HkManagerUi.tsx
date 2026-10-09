@@ -64,7 +64,16 @@ export function HkHeader({
             </div>
           </dl>
         </div>
-        {controls ? <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">{controls}</div> : null}
+        {/*
+          `min-w-0` + full width on phones: without them this flex column keeps
+          its children's intrinsic width (a native date input has one), and the
+          date field ran past the right edge at 320–390px.
+        */}
+        {controls ? (
+          <div className="flex w-full min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end md:w-auto" data-testid="hk-controls">
+            {controls}
+          </div>
+        ) : null}
       </section>
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
@@ -173,6 +182,8 @@ export function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {
 
 const STATE_TONE: Record<RoomWorkState, Tone> = {
   NOT_STARTED: 'gray',
+  // "Đã kiểm tra": inspected, cleaning not started.
+  INSPECTED: 'amber',
   IN_PROGRESS: 'blue',
   COMPLETED: 'green',
 };
@@ -231,12 +242,14 @@ export function RateBar({ rate }: { rate: number }) {
 
 const TILE: Record<RoomWorkState, string> = {
   NOT_STARTED: 'border-slate-300 bg-slate-50 hover:bg-slate-100',
+  INSPECTED: 'border-amber-400 bg-amber-50 hover:bg-amber-100',
   IN_PROGRESS: 'border-blue-400 bg-blue-50 hover:bg-blue-100',
   COMPLETED: 'border-green-500 bg-green-50/60 hover:bg-green-50',
 };
 
 const STATE_TEXT: Record<RoomWorkState, string> = {
   NOT_STARTED: 'text-slate-600',
+  INSPECTED: 'text-amber-800',
   IN_PROGRESS: 'text-blue-700',
   COMPLETED: 'text-green-700',
 };
@@ -245,6 +258,7 @@ export function ManagerLegend() {
   return (
     <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600" data-testid="room-legend">
       <Badge tone="gray">Chưa bắt đầu</Badge>
+      <Badge tone="amber">Đã kiểm tra</Badge>
       <Badge tone="blue">Đang dọn</Badge>
       <Badge tone="red">Cần dọn lại</Badge>
       <PriorityBadge />

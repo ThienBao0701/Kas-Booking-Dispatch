@@ -44,6 +44,7 @@ import {
   type PaymentMethod,
   type ReportOptions,
 } from '../api/receptionReports';
+import { useReportSubmitOverride } from '../lib/reportSubmit';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
 import { Input } from './Input';
@@ -531,11 +532,11 @@ export function NewPaymentForm({
   */
   const payout = form.source === EXPENSE_SOURCE;
 
+  const override = useReportSubmitOverride();
   const create = useMutation({
-    mutationFn: () =>
-      reportsApi.create({
-        branchId,
-        category: 'PAYMENT',
+    mutationFn: () => {
+      const input = {
+        category: 'PAYMENT' as const,
         payment: {
           ezCode: form.ezCode.trim() || undefined,
           source: form.source,
@@ -546,7 +547,10 @@ export function NewPaymentForm({
           expense: parseVndOrZero(form.expense),
           note: form.note.trim() || undefined,
         },
-      }),
+      };
+      // "Nhập bù" submits the same payment to its own endpoint (see lib/reportSubmit).
+      return override ? override(input) : reportsApi.create({ branchId, ...input });
+    },
     onSuccess: async () => {
       setError(null);
       setTriedSubmit(false);

@@ -100,11 +100,12 @@ async function onShift(agent: Agent) {
   expect([201, 409]).toContain(res.status);
 }
 
-/** One cycle from the worker's side: "Kiểm phòng" at `from`, "Hoàn thành" at `to`. */
+/** One cycle from the worker's side: "Kiểm phòng" and "Bắt đầu dọn" at `from`, "Hoàn thành" at `to`. */
 async function clean(agent: Agent, id: string, from: string, to: string, form: Record<string, unknown>, issues: { type: string }[] = []) {
   await onShift(agent);
   at(from);
   expect((await agent.post(`/api/housekeeping/work/tasks/${id}/inspect`).send({ issues })).status).toBe(201);
+  expect((await agent.post(`/api/housekeeping/work/tasks/${id}/start`)).status).toBe(200);
   at(to);
   const done = await agent.post(`/api/housekeeping/work/tasks/${id}/complete`).send(form);
   expect(done.status).toBe(200);
@@ -235,8 +236,8 @@ describe('"Không đạt" and the re-clean cycle', () => {
       review: { status: 'PASSED', reviewedAt: iso('09:10') },
       reclean: { cycleNumber: 1, reason: 'Thiếu khăn tắm' },
     });
-    expect(history[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'INSPECTED', 'COMPLETED', 'REVIEWED']);
-    expect(history[1].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'ASSIGNED', 'ASSIGNED', 'INSPECTED', 'COMPLETED', 'REVIEWED']);
+    expect(history[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'INSPECTED', 'STARTED', 'COMPLETED', 'REVIEWED']);
+    expect(history[1].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'ASSIGNED', 'ASSIGNED', 'INSPECTED', 'STARTED', 'COMPLETED', 'REVIEWED']);
     // The Admin reads the same history.
     expect((await admin.get(`/api/housekeeping/manager/tasks/${first!.id}/history`)).body.cycles).toHaveLength(2);
 

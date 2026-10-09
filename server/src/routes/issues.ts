@@ -14,7 +14,11 @@ import {
   voidIssue,
   authorizeIssuePhoto,
   cannotRepairIssue,
+  completeExternal,
   completeIssue,
+  dispatchExternal,
+  dispatchToManager,
+  listDispatchManagers,
   recordRepairStage,
   createIssue,
   findSimilarIssues,
@@ -29,6 +33,7 @@ import {
 import { computeIssueSummary, computeTechnicalCounts } from '../issue/issueSummary';
 import { STATISTICS_PERIOD_DAYS, computeIncidentStatistics } from '../issue/issueStatistics';
 import type { UserWithBranch } from '../auth/serialize';
+import { requireCapability } from '../auth/capabilities';
 
 const CATEGORY = z.enum([
   'DOOR',
@@ -224,15 +229,38 @@ const requireReporter = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER'
  * Who GIVES an incident to a technician: the Admin and the reception supervisors,
  * each within its branch scope (checked against the incident by the service).
  */
-// The reception supervisors and the Quản lý kỹ thuật — each within its branches (the service checks).
-const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER');
+// The reception supervisors, the Quản lý kỹ thuật and the Tổng quản lý kỹ thuật —
+// each within its branches (the service checks every incident).
+const requireAssigner = requireCapability('technical.assignTechnician');
 
-const assignSchema = z.object({ technicianUserId: z.number().int().positive() });
+/** "Ghi chú / hướng dẫn" — optional on an in-house assignment. */
+const assignNote = z.string().max(2000).nullable().optional();
+const assignSchema = z.object({ technicianUserId: z.number().int().positive(), note: assignNote });
 /** A room's chosen incidents, given to one technician together. */
 const bulkAssignSchema = z.object({
   issueIds: z.array(z.string().min(1)).min(1, 'Vui lòng chọn ít nhất một sự cố.').max(50),
   technicianUserId: z.number().int().positive(),
+  note: assignNote,
 });
+/** "Giao việc → Nhân sự". The note is required — the service says so in Vietnamese. */
+const dispatchManagerSchema = z.object({ managerUserId: z.number().int().positive(), note: z.string().max(2000).optional() });
+/** "Giao cho kĩ thuật bên ngoài" — every field is validated by the service, with its own message. */
+const dispatchExternalSchema = z.object({
+  name: z.string().max(200).optional(),
+  phone: z.string().max(30).optional(),
+  specialty: z.string().max(200).optional(),
+  type: z.enum(['INDIVIDUAL', 'COMPANY']).optional(),
+  company: z.string().max(200).nullable().optional(),
+  note: z.string().max(2000).optional(),
+});
+/** Outside work completed: the cost is a NUMBER (0 allowed) — a string is refused, never coerced. */
+const completeExternalSchema = z.object({
+  repairCost: z.number().optional(),
+  verdict: z.enum(['CORRECT', 'INCORRECT']).nullable().optional(),
+  resolution: z.string().max(2000).nullable().optional(),
+  incorrectReason: z.string().max(2000).nullable().optional(),
+});
+const managersQuery = z.object({ branchId: z.coerce.number().int().positive() });
 /** "Xóa": the reason is optional; the confirmation is the dialog's. */
 const voidIssueSchema = z.object({ reason: z.string().trim().max(1000).nullable().optional() });
 
@@ -263,7 +291,7 @@ export function createIssuesRouter(): Router {
       const input = createSchema.parse(req.body ?? {});
       const photo = req.file ? { buffer: req.file.buffer, size: req.file.size } : undefined;
       const issue = await createIssue({ ...input, photo }, actor(user));
-      res.status(201).json({ issue: serializeIssue(issue) });
+      res.status(201).json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -313,7 +341,7 @@ export function createIssuesRouter(): Router {
         take: q.pageSize,
       });
       res.json({
-        issues: issues.map((issue) => serializeIssue(issue, now)),
+        issues: issues.map((issue) => serializeIssue(issue, now, req.currentUser!.role)),
         pagination: { page: q.page, pageSize: q.pageSize, total, totalPages: Math.max(1, Math.ceil(total / q.pageSize)) },
       });
     })().catch(next);
@@ -390,6 +418,65 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
+  // GET /api/issues/managers?branchId= — "Giao việc → Nhân sự": the Quản lý kỹ thuật of that branch.
+  router.get(
+    '/issues/managers',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('technical.dispatchToManager'),
+    (req, res, next) => {
+      (async () => {
+        const { branchId } = managersQuery.parse(req.query);
+        res.json({ managers: await listDispatchManagers(actor(req.currentUser!), branchId) });
+      })().catch(next);
+    },
+  );
+
+  // POST /api/issues/:id/dispatch-manager — Tổng quản lý kỹ thuật → Quản lý kỹ thuật, with instructions.
+  router.post(
+    '/issues/:id/dispatch-manager',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('technical.dispatchToManager'),
+    (req, res, next) => {
+      (async () => {
+        const input = dispatchManagerSchema.parse(req.body ?? {});
+        const issue = await dispatchToManager(req.params.id!, { managerUserId: input.managerUserId, note: input.note }, actor(req.currentUser!), getClock());
+        res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
+      })().catch(next);
+    },
+  );
+
+  // POST /api/issues/:id/dispatch-external — Quản lý kỹ thuật → kĩ thuật bên ngoài (no account is created).
+  router.post(
+    '/issues/:id/dispatch-external',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('technical.dispatchExternal'),
+    (req, res, next) => {
+      (async () => {
+        const input = dispatchExternalSchema.parse(req.body ?? {});
+        const issue = await dispatchExternal(req.params.id!, input, actor(req.currentUser!), getClock());
+        res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
+      })().catch(next);
+    },
+  );
+
+  // POST /api/issues/:id/complete-external — outside work done; the repair cost is required (0 allowed).
+  router.post(
+    '/issues/:id/complete-external',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('technical.completeExternal'),
+    (req, res, next) => {
+      (async () => {
+        const input = completeExternalSchema.parse(req.body ?? {});
+        const issue = await completeExternal(req.params.id!, input, actor(req.currentUser!), getClock());
+        res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
+      })().catch(next);
+    },
+  );
+
   /*
     GET /api/issues/similar — "Có thể đã được báo": open incidents at the same
     room (likely duplicates) and ones finished recently (a new report would be a
@@ -403,8 +490,8 @@ export function createIssuesRouter(): Router {
       const now = getClock().now();
       const { open, recent } = await findSimilarIssues(actor(user), q);
       res.json({
-        open: open.map((i) => serializeIssue(i, now)),
-        recent: recent.map((i) => serializeIssue(i, now)),
+        open: open.map((i) => serializeIssue(i, now, req.currentUser!.role)),
+        recent: recent.map((i) => serializeIssue(i, now, req.currentUser!.role)),
       });
     })().catch(next);
   });
@@ -414,9 +501,9 @@ export function createIssuesRouter(): Router {
   router.post('/issues/assign', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
-      const { issueIds, technicianUserId } = bulkAssignSchema.parse(req.body ?? {});
-      const issues = await assignIssues(issueIds, { technicianUserId }, actor(user), getClock());
-      res.json({ issues: issues.map((i) => serializeIssue(i)) });
+      const { issueIds, technicianUserId, note } = bulkAssignSchema.parse(req.body ?? {});
+      const issues = await assignIssues(issueIds, { technicianUserId, note }, actor(user), getClock());
+      res.json({ issues: issues.map((i) => serializeIssue(i, undefined, req.currentUser!.role)) });
     })().catch(next);
   });
 
@@ -425,7 +512,7 @@ export function createIssuesRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const issue = await unassignIssue(req.params.id!, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -444,7 +531,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = assignSchema.parse(req.body ?? {});
       const issue = await assignIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -453,7 +540,7 @@ export function createIssuesRouter(): Router {
     (async () => {
       const user = req.currentUser!;
       const issue = await getIssue(req.params.id!, actor(user));
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -478,7 +565,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = updateSchema.parse(req.body ?? {});
       const issue = await updateIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -490,7 +577,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = acceptSchema.parse(req.body ?? {});
       const issue = await acceptIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -501,7 +588,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = completeSchema.parse(req.body ?? {});
       const issue = await completeIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -512,7 +599,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = stageSchema.parse(req.body ?? {});
       const issue = await recordRepairStage(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -523,7 +610,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = causeSchema.parse(req.body ?? {});
       const issue = await updateRepairCause(req.params.id!, input, actor(user));
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -535,7 +622,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = inspectSchema.parse(req.body ?? {});
       const issue = await inspectIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -554,7 +641,7 @@ export function createIssuesRouter(): Router {
       const user = req.currentUser!;
       const input = cannotRepairSchema.parse(req.body ?? {});
       const issue = await cannotRepairIssue(req.params.id!, input, actor(user), getClock());
-      res.json({ issue: serializeIssue(issue) });
+      res.json({ issue: serializeIssue(issue, undefined, req.currentUser!.role) });
     })().catch(next);
   });
 

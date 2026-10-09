@@ -106,7 +106,7 @@ function useScope(allowAll: boolean) {
         ? branchLabel(chosen)
         : 'Chưa chọn';
   const picker: ReactNode = isAdmin ? (
-    <div className="w-full sm:w-72">
+    <div className="w-full min-w-0 sm:w-72">
       <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Chi nhánh</p>
       <BranchPicker value={choice} onChange={setChoice} branches={list} allowAll={allowAll} />
     </div>
@@ -117,14 +117,16 @@ function useScope(allowAll: boolean) {
 function DateField({ date, onDate }: { date: string; onDate: (d: string) => void }) {
   return (
     // The label on its own line, a modest gap, then the field — the KAS form rhythm.
-    <label className="block">
+    // `min-w-0 max-w-full appearance-none`: a native date input otherwise keeps
+    // its intrinsic width (iOS Safari especially) and overflows a phone screen.
+    <label className="block w-full min-w-0 sm:w-auto">
       <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Ngày</span>
       <input
         type="date"
         value={date}
         onChange={(e) => e.target.value && onDate(e.target.value)}
         data-testid="hk-date"
-        className={`${FIELD} !mt-0 sm:w-44`}
+        className={`${FIELD} !mt-0 min-w-0 max-w-full appearance-none sm:w-44`}
       />
     </label>
   );
@@ -144,6 +146,8 @@ function splitBoard(tasks: RoomTask[]) {
     active,
     awaiting: tasks.filter((t) => t.review?.status === 'PENDING').sort((a, b) => (a.completedAt ?? '').localeCompare(b.completedAt ?? '')),
     notStarted: active.filter((t) => t.state === 'NOT_STARTED' && !t.reclean).length,
+    // "Đã kiểm tra": inspected, waiting for "Bắt đầu dọn" (and free to be given to another housekeeper).
+    inspected: active.filter((t) => t.state === 'INSPECTED').length,
     inProgress: active.filter((t) => t.state === 'IN_PROGRESS').length,
     reclean: active.filter((t) => t.state === 'NOT_STARTED' && t.reclean).length,
     passed: tasks.filter((t) => t.review?.status === 'PASSED').length,
@@ -409,16 +413,17 @@ export function HkOverviewPage() {
                 </span>
               }
             >
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-7">
                 <Metric label="Tổng phòng" value={o.rooms.total} />
                 <Metric label="Chưa bắt đầu" value={o.rooms.notStarted} tone="gray" />
+                <Metric label="Đã kiểm tra" value={o.rooms.inspected ?? 0} tone="amber" />
                 <Metric label="Đang dọn" value={o.rooms.inProgress} tone="blue" />
                 <Metric label="Hoàn thành" value={o.rooms.completed} tone="green" />
                 <Metric label="Ưu tiên" value={o.rooms.priority} tone="red" />
                 <Metric label="Chưa giao" value={o.rooms.unassigned} tone="amber" />
               </div>
               <div className="mt-3">
-                <ProgressBar notStarted={o.rooms.notStarted} inProgress={o.rooms.inProgress} completed={o.rooms.completed} />
+                <ProgressBar notStarted={o.rooms.notStarted + (o.rooms.inspected ?? 0)} inProgress={o.rooms.inProgress} completed={o.rooms.completed} />
               </div>
             </HkSection>
 
@@ -741,9 +746,10 @@ export function HkRoomBoardPage() {
         <PickBranchFirst />
       ) : (
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-7" data-testid="board-summary">
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-8" data-testid="board-summary">
             <Metric label="Đang thực hiện" value={b.active.length} />
             <Metric label="Chưa bắt đầu" value={b.notStarted} tone="gray" />
+            <Metric label="Đã kiểm tra" value={b.inspected} tone="amber" />
             <Metric label="Đang dọn" value={b.inProgress} tone="blue" />
             <Metric label="Cần dọn lại" value={b.reclean} tone="red" />
             <Metric label="Chờ đánh giá" value={b.awaiting.length} tone="amber" />

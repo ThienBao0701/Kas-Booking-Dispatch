@@ -28,7 +28,7 @@ import { Toast } from '../components/Toast';
 import { formatDateTime } from '../lib/format';
 
 const KEY = ['confidential-reports'];
-const TITLE = 'VII. Báo cáo các vấn đề và tình hình quan trọng';
+const TITLE = 'Báo cáo các vấn đề và tình hình quan trọng';
 
 /**
  * "Gửi đến": one checkbox per superior ROLE, nearest first. Ticking one names

@@ -658,8 +658,33 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
     { header: 'Số giai đoạn', key: 'stages', width: 10 },
     { header: 'Không sửa được (lần)', key: 'cannot', width: 12 },
     { header: 'Hoàn thành lúc', key: 'completedAt', width: 18 },
+    { header: 'Người hoàn thành', key: 'completedBy', width: 20 },
+    // The dispatch chain: Tổng quản lý kỹ thuật → Quản lý kỹ thuật → kĩ thuật khách sạn / bên ngoài.
+    { header: 'Ca báo', key: 'shift', width: 10 },
+    { header: 'Tổng QLKT giao', key: 'generalManager', width: 20 },
+    { header: 'QLKT phụ trách', key: 'manager', width: 20 },
+    { header: 'Kĩ thuật bên ngoài', key: 'contractor', width: 26 },
+    { header: 'Liên hệ bên ngoài', key: 'contractorContact', width: 22 },
+    { header: 'Chi phí sửa chữa', key: 'repairCost', width: 16 },
   ];
   headerRow(sheet);
+  moneyColumns(sheet, ['repairCost']);
+  // Every hand-off, oldest first: in-house assignments and the dispatch chain.
+  const handoffs = wb.addWorksheet('Lịch sử giao việc');
+  handoffs.columns = [
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Vị trí', key: 'location', width: 26 },
+    { header: 'Sự cố', key: 'description', width: 36 },
+    { header: 'Thời gian', key: 'at', width: 18 },
+    { header: 'Hình thức', key: 'kind', width: 22 },
+    { header: 'Người giao', key: 'from', width: 22 },
+    { header: 'Người nhận', key: 'to', width: 26 },
+    { header: 'Ghi chú / hướng dẫn', key: 'note', width: 40 },
+    { header: 'Hoàn thành lúc', key: 'completedAt', width: 18 },
+    { header: 'Chi phí', key: 'cost', width: 14 },
+  ];
+  headerRow(handoffs);
+  moneyColumns(handoffs, ['cost']);
   const stages = wb.addWorksheet('Giai đoạn sửa chữa');
   stages.columns = [
     { header: 'Chi nhánh', key: 'branch', width: 30 },
@@ -696,7 +721,53 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
         stages: i.stages.length,
         cannot: i.cannotRepairCount,
         completedAt: when(i.completedAt),
+        completedBy: i.completedByName ?? '',
+        shift: i.shiftType ?? '',
+        generalManager: i.dispatches.filter((d) => d.kind === 'TO_MANAGER').at(-1)?.assignedByName ?? '',
+        manager: i.assignedManager?.name ?? '',
+        contractor: externalLabel(i.dispatches.filter((d) => d.kind === 'TO_EXTERNAL').at(-1)),
+        contractorContact: i.dispatches
+          .filter((d) => d.kind === 'TO_EXTERNAL')
+          .map((d) => [d.contractor?.phone, d.contractor?.specialty].filter(Boolean).join(' · '))
+          .filter(Boolean)
+          .join('\n'),
+        // The persisted cost of every completed outside job, never a typed-in total.
+        repairCost: costOf(i.dispatches),
       });
+      const events = [
+        ...i.assignments.map((a) => ({
+          at: a.createdAt,
+          kind: 'Giao kĩ thuật khách sạn',
+          from: `${a.assignedByName}`,
+          to: a.technicianName,
+          note: a.note ?? '',
+          completedAt: null as string | null,
+          cost: null as number | null,
+        })),
+        ...i.dispatches.map((d) => ({
+          at: d.createdAt,
+          kind: d.kind === 'TO_MANAGER' ? 'Giao quản lý kỹ thuật' : 'Giao kĩ thuật bên ngoài',
+          from: `${d.assignedByName}${d.assignedByRoleLabel ? ` (${d.assignedByRoleLabel})` : ''}`,
+          to: d.kind === 'TO_MANAGER' ? (d.manager?.name ?? '') : externalLabel(d),
+          note: d.note,
+          completedAt: d.completedAt,
+          cost: d.repairCost,
+        })),
+      ].sort((a, b) => a.at.localeCompare(b.at));
+      for (const e of events) {
+        handoffs.addRow({
+          branch: branchLabel(section),
+          location: i.locationLabel,
+          description: i.description,
+          at: when(e.at),
+          kind: e.kind,
+          from: e.from,
+          to: e.to,
+          note: e.note,
+          completedAt: when(e.completedAt),
+          cost: e.cost,
+        });
+      }
       for (const st of i.stages) {
         stages.addRow({
           branch: branchLabel(section),
@@ -714,6 +785,20 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
     });
   }
   return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+type SerializedDispatch = OperationalReportData['branches'][number]['technical'][number]['dispatches'][number];
+
+/** "Nguyễn Văn A — Công ty ABC" / "Nguyễn Văn B (Cá nhân)". */
+function externalLabel(d: SerializedDispatch | undefined): string {
+  if (!d?.contractor) return '';
+  return d.contractor.company ? `${d.contractor.name} — ${d.contractor.company}` : `${d.contractor.name ?? ''} (${d.contractor.typeLabel})`;
+}
+
+/** The sum of the recorded costs of completed outside jobs, or empty when there were none. */
+function costOf(dispatches: SerializedDispatch[]): number | null {
+  const costs = dispatches.filter((d) => d.repairCost !== null).map((d) => d.repairCost!);
+  return costs.length ? costs.reduce((a, b) => a + b, 0) : null;
 }
 
 /* ------------------------------ Buồng phòng ------------------------------ */

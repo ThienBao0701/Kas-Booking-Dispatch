@@ -340,6 +340,7 @@ export async function setOpeningCash(
         actorUserId: actor.id,
         actorNameSnapshot: session.receptionistName,
         actorShiftType: session.shiftType,
+        actorRole: actor.role,
         createdAt: now,
       },
     });

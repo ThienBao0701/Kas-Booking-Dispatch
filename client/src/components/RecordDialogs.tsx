@@ -32,6 +32,8 @@ import { PaymentAllocations } from './PaymentAllocations';
 import { allocationState, linesOf, paymentMoneyPayload, type AllocationLine } from '../lib/paymentAllocations';
 import { SeverityPicker } from './Severity';
 import type { Severity } from '../api/receptionReports';
+import { useAuth } from '../auth/AuthProvider';
+import { can } from '../auth/capabilities';
 
 /**
  * "Xóa" asks for a reason and says plainly what it is about to do.
@@ -43,11 +45,18 @@ export function VoidDialog({
   id,
   onClose,
   onVoided,
+  mode = 'void',
 }: {
   id: string;
   onClose: () => void;
   onVoided: () => void | Promise<void>;
+  /**
+   * "void" — the desk's own "Hủy". "delete" — a supervisor's "Xóa" from the
+   * overview or a category page: the same audited withdrawal, said as such.
+   */
+  mode?: 'void' | 'delete';
 }) {
+  const deleting = mode === 'delete';
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -63,7 +72,7 @@ export function VoidDialog({
   return (
     <Modal
       open
-      title="Hủy bản ghi"
+      title={deleting ? 'Xóa bản ghi' : 'Hủy bản ghi'}
       onClose={onClose}
       footer={
         <>
@@ -71,23 +80,25 @@ export function VoidDialog({
             Đóng
           </Button>
           <Button
+            variant={deleting ? 'danger' : undefined}
             onClick={() => run.mutate()}
             disabled={reason.trim().length === 0}
             loading={run.isPending}
             data-testid="void-confirm"
           >
-            Xác nhận hủy
+            {deleting ? 'Xác nhận xóa' : 'Xác nhận hủy'}
           </Button>
         </>
       }
     >
       <div className="space-y-3">
         <p className="text-sm text-slate-600">
-          Bản ghi sẽ không còn được tính vào tổng, nhưng vẫn được lưu lại đầy đủ cùng lý do và người
-          thực hiện. Hệ thống không xóa dữ liệu.
+          {deleting
+            ? 'Bản ghi sẽ rời khỏi danh sách, số liệu và tổng tiền. Người tạo, ca và ngày gốc vẫn được giữ; bản ghi cùng lý do, người xóa và thời điểm xóa xem lại được trong "Lịch sử xóa".'
+            : 'Bản ghi sẽ không còn được tính vào tổng, nhưng vẫn được lưu lại đầy đủ cùng lý do và người thực hiện. Hệ thống không xóa dữ liệu.'}
         </p>
         <label className="block text-sm font-medium text-slate-700">
-          Lý do hủy
+          {deleting ? 'Lý do xóa' : 'Lý do hủy'}
           <textarea
             value={reason}
             onChange={(e) => setReason(e.target.value)}
@@ -229,6 +240,14 @@ export function RecordEditDialog({
   onSaved: () => void | Promise<void>;
 }) {
   const source = (report[block] ?? {}) as Record<string, unknown>;
+  const { user } = useAuth();
+  /*
+    A Quản lý lễ tân / Tổng quản lý lễ tân correcting a record the DESK wrote
+    must say why — the server refuses it otherwise. Their own records, and the
+    Admin's edits, keep the optional reason.
+  */
+  const reasonRequired =
+    can(user?.role, 'reports.editRequiresReason') && (!report.createdByRole || report.createdByRole === 'RECEPTIONIST');
 
   const [draft, setDraft] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -296,7 +315,7 @@ export function RecordEditDialog({
   const countFields = fields.filter((f) => f.kind === 'count');
   const countsReady =
     countFields.length === 0 || countFields.reduce((sum, f) => sum + (parseCount(draft[f.name] ?? '') ?? 0), 0) > 0;
-  const ready = everyFieldReady && countsReady;
+  const ready = everyFieldReady && countsReady && (!reasonRequired || reason.trim().length > 0);
 
   return (
     <Modal
@@ -412,12 +431,18 @@ export function RecordEditDialog({
         </div>
 
         <Input
-          label="Lý do sửa (không bắt buộc)"
+          label={reasonRequired ? 'Lý do sửa (bắt buộc)' : 'Lý do sửa (không bắt buộc)'}
+          required={reasonRequired}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
           placeholder="Ví dụ: Khách đọc nhầm số phòng"
           data-testid="record-edit-reason"
         />
+        {reasonRequired && reason.trim().length === 0 ? (
+          <p className="text-xs text-slate-500" data-testid="record-edit-reason-required">
+            Bạn đang sửa bản ghi của lễ tân — vui lòng nhập lý do sửa.
+          </p>
+        ) : null}
 
         {error ? <ErrorAlert>{error}</ErrorAlert> : null}
       </div>
@@ -428,9 +453,11 @@ export function RecordEditDialog({
 /** The "Đã hủy" strip a voided row carries wherever it is shown. */
 export function VoidedNote({ report }: { report: OperationalReport }): ReactNode {
   if (!report.voided) return null;
+  const by = report.voidedByName ? ` — ${report.voidedByName}${report.voidedByRoleLabel ? ` (${report.voidedByRoleLabel})` : ''}` : '';
   return (
     <span className="mt-0.5 block text-xs font-medium text-rose-600">
       Đã hủy: {report.voidReason}
+      {by}
     </span>
   );
 }

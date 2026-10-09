@@ -132,7 +132,7 @@ const operationalExportQuery = rangeQuery.and(
  * Reception's: any other export is refused here, before anything is loaded.
  */
 function assertExportAllowed(role: UserRole, section: 'TECHNICAL' | 'HOUSEKEEPING' | undefined): void {
-  if (role === 'TECHNICAL_MANAGER' && section !== 'TECHNICAL') {
+  if ((role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER') && section !== 'TECHNICAL') {
     throw ApiError.forbidden('Quản lý kỹ thuật chỉ xuất được báo cáo kỹ thuật.');
   }
 }
@@ -285,7 +285,7 @@ export function createAdminReportsRouter(): Router {
     '/admin/reports',
     requireAuth,
     requirePasswordChanged,
-    requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER'),
+    requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'),
     (req, res, next) =>
       /^\/operational(\.pdf|\.xlsx)?$/.test(req.path) ? next() : requireAdmin(req, res, next),
   );
@@ -327,7 +327,7 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const q = rangeQuery.parse(req.query);
       const issues = await loadIssues(q);
-      res.json({ range: { from: q.from, to: q.to }, issues: issues.map((issue) => serializeIssue(issue)) });
+      res.json({ range: { from: q.from, to: q.to }, issues: issues.map((issue) => serializeIssue(issue, undefined, req.currentUser!.role)) });
     })().catch(next);
   });
 
@@ -487,7 +487,20 @@ export function createAdminReportsRouter(): Router {
         : q.shiftType
           ? { shiftSessionIds: sessionIds }
           : {};
-      const filter = { branchId: oneBranch, branchIds, category: q.category, severity: q.severity, ...periodScope };
+      /*
+        DELETED RECORDS ARE NOT ACTIVE RECORDS: they leave this list, the
+        category counts and the total. They stay on file and are read through
+        "Lịch sử xóa" (`/reception/reports/deleted`); the drawer still states how
+        many payments were withdrawn from its totals.
+      */
+      const filter = {
+        branchId: oneBranch,
+        branchIds,
+        category: q.category,
+        severity: q.severity,
+        includeVoided: false,
+        ...periodScope,
+      };
 
       const [reports, counts, total] = await Promise.all([
         listReports(admin, filter),
@@ -496,7 +509,7 @@ export function createAdminReportsRouter(): Router {
           the five category buttons, and selecting one must not zero the other
           four. They describe the branch and the period, not the selection.
         */
-        countByCategory(admin, { branchId: oneBranch, branchIds, ...periodScope }),
+        countByCategory(admin, { branchId: oneBranch, branchIds, includeVoided: false, ...periodScope }),
         countReports(admin, filter),
       ]);
 

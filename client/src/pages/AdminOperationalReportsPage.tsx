@@ -37,14 +37,16 @@ import type { Severity } from '../api/receptionReports';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Building2, Download, Plus } from 'lucide-react';
+import { AlertTriangle, Building2, CalendarClock, Download, History, Plus } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, type Branch } from '../auth/types';
 import { branchesApi } from '../api/bookings';
 import { shiftsApi } from '../api/shifts';
 import { SupervisorCreateDialog } from '../components/SupervisorCreateDialog';
 import { AssignTechnicianDialog } from '../components/AssignTechnicianDialog';
-import { RecordEditDialog } from '../components/RecordDialogs';
+import { RecordEditDialog, VoidDialog } from '../components/RecordDialogs';
+import { DeletedHistoryDialog, LateEntryDialog } from '../components/ReportManagementDialogs';
+import { can } from '../auth/capabilities';
 import { RowAction } from '../components/DataTable';
 import { Toast } from '../components/Toast';
 import { recordEditConfig } from '../lib/recordEdit';
@@ -107,6 +109,8 @@ type TableState = {
   onRetry: () => void;
   /** "Sửa" on each live record — the shared correction dialog. */
   onEdit?: (row: OperationalReport) => void;
+  /** "Xóa" on each live record — the audited void (supervisors only). */
+  onDelete?: (row: OperationalReport) => void;
 };
 
 export function AdminOperationalReportsPage() {
@@ -148,10 +152,16 @@ export function AdminOperationalReportsPage() {
   const [facilityBranch, setFacilityBranch] = useState<number | null>(null);
   /** The record being corrected through the shared dialog. */
   const [editing, setEditing] = useState<OperationalReport | null>(null);
+  /** "Xóa": the record about to be withdrawn, after a confirmation with its reason. */
+  const [deleting, setDeleting] = useState<OperationalReport | null>(null);
+  /** "Lịch sử xóa" and "Nhập bù". */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [lateOpen, setLateOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = user?.role === 'ADMIN';
+  const canDelete = can(user?.role, 'reports.delete');
 
   const rangeValid = period !== null;
 
@@ -182,6 +192,7 @@ export function AdminOperationalReportsPage() {
   const refreshAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin', 'operational-reports'] });
     await queryClient.invalidateQueries({ queryKey: ['issues'] });
+    await queryClient.invalidateQueries({ queryKey: ['reception', 'reports', 'deleted'] });
   };
 
   const filters = {
@@ -227,6 +238,7 @@ export function AdminOperationalReportsPage() {
     error: data.error,
     onRetry: () => void data.refetch(),
     onEdit: setEditing,
+    ...(canDelete ? { onDelete: setDeleting } : {}),
   };
   const branchList = branches.data?.branches ?? [];
   const editConfig = editing ? recordEditConfig(editing, options.data) : null;
@@ -247,6 +259,24 @@ export function AdminOperationalReportsPage() {
           </p>
         </div>
         <div className="ml-auto flex flex-wrap gap-2">
+          {can(user?.role, 'reports.deletionHistory') ? (
+            <Button variant="secondary" onClick={() => setHistoryOpen(true)} data-testid="deleted-history-open" className="shadow-sm">
+              <History className="h-4 w-4" aria-hidden="true" />
+              Lịch sử xóa
+            </Button>
+          ) : null}
+          {can(user?.role, 'reports.lateEntry') ? (
+            <Button
+              variant="secondary"
+              onClick={() => setLateOpen(true)}
+              disabled={branches.isLoading}
+              data-testid="late-entry-open"
+              className="shadow-sm"
+            >
+              <CalendarClock className="h-4 w-4" aria-hidden="true" />
+              Nhập bù
+            </Button>
+          ) : null}
           <Button
             variant="secondary"
             onClick={() => setExportOpen(true)}
@@ -415,6 +445,43 @@ export function AdminOperationalReportsPage() {
               .then(() => setToast('Đã báo cáo sự cố cho chi nhánh.'))
               .catch(() => setToast('Đã báo cáo sự cố; chưa ghi được vào nhật ký chi nhánh.'))
               .finally(() => void refreshAll());
+          }}
+        />
+      ) : null}
+
+      {deleting ? (
+        <VoidDialog
+          id={deleting.id}
+          mode="delete"
+          onClose={() => setDeleting(null)}
+          onVoided={async () => {
+            setDeleting(null);
+            setToast('Đã xóa bản ghi. Bản ghi được lưu trong "Lịch sử xóa".');
+            await refreshAll();
+          }}
+        />
+      ) : null}
+
+      {historyOpen ? (
+        <DeletedHistoryDialog
+          period={rangeValid ? range : null}
+          branchId={filters.branchId}
+          labelOf={label}
+          onClose={() => setHistoryOpen(false)}
+        />
+      ) : null}
+
+      {lateOpen ? (
+        <LateEntryDialog
+          branches={branchList.filter((b) => (b as { active?: boolean }).active !== false)}
+          options={options.data}
+          initialBranchId={typeof branch === 'number' ? branch : null}
+          labelOf={label}
+          onClose={() => setLateOpen(false)}
+          onCreated={async (message) => {
+            setLateOpen(false);
+            setToast(message);
+            await refreshAll();
           }}
         />
       ) : null}

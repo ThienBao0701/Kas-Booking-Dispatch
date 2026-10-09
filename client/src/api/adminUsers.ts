@@ -25,7 +25,8 @@ export type ManageableRole =
   | 'HOUSEKEEPING'
   | 'RECEPTION_MANAGER'
   | 'RECEPTION_GENERAL_MANAGER'
-  | 'HOUSEKEEPING_MANAGER';
+  | 'HOUSEKEEPING_MANAGER'
+  | 'TECHNICAL_GENERAL_MANAGER';
 
 /**
  * The accounts with NO single branch — the global departments, and the two
@@ -42,6 +43,7 @@ export const GLOBAL_ROLES: readonly ManageableRole[] = [
   'TECHNICAL_MANAGER',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
 ];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
@@ -56,9 +58,9 @@ export function requiresSingleBranchChoice(role: UserRole | undefined): boolean 
   return role === 'HOUSEKEEPING_MANAGER' || role === 'HOUSEKEEPING';
 }
 
-/** Quản lý lễ tân and Quản lý kỹ thuật pick their branches — one or more, with checkboxes. */
+/** Quản lý lễ tân, Quản lý kỹ thuật and Tổng quản lý kỹ thuật pick their branches — one or more, with checkboxes. */
 export function requiresBranchSet(role: UserRole | undefined): boolean {
-  return role === 'RECEPTION_MANAGER' || role === 'TECHNICAL_MANAGER';
+  return role === 'RECEPTION_MANAGER' || role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER';
 }
 
 export interface CreateUserInput {

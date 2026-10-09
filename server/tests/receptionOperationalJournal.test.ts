@@ -903,7 +903,7 @@ describe('branch isolation and roles', () => {
     }
   });
 
-  it('lets an Admin write for ONE named branch, marked "Admin tạo" — never void — and read every branch', async () => {
+  it('lets an Admin write for ONE named branch, marked "Admin tạo", delete ("Xóa") with an audit, and read every branch', async () => {
     setClock({ now: () => hcm('2026-09-19', '08:00') });
     await checkIn(letan, 'A', 'Nguyễn A');
     const mine = await createComplaint(letan, { description: 'CN1' });
@@ -934,14 +934,16 @@ describe('branch isolation and roles', () => {
     });
     expect(audit?.actorUserId).not.toBeNull();
 
-    // Withdrawing and completing stay the desk's own.
-    expect(
-      (await admin.post(`/api/reception/reports/${mine.body.report.id}/void`).send({ reason: 'x' })).status,
-    ).toBe(403);
+    // "Xóa" is a supervisor's too now — a void with the Admin and its role on file.
+    const voided = await admin.post(`/api/reception/reports/${mine.body.report.id}/void`).send({ reason: 'x' });
+    expect(voided.status).toBe(200);
+    // The desk's record keeps its creator; the Admin is named as who deleted it.
+    expect(voided.body.report).toMatchObject({ voided: true, voidedByRole: 'ADMIN', createdByRole: 'RECEPTIONIST', createdByName: 'Nguyễn A' });
 
+    // The deleted record leaves the active list; the other two remain.
     const all = await admin.get('/api/admin/reports/operational');
     expect(all.status).toBe(200);
-    expect(all.body.reports).toHaveLength(3);
+    expect(all.body.reports).toHaveLength(2);
   });
 
   /*

@@ -189,6 +189,8 @@ export async function myKpi(actor: HousekeepingActor, filter: { from: string; to
 export interface StaffProgressRow extends KpiRow {
   assigned: number;
   notStarted: number;
+  /** "Đã kiểm tra" — inspected, cleaning not started. */
+  inspected: number;
   inProgress: number;
   completed: number;
   /** 0–100, of the rooms assigned in the period. */
@@ -207,7 +209,7 @@ export async function staffProgress(actor: HousekeepingActor, filter: PeriodFilt
   ]);
   const byUser = new Map<number, StaffProgressRow>();
   const get = (id: number, name: string) => {
-    const row = byUser.get(id) ?? { ...emptyRow(id, name), assigned: 0, notStarted: 0, inProgress: 0, completed: 0, completionRate: 0 };
+    const row = byUser.get(id) ?? { ...emptyRow(id, name), assigned: 0, notStarted: 0, inspected: 0, inProgress: 0, completed: 0, completionRate: 0 };
     byUser.set(id, row);
     return row;
   };
@@ -216,6 +218,7 @@ export async function staffProgress(actor: HousekeepingActor, filter: PeriodFilt
     row.assigned += 1;
     if (t.state === 'COMPLETED') row.completed += 1;
     else if (t.state === 'IN_PROGRESS') row.inProgress += 1;
+    else if (t.state === 'INSPECTED') row.inspected += 1;
     else row.notStarted += 1;
   }
   for (const i of inspections) tally(get(i.createdByUserId, i.createdByNameSnapshot), i);
@@ -307,6 +310,8 @@ export async function overview(actor: HousekeepingActor, filter: { workDate: str
     rooms: {
       total: rooms.length,
       notStarted: rooms.filter((t) => t.state === 'NOT_STARTED').length,
+      // "Đã kiểm tra": inspected, cleaning not started yet.
+      inspected: rooms.filter((t) => t.state === 'INSPECTED').length,
       inProgress: rooms.filter((t) => t.state === 'IN_PROGRESS').length,
       completed: rooms.filter((t) => t.state === 'COMPLETED').length,
       priority: rooms.filter((t) => t.priority).length,

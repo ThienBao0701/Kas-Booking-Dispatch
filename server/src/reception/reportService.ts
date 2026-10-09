@@ -31,7 +31,7 @@ import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, Repo
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { parseCompletionVerdict, verdictWhere, type CompletionVerdictInput } from '../completion/verdict';
-import { journalPeriodWhere, type ReportPeriod } from './businessDate';
+import { journalPeriodWhere, sessionsForBusinessDates, type ReportPeriod } from './businessDate';
 import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
 import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
@@ -78,6 +78,8 @@ import {
   scopedBranchFilter,
   supervisorSourceLabel,
 } from '../auth/branchScope';
+import { assertCan, can } from '../auth/capabilities';
+import { roleLabel } from '../auth/roleLabels';
 
 /**
  * The journal's actor: a receptionist on shift, or a reception SUPERVISOR
@@ -228,6 +230,8 @@ export function serializeReportAudit(row: ReportDetail['audits'][number]) {
     newValue: row.newValue,
     reason: row.reason,
     actor: { id: row.actorUserId, name: row.actorNameSnapshot },
+    actorRole: row.actorRole,
+    actorRoleLabel: roleLabel(row.actorRole),
     shiftType: row.actorShiftType,
     createdAt: row.createdAt.toISOString(),
   };
@@ -280,6 +284,23 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
     voidedBy: person(row.voidedBy),
     voidedByName: row.voidedByNameSnapshot,
     voidReason: row.voidReason,
+    /** "Xóa bởi Quản lý lễ tân …" — null on rows voided before the role was kept. */
+    voidedByRole: row.voidedByRole,
+    voidedByRoleLabel: roleLabel(row.voidedByRole),
+    /**
+     * "Nhập bù": entered after its shift by a manager, for the receptionist
+     * named in `createdBy`. `createdAt` is when it was entered; `shiftDate` and
+     * the shift are the original ones.
+     */
+    lateEntry: row.enteredByUserId
+      ? {
+          enteredBy: { id: row.enteredByUserId, name: row.enteredByNameSnapshot ?? '—' },
+          enteredByRole: row.enteredByRole,
+          enteredByRoleLabel: roleLabel(row.enteredByRole),
+          reason: row.lateEntryReason,
+          enteredAt: row.createdAt.toISOString(),
+        }
+      : null,
 
     payment: row.payment
       ? serializePayment(row.payment)
@@ -886,10 +907,20 @@ async function buildCreateData(
     createdByRole: UserRole;
     category: CreateReportInput['category'];
     createdAt: Date;
+    /** "Nhập bù" only: the manager who actually entered it, and why. */
+    lateEntry?: { userId: number; name: string; role: UserRole; reason: string };
   },
   client: PrismaClient,
 ): Promise<Prisma.ReceptionOperationalReportCreateInput> {
   const scalars = {
+    ...(base.lateEntry
+      ? {
+          enteredBy: { connect: { id: base.lateEntry.userId } },
+          enteredByNameSnapshot: base.lateEntry.name,
+          enteredByRole: base.lateEntry.role,
+          lateEntryReason: base.lateEntry.reason,
+        }
+      : {}),
     branch: { connect: { id: base.branchId } },
     ...(base.shiftSessionId ? { shiftSession: { connect: { id: base.shiftSessionId } } } : {}),
     shiftType: base.shiftType,
@@ -1018,6 +1049,8 @@ export interface ListReportsFilter {
   to?: Date;
   /** Voided rows are INCLUDED by default — they are part of the audit record. */
   includeVoided?: boolean;
+  /** "Lịch sử xóa": ONLY the voided rows. */
+  onlyVoided?: boolean;
   /** "Mức độ" — requests, complaints and facility entries of that level only. */
   severity?: IssueSeverity;
   take?: number;
@@ -1046,6 +1079,7 @@ export function reportWhere(
     };
   }
   if (filter.includeVoided === false) where.voidedAt = null;
+  if (filter.onlyVoided) where.voidedAt = { not: null };
   if (filter.severity) where.AND = [severityWhere(filter.severity)];
   return where;
 }
@@ -1387,7 +1421,18 @@ export async function updateReport(
   };
   const supplied: Record<string, unknown> = suppliedByCategory[current.category] ?? {};
 
-  const reason = optional(patch.reason);
+  /*
+    A CORRECTION MADE FOR A RECEPTIONIST MUST SAY WHY. A Quản lý lễ tân / Tổng
+    quản lý lễ tân changing a record the desk wrote (createdByRole RECEPTIONIST,
+    or null on rows from before the role was kept — all of them the desk's) is
+    refused without "Lý do sửa". The record keeps its creator; the reason, the
+    manager and the instant go on every audit row of this edit.
+  */
+  const forReceptionist = current.createdByRole === null || current.createdByRole === 'RECEPTIONIST';
+  const reason =
+    forReceptionist && can(actor.role, 'reports.editRequiresReason')
+      ? required(patch.reason, 'lý do sửa')
+      : optional(patch.reason);
 
   /*
     THE OLD VALUE IS READ INSIDE THE TRANSACTION, AND THE UPDATE IS GUARDED BY IT.
@@ -1549,6 +1594,7 @@ export async function updateReport(
         actorUserId: actor.id,
         actorNameSnapshot: writer.name,
         actorShiftType: writer.shiftType,
+        actorRole: actor.role,
         createdAt: now,
       })),
     });
@@ -1740,6 +1786,7 @@ export async function voidReport(
         voidedByUserId: actor.id,
         voidedByNameSnapshot: writer.name,
         voidReason: trimmed,
+        voidedByRole: actor.role,
       },
     });
     if (count === 0) throw ApiError.conflict('Báo cáo đã bị hủy trước đó.');
@@ -1754,6 +1801,7 @@ export async function voidReport(
         actorUserId: actor.id,
         actorNameSnapshot: writer.name,
         actorShiftType: writer.shiftType,
+        actorRole: actor.role,
         createdAt: now,
       },
     });
@@ -1829,4 +1877,166 @@ export async function completeReport(
     where: { id },
     include: REPORT_INCLUDE,
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * "Lịch sử xóa" — the deleted records, for the people who may see them
+ * ------------------------------------------------------------------ */
+
+/**
+ * THE DELETED RECORDS OF THE READER'S BRANCHES, newest deletion first.
+ *
+ * Reception sees its own branch's — the records its desk entered and the ones a
+ * supervisor deleted there; a supervisor sees its scope (one branch of it when
+ * asked). The record itself is the history: its creator, shift and business
+ * date are untouched, and `voidedBy…` + the VOID audit row say who deleted it,
+ * in what role, when and why. A period narrows by BUSINESS date, like every
+ * other report screen.
+ */
+export async function listDeletedReports(
+  actor: ReportActor,
+  filter: { branchId?: number; category?: CreateReportInput['category']; period?: ReportPeriod | null },
+  client: PrismaClient = prisma,
+): Promise<ReportDetail[]> {
+  assertCan(actor.role, 'reports.deletionHistory', 'Bạn không có quyền xem lịch sử xóa báo cáo.');
+  const where: Prisma.ReceptionOperationalReportWhereInput = {
+    AND: [
+      reportVisibilityWhere(actor, { branchId: filter.branchId }),
+      { voidedAt: { not: null } },
+      ...(filter.category ? [{ category: filter.category }] : []),
+      ...(filter.period ? [journalPeriodWhere(filter.period)] : []),
+    ],
+  };
+  return client.receptionOperationalReport.findMany({
+    where,
+    include: REPORT_INCLUDE,
+    orderBy: { voidedAt: 'desc' },
+    take: 500,
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * "Nhập bù" — a record the receptionist missed, entered on its own shift
+ * ------------------------------------------------------------------ */
+
+/** The categories a late entry may carry. An incident is reported now, with its own lifecycle. */
+const LATE_ENTRY_CATEGORIES: readonly CreateReportInput['category'][] = [
+  'PAYMENT',
+  'GUEST_REQUEST',
+  'CUSTOMER_COMPLAINT',
+  'ROOM_SERVICE',
+  'HOTEL_DELIVERY',
+];
+
+/**
+ * The FINISHED shifts of one business date at one branch of the manager's scope —
+ * the only places a late entry can go. Each names the receptionist who worked
+ * it, so the manager picks the shift and the person together and can never name
+ * a receptionist who was not there.
+ */
+export async function lateEntrySessions(
+  actor: ReportActor,
+  params: { branchId: number; businessDate: string },
+  client: PrismaClient = prisma,
+) {
+  assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền nhập bù báo cáo.');
+  const branchId = assertBranchInScope(actor, params.branchId);
+  const sessions = await sessionsForBusinessDates(
+    { from: params.businessDate, to: params.businessDate, branchId },
+    client,
+  );
+  const users = await client.receptionShiftSession.findMany({
+    where: { id: { in: sessions.map((s) => s.id) } },
+    select: { id: true, userId: true },
+  });
+  const userOf = new Map(users.map((u) => [u.id, u.userId]));
+  return sessions
+    .filter((s) => s.closedAt !== null)
+    .map((s) => ({
+      id: s.id,
+      branchId: s.branchId,
+      businessDate: s.businessDate,
+      shiftType: s.shiftType,
+      shiftName: shiftDefinition(s.shiftType).name,
+      shiftWindow: shiftWindowLabel(s.shiftType),
+      receptionist: { id: userOf.get(s.id) ?? null, name: s.receptionistName },
+      startedAt: s.startedAt.toISOString(),
+      closedAt: s.closedAt!.toISOString(),
+    }));
+}
+
+export interface LateEntryInput {
+  shiftSessionId: string;
+  reason: string;
+}
+
+/**
+ * "NHẬP BÙ" — a manager records, now, what the receptionist missed on a
+ * finished shift.
+ *
+ *   * The SHIFT is the original one (`shiftSessionId`), so the record counts on
+ *     that business date and shift — in the journal, the totals, the drawer of
+ *     that shift and every export — and never in today's.
+ *   * The CREATOR is the receptionist who worked that shift (from the session,
+ *     never from the request); `enteredBy…` is the manager; `createdAt` is now.
+ *   * The REASON is required, and a LATE_ENTRY audit row records it.
+ *   * The CONTENT goes through the category's own validation (`buildCreateData`),
+ *     the same as any record — a late payment is checked like any payment.
+ */
+export async function createLateReport(
+  input: CreateReportInput & LateEntryInput,
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail> {
+  assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền nhập bù báo cáo.');
+  const reason = required(input.reason, 'lý do nhập bù');
+  if (reason.length > 1000) throw ApiError.validation('Lý do nhập bù quá dài.');
+  if (!LATE_ENTRY_CATEGORIES.includes(input.category)) {
+    throw ApiError.validation('Sự cố cơ sở vật chất được báo cáo trực tiếp, không nhập bù.');
+  }
+  const session = await client.receptionShiftSession.findUnique({
+    where: { id: input.shiftSessionId },
+    select: { id: true, branchId: true, userId: true, receptionistName: true, shiftType: true, closedAt: true },
+  });
+  if (!session) throw ApiError.notFound('Không tìm thấy ca làm việc.');
+  assertBranchInScope(actor, session.branchId);
+  if (session.closedAt === null) {
+    throw ApiError.conflict('Ca này chưa kết thúc — lễ tân đang trong ca tự ghi báo cáo.');
+  }
+  const now = clock.now();
+  const data = await buildCreateData(
+    input,
+    {
+      branchId: session.branchId,
+      shiftSessionId: session.id,
+      shiftType: session.shiftType,
+      createdByUserId: session.userId,
+      createdByNameSnapshot: session.receptionistName,
+      createdByRole: 'RECEPTIONIST',
+      category: input.category,
+      createdAt: now,
+      lateEntry: { userId: actor.id, name: actor.fullName, role: actor.role, reason },
+    },
+    client,
+  );
+  const id = await client.$transaction(async (tx) => {
+    const created = await tx.receptionOperationalReport.create({ data, select: { id: true } });
+    await tx.receptionReportAudit.create({
+      data: {
+        branchId: session.branchId,
+        reportId: created.id,
+        shiftSessionId: null,
+        action: 'LATE_ENTRY',
+        reason,
+        actorUserId: actor.id,
+        actorNameSnapshot: actor.fullName,
+        actorShiftType: null,
+        actorRole: actor.role,
+        createdAt: now,
+      },
+    });
+    return created.id;
+  });
+  return client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
 }

@@ -13,7 +13,8 @@ function query(params: Record<string, string | number | undefined>): string {
   return s ? `?${s}` : '';
 }
 
-export type RoomWorkState = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
+/** Chưa bắt đầu → Đã kiểm tra (chờ "Bắt đầu dọn") → Đang dọn → Hoàn thành. */
+export type RoomWorkState = 'NOT_STARTED' | 'INSPECTED' | 'IN_PROGRESS' | 'COMPLETED';
 export const ROOM_WORK_KEY = ['housekeeping', 'room-work'] as const;
 
 export interface CatalogItem {
@@ -160,6 +161,8 @@ export interface FindingLine {
 export interface StaffProgressRow extends KpiRow {
   assigned: number;
   notStarted: number;
+  /** "Đã kiểm tra" — inspected, cleaning not started. */
+  inspected: number;
   inProgress: number;
   completed: number;
   completionRate: number;
@@ -175,7 +178,7 @@ export interface WorkShiftLite {
 
 export interface Overview {
   workDate: string;
-  rooms: { total: number; notStarted: number; inProgress: number; completed: number; priority: number; unassigned: number };
+  rooms: { total: number; notStarted: number; inspected: number; inProgress: number; completed: number; priority: number; unassigned: number };
   working: { userId: number; name: string; branch: { address: string; branchNumber: number }; since: string }[];
   employees: { userId: number; name: string; assigned: number; inProgress: number; completed: number }[];
   inspections: number;
@@ -258,6 +261,8 @@ export const roomWorkApi = {
   open: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/open`, {}),
   inspect: (id: string, issues: { type: RoomIssueType; note?: string }[]) =>
     api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, { issues }),
+  /** "Bắt đầu dọn" — the one action that starts the cleaning time. */
+  start: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/start`, {}),
   saveCleaning: (id: string, form: CleaningForm) => api.put<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/cleaning`, form),
   complete: (id: string, form: CleaningForm) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/complete`, form),
   myKpi: (p: { from: string; to: string }) =>

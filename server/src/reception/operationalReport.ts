@@ -296,7 +296,7 @@ async function sectionBranchReport(
       client.hotelIssue.count({ where }),
     ]);
     const ordered = [...rows].sort((a, b) => describeLocation(a).localeCompare(describeLocation(b), 'vi', { numeric: true }));
-    return { ...base, technical: ordered.map((row) => serializeIssue(row, now)), technicalTruncated: total > rows.length };
+    return { ...base, technical: ordered.map((row) => serializeIssue(row, now, actor.role)), technicalTruncated: total > rows.length };
   }
   const [rooms, segments] = await Promise.all([
     listRoomIssues(actor, { branchId: branch.id, from: window.from, to: window.to }, client),

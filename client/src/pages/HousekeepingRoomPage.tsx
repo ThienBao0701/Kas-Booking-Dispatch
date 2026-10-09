@@ -4,9 +4,12 @@
  *   [ Kiểm phòng ]  [ Dọn phòng ]
  *   code · priority · manager's note · state · started · elapsed · finished
  *
- * "LƯU KIỂM TRA" STARTS THE TIMER — on the server, at the inspection's own time;
- * opening this page records only that it was opened. "Dọn phòng" is locked until
- * the inspection is saved. The person is the account: no name is asked anywhere.
+ * INSPECTION AND CLEANING ARE SEPARATE. "Lưu kiểm tra" saves the inspection and
+ * the room becomes "Đã kiểm tra" — nothing starts. "Bắt đầu dọn" is the one
+ * action that starts the cleaning time (the manager may first give the room to
+ * another housekeeper). Opening this page records only that it was opened.
+ * "Hoàn thành dọn phòng" shows everything entered for a last check before it is
+ * sent. The person is the account: no name is asked anywhere.
  *
  * Phone first: every control is a large tap target, the sections stack, numbers
  * use the numeric keyboard, and the main action sits at the bottom of the screen.
@@ -14,12 +17,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Check, ClipboardCheck, Minus, Plus, Save, Sparkles } from 'lucide-react';
+import { ArrowLeft, Check, ClipboardCheck, Minus, Pencil, Play, Plus, Save, Sparkles } from 'lucide-react';
 import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
 import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { branchLabel } from '../auth/types';
 import { Button } from '../components/Button';
+import { Modal } from '../components/Modal';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
@@ -87,7 +91,7 @@ export function HousekeepingRoomPage() {
               ))}
             </div>
             {t.state === 'NOT_STARTED' && active === 'inspect' ? (
-              <p className="mb-3 text-sm text-slate-600">“Dọn phòng” mở sau khi lưu kiểm tra; thời gian dọn bắt đầu từ lúc lưu.</p>
+              <p className="mb-3 text-sm text-slate-600">“Dọn phòng” mở sau khi lưu kiểm tra; thời gian dọn chỉ bắt đầu khi bấm “Bắt đầu dọn”.</p>
             ) : null}
             {active === 'inspect' ? (
               <InspectPanel
@@ -95,7 +99,15 @@ export function HousekeepingRoomPage() {
                 onSaved={(next) => {
                   refresh(next);
                   setTab('clean');
-                  setToast('Đã lưu kiểm tra — bắt đầu dọn phòng.');
+                  setToast('Đã lưu kiểm tra. Bấm “Bắt đầu dọn” khi bắt đầu dọn phòng.');
+                }}
+              />
+            ) : t.state === 'INSPECTED' ? (
+              <StartPanel
+                task={t}
+                onStarted={(next) => {
+                  refresh(next);
+                  setToast('Đã bắt đầu dọn phòng.');
                 }}
               />
             ) : (
@@ -132,7 +144,13 @@ function useElapsed(task: RoomTask): number | null {
 function RoomHeader({ task }: { task: RoomTask }) {
   const elapsed = useElapsed(task);
   const stateTone =
-    task.state === 'COMPLETED' ? 'bg-green-100 text-green-800' : task.state === 'IN_PROGRESS' ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-700';
+    task.state === 'COMPLETED'
+      ? 'bg-green-100 text-green-800'
+      : task.state === 'IN_PROGRESS'
+        ? 'bg-blue-100 text-blue-800'
+        : task.state === 'INSPECTED'
+          ? 'bg-amber-100 text-amber-900'
+          : 'bg-slate-100 text-slate-700';
   const fact = (label: string, value: string, testId?: string) => (
     <div>
       <dt className="text-xs font-medium text-slate-500">{label}</dt>
@@ -170,6 +188,33 @@ function RoomHeader({ task }: { task: RoomTask }) {
         {fact(task.state === 'COMPLETED' ? 'Thời gian dọn' : 'Đã làm', formatMinutes(elapsed), 'room-elapsed')}
         {fact('Hoàn thành', task.completedAt ? formatDateTime(task.completedAt) : '—', 'room-completed')}
       </dl>
+    </section>
+  );
+}
+
+/* -------------------------------- Bắt đầu dọn -------------------------------- */
+
+/**
+ * "Đã kiểm tra" — nothing is running. The cleaning starts only when the
+ * housekeeper presses "Bắt đầu dọn"; a second press is refused by the server.
+ */
+function StartPanel({ task, onStarted }: { task: RoomTask; onStarted: (task: RoomTask) => void }) {
+  const start = useMutation({
+    mutationFn: () => roomWorkApi.start(task.id),
+    onSuccess: ({ task: next }) => onStarted(next),
+  });
+  return (
+    <section className="space-y-3 rounded-2xl border border-amber-300 bg-amber-50 p-4" data-testid="cleaning-start-panel">
+      <p className="text-base text-amber-900">
+        Phòng đã được kiểm tra
+        {task.inspection ? ` lúc ${formatDateTime(task.inspection.createdAt)} bởi ${task.inspection.inspectorName}` : ''}. Thời gian dọn
+        chưa bắt đầu.
+      </p>
+      {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
+      <Button className="min-h-[3rem] w-full text-base" onClick={() => start.mutate()} loading={start.isPending} disabled={start.isPending} data-testid="cleaning-start">
+        <Play className="h-5 w-5" aria-hidden="true" />
+        Bắt đầu dọn
+      </Button>
     </section>
   );
 }
@@ -295,9 +340,14 @@ function CleanPanel({
     }),
     [form],
   );
+  /** "Hoàn thành dọn phòng" opens the summary first; only its confirmation completes. */
+  const [confirming, setConfirming] = useState(false);
   const save = useMutation({
     mutationFn: (complete: boolean) => (complete ? roomWorkApi.complete(task.id, payload) : roomWorkApi.saveCleaning(task.id, payload)),
-    onSuccess: ({ task: next }, complete) => onSaved(next, complete),
+    onSuccess: ({ task: next }, complete) => {
+      if (complete) setConfirming(false);
+      onSaved(next, complete);
+    },
   });
 
   const clamp = (value: number) => Math.max(0, Math.min(catalog.maxQuantity, Math.round(value) || 0));
@@ -456,12 +506,104 @@ function CleanPanel({
             <Save className="h-5 w-5" aria-hidden="true" />
             Lưu tạm
           </Button>
-          <Button className="min-h-[3rem] flex-[2] text-base" onClick={() => save.mutate(true)} loading={save.isPending && save.variables === true} disabled={save.isPending} data-testid="cleaning-complete">
+          <Button
+            className="min-h-[3rem] flex-[2] text-base"
+            onClick={() => {
+              save.reset();
+              setConfirming(true);
+            }}
+            disabled={save.isPending}
+            data-testid="cleaning-complete"
+          >
             <Check className="h-5 w-5" aria-hidden="true" />
             Hoàn thành dọn phòng
           </Button>
         </div>
       ) : null}
+      {confirming ? (
+        <Modal
+          open
+          size="xl"
+          title="Xác nhận hoàn thành dọn phòng"
+          onClose={() => setConfirming(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirming(false)} disabled={save.isPending} data-testid="cleaning-confirm-back">
+                <Pencil className="h-4 w-4" aria-hidden="true" />
+                Quay lại sửa
+              </Button>
+              <Button
+                onClick={() => save.mutate(true)}
+                loading={save.isPending && save.variables === true}
+                disabled={save.isPending}
+                data-testid="cleaning-confirm-submit"
+              >
+                <Check className="h-4 w-4" aria-hidden="true" />
+                Xác nhận hoàn thành
+              </Button>
+            </>
+          }
+        >
+          <CleaningSummary task={task} catalog={catalog} form={form} />
+          {save.isError ? (
+            <div className="mt-3">
+              <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+            </div>
+          ) : null}
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * EVERYTHING ENTERED, AS IT WILL BE SENT — read from the live form state with
+ * the catalog's own labels, so the summary can never disagree with the form.
+ */
+function CleaningSummary({ task, catalog, form }: { task: RoomTask; catalog: RoomWorkCatalog; form: CleaningForm }) {
+  const label = (items: { code: string; label: string }[], code: string) => items.find((i) => i.code === code)?.label ?? code;
+  const linen = catalog.linen
+    .filter((item) => form.linen[item.code])
+    .map((item) => {
+      const e = form.linen[item.code]!;
+      return `${item.label}: ${label(catalog.linenSizes, e.size)} × ${e.quantity ?? 0}`;
+    });
+  const quantities = catalog.quantities
+    .filter((item) => (form.quantities[item.code] ?? 0) > 0)
+    .map((item) => `${item.label}: ${form.quantities[item.code]}`);
+  const replaced = catalog.replacements.filter((item) => form.replaced.includes(item.code)).map((item) => item.label);
+  const special = catalog.specialStatuses.filter((item) => form.special.includes(item.code)).map((item) => `${item.short} : ${item.label}`);
+  const row = (title: string, values: string[], testId: string) => (
+    <div className="border-b border-line-subtle py-2 last:border-0" data-testid={testId}>
+      <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</dt>
+      <dd className="mt-0.5 text-base text-slate-900">
+        {values.length ? (
+          <ul className="space-y-0.5">
+            {values.map((v) => (
+              <li key={v}>{v}</li>
+            ))}
+          </ul>
+        ) : (
+          <span className="text-slate-400">Không có</span>
+        )}
+      </dd>
+    </div>
+  );
+  return (
+    <div data-testid="cleaning-summary">
+      <p className="mb-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
+        <span className="font-semibold">Phòng {task.roomNumber}</span> · {branchLabel(task.branch)}
+        {task.assignee ? ` · ${task.assignee.name}` : ''}
+        {task.startedAt ? ` · bắt đầu ${formatDateTime(task.startedAt)}` : ''}
+      </p>
+      <dl>
+        {row('Đồ vải giường', linen, 'summary-linen')}
+        {row('Số lượng', quantities, 'summary-quantities')}
+        {row('Đồ được thay thế', replaced, 'summary-replaced')}
+        {row('Ghi nhận đặc biệt', special, 'summary-special')}
+        {row('Ghi chú', form.note?.trim() ? [form.note.trim()] : [], 'summary-note')}
+      </dl>
+      <p className="mt-2 text-xs text-slate-500">Kiểm tra lại trước khi xác nhận. Sau khi hoàn thành, phòng chờ quản lý đánh giá.</p>
     </div>
   );
 }

@@ -84,6 +84,11 @@ enum UserRole {
   /// workers' inspections, cleaning and KPI. Confined by `requireAuth` to the
   /// housekeeping endpoints, scoped to that branch by `branchScopeOf`.
   HOUSEKEEPING_MANAGER
+  /// "Tổng quản lý kỹ thuật" — receives the facility incidents of the branches
+  /// ticked on the account (`UserBranchAssignment`, like a Quản lý kỹ thuật —
+  /// never all branches by the role alone) and hands each one on: to a Quản lý
+  /// kỹ thuật ("Nhân sự") or straight to an in-house technician ("Kĩ thuật").
+  TECHNICAL_GENERAL_MANAGER
 }
 
 /// Where a daily room work item stands — separate from the room's operational
@@ -93,6 +98,10 @@ enum RoomWorkState {
   NOT_STARTED
   IN_PROGRESS
   COMPLETED
+  /// "Đã kiểm tra" — the inspection is saved and nothing has started: no
+  /// `startedAt`, no cleaning time. The manager may give the room to another
+  /// housekeeper; the cleaning starts only with "Bắt đầu dọn" (→ IN_PROGRESS).
+  INSPECTED
 }
 
 /// The manager's quality review of ONE completed cleaning cycle — given once,
@@ -116,6 +125,8 @@ enum RoomTaskEventType {
   VOIDED
   /// The manager's "Đạt" / "Không đạt" (with the reason and the re-clean request).
   REVIEWED
+  /// "Bắt đầu dọn" — the cleaner's explicit start; `startedAt` is this instant.
+  STARTED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -625,6 +636,11 @@ model User {
   repairInspections        TechnicalRepairAttempt[]      @relation("AttemptInspector")
   operationalReports       ReceptionOperationalReport[]  @relation("OperationalReportCreatedBy")
   operationalReportsVoided ReceptionOperationalReport[]  @relation("OperationalReportVoidedBy")
+  reportsEnteredLate       ReceptionOperationalReport[]  @relation("OperationalReportEnteredBy")
+  issuesManaged            HotelIssue[]                  @relation("IssueAssignedManager")
+  issueDispatchesMade      HotelIssueDispatch[]          @relation("DispatchAssignedBy")
+  issueDispatchesReceived  HotelIssueDispatch[]          @relation("DispatchManager")
+  issueDispatchesCompleted HotelIssueDispatch[]          @relation("DispatchCompletedBy")
   guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
   complaintsCompleted      CustomerComplaintReport[]     @relation("ComplaintCompletedBy")
   operationalReportAudits  ReceptionReportAudit[]        @relation("ReportAuditActor")
@@ -773,6 +789,7 @@ model Branch {
   housekeepingSegments    HousekeepingWorkSegment[]
   housekeepingRoomTasks   HousekeepingRoomTask[]
   confidentialReports     ConfidentialReport[]
+  issueDispatches         HotelIssueDispatch[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -1901,6 +1918,17 @@ model HotelIssue {
   assignedByUserId               Int?
   assignedByNameSnapshot         String?
 
+  /// THE CURRENT HAND-OFF TO A QUẢN LÝ KỸ THUẬT ("Giao việc → Nhân sự"), set by
+  /// a Tổng quản lý kỹ thuật. That manager then gives the work to an in-house
+  /// technician or an outside contractor. Every hand-off is kept in
+  /// `HotelIssueDispatch`; these are the current one.
+  assignedManagerUserId         Int?
+  assignedManagerNameSnapshot   String?
+  assignedManagerAt             DateTime?
+  assignedManagerByUserId       Int?
+  assignedManagerByNameSnapshot String?
+  assignedManagerNote           String?
+
   /// The reporter's ROLE at the moment of reporting — how Reception can tell an
   /// incident an Admin or a manager filed ("Admin tạo"). Null on older rows.
   reportedByRole UserRole?
@@ -1958,6 +1986,9 @@ model HotelIssue {
   operationalReports FacilityIssueReport[]    @relation("FacilityReportIssue")
   /// What a receptionist changed AFTER the report was filed — one row per field.
   edits              HotelIssueEdit[]         @relation("IssueEdits")
+  /// Hand-offs to a Quản lý kỹ thuật and to outside contractors, oldest first.
+  dispatches         HotelIssueDispatch[]     @relation("IssueDispatches")
+  assignedManager    User?                    @relation("IssueAssignedManager", fields: [assignedManagerUserId], references: [id])
   assignedTechnician User?                    @relation("IssueAssignedTechnician", fields: [assignedTechnicianUserId], references: [id])
   /// Every assignment and reassignment, oldest first when read.
   assignments        HotelIssueAssignment[]   @relation("IssueAssignments")
@@ -2617,6 +2648,9 @@ enum ReceptionReportAuditAction {
   /// "Tiền đầu ca" was set or corrected. Carries no `reportId`: it belongs to
   /// the shift, not to any one payment.
   OPENING_CASH
+  /// "Nhập bù" — a reception manager recorded, after the fact, a record the
+  /// receptionist missed on that shift. `reason` is the required late-entry reason.
+  LATE_ENTRY
 }
 
 /// ONE ENTRY IN THE RECEPTION OPERATIONAL JOURNAL — "Báo cáo vấn đề".
@@ -2673,6 +2707,17 @@ model ReceptionOperationalReport {
   voidedByUserId       Int?
   voidedByNameSnapshot String?
   voidReason           String?
+  /// The role of whoever withdrew it ("Xóa") — a receptionist or a supervisor.
+  voidedByRole         UserRole?
+
+  /// "NHẬP BÙ" — set when a reception manager entered this record AFTER its
+  /// shift, for the receptionist who missed it. `createdBy…` stays the
+  /// receptionist and `shiftSessionId` the ORIGINAL shift (so it counts on that
+  /// business date and shift); `createdAt` is when it was actually entered.
+  enteredByUserId       Int?
+  enteredByNameSnapshot String?
+  enteredByRole         UserRole?
+  lateEntryReason       String?
 
   /// SERVER TIME, stamped from the injected business clock rather than defaulted
   /// by PostgreSQL. The Admin period report filters on this column, and a value
@@ -2684,6 +2729,7 @@ model ReceptionOperationalReport {
   shiftSession ReceptionShiftSession? @relation("OperationalReportSession", fields: [shiftSessionId], references: [id], onDelete: SetNull)
   createdBy    User                   @relation("OperationalReportCreatedBy", fields: [createdByUserId], references: [id])
   voidedBy     User?                  @relation("OperationalReportVoidedBy", fields: [voidedByUserId], references: [id])
+  enteredBy    User?                  @relation("OperationalReportEnteredBy", fields: [enteredByUserId], references: [id])
 
   /// Exactly one of these exists, decided by `category`.
   payment      ReceptionPayment?
@@ -2704,6 +2750,7 @@ model ReceptionOperationalReport {
   @@index([createdAt])
   @@index([createdByUserId])
   @@index([voidedAt])
+  @@index([enteredByUserId])
 }
 
 /// ONE PAYMENT ROW — "Thu tiền thanh toán".
@@ -2973,6 +3020,8 @@ model ReceptionReportAudit {
   actorUserId       Int
   actorNameSnapshot String
   actorShiftType    ShiftType?
+  /// The actor's ROLE when it acted. Null on rows written before it was kept.
+  actorRole         UserRole?
 
   /// Server time, from the business clock. Same reason as the report's own.
   createdAt DateTime
@@ -3008,6 +3057,8 @@ model HotelIssueAssignment {
   assignedByUserId               Int
   assignedByNameSnapshot         String
   assignedByRole                 UserRole
+  /// The assigner's work instructions ("Ghi chú / hướng dẫn"), when given.
+  note                           String?
   /// Server time, from the business clock.
   createdAt                      DateTime
   /// "Chuyển về chờ giao kỹ thuật": the assignment ended without a repair. The
@@ -3564,4 +3615,89 @@ model AdminOverrideCredential {
   updatedAt         DateTime @updatedAt
 
   setBy User @relation("AdminOverrideSetBy", fields: [setByUserId], references: [id])
+}
+
+/// What a hand-off of a facility incident gave the work to.
+enum IssueDispatchKind {
+  /// "Giao việc → Nhân sự": a Tổng quản lý kỹ thuật gives it to a Quản lý kỹ thuật.
+  TO_MANAGER
+  /// "Giao cho kĩ thuật bên ngoài": a Quản lý kỹ thuật hires an outside contractor.
+  TO_EXTERNAL
+}
+
+/// An outside contractor is a person or a company.
+enum ExternalContractorType {
+  /// "Cá nhân"
+  INDIVIDUAL
+  /// "Công ty" — `contractorCompany` is required.
+  COMPANY
+}
+
+/// THE DISPATCH CHAIN OF A FACILITY INCIDENT — append-only, one row per hand-off.
+///
+///   Tổng quản lý kỹ thuật → Quản lý kỹ thuật          (TO_MANAGER)
+///   Quản lý kỹ thuật      → kĩ thuật bên ngoài         (TO_EXTERNAL)
+///
+/// A hand-off to an IN-HOUSE technician stays where it always was:
+/// `HotelIssueAssignment` (now with its `note`). The incident itself — its
+/// report, reporter, business date and shift — is never copied: every row
+/// points at the one incident.
+///
+/// AN OUTSIDE CONTRACTOR HAS NO ACCOUNT. Its name, phone, speciality and company
+/// are a contact record of this hand-off, readable only by the technical
+/// managers and the Admin. The work it does is also an ordinary
+/// `TechnicalRepairAttempt` (no technician account), so every repair report
+/// keeps counting attempts the same way; the COST is recorded here, by the
+/// responsible Quản lý kỹ thuật, when the work is completed.
+model HotelIssueDispatch {
+  id       String            @id @default(cuid())
+  issueId  String
+  branchId Int
+  kind     IssueDispatchKind
+
+  assignedByUserId       Int
+  assignedByNameSnapshot String
+  assignedByRole         UserRole
+  /// "Ghi chú / hướng dẫn công việc" — required.
+  note                   String
+  /// Server time, from the business clock.
+  createdAt              DateTime
+
+  /// TO_MANAGER: the Quản lý kỹ thuật given the work, and who held it before.
+  managerUserId               Int?
+  managerNameSnapshot         String?
+  previousManagerUserId       Int?
+  previousManagerNameSnapshot String?
+
+  /// TO_EXTERNAL: the contractor, as given.
+  contractorName      String?
+  contractorPhone     String?
+  contractorSpecialty String?
+  contractorType      ExternalContractorType?
+  contractorCompany   String?
+  /// The attempt this contractor's work is recorded as.
+  attemptId           String?                 @unique
+
+  /// TO_EXTERNAL, at completion: the cost in whole đồng (0 allowed), who
+  /// recorded it and when. Required before the incident can be completed.
+  repairCost              Int?
+  completedAt             DateTime?
+  completedByUserId       Int?
+  completedByNameSnapshot String?
+  completionNote          String?
+
+  /// Set when the hand-off was superseded (a new manager hand-off) without being completed.
+  endedAt DateTime?
+
+  issue       HotelIssue @relation("IssueDispatches", fields: [issueId], references: [id], onDelete: Cascade)
+  branch      Branch     @relation(fields: [branchId], references: [id])
+  assignedBy  User       @relation("DispatchAssignedBy", fields: [assignedByUserId], references: [id])
+  manager     User?      @relation("DispatchManager", fields: [managerUserId], references: [id])
+  completedBy User?      @relation("DispatchCompletedBy", fields: [completedByUserId], references: [id])
+
+  @@index([issueId, createdAt])
+  @@index([managerUserId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([assignedByUserId])
+  @@index([completedByUserId])
 }

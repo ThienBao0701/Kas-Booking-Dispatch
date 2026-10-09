@@ -4,6 +4,7 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { devToolsActive, isTestReceptionist } from '../devtest/guard';
 import type { UserWithBranch } from '../auth/serialize';
+import { hasBranchSet } from '../auth/branchScope';
 
 /**
  * The authenticated user as every route sees it: the account, its branch, and —
@@ -37,7 +38,7 @@ async function loadSessionUser(req: Request): Promise<SessionUser | null> {
   });
   if (!user) return null;
   const { branchAssignments, ...rest } = user;
-  if (user.role === 'RECEPTION_MANAGER' || user.role === 'TECHNICAL_MANAGER') {
+  if (hasBranchSet(user.role)) {
     return { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) };
   }
   /*
@@ -183,7 +184,9 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
           return;
         }
       }
-      if (user.role === 'TECHNICAL_MANAGER') {
+      // The Tổng quản lý kỹ thuật reaches exactly what a Quản lý kỹ thuật does;
+      // every service then scopes it to its own ticked branches.
+      if (user.role === 'TECHNICAL_MANAGER' || user.role === 'TECHNICAL_GENERAL_MANAGER') {
         const path = req.originalUrl.split('?')[0] ?? '';
         if (!TECHNICAL_MANAGER_ROUTES.some((route) => route.test(path))) {
           next(ApiError.forbidden());

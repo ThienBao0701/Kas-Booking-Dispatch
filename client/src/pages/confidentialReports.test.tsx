@@ -128,7 +128,9 @@ describe('sending a confidential report', () => {
     );
     renderApp('/app/reports/confidential');
 
-    expect(await screen.findByRole('heading', { name: 'VII. Báo cáo các vấn đề và tình hình quan trọng' })).toBeInTheDocument();
+    // The page heading carries no "VII." — it reads exactly as the menu does (the topbar repeats it).
+    expect((await screen.findAllByRole('heading', { name: 'Báo cáo các vấn đề và tình hình quan trọng' })).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/VII\./)).not.toBeInTheDocument();
     // The sender has no list of what it sent — only the note and the button.
     expect(await screen.findByTestId('confidential-sender-note')).toBeInTheDocument();
     expect(screen.queryByTestId('confidential-inbox')).not.toBeInTheDocument();

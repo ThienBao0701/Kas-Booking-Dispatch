@@ -24,14 +24,19 @@ import type { UserWithBranch } from '../auth/serialize';
 import {
   completeReport,
   countByCategory,
+  createLateReport,
   createReport,
+  lateEntrySessions,
   listActiveJournal,
   listArchivedJournal,
+  listDeletedReports,
   listReports,
   serializeReport,
   updateReport,
   voidReport,
 } from '../reception/reportService';
+import { requireCapability } from '../auth/capabilities';
+import { branchScopeOf } from '../auth/branchScope';
 import { setOpeningCash, shiftCashSummary, sumPayments, withEndingCash } from '../reception/cashService';
 import { MAX_VND } from '../reception/reportService';
 import { captureShiftContext, requireOpenSession } from '../shift/shiftService';
@@ -198,6 +203,35 @@ const updateSchema = z.object({
 
 const voidSchema = z.object({
   reason: text(1000).min(1, 'Vui lòng nhập lý do hủy.'),
+});
+
+/** "Lịch sử xóa": an optional BUSINESS-date period, a branch of the scope, a category. */
+const deletedSchema = z
+  .object({
+    from: isoDay.optional(),
+    to: isoDay.optional(),
+    branchId: z.coerce.number().int().positive().optional(),
+    category: CATEGORY.optional(),
+  })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
+    path: ['to'],
+  })
+  .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+    message: 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.',
+    path: ['from'],
+  });
+
+/** "Nhập bù": the finished shifts of one business date at one branch. */
+const lateSessionsSchema = z.object({
+  branchId: z.coerce.number().int().positive(),
+  date: isoDay,
+});
+
+/** "Nhập bù": the original shift and the required reason, beside the category's own form. */
+const lateEntrySchema = z.object({
+  shiftSessionId: z.string().min(1, 'Vui lòng chọn ca.'),
+  reason: text(1000).min(1, 'Vui lòng nhập lý do nhập bù.'),
 });
 
 const listSchema = z
@@ -413,19 +447,89 @@ export function createReceptionReportsRouter(): Router {
     POST /api/reception/reports/:id/void — "Xóa", implemented as a withdrawal.
 
     NOT `DELETE`, and the verb is the point: nothing here removes a row. The
-    record keeps its place in the journal with the reason, the person and the
-    instant attached, and drops out of every total.
-    Reception only: a supervisor corrects a record ("Sửa") but never withdraws it.
+    record keeps its place in the journal with the reason, the person, the role
+    and the instant attached, and drops out of every total.
+
+    The desk on its branch (its existing "Hủy"), and the reception supervisors —
+    Admin, Quản lý lễ tân, Tổng quản lý lễ tân — within their branch scope, which
+    `voidReport` checks on the record itself (an id from another branch is 403).
   */
-  router.post('/reception/reports/:id/void', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
-    (async () => {
-      const user = req.currentUser!;
-      const { reason } = voidSchema.parse(req.body ?? {});
-      const clock = getClock();
-      const voided = await voidReport(req.params.id!, reason, actor(user), clock);
-      res.json({ report: serializeReport(voided, clock.now()) });
-    })().catch(next);
-  });
+  router.post(
+    '/reception/reports/:id/void',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.delete', 'reports.voidOwnBranch'),
+    (req, res, next) => {
+      (async () => {
+        const user = req.currentUser!;
+        const { reason } = voidSchema.parse(req.body ?? {});
+        const clock = getClock();
+        const voided = await voidReport(req.params.id!, reason, actor(user), clock);
+        res.json({ report: serializeReport(voided, clock.now()) });
+      })().catch(next);
+    },
+  );
+
+  /*
+    GET /api/reception/reports/deleted — "Lịch sử xóa": the deleted records the
+    reader may see (Reception its branch, a supervisor its scope), with who
+    created them, who deleted them in what role, when and why.
+  */
+  router.get(
+    '/reception/reports/deleted',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.deletionHistory'),
+    (req, res, next) => {
+      (async () => {
+        const user = req.currentUser!;
+        const q = deletedSchema.parse(req.query);
+        const period =
+          q.from && q.to
+            ? await resolveReportPeriod(branchScopeOf(actor(user)), { from: q.from, to: q.to, branchId: q.branchId })
+            : null;
+        const now = getClock().now();
+        const reports = await listDeletedReports(actor(user), { branchId: q.branchId, category: q.category, period });
+        res.json({ reports: reports.map((r) => serializeReport(r, now)) });
+      })().catch(next);
+    },
+  );
+
+  // GET /api/reception/reports/late-entry/sessions — the finished shifts a late entry can go to.
+  router.get(
+    '/reception/reports/late-entry/sessions',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.lateEntry'),
+    (req, res, next) => {
+      (async () => {
+        const q = lateSessionsSchema.parse(req.query);
+        res.json({ sessions: await lateEntrySessions(actor(req.currentUser!), { branchId: q.branchId, businessDate: q.date }) });
+      })().catch(next);
+    },
+  );
+
+  /*
+    POST /api/reception/reports/late-entry — "Nhập bù": a record the receptionist
+    missed, on its ORIGINAL shift, for the receptionist who worked it. The body is
+    the category form plus `shiftSessionId` and the required `reason`; who
+    entered it and when are the server's.
+  */
+  router.post(
+    '/reception/reports/late-entry',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.lateEntry'),
+    (req, res, next) => {
+      (async () => {
+        const input = createSchema.parse(req.body ?? {});
+        const late = lateEntrySchema.parse(req.body ?? {});
+        const clock = getClock();
+        const created = await createLateReport({ ...input, ...late }, actor(req.currentUser!), clock);
+        res.status(201).json({ report: serializeReport(created, clock.now()) });
+      })().catch(next);
+    },
+  );
 
   /*
     POST /api/reception/reports/:id/complete — "Hoàn thành" on a guest request

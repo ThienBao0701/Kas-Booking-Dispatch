@@ -57,7 +57,7 @@ export interface IssueSummary {
  */
 export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
   const branchRows: Prisma.BranchWhereInput =
-    isReceptionSupervisor(actor.role) || actor.role === 'TECHNICAL_MANAGER'
+    isReceptionSupervisor(actor.role) || actor.role === 'TECHNICAL_MANAGER' || actor.role === 'TECHNICAL_GENERAL_MANAGER'
     ? scopedBranchRows(actor)
     : seesAllBranches(actor.role)
       ? { active: true }

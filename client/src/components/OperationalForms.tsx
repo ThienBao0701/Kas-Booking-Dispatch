@@ -17,6 +17,7 @@ import { useState } from 'react';
 import { SeverityPicker } from './Severity';
 import { DEFAULT_SEVERITY } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
+import { useReportSubmitOverride } from '../lib/reportSubmit';
 import { useMutation } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import {
@@ -100,8 +101,10 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
  */
 function useCreateReport(onCreated: () => void | Promise<void>, branchId?: number) {
   const [error, setError] = useState<string | null>(null);
+  // "Nhập bù" submits the same form to its own endpoint (see lib/reportSubmit).
+  const override = useReportSubmitOverride();
   const mutation = useMutation({
-    mutationFn: (input: NewReportInput) => reportsApi.create({ ...input, branchId }),
+    mutationFn: (input: NewReportInput) => (override ? override(input) : reportsApi.create({ ...input, branchId })),
     onSuccess: async () => {
       setError(null);
       await onCreated();

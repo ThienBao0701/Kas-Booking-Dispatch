@@ -66,6 +66,7 @@ export function createNavBadgesRouter(): Router {
         user.role === 'BOOKING_DEPARTMENT' ||
         user.role === 'TECHNICAL' ||
         user.role === 'TECHNICAL_MANAGER' ||
+        user.role === 'TECHNICAL_GENERAL_MANAGER' ||
         user.role === 'HOUSEKEEPING' ||
         // The reception supervisors are branchless too and have no booking
         // screen; falling through would count every order on every branch.

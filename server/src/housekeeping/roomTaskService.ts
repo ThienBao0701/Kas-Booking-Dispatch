@@ -51,6 +51,7 @@ const EVENT_LABELS: Record<TaskRow['events'][number]['type'], string> = {
   COMPLETED: 'Hoàn thành dọn phòng',
   VOIDED: 'Xóa',
   REVIEWED: 'Đánh giá chất lượng',
+  STARTED: 'Bắt đầu dọn',
 };
 
 const REVIEWED_LOCKED = 'Phòng này đã được đánh giá — lần dọn đã đánh giá không thể thay đổi.';
@@ -659,9 +660,10 @@ export async function openTask(actor: HousekeepingActor, id: string, clock: Cloc
 
 /**
  * "LƯU KIỂM TRA" — the shared inspection (findings optional: a clean room is a
- * result too), recorded at the room's branch on the open shift, and in the SAME
- * transaction the cleaning starts: "đang dọn", \`startedAt\` = the inspection's own
- * time. Only this starts the timer — opening the room or the form never does.
+ * result too), recorded at the room's branch on the open shift. The room becomes
+ * "Đã kiểm tra" and NOTHING starts: no \`startedAt\`, no cleaning time. The
+ * manager may still give it to another housekeeper; the inspection keeps its
+ * own inspector. Cleaning starts only with "Bắt đầu dọn" (\`startTask\`).
  */
 export async function inspectTask(
   actor: HousekeepingActor,
@@ -679,7 +681,7 @@ export async function inspectTask(
     onCreated: async (tx, inspection) => {
       const { count } = await tx.housekeepingRoomTask.updateMany({
         where: { id, voidedAt: null, state: 'NOT_STARTED', inspectionId: null, assigneeUserId: actor.id },
-        data: { state: 'IN_PROGRESS', inspectionId: inspection.id, startedAt: inspection.createdAt },
+        data: { state: 'INSPECTED', inspectionId: inspection.id },
       });
       if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
       await recordEvent(tx, id, 'INSPECTED', actor, inspection.createdAt, {
@@ -687,6 +689,30 @@ export async function inspectTask(
         findings: input.issues.length,
       });
     },
+  });
+  return serializeTask(await loadTask(id, client), { money: false });
+}
+
+/**
+ * "BẮT ĐẦU DỌN" — the one action that starts the cleaning: "Đã kiểm tra" →
+ * "Đang dọn", \`startedAt\` = now. Only the housekeeper the room is given to, and
+ * only once: the update is guarded on the state, so a double tap or a retried
+ * request finds it already started and changes nothing twice.
+ */
+export async function startTask(actor: HousekeepingActor, id: string, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
+  const row = await loadTask(id, client);
+  assertAssignee(row, actor);
+  if (row.state === 'NOT_STARTED') throw ApiError.conflict('Cần "Kiểm phòng" trước khi bắt đầu dọn.');
+  if (row.state === 'IN_PROGRESS') throw ApiError.conflict('Phòng đang được dọn.');
+  if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong.');
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id, voidedAt: null, state: 'INSPECTED', startedAt: null, assigneeUserId: actor.id },
+      data: { state: 'IN_PROGRESS', startedAt: now },
+    });
+    if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, id, 'STARTED', actor, now);
   });
   return serializeTask(await loadTask(id, client), { money: false });
 }
@@ -702,9 +728,8 @@ async function writeCleaning(
 ) {
   const row = await loadTask(id, client);
   assertAssignee(row, actor);
-  if (row.state === 'NOT_STARTED' || !row.startedAt) {
-    throw ApiError.conflict('Cần "Kiểm phòng" trước khi dọn phòng.');
-  }
+  if (row.state === 'NOT_STARTED') throw ApiError.conflict('Cần "Kiểm phòng" trước khi dọn phòng.');
+  if (row.state === 'INSPECTED' || !row.startedAt) throw ApiError.conflict('Cần "Bắt đầu dọn" trước khi dọn phòng.');
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong.');
   const form = parseCleaningForm(raw);
   const now = clock.now();

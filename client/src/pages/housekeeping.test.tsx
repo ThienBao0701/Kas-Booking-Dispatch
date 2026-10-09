@@ -173,7 +173,7 @@ function roomTask(id: string, over: Record<string, unknown> = {}) {
 
 const CATALOG = {
   statusCodes: ['OUT', 'OC', 'VC'],
-  states: { NOT_STARTED: 'Chưa bắt đầu', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
+  states: { NOT_STARTED: 'Chưa bắt đầu', INSPECTED: 'Đã kiểm tra', IN_PROGRESS: 'Đang dọn', COMPLETED: 'Hoàn thành' },
   linen: [
     { code: 'BED_SHEET', label: 'Ga giường' },
     { code: 'DUVET_COVER', label: 'Bọc chăn' },
@@ -340,19 +340,21 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
       ...extra,
     });
 
-  it('offers the six conditions; "Dọn phòng" stays locked until the inspection is saved, which starts the clock', async () => {
+  it('offers the six conditions; saving the inspection makes the room "Đã kiểm tra" — only "Bắt đầu dọn" starts the clock', async () => {
     const posted: unknown[] = [];
-    const started = roomTask('t1', {
-      state: 'IN_PROGRESS',
-      stateLabel: 'Đang dọn',
-      startedAt: new Date().toISOString(),
-      inspection: { id: 'in1', createdAt: new Date().toISOString(), inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] },
-    });
+    const starts: unknown[] = [];
+    const inspection = { id: 'in1', createdAt: new Date().toISOString(), inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] };
+    const inspected = roomTask('t1', { state: 'INSPECTED', stateLabel: 'Đã kiểm tra', startedAt: null, inspection });
+    const started = roomTask('t1', { state: 'IN_PROGRESS', stateLabel: 'Đang dọn', startedAt: new Date().toISOString(), inspection });
     installApiMock(
       routes(roomTask('t1', { priority: true, note: 'Dọn trước 14:00' }), {
         'POST /api/housekeeping/work/tasks/t1/inspect': (init) => {
           posted.push(JSON.parse(String(init.body)));
-          return { status: 201, body: { task: started } };
+          return { status: 201, body: { task: inspected } };
+        },
+        'POST /api/housekeeping/work/tasks/t1/start': () => {
+          starts.push(1);
+          return { status: 200, body: { task: started } };
         },
       }),
     );
@@ -377,9 +379,16 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     await userEvent.click(screen.getByTestId('inspection-type-SMOKING'));
     await userEvent.click(screen.getByTestId('inspection-save'));
     await waitFor(() => expect(posted).toEqual([{ issues: [{ type: 'SMOKING' }, { type: 'OTHER', note: 'Rèm rách' }] }]));
-    // Saved: "đang dọn", and the cleaning form opens.
+    // Saved: "Đã kiểm tra" — nothing has started and no form is open.
+    expect(await screen.findByTestId('cleaning-start-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('room-state')).toHaveTextContent('Đã kiểm tra');
+    expect(screen.queryByTestId('cleaning-form')).not.toBeInTheDocument();
+    expect(starts).toEqual([]);
+    // "Bắt đầu dọn" — the explicit start; then the cleaning form opens.
+    await userEvent.click(screen.getByTestId('cleaning-start'));
     expect(await screen.findByTestId('cleaning-form')).toBeInTheDocument();
     expect(screen.getByTestId('room-state')).toHaveTextContent('Đang dọn');
+    expect(starts).toEqual([1]);
   });
 
   it('records King / Queen / Twin with a count, counts, ✓ replacements and special notes, and completes the room', async () => {
@@ -447,7 +456,25 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     // The note, under its own placeholder.
     expect(screen.getByTestId('cleaning-note')).toHaveAttribute('placeholder', 'Các lưu ý-Hỏng hóc-Vấn đề khác...');
     await userEvent.type(screen.getByTestId('cleaning-note'), 'Rèm hơi bẩn');
+    // "Hoàn thành dọn phòng" shows everything entered first — nothing is sent yet.
     await userEvent.click(screen.getByTestId('cleaning-complete'));
+    const summary = await screen.findByTestId('cleaning-summary');
+    expect(within(summary).getByTestId('summary-linen')).toHaveTextContent('Ga giường: Queen × 2');
+    expect(within(summary).getByTestId('summary-quantities')).toHaveTextContent('Khăn tắm: 2');
+    expect(within(summary).getByTestId('summary-replaced')).toHaveTextContent('Dầu gội');
+    expect(within(summary).getByTestId('summary-special')).toHaveTextContent('L/B : Khách có hành lý gọn nhẹ');
+    expect(within(summary).getByTestId('summary-special')).toHaveTextContent('DND : Không làm phiền');
+    expect(within(summary).getByTestId('summary-note')).toHaveTextContent('Rèm hơi bẩn');
+    expect(posted).toEqual([]);
+    // "Quay lại sửa" returns to the form with every value kept.
+    await userEvent.click(screen.getByTestId('cleaning-confirm-back'));
+    expect(screen.queryByTestId('cleaning-summary')).not.toBeInTheDocument();
+    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(2);
+    expect(screen.getByTestId('cleaning-note')).toHaveValue('Rèm hơi bẩn');
+    expect(posted).toEqual([]);
+    // Only the final confirmation completes — once.
+    await userEvent.click(screen.getByTestId('cleaning-complete'));
+    await userEvent.click(await screen.findByTestId('cleaning-confirm-submit'));
     await waitFor(() =>
       expect(posted).toEqual([
         {

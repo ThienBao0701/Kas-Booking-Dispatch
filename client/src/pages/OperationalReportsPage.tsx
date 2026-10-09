@@ -38,7 +38,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, ChevronDown, Plus, RefreshCw } from 'lucide-react';
+import { Check, ChevronDown, History, Plus, RefreshCw } from 'lucide-react';
 import {
   reportsApi,
   type ReportCategory,
@@ -70,6 +70,7 @@ import {
   ServiceQualityTable,
 } from '../components/OperationalTables';
 import { AdminOperationalReportsPage } from './AdminOperationalReportsPage';
+import { DeletedHistoryDialog } from '../components/ReportManagementDialogs';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
 import {
   CATEGORY_FALLBACK_LABELS,
@@ -103,6 +104,8 @@ function ReceptionJournal() {
   const [adding, setAdding] = useState(false);
   /** "Hoàn thành vấn đề" — a view beside the categories, not a sixth-and-a-half category. */
   const [toast, setToast] = useState<string | null>(null);
+  /** "Lịch sử xóa" — the branch's deleted records. */
+  const [historyOpen, setHistoryOpen] = useState(false);
   /** "Mức độ" on II, III and IV — the server filters; the overview never does. */
   const [severity, setSeverity] = useState<Severity | ''>('');
   const levelled = category === 'GUEST_REQUEST' || category === 'FACILITY_ISSUE' || category === 'CUSTOMER_COMPLAINT';
@@ -232,6 +235,11 @@ function ReceptionJournal() {
               TỔNG QUAN
             </h2>
             <span aria-hidden="true" className="h-px flex-1 bg-slate-300" />
+            {/* The branch's deleted records — who deleted each, when and why. */}
+            <Button variant="ghost" onClick={() => setHistoryOpen(true)} data-testid="deleted-history-open" className="!px-2 !py-1 text-xs">
+              <History className="h-3.5 w-3.5" aria-hidden="true" />
+              Lịch sử xóa
+            </Button>
           </div>
           <PaymentOverview title={title('PAYMENT')} section={{ marker: CATEGORY_MARKERS.PAYMENT }} />
           {/*
@@ -460,6 +468,7 @@ function ReceptionJournal() {
         </CategoryShell>
       )}
 
+      {historyOpen ? <DeletedHistoryDialog labelOf={title} onClose={() => setHistoryOpen(false)} /> : null}
       <Toast message={toast} onDone={() => setToast(null)} />
     </div>
   );

@@ -227,6 +227,11 @@ export interface OperationalReport {
   voidedBy: { id: number; fullName: string } | null;
   voidedByName: string | null;
   voidReason: string | null;
+  /** The role of whoever deleted it; null on rows deleted before it was kept. */
+  voidedByRole?: string | null;
+  voidedByRoleLabel?: string | null;
+  /** "Nhập bù": entered after its shift by a manager, for the receptionist in `createdBy`. */
+  lateEntry?: LateEntryInfo | null;
   payment: PaymentDetail | null;
   guestRequest: GuestRequestDetail | null;
   facility: FacilityIssueDetail | null;
@@ -237,6 +242,27 @@ export interface OperationalReport {
 }
 
 export type CategoryCounts = Record<ReportCategory, number>;
+
+export interface LateEntryInfo {
+  enteredBy: { id: number; name: string };
+  enteredByRole: string | null;
+  enteredByRoleLabel: string | null;
+  reason: string | null;
+  enteredAt: string;
+}
+
+/** A finished shift a "Nhập bù" can go to, with the receptionist who worked it. */
+export interface LateEntrySession {
+  id: string;
+  branchId: number;
+  businessDate: string;
+  shiftType: ShiftType;
+  shiftName: string;
+  shiftWindow: string;
+  receptionist: { id: number | null; name: string };
+  startedAt: string;
+  closedAt: string;
+}
 
 /**
  * The drawer. `openingCash` and `endingCash` are NULLABLE, and null means
@@ -409,6 +435,18 @@ export const reportsApi = {
    */
   void: (id: string, reason: string) =>
     api.post<{ report: OperationalReport }>(`/reception/reports/${id}/void`, { reason }),
+
+  /** "Lịch sử xóa" — the deleted records the reader may see (optionally a business-date period). */
+  deleted: (params: { from?: string; to?: string; branchId?: number; category?: ReportCategory } = {}) =>
+    api.get<{ reports: OperationalReport[] }>(`/reception/reports/deleted${query(params)}`),
+
+  /** "Nhập bù" — the finished shifts of one business date at one branch. */
+  lateEntrySessions: (branchId: number, date: string) =>
+    api.get<{ sessions: LateEntrySession[] }>(`/reception/reports/late-entry/sessions${query({ branchId, date })}`),
+
+  /** "Nhập bù" — a record on its original shift, with the required reason. */
+  lateEntry: (input: NewReportInput & { shiftSessionId: string; reason: string }) =>
+    api.post<{ report: OperationalReport }>('/reception/reports/late-entry', input),
 
   /**
    * "Hoàn thành" on a guest request or a service-quality report. The handling

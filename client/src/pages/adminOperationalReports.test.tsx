@@ -1411,7 +1411,7 @@ describe('deliberately few controls', () => {
     ['FACILITY_ISSUE', ISSUE.id],
     ['CUSTOMER_COMPLAINT', 'c1'],
     ['ROOM_SERVICE', 'v1'],
-  ])('gives the Admin only the supervisor’s "Sửa" in the %s view, open or closed', async (code, id) => {
+  ])('gives the Admin only the supervisor’s "Sửa" and "Xóa" in the %s view, open or closed', async (code, id) => {
     installApiMock(shellRoutes(incidentRoutes()));
     renderApp('/app/reports');
     await chooseBranch();
@@ -1434,9 +1434,8 @@ describe('deliberately few controls', () => {
       // The reception and technician verbs, by name, anywhere on the page.
       for (const label of [
         // "Sửa" is the supervisor's correction, through Reception's own dialog;
-        // on the incident page "Xóa" is the supervisors' own (a void).
+        // "Xóa" is the supervisors' own audited void (records and incidents alike).
         /^Hủy$/,
-        ...(code === 'FACILITY_ISSUE' ? [] : [/^Xóa$/]),
         /^Tiếp nhận$/,
         /^Thêm$/,
         /^Lưu$/,
@@ -1449,6 +1448,8 @@ describe('deliberately few controls', () => {
     };
 
     assertReadOnly();
+    // The supervisor's "Xóa" is on every live journal row.
+    if (code !== 'FACILITY_ISSUE') expect(screen.getAllByTestId(`admin-delete-${id}`).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByTestId(`row-toggle-${id}`));
     if (code === 'FACILITY_ISSUE') await screen.findByText('Lịch sử xử lý');
     else await screen.findByTestId(`record-detail-${id}`);

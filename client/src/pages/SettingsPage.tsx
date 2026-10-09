@@ -157,6 +157,7 @@ const DEPARTMENTS: UserRole[] = [
   'HOUSEKEEPING',
   'TECHNICAL',
   'TECHNICAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
   'BOOKING_DEPARTMENT',
   'ADMIN',
 ];
@@ -172,6 +173,7 @@ const DEPARTMENT_TITLE: Record<UserRole, string> = {
   HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
   TECHNICAL: 'Kỹ thuật',
   TECHNICAL_MANAGER: 'Quản lý kỹ thuật',
+  TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   ADMIN: 'Admin / Quản trị',
 };
@@ -587,6 +589,7 @@ function CreateUserModal({
             <option value="BOOKING_DEPARTMENT">Bộ phận đặt phòng</option>
             <option value="TECHNICAL">Bộ phận kỹ thuật</option>
             <option value="TECHNICAL_MANAGER">Quản lý kỹ thuật</option>
+            <option value="TECHNICAL_GENERAL_MANAGER">Tổng quản lý kỹ thuật</option>
             <option value="HOUSEKEEPING">Bộ phận buồng phòng</option>
             <option value="HOUSEKEEPING_MANAGER">Quản lý buồng phòng</option>
             <option value="RECEPTION_MANAGER">Quản lý lễ tân</option>

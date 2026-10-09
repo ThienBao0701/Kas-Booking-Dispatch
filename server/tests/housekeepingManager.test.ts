@@ -240,7 +240,36 @@ describe('the branch’s staff — the accounts the Admin assigned to it', () =>
 });
 
 describe('the room work', () => {
-  it('5–8. the inspection starts the timer; completion records start, end, duration and the account', async () => {
+  it('keeps inspection and cleaning apart: an inspected room can go to another housekeeper, who starts it', async () => {
+    const [task] = await setUp(manager1, ['102'], workerId);
+    await onShift(worker, cn1);
+    setClock({ now: () => hcm(DAY, '08:00') });
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
+
+    // The manager gives the INSPECTED room to Chị Hoa; the inspection stays Chị Lan's.
+    const moved = await manager1.post(`/api/housekeeping/manager/tasks/${task!.id}/assign`).send({ assigneeUserId: worker2Id });
+    expect(moved.status).toBe(200);
+    expect(moved.body.task).toMatchObject({ state: 'INSPECTED', assignee: { id: worker2Id }, inspection: { inspectorId: workerId } });
+
+    // Only the housekeeper the room is given to can start it.
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(403);
+    await onShift(worker2, cn1);
+    setClock({ now: () => hcm(DAY, '08:20') });
+    const started = await worker2.post(`/api/housekeeping/work/tasks/${task!.id}/start`);
+    expect(started.status).toBe(200);
+    expect(started.body.task).toMatchObject({ state: 'IN_PROGRESS', startedAt: hcm(DAY, '08:20').toISOString() });
+
+    setClock({ now: () => hcm(DAY, '08:50') });
+    const done = await worker2.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send({});
+    expect(done.status).toBe(200);
+    // The cleaning time runs from the start, not from the inspection.
+    expect(done.body.task).toMatchObject({ durationSeconds: 30 * 60, cleanedBy: { id: worker2Id }, inspection: { inspectorId: workerId } });
+    // A duplicate completion writes nothing twice.
+    expect((await worker2.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send({})).status).toBe(409);
+    expect(await testPrisma.housekeepingRoomTaskEvent.count({ where: { taskId: task!.id, type: 'COMPLETED' } })).toBe(1);
+  });
+
+  it('5–8. the inspection is saved as "Đã kiểm tra"; only "Bắt đầu dọn" starts the timer; completion records start, end, duration and the account', async () => {
     const [task] = await setUp(manager1, ['101'], workerId);
     await onShift(worker, cn1);
     // 6. Opening the room, or saving "Dọn phòng" before "Kiểm phòng", starts nothing.
@@ -253,11 +282,22 @@ describe('the room work', () => {
     setClock({ now: () => hcm(DAY, '09:00') });
     const inspected = await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [{ type: 'SMOKING' }] });
     expect(inspected.status).toBe(201);
-    expect(inspected.body.task).toMatchObject({ state: 'IN_PROGRESS', startedAt: hcm(DAY, '09:00').toISOString() });
+    // "Đã kiểm tra": the inspection is saved and NOTHING has started.
+    expect(inspected.body.task).toMatchObject({ state: 'INSPECTED', stateLabel: 'Đã kiểm tra', startedAt: null, elapsedSeconds: null });
     expect(inspected.body.task.inspection).toMatchObject({ inspectorId: workerId, inspectorName: 'Chị Lan' });
     const stored = await testPrisma.roomInspection.findUniqueOrThrow({ where: { id: inspected.body.task.inspection.id } });
     expect(stored).toMatchObject({ createdByUserId: workerId, staffName: 'Chị Lan', branchId: cn1, roomNumber: '101' });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(409);
+    // Saving or completing the form before "Bắt đầu dọn" is refused — it starts nothing either.
+    expect((await worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send({})).status).toBe(409);
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send({})).status).toBe(409);
+    expect((await worker.get(`/api/housekeeping/work/tasks/${task!.id}`)).body.task).toMatchObject({ state: 'INSPECTED', startedAt: null });
+
+    // "Bắt đầu dọn" — the explicit start, once; a second press changes nothing.
+    const started = await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`);
+    expect(started.status).toBe(200);
+    expect(started.body.task).toMatchObject({ state: 'IN_PROGRESS', startedAt: hcm(DAY, '09:00').toISOString() });
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(409);
 
     // The form, validated against the catalog: ONE type per linen item, with its count.
     const cleaning = (body: Record<string, unknown>) => worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send(body);
@@ -297,7 +337,7 @@ describe('the room work', () => {
 
     // 12. The manager sees every step and every value the worker entered.
     const seen = (await manager1.get(`/api/housekeeping/manager/staff/${workerId}?from=${DAY}&to=${DAY}`)).body;
-    expect(seen.tasks[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'OPENED', 'INSPECTED', 'COMPLETED']);
+    expect(seen.tasks[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'OPENED', 'INSPECTED', 'STARTED', 'COMPLETED']);
     expect(seen.tasks[0].cleaning).toMatchObject({ quantities: { BATH_TOWEL: 2, WATER: 4 }, special: ['LB', 'DND'], linen: { BED_SHEET: { size: 'K', quantity: 2 } } });
     expect(seen.findings.map((f: { typeLabel: string }) => f.typeLabel)).toEqual(['Hút thuốc']);
     expect(seen.shifts).toHaveLength(1);
@@ -354,6 +394,7 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     const [task] = await setUp(manager1, ['101'], workerId);
     await onShift(worker, cn1);
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(200);
     const form = {
       linen: { BED_SHEET: { size: 'Q', quantity: 2 }, MATTRESS_PROTECTOR: { size: 'K', quantity: 1 } },
       quantities: { PILLOWCASE: 4 },
@@ -434,6 +475,7 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     await onShift(worker, cn1);
     setClock({ now: () => hcm(DAY, '09:00') });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(200);
     setClock({ now: () => hcm(DAY, '09:42') });
     const form = {
       linen: { BED_SHEET: { size: 'K', quantity: 2 } },
@@ -612,7 +654,8 @@ describe('"Xóa" a room work item', () => {
 
     expect((await manager1.get(`/api/housekeeping/manager/tasks?date=${DAY}`)).body.tasks).toHaveLength(0);
     const kept = await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task!.id }, include: { events: true } });
-    expect(kept).toMatchObject({ voidReason: 'Nhập nhầm phòng', state: 'IN_PROGRESS' });
+    // Inspected but never started: "Đã kiểm tra" — and it stays that way, voided.
+    expect(kept).toMatchObject({ voidReason: 'Nhập nhầm phòng', state: 'INSPECTED' });
     expect(kept.events.map((e) => e.type)).toContain('VOIDED');
     expect(await testPrisma.roomInspection.count()).toBe(1);
     expect(await testPrisma.roomIssueCollection.count({ where: { status: 'COLLECTED' } })).toBe(1);

@@ -300,16 +300,22 @@ describe('the drill-down returns records, not counts', () => {
     });
   });
 
-  it('keeps a voided row visible, marked, and out of the totals', async () => {
+  it('takes a deleted row out of the active list, the counts and the totals — and keeps it in "Lịch sử xóa"', async () => {
     const { paymentId } = await seedFullDay(letan, 'Nguyễn Văn A', { end: false });
     await letan.post(`/api/reception/reports/${paymentId}/void`).send({ reason: 'Nhập nhầm' });
 
     const res = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&category=PAYMENT`);
-    expect(res.body.reports).toHaveLength(1);
-    expect(res.body.reports[0].voided).toBe(true);
-    expect(res.body.reports[0].voidReason).toBe('Nhập nhầm');
+    expect(res.body.reports).toHaveLength(0);
+    expect(res.body.counts.PAYMENT).toBe(0);
+    expect(res.body.total).toBe(0);
     expect(res.body.cash.cashCollected).toBe(0);
+    // The drawer still says a payment was withdrawn from its totals.
     expect(res.body.cash.voidedCount).toBe(1);
+
+    const history = await admin.get(`/api/reception/reports/deleted?branchId=${cn1}`);
+    expect(history.status).toBe(200);
+    expect(history.body.reports).toHaveLength(1);
+    expect(history.body.reports[0]).toMatchObject({ id: paymentId, voided: true, voidReason: 'Nhập nhầm', voidedByRole: 'RECEPTIONIST' });
   });
 });
 
