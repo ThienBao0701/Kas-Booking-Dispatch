@@ -8,12 +8,15 @@
  * contact information the report exists to carry, and the Admin who can run this
  * report can already see it on screen.
  */
-import type { IssueStatus } from '@prisma/client';
+import type { IssueStatus, UserRole } from '@prisma/client';
 import { durationSeconds, formatDuration } from '../lib/duration';
 import type { IncidentRangeSummary } from '../issue/issueSummary';
 import { shiftDefinition } from '../shift/shiftTypes';
 import { describeLocation, ISSUE_AREA_LABELS } from '../issue/issueArea';
-import { ISSUE_CATEGORY_LABELS, type IssueDetail } from '../issue/issueService';
+import { ISSUE_CATEGORY_LABELS, serializeIssue, type IssueDetail } from '../issue/issueService';
+import { formatVnd, formatVndPlain } from '../reception/reportTypes';
+import { HANDOFF_PDF_COLUMNS, handoffLines } from './operationalPdf';
+import { dispatchChainText, repairCostOf, type TechnicalIssueView } from './technicalDispatch';
 import { INSPECTION_RESULT_LABELS, issueLifecycle } from '../issue/issueLifecycle';
 import { hcmDateTime, periodLabel, rankedTotals } from './format';
 import {
@@ -212,12 +215,46 @@ function attemptLines(issues: IssueDetail[]): AttemptLine[] {
   return lines;
 }
 
+/**
+ * "ĐIỀU PHỐI KỸ THUẬT" — per incident that was handed on: who reported it on
+ * which shift, the chain (Tổng QLKT > QLKT > kĩ thuật khách sạn / bên ngoài),
+ * who completed it and when, and the repair cost. Read from the SERIALIZED
+ * incident, so an outside contractor's company prints only for a reader allowed
+ * to see it.
+ */
+export const DISPATCH_SUMMARY_COLUMNS: Column<TechnicalIssueView>[] = assertFitsLandscape('incident dispatch summary', [
+  { header: 'Chi nhánh', width: 60, value: (i) => i.branch?.code ?? '—' },
+  { header: 'Vị trí', width: 100, value: (i) => i.locationLabel },
+  {
+    header: 'Người báo / ca',
+    width: 110,
+    value: (i) =>
+      [
+        `${i.reporterName ?? '—'} · ${hcmDateTime(new Date(i.createdAt))}`,
+        i.shiftType ? shiftDefinition(i.shiftType).name : null,
+        i.lateEntry ? `Nhập bù: ${i.lateEntry.enteredBy.name}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+  },
+  { header: 'Điều phối', width: 180, value: (i) => dispatchChainText(i) },
+  { header: 'Trạng thái', width: 80, value: (i) => i.assignmentStateLabel },
+  {
+    header: 'Hoàn thành',
+    width: 110,
+    value: (i) => (i.completedAt ? `${i.completedByName ?? '—'} · ${hcmDateTime(new Date(i.completedAt))}` : '—'),
+  },
+  { header: 'Chi phí (₫)', width: 72, value: (i) => { const c = repairCostOf(i); return c === null ? '—' : formatVndPlain(c); } },
+]);
+
 export interface IncidentReportInput {
   from: string;
   to: string;
   scope: string;
   issues: IssueDetail[];
   generatedAt: Date;
+  /** The reader — decides only what an outside contractor's contact shows. */
+  viewerRole?: UserRole;
   /**
    * The SAME counts the Admin screen shows, computed by the same query.
    *
@@ -260,6 +297,23 @@ export async function buildIncidentReportPdf(input: IncidentReportInput): Promis
     doc.addPage();
     sectionTitle(doc, 'CHI TIẾT XỬ LÝ');
     drawTable(doc, ATTEMPT_COLUMNS, attempts);
+  }
+
+  // The dispatch chain, its hand-offs with their notes, completion and cost.
+  const views = input.issues.map((i) => serializeIssue(i, input.generatedAt, input.viewerRole));
+  const dispatched = views.filter((v) => v.assignments.length > 0 || v.dispatches.length > 0);
+  if (dispatched.length > 0) {
+    doc.addPage();
+    sectionTitle(doc, 'ĐIỀU PHỐI KỸ THUẬT');
+    drawTable(doc, DISPATCH_SUMMARY_COLUMNS, dispatched);
+    const costs = dispatched.map(repairCostOf).filter((c): c is number => c !== null);
+    if (costs.length > 0) {
+      doc.moveDown(0.5);
+      doc.text(`Chi phí sửa chữa thuê ngoài: ${formatVnd(costs.reduce((a, b) => a + b, 0))}`);
+    }
+    doc.moveDown(0.8);
+    sectionTitle(doc, 'LỊCH SỬ GIAO VIỆC');
+    drawTable(doc, HANDOFF_PDF_COLUMNS, handoffLines(dispatched));
   }
 
   // Only while inspection is part of the workflow; dormant, nothing about it prints.

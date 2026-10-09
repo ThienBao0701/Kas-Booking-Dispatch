@@ -41,6 +41,7 @@ import {
 } from '../reception/reportTypes';
 import { MAX_VND } from '../reception/reportService';
 import { hcmDateTime, periodLabel } from './format';
+import { dispatchChainText, handoffEvents, repairCostOf, type HandoffEvent } from './technicalDispatch';
 import {
   FONT_BOLD,
   FONT_REGULAR,
@@ -488,11 +489,12 @@ const COMPLETED_COLUMNS = checked<Numbered<SerializedReport>>('operational compl
 
 type TechnicalRow = BranchOperationalReport['technical'][number];
 
-/** Who holds or held the job, and since when. */
-function technicianOf(i: TechnicalRow): string {
-  const who = i.assignedTechnician?.name ?? i.attempts.at(-1)?.technicianName ?? i.technicianName;
-  if (!who) return '—';
-  return i.assignedAt ? `${who} · ${hcmDateTime(new Date(i.assignedAt))}` : who;
+/** Who reported it, when, on which shift — and who entered it late, when it was a "Nhập bù". */
+function reporterCell(i: TechnicalRow): string {
+  const lines = [`${i.reporterName ?? '—'} · ${hcmDateTime(new Date(i.createdAt))}`];
+  if (i.shiftType) lines.push(shiftDefinition(i.shiftType).name);
+  if (i.lateEntry) lines.push(`Nhập bù: ${i.lateEntry.enteredBy.name}`);
+  return lines.join('\n');
 }
 
 /** The state, plus the facts that change how it is read: rework, repeat, reassignment. */
@@ -513,20 +515,55 @@ function technicalWork(i: TechnicalRow): string {
   for (const a of i.attempts) {
     if (a.outcome === 'CANNOT_REPAIR') lines.push(`Không sửa được (${a.technicianName}): ${a.reason ?? '—'}`);
   }
-  if (lines.length === 0 && i.completedAt) lines.push('Đã hoàn thành');
+  if (i.completedAt) {
+    lines.push(`Hoàn thành: ${i.completedByName ?? '—'} · ${hcmDateTime(new Date(i.completedAt))}`);
+  }
+  const cost = repairCostOf(i);
+  if (cost !== null) lines.push(`Chi phí sửa chữa: ${formatVnd(cost)}`);
   return lines.join('\n') || '—';
 }
 
-const TECHNICAL_COLUMNS = checked<Numbered<TechnicalRow>>('operational technical', [
+/**
+ * The incident table. "Điều phối" carries the dispatch chain the XLSX spreads
+ * over columns (Tổng QLKT > QLKT > kĩ thuật khách sạn / bên ngoài); the
+ * completion and the repair cost close "Giai đoạn / kết quả". The hand-offs with
+ * their notes follow in their own table.
+ */
+export const TECHNICAL_PDF_COLUMNS = checked<Numbered<TechnicalRow>>('operational technical', [
   { header: 'STT', width: 24, value: (r) => String(r.stt) },
-  { header: 'Vị trí', width: 92, value: (r) => r.locationLabel },
-  { header: 'Loại', width: 56, value: (r) => (r.category ? ISSUE_CATEGORY_TEXT[r.category] ?? r.category : '—') },
-  { header: 'Sự cố', width: 150, value: (r) => r.description },
-  { header: 'Người báo', width: 86, value: (r) => `${r.reporterName ?? '—'} · ${hcmDateTime(new Date(r.createdAt))}` },
-  { header: 'Kỹ thuật viên', width: 96, value: technicianOf },
-  { header: 'Trạng thái', width: 92, value: technicalState },
+  { header: 'Vị trí', width: 80, value: (r) => r.locationLabel },
+  { header: 'Loại', width: 50, value: (r) => (r.category ? ISSUE_CATEGORY_TEXT[r.category] ?? r.category : '—') },
+  { header: 'Sự cố', width: 130, value: (r) => r.description },
+  { header: 'Người báo / ca', width: 92, value: reporterCell },
+  { header: 'Điều phối', width: 132, value: dispatchChainText },
+  { header: 'Trạng thái', width: 86, value: technicalState },
   { header: 'Giai đoạn / kết quả', width: 150, value: technicalWork },
 ]);
+
+type HandoffLine = HandoffEvent & { stt: number; location: string };
+
+/** Every hand-off of the period's incidents, oldest first per incident, with its note. */
+export const HANDOFF_PDF_COLUMNS = checked<HandoffLine>('operational technical handoffs', [
+  { header: 'STT', width: 24, value: (r) => String(r.stt) },
+  { header: 'Vị trí', width: 80, value: (r) => r.location },
+  { header: 'Thời gian', width: 70, value: (r) => hcmDateTime(new Date(r.at)) },
+  { header: 'Hình thức', width: 90, value: (r) => r.kind },
+  { header: 'Người giao', width: 110, value: (r) => r.from || '—' },
+  { header: 'Người nhận', width: 110, value: (r) => r.to || '—' },
+  { header: 'Ghi chú / hướng dẫn', width: 140, value: (r) => r.note || '—' },
+  {
+    header: 'Hoàn thành',
+    width: 80,
+    value: (r) => (r.completedAt ? `${r.completedBy || '—'} · ${hcmDateTime(new Date(r.completedAt))}` : '—'),
+  },
+  { header: 'Chi phí (₫)', width: MONEY_COLUMN_WIDTH, value: (r) => (r.cost === null ? '—' : formatVndPlain(r.cost)) },
+]);
+
+/** The hand-off lines of a branch's incidents, numbered once across the table. */
+export function handoffLines(issues: TechnicalRow[]): HandoffLine[] {
+  let stt = 0;
+  return issues.flatMap((i) => handoffEvents(i).map((e) => ({ ...e, stt: ++stt, location: i.locationLabel })));
+}
 
 /** The fault types as the forms say them (the PDF has no access to the client's labels). */
 const ISSUE_CATEGORY_TEXT: Record<string, string> = {
@@ -565,11 +602,22 @@ function sectionBranchBody(doc: PdfDoc, data: OperationalReportData, section: Br
     }
     doc.x = doc.page.margins.left;
     const table = numbered(section.technical);
-    ensureSpace(doc, tableLeadHeight(doc, TECHNICAL_COLUMNS, table));
-    drawTable(doc, TECHNICAL_COLUMNS, table, { frame: true });
+    ensureSpace(doc, tableLeadHeight(doc, TECHNICAL_PDF_COLUMNS, table));
+    drawTable(doc, TECHNICAL_PDF_COLUMNS, table, { frame: true });
     doc.moveDown(0.8);
     const done = section.technical.filter((i) => i.assignmentState === 'COMPLETED').length;
     note(doc, `Tổng: ${section.technical.length} sự cố · đã hoàn thành ${done} · còn lại ${section.technical.length - done}`, true);
+    // The persisted cost of every completed outside job — never a typed-in total.
+    const costs = section.technical.map(repairCostOf).filter((c): c is number => c !== null);
+    if (costs.length > 0) note(doc, `Chi phí sửa chữa thuê ngoài: ${formatVnd(costs.reduce((a, b) => a + b, 0))}`, true);
+    const handoffs = handoffLines(section.technical);
+    if (handoffs.length > 0) {
+      doc.moveDown(0.8);
+      doc.x = doc.page.margins.left;
+      sectionTitle(doc, `LỊCH SỬ GIAO VIỆC — ${handoffs.length} lượt`);
+      ensureSpace(doc, tableLeadHeight(doc, HANDOFF_PDF_COLUMNS, handoffs));
+      drawTable(doc, HANDOFF_PDF_COLUMNS, handoffs, { frame: true });
+    }
     return;
   }
   sectionTitle(doc, `CA BUỒNG PHÒNG — ${section.workSegments.length} lượt làm việc tại chi nhánh`);

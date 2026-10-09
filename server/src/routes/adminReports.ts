@@ -422,6 +422,7 @@ export function createAdminReportsRouter(): Router {
         scope: await scopeLabel(q.branchId),
         issues,
         generatedAt: getClock().now(),
+        viewerRole: req.currentUser!.role,
         // The same query the screen's summary cards read, so the file and the
         // table it was printed from cannot report different figures.
         summary: await computeIncidentRangeSummary({ start, end, branchId: q.branchId }),

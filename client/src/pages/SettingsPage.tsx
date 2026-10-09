@@ -9,6 +9,7 @@ import {
   type ManagedUser,
   requiresBranch,
   requiresBranchSet,
+  isTechnicianBranchRole,
   requiresSingleBranchChoice,
 } from '../api/adminUsers';
 import { branchesApi } from '../api/bookings';
@@ -178,6 +179,8 @@ const DEPARTMENT_TITLE: Record<UserRole, string> = {
   ADMIN: 'Admin / Quản trị',
 };
 
+const TECHNICIAN_BRANCHES_TITLE = 'Chi nhánh được giao việc';
+
 /** "CN 1, 2, 3" — a Quản lý lễ tân's branches, compact. */
 function managedLabel(u: ManagedUser): string {
   const branches = u.managedBranches ?? [];
@@ -260,6 +263,8 @@ function EditUserModal({
   const [branchSet, setBranchSet] = useState<number[]>((user.managedBranches ?? []).map((b) => b.id));
   const needsBranch = user.role === 'RECEPTIONIST';
   const needsBranchSet = requiresBranchSet(user.role);
+  // Kỹ thuật viên: its "giao việc" branches — sent once at least one is ticked.
+  const technician = isTechnicianBranchRole(user.role);
   // Quản lý buồng phòng: one branch, in the checkbox list.
   const single = requiresSingleBranchChoice(user.role);
   const save = useMutation({
@@ -267,7 +272,7 @@ function EditUserModal({
       adminUsersApi.update(user.id, {
         ...(fullName.trim() !== user.fullName ? { fullName: fullName.trim() } : {}),
         ...((needsBranch || single) && branchId !== user.branch?.id ? { branchId } : {}),
-        ...(needsBranchSet ? { branchIds: branchSet } : {}),
+        ...(needsBranchSet || (technician && branchSet.length > 0) ? { branchIds: branchSet } : {}),
       }),
     onSuccess: onSaved,
   });
@@ -313,6 +318,8 @@ function EditUserModal({
           />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
+        ) : technician ? (
+          <TechnicianBranches branches={branches} value={branchSet} onChange={setBranchSet} />
         ) : (
           <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{scopeNote(user.role)}</p>
         )}
@@ -321,6 +328,18 @@ function EditUserModal({
         </p>
       </div>
     </Modal>
+  );
+}
+
+/** A Kỹ thuật viên's "giao việc" branches, with what they mean. */
+function TechnicianBranches({ branches, value, onChange }: { branches: Branch[]; value: number[]; onChange: (next: number[]) => void }) {
+  return (
+    <div className="space-y-1.5">
+      <BranchChecklist branches={branches} value={value} onChange={onChange} title={TECHNICIAN_BRANCHES_TITLE} />
+      <p className="text-xs text-slate-500" data-testid="technician-branches-note">
+        Chỉ được giao sự cố của các chi nhánh đã chọn. Chưa chọn chi nhánh nào thì không thể được giao việc.
+      </p>
+    </div>
   );
 }
 
@@ -407,6 +426,14 @@ function DepartmentTable({
       render: (u) =>
         requiresBranchSet(u.role) ? (
           managedLabel(u)
+        ) : isTechnicianBranchRole(u.role) ? (
+          (u.managedBranches ?? []).length > 0 ? (
+            managedLabel(u)
+          ) : (
+            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" data-testid={`needs-branch-${u.id}`}>
+              Cần gán chi nhánh
+            </span>
+          )
         ) : u.role === 'HOUSEKEEPING' && !u.branch ? (
           <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" data-testid={`needs-branch-${u.id}`}>
             Cần gán chi nhánh
@@ -523,6 +550,8 @@ function CreateUserModal({
   const single = requiresSingleBranchChoice(form.role);
   const needsBranch = requiresBranch(form.role) && !single;
   const needsBranchSet = requiresBranchSet(form.role);
+  // A NEW Kỹ thuật viên is created with its "giao việc" branches.
+  const technician = isTechnicianBranchRole(form.role);
   const [branchSet, setBranchSet] = useState<number[]>([]);
 
   const create = useMutation({
@@ -533,7 +562,7 @@ function CreateUserModal({
       adminUsersApi.create({
         ...form,
         branchId: needsBranch || single ? form.branchId : undefined,
-        branchIds: needsBranchSet ? branchSet : undefined,
+        branchIds: needsBranchSet || technician ? branchSet : undefined,
       }),
     onSuccess: () => {
       setForm(EMPTY);
@@ -547,7 +576,7 @@ function CreateUserModal({
     form.fullName.trim() &&
     form.temporaryPassword.length >= 8 &&
     (!(needsBranch || single) || (form.branchId ?? 0) > 0) &&
-    (!needsBranchSet || branchSet.length > 0);
+    (!(needsBranchSet || technician) || branchSet.length > 0);
 
   return (
     <Modal
@@ -622,6 +651,8 @@ function CreateUserModal({
           />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
+        ) : technician ? (
+          <TechnicianBranches branches={branches} value={branchSet} onChange={setBranchSet} />
         ) : (
           <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{scopeNote(form.role ?? 'RECEPTIONIST')}</p>
         )}

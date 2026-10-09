@@ -84,6 +84,8 @@ function routes(user: unknown, extra: Record<string, (init: RequestInit) => { st
     }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [B1, B2] } }),
     'GET /api/issues/technicians': () => ({ status: 200, body: { technicians: [{ id: 4, fullName: 'Kỹ thuật viên trực' }] } }),
+    // The room's dialog asks for the technicians of the incidents' branch only.
+    'GET /api/issues/technicians?branchId=1': () => ({ status: 200, body: { technicians: [{ id: 4, fullName: 'Kỹ thuật viên trực' }] } }),
     [LIST]: () => ({
       status: 200,
       body: { issues: ISSUES, pagination: { page: 1, pageSize: 500, total: ISSUES.length, totalPages: 1 } },

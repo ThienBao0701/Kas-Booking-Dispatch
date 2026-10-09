@@ -39,7 +39,7 @@ import { requireCapability } from '../auth/capabilities';
 import { branchScopeOf } from '../auth/branchScope';
 import { setOpeningCash, shiftCashSummary, sumPayments, withEndingCash } from '../reception/cashService';
 import { MAX_VND } from '../reception/reportService';
-import { captureShiftContext, requireOpenSession } from '../shift/shiftService';
+import { requireOpenSession } from '../shift/shiftService';
 import { COMPLETION_ARCHIVE_HOURS } from '../reception/completionArchive';
 import { resolveReportPeriod } from '../reception/businessDate';
 import { HOTEL_DELIVERY_ARCHIVE_HOURS } from '../reception/deliveryLifecycle';
@@ -348,11 +348,14 @@ export function createReceptionReportsRouter(): Router {
       const q = listSchema.parse(req.query);
       const range = q.from && q.to ? hcmRange(q.from, q.to) : null;
       const now = getClock().now();
+      // A deleted / withdrawn record is not an active one: it leaves the journal,
+      // its counts and totals, and is read in "Lịch sử xóa" (/reception/reports/deleted).
       const filter = {
         category: q.category,
         shiftSessionId: q.shiftSessionId,
         from: range?.start,
         to: range?.end,
+        includeVoided: false,
       };
       const [reports, counts] = await Promise.all([
         listReports(actor(user), filter),
@@ -373,8 +376,7 @@ export function createReceptionReportsRouter(): Router {
       const user = req.currentUser!;
       const now = getClock().now();
       const q = activeSchema.parse(req.query);
-      const shift = await captureShiftContext(actor(user));
-      const { reports, totals } = await listActiveJournal(actor(user), now, shift.shiftSessionId, undefined, q.severity);
+      const { reports, totals } = await listActiveJournal(actor(user), now, undefined, q.severity);
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),
         // Each category's full count: the list is a page, and the screen says so.
@@ -458,7 +460,7 @@ export function createReceptionReportsRouter(): Router {
     '/reception/reports/:id/void',
     requireAuth,
     requirePasswordChanged,
-    requireCapability('reports.delete', 'reports.voidOwnBranch'),
+    requireCapability('reports.delete', 'reports.voidOwnShiftEntry'),
     (req, res, next) => {
       (async () => {
         const user = req.currentUser!;

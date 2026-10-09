@@ -241,6 +241,14 @@ export interface Issue {
   /** Which shift reported it, when the reporter was on one. */
   shiftType: string | null;
   shiftReceptionistName: string | null;
+  /** "Nhập bù": a manager entered it late for the shift's receptionist (the reporter). Absent on older servers. */
+  lateEntry?: {
+    enteredBy: { id: number | null; name: string };
+    enteredByRole: string | null;
+    enteredByRoleLabel: string | null;
+    reason: string | null;
+    enteredAt: string;
+  } | null;
   /** The CURRENT assignment's elapsed time — running while it is being worked. */
   durationSeconds: number | null;
   durationLabel: string | null;
@@ -556,6 +564,25 @@ export interface TechnicalCounts {
   inspectionEnabled: boolean;
 }
 
+/** The multipart body of an incident report — only the fields its area uses. */
+function issueForm(input: NewIssueInput): FormData {
+  const form = new FormData();
+  if (input.branchId !== undefined) form.append('branchId', String(input.branchId));
+  form.append('areaCategory', input.areaCategory);
+  form.append('description', input.description);
+  if (input.cause?.trim()) form.append('cause', input.cause.trim());
+  // Only the fields this area actually uses are sent; the server drops any
+  // that do not belong to it anyway.
+  if (input.category) form.append('category', input.category);
+  if (input.severity) form.append('severity', input.severity);
+  if (input.roomNumber?.trim()) form.append('roomNumber', input.roomNumber.trim());
+  if (input.floorNumber?.trim()) form.append('floorNumber', input.floorNumber.trim());
+  if (input.areaSubtype) form.append('areaSubtype', input.areaSubtype);
+  if (input.locationDetail?.trim()) form.append('locationDetail', input.locationDetail.trim());
+  if (input.photo) form.append('image', input.photo);
+  return form;
+}
+
 function query(params: Record<string, string | number | undefined>): string {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -632,23 +659,19 @@ export const issuesApi = {
 
   detail: (id: string) => api.get<{ issue: Issue }>(`/issues/${id}`),
 
-  create: (input: NewIssueInput) => {
-    const form = new FormData();
-    if (input.branchId !== undefined) form.append('branchId', String(input.branchId));
-    form.append('areaCategory', input.areaCategory);
-    form.append('description', input.description);
-    if (input.cause?.trim()) form.append('cause', input.cause.trim());
-    // Only the fields this area actually uses are sent; the server drops any
-    // that do not belong to it anyway.
-    if (input.category) form.append('category', input.category);
-    if (input.severity) form.append('severity', input.severity);
-    if (input.roomNumber?.trim()) form.append('roomNumber', input.roomNumber.trim());
-    if (input.floorNumber?.trim()) form.append('floorNumber', input.floorNumber.trim());
-    if (input.areaSubtype) form.append('areaSubtype', input.areaSubtype);
-    if (input.locationDetail?.trim()) form.append('locationDetail', input.locationDetail.trim());
-    if (input.photo) form.append('image', input.photo);
-    return api.postForm<{ issue: Issue }>('/issues', form);
+  create: (input: NewIssueInput) => api.postForm<{ issue: Issue }>('/issues', issueForm(input)),
+
+  /**
+   * "Nhập bù" — a receptionist's missed incident report, entered by a manager on
+   * the original finished shift. The server takes the branch from the shift.
+   */
+  createLate: (input: NewIssueInput & { shiftSessionId: string; reason: string }) => {
+    const form = issueForm({ ...input, branchId: undefined });
+    form.append('shiftSessionId', input.shiftSessionId);
+    form.append('reason', input.reason);
+    return api.postForm<{ issue: Issue; reportId: string }>('/issues/late-entry', form);
   },
+
 
   /** "Sửa vấn đề" — corrects an open incident; the server keeps the old words. */
   update: (id: string, input: UpdateIssueInput) => api.put<{ issue: Issue }>(`/issues/${id}`, input),
@@ -678,8 +701,12 @@ export const issuesApi = {
     input: { repairCost: number; verdict: ReportVerdict; resolution?: string; incorrectReason?: string },
   ) => api.post<{ issue: Issue }>(`/issues/${id}/complete-external`, input),
 
-  /** Active technicians by full name, for the assignment picker. */
-  technicians: () => api.get<{ technicians: { id: number; fullName: string }[] }>('/issues/technicians'),
+  /**
+   * Active technicians by full name. With a branch: those assigned to it — the
+   * only ones an incident there can be given to. Without: all, for filters.
+   */
+  technicians: (branchId?: number) =>
+    api.get<{ technicians: { id: number; fullName: string }[] }>(`/issues/technicians${query({ branchId })}`),
 
   /**
    * "Có thể bị trùng": open incidents and recent completions with the same

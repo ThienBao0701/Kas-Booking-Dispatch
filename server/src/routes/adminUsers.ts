@@ -51,6 +51,15 @@ const GLOBAL_ROLES: readonly string[] = [
 /** The roles whose branches are a SET of ticked boxes (at least one) — `auth/branchScope.ts`'s list. */
 const BRANCH_SET_ROLES: readonly string[] = SHARED_BRANCH_SET_ROLES;
 
+/**
+ * The roles that MAY carry a branch set. A Kỹ thuật viên's ticked branches are
+ * where it can be given work ("Giao kỹ thuật" lists and accepts only those). It
+ * is optional so an account created before branches existed keeps working until
+ * the Admin ticks them — such a technician simply cannot be assigned anywhere.
+ * It never widens what the technician itself sees.
+ */
+const BRANCH_SET_ALLOWED_ROLES: readonly string[] = [...BRANCH_SET_ROLES, 'TECHNICAL'];
+
 /** Vietnamese department names, for the messages this endpoint returns. */
 const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   RECEPTIONIST: 'lễ tân',
@@ -100,8 +109,8 @@ const createUserSchema = z
     message: 'Tài khoản quản lý phải được gán ít nhất một chi nhánh.',
     path: ['branchIds'],
   })
-  .refine((v) => BRANCH_SET_ROLES.includes(v.role) || v.branchIds === undefined, {
-    message: 'Chỉ quản lý lễ tân, quản lý kỹ thuật và tổng quản lý kỹ thuật mới được gán nhiều chi nhánh.',
+  .refine((v) => BRANCH_SET_ALLOWED_ROLES.includes(v.role) || v.branchIds === undefined, {
+    message: 'Chỉ quản lý lễ tân, quản lý kỹ thuật, tổng quản lý kỹ thuật và kỹ thuật viên mới được gán nhiều chi nhánh.',
     path: ['branchIds'],
   });
 
@@ -238,7 +247,7 @@ export function createAdminUsersRouter(): Router {
         throw ApiError.conflict('Tên đăng nhập đã tồn tại.');
       }
 
-      const managed = BRANCH_SET_ROLES.includes(body.role) ? await usableBranchIds(body.branchIds ?? []) : [];
+      const managed = BRANCH_SET_ALLOWED_ROLES.includes(body.role) ? await usableBranchIds(body.branchIds ?? []) : [];
 
       const created = await prisma.user.create({
         data: {
@@ -285,8 +294,8 @@ export function createAdminUsersRouter(): Router {
       */
       let managed: number[] | null = null;
       if (body.branchIds !== undefined) {
-        if (!BRANCH_SET_ROLES.includes(existing.role)) {
-          throw ApiError.validation('Chỉ quản lý lễ tân, quản lý kỹ thuật và tổng quản lý kỹ thuật mới được gán nhiều chi nhánh.');
+        if (!BRANCH_SET_ALLOWED_ROLES.includes(existing.role)) {
+          throw ApiError.validation('Chỉ quản lý lễ tân, quản lý kỹ thuật, tổng quản lý kỹ thuật và kỹ thuật viên mới được gán nhiều chi nhánh.');
         }
         managed = await usableBranchIds(body.branchIds);
       }

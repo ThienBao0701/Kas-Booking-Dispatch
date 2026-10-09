@@ -6,6 +6,7 @@ import type {
   IssueSeverity,
   IssueStatus,
   Prisma,
+  ShiftType,
   UserRole,
 } from '@prisma/client';
 import { Prisma as PrismaNS } from '@prisma/client';
@@ -409,6 +410,20 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now(),
     /** Which shift reported it, when the reporter was on one. */
     shiftType: issue.shiftType,
     shiftReceptionistName: issue.shiftSession?.receptionistName ?? null,
+    /**
+     * "Nhập bù": a manager entered this report late, for the receptionist of the
+     * shift above (the reporter). `enteredAt` is the real entry time.
+     */
+    lateEntry:
+      issue.enteredByUserId !== null || issue.lateEntryReason !== null
+        ? {
+            enteredBy: { id: issue.enteredByUserId, name: issue.enteredByNameSnapshot ?? '' },
+            enteredByRole: issue.enteredByRole,
+            enteredByRoleLabel: issue.enteredByRole ? roleLabel(issue.enteredByRole) : null,
+            reason: issue.lateEntryReason,
+            enteredAt: issue.createdAt.toISOString(),
+          }
+        : null,
 
     /**
      * How long the CURRENT assignment has taken — running while IN_PROGRESS,
@@ -656,14 +671,43 @@ export interface CreateIssueInput extends AreaInput {
 }
 
 /**
+ * "NHẬP BÙ" for an incident — resolved by the caller (`createLateIncident`)
+ * from a FINISHED shift of the actor's scope; never from the request.
+ */
+export interface IssueLateEntry {
+  shiftSessionId: string;
+  shiftType: ShiftType;
+  branchId: number;
+  /** The receptionist who worked that shift: the reporter of record. */
+  reporter: { userId: number; name: string };
+  reason: string;
+  /** The real entry time — the incident's `createdAt`, and its journal entry's. */
+  now: Date;
+  /** Written in the SAME transaction as the incident (the journal entry). */
+  inTransaction: (tx: PrismaNS.TransactionClient, issueId: string) => Promise<void>;
+}
+
+/**
  * Creates a new issue report. The reporter is the current user; a receptionist's
  * branch is always taken from their session (a client-supplied branchId is
  * ignored, so a report can never be filed against another branch). Every active
  * Admin is notified.
+ *
+ * With `lateEntry` (a manager's "Nhập bù"): the branch, shift and reporter are
+ * the original shift's, `enteredBy…` is the manager, `createdAt` stays the real
+ * entry time — and every rule below (location, room catalog, repeat link,
+ * photo) applies exactly as to a live report.
  */
-export async function createIssue(input: CreateIssueInput, actor: Actor): Promise<IssueDetail> {
+export async function createIssue(
+  input: CreateIssueInput,
+  actor: Actor,
+  lateEntry?: IssueLateEntry,
+): Promise<IssueDetail> {
   let branchId: number | null;
-  if (actor.role === 'RECEPTIONIST') {
+  if (lateEntry) {
+    if (!can(actor.role, 'reports.lateEntry')) throw ApiError.forbidden('Bạn không có quyền nhập bù báo cáo.');
+    branchId = assertBranchInScope(actor, lateEntry.branchId);
+  } else if (actor.role === 'RECEPTIONIST') {
     branchId = actor.branchId;
   } else if (isReceptionSupervisor(actor.role)) {
     // A supervisor names ONE branch of its scope — never "all", never another's.
@@ -707,30 +751,47 @@ export async function createIssue(input: CreateIssueInput, actor: Actor): Promis
     notification are built on; the person on the desk is a separate question that
     `shiftSessionId` answers without overwriting the first one.
   */
-  const shift = await captureShiftContext(actor);
+  const shift = lateEntry
+    ? { shiftSessionId: lateEntry.shiftSessionId, shiftType: lateEntry.shiftType }
+    : await captureShiftContext(actor);
 
-  const issue = await prisma.hotelIssue.create({
-    data: {
-      branchId,
-      ...area,
-      // Only some areas ask for a fault type; the rest store none rather than a
-      // default nobody chose.
-      category,
-      severity: input.severity === undefined ? DEFAULT_SEVERITY : parseSeverity(input.severity),
-      description,
-      // Kept exactly as reported. A technician's later determination is stored
-      // on their attempt, never written over this.
-      cause: optionalText(input.cause),
-      status: 'NEW',
-      reportedByUserId: actor.id,
-      reportedByNameSnapshot: actor.fullName,
-      reportedByRole: actor.role,
-      repeatOfIssueId: repeatOf?.id ?? null,
-      shiftSessionId: shift.shiftSessionId,
-      shiftType: shift.shiftType,
-    },
-    include: ISSUE_INCLUDE,
-  });
+  const data = {
+    branchId,
+    ...area,
+    // Only some areas ask for a fault type; the rest store none rather than a
+    // default nobody chose.
+    category,
+    severity: input.severity === undefined ? DEFAULT_SEVERITY : parseSeverity(input.severity),
+    description,
+    // Kept exactly as reported. A technician's later determination is stored
+    // on their attempt, never written over this.
+    cause: optionalText(input.cause),
+    status: 'NEW' as const,
+    reportedByUserId: lateEntry ? lateEntry.reporter.userId : actor.id,
+    reportedByNameSnapshot: lateEntry ? lateEntry.reporter.name : actor.fullName,
+    reportedByRole: lateEntry ? ('RECEPTIONIST' as const) : actor.role,
+    repeatOfIssueId: repeatOf?.id ?? null,
+    shiftSessionId: shift.shiftSessionId,
+    shiftType: shift.shiftType,
+    ...(lateEntry
+      ? {
+          enteredByUserId: actor.id,
+          enteredByNameSnapshot: actor.fullName,
+          enteredByRole: actor.role,
+          lateEntryReason: lateEntry.reason,
+          createdAt: lateEntry.now,
+        }
+      : {}),
+  } satisfies PrismaNS.HotelIssueUncheckedCreateInput;
+
+  // A late entry lands with its journal entry, or not at all.
+  const issue = lateEntry
+    ? await prisma.$transaction(async (tx) => {
+        const created = await tx.hotelIssue.create({ data, select: { id: true } });
+        await lateEntry.inTransaction(tx, created.id);
+        return created;
+      })
+    : await prisma.hotelIssue.create({ data, select: { id: true } });
 
   if (input.photo && mime) {
     // Now that the id exists, generate the definitive file name and persist it.
@@ -1095,9 +1156,20 @@ export async function assignIssues(
   }
   const technician = await prisma.user.findFirst({
     where: { id: input.technicianUserId, role: 'TECHNICAL', active: true },
-    select: { id: true, fullName: true },
+    select: { id: true, fullName: true, branchAssignments: { select: { branchId: true } } },
   });
   if (!technician) throw ApiError.validation('Kỹ thuật viên không hợp lệ hoặc đã ngừng hoạt động.');
+  // The technician must SERVE every incident's branch (the Admin's ticked
+  // branches on the account) — a technician id typed into the request never
+  // reaches a branch the account was not given.
+  const served = new Set(technician.branchAssignments.map((a) => a.branchId));
+  const outside = issues.find((i) => !served.has(i.branchId));
+  if (outside) {
+    throw ApiError.validation('Kỹ thuật viên này chưa được phân công cho chi nhánh của sự cố.', {
+      issueId: outside.id,
+      branchId: outside.branchId,
+    });
+  }
   const already = issues.find((i) => i.assignedTechnicianUserId === technician.id);
   if (already) {
     throw ApiError.conflict(
@@ -1638,10 +1710,21 @@ export async function completeExternal(
   return updated;
 }
 
-/** The active technicians an incident can be given to — full names, never usernames. */
-export async function listAssignableTechnicians(): Promise<{ id: number; fullName: string }[]> {
+/**
+ * The active technicians — full names, never usernames.
+ *
+ * With a branch: only those the Admin assigned to it (UserBranchAssignment), the
+ * same rule `assignIssues` enforces. Without one: every active technician, for
+ * the history filters (a past repair may have been done anywhere) — never for
+ * choosing who gets a job.
+ */
+export async function listAssignableTechnicians(branchId?: number): Promise<{ id: number; fullName: string }[]> {
   return prisma.user.findMany({
-    where: { role: 'TECHNICAL', active: true },
+    where: {
+      role: 'TECHNICAL',
+      active: true,
+      ...(branchId !== undefined ? { branchAssignments: { some: { branchId } } } : {}),
+    },
     select: { id: true, fullName: true },
     orderBy: { fullName: 'asc' },
   });

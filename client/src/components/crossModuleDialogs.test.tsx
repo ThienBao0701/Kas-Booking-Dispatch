@@ -228,8 +228,8 @@ describe('Nhập bù', () => {
     await userEvent.selectOptions(screen.getByTestId('late-branch'), '11');
     await userEvent.type(screen.getByTestId('late-date'), '2026-10-05');
     await userEvent.click(await screen.findByTestId('late-session-s9'));
-    // An incident is reported live — never a late entry.
-    expect(screen.queryByTestId('late-category-FACILITY_ISSUE')).not.toBeInTheDocument();
+    // Every category the desk reports is offered, the facility incident included.
+    expect(screen.getByTestId('late-category-FACILITY_ISSUE')).toBeInTheDocument();
     await userEvent.click(screen.getByTestId('late-category-GUEST_REQUEST'));
     expect(screen.getByTestId('late-reason-first')).toBeInTheDocument();
     expect(screen.queryByTestId('guest-request-form')).not.toBeInTheDocument();
@@ -263,6 +263,66 @@ const ISSUE = {
   externalWork: { contractor: { name: 'Điện lạnh Phát', company: 'Công ty Phát', typeLabel: 'Công ty' } },
 } as unknown as Issue;
 
+describe('Nhập bù — a facility incident', () => {
+  it('opens the incident form for the chosen shift and posts it to the late-entry endpoint with the reason', async () => {
+    let sent: FormData | null = null;
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTION_MANAGER } }),
+      'GET /api/reception/reports/late-entry/sessions?branchId=11&date=2026-10-05': () => ({
+        status: 200,
+        body: {
+          sessions: [
+            {
+              id: 's9',
+              branchId: 11,
+              businessDate: '2026-10-05',
+              shiftType: 'A',
+              shiftName: 'Ca A',
+              shiftWindow: '06:00 – 14:00',
+              receptionist: { id: 2, name: 'Nguyễn A' },
+              startedAt: '2026-10-04T23:00:00.000Z',
+              closedAt: '2026-10-05T07:00:00.000Z',
+            },
+          ],
+        },
+      }),
+      'GET /api/branches/11/rooms': () => ({ status: 200, body: { branchId: 11, rooms: ['301', '302'], floors: null } }),
+      // The duplicate check runs as for any report.
+      'GET /api/issues/similar?branchId=11&areaCategory=ROOM&roomNumber=301&category=AIR_CONDITIONER': () => ({
+        status: 200,
+        body: { open: [], recent: [] },
+      }),
+      'POST /api/issues/late-entry': (init) => {
+        sent = init.body as FormData;
+        return { status: 201, body: { issue: { id: 'i9' }, reportId: 'r9' } };
+      },
+    });
+    const onCreated = vi.fn();
+    wrap(<LateEntryDialog branches={[BRANCH]} labelOf={(c) => c} onClose={() => undefined} onCreated={onCreated} />);
+
+    await userEvent.selectOptions(screen.getByTestId('late-branch'), '11');
+    await userEvent.type(screen.getByTestId('late-date'), '2026-10-05');
+    await userEvent.click(await screen.findByTestId('late-session-s9'));
+    await userEvent.click(screen.getByTestId('late-category-FACILITY_ISSUE'));
+    expect(screen.queryByTestId('late-facility-open')).not.toBeInTheDocument();
+    await userEvent.type(screen.getByTestId('late-reason'), 'Lễ tân quên báo');
+    await userEvent.click(await screen.findByTestId('late-facility-open'));
+
+    await userEvent.selectOptions(await screen.findByTestId('issue-room-select'), '301');
+    await userEvent.type(screen.getByLabelText('Sự cố'), 'Máy lạnh chảy nước');
+    await userEvent.click(screen.getByTestId('issue-submit'));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    const form = sent as unknown as FormData;
+    expect(form.get('shiftSessionId')).toBe('s9');
+    expect(form.get('reason')).toBe('Lễ tân quên báo');
+    expect(form.get('roomNumber')).toBe('301');
+    expect(form.get('description')).toBe('Máy lạnh chảy nước');
+    // The shift decides the branch — none is sent.
+    expect(form.get('branchId')).toBeNull();
+  });
+});
+
 describe('Giao việc — Tổng quản lý kỹ thuật', () => {
   it('A. Nhân sự needs a manager and instructions', async () => {
     const sent: Record<string, unknown>[] = [];
@@ -295,7 +355,8 @@ describe('Giao việc — Tổng quản lý kỹ thuật', () => {
     const sent: Record<string, unknown>[] = [];
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
-      'GET /api/issues/technicians': () => ({ status: 200, body: { technicians: [{ id: 4, fullName: 'Kỹ thuật Tâm' }] } }),
+      // Only the technicians of the incident's branch are asked for.
+      'GET /api/issues/technicians?branchId=11': () => ({ status: 200, body: { technicians: [{ id: 4, fullName: 'Kỹ thuật Tâm' }] } }),
       'POST /api/issues/i1/assign': (init) => {
         sent.push(body(init));
         return { status: 200, body: { issue: ISSUE } };
@@ -309,6 +370,20 @@ describe('Giao việc — Tổng quản lý kỹ thuật', () => {
     await userEvent.click(screen.getByTestId('give-work-confirm'));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(sent).toEqual([{ technicianUserId: 4 }]);
+  });
+});
+
+describe('Giao việc — a branch without technicians', () => {
+  it('says the Admin must assign technicians to the branch, and offers nobody', async () => {
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
+      'GET /api/issues/technicians?branchId=11': () => ({ status: 200, body: { technicians: [] } }),
+    });
+    wrap(<GiveWorkDialog issue={ISSUE} onClose={() => undefined} onDone={() => undefined} />);
+    await userEvent.click(screen.getByTestId('give-work-TECHNICIAN'));
+    expect(await screen.findByTestId('no-branch-technicians')).toHaveTextContent('Chi nhánh này chưa có kỹ thuật viên được phân công');
+    expect(within(screen.getByTestId('give-work-person')).getAllByRole('option')).toHaveLength(1);
+    expect(screen.getByTestId('give-work-confirm')).toBeDisabled();
   });
 });
 

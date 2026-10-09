@@ -53,8 +53,8 @@ export function GiveWorkDialog({ issue, onClose, onDone }: { issue: Issue; onClo
     enabled: mode === 'MANAGER',
   });
   const technicians = useQuery({
-    queryKey: ['issues', 'technicians'],
-    queryFn: () => issuesApi.technicians(),
+    queryKey: ['issues', 'technicians', issue.branchId],
+    queryFn: () => issuesApi.technicians(issue.branchId),
     enabled: mode === 'TECHNICIAN',
   });
   const people = mode === 'MANAGER' ? (managers.data?.managers ?? []) : (technicians.data?.technicians ?? []);
@@ -140,6 +140,11 @@ export function GiveWorkDialog({ issue, onClose, onDone }: { issue: Issue; onClo
             </label>
             {mode === 'MANAGER' && managers.isSuccess && people.length === 0 ? (
               <p className="text-xs text-amber-800">Chi nhánh này chưa có quản lý kỹ thuật được phân công.</p>
+            ) : null}
+            {mode === 'TECHNICIAN' && technicians.isSuccess && people.length === 0 ? (
+              <p className="text-xs text-amber-800" data-testid="no-branch-technicians">
+                Chi nhánh này chưa có kỹ thuật viên được phân công. Admin cần chọn chi nhánh cho tài khoản kỹ thuật viên.
+              </p>
             ) : null}
             <label className="block text-sm font-medium text-slate-700">
               Ghi chú / hướng dẫn công việc{mode === 'MANAGER' ? ' (bắt buộc)' : ' (không bắt buộc)'}

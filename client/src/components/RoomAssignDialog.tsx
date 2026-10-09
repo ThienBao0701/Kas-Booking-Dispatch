@@ -30,8 +30,9 @@ export function RoomAssignDialog({
   onAssigned: (count: number, technicianName: string) => void;
 }) {
   const technicians = useQuery({
-    queryKey: ['issues', 'technicians'],
-    queryFn: () => issuesApi.technicians(),
+    // One room, one branch: only the technicians assigned to it.
+    queryKey: ['issues', 'technicians', issues[0]?.branchId],
+    queryFn: () => issuesApi.technicians(issues[0]?.branchId),
     staleTime: 60_000,
   });
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
@@ -143,6 +144,11 @@ export function RoomAssignDialog({
         <p className="text-xs text-slate-500">
           Chỉ các sự cố được chọn mới được giao; sự cố còn lại vẫn chờ giao kỹ thuật. Kỹ thuật viên nhận một thông báo cho cả nhóm.
         </p>
+        {technicians.isSuccess && technicians.data.technicians.length === 0 ? (
+          <p className="text-xs text-amber-800" data-testid="no-branch-technicians">
+            Chi nhánh này chưa có kỹ thuật viên được phân công. Admin cần chọn chi nhánh cho tài khoản kỹ thuật viên.
+          </p>
+        ) : null}
         {technicians.isError ? <ErrorAlert>{toUserMessage(technicians.error)}</ErrorAlert> : null}
         {assign.isError ? <ErrorAlert>{toUserMessage(assign.error)}</ErrorAlert> : null}
       </div>

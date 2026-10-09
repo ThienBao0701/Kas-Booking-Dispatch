@@ -20,6 +20,7 @@
  * click and stays one sheet.
  */
 import ExcelJS from 'exceljs';
+import { contractorContactOf, contractorOf, generalManagerOf, handoffEvents, repairCostOf } from './technicalDispatch';
 import type { BranchOperationalReport, OperationalReportData } from '../reception/operationalReport';
 import type { SerializedReport } from '../reception/reportService';
 import { CATEGORY_LABELS, CATEGORY_NUMERALS, ROOM_SERVICE_PRICE_LABEL } from '../reception/reportTypes';
@@ -723,38 +724,14 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
         completedAt: when(i.completedAt),
         completedBy: i.completedByName ?? '',
         shift: i.shiftType ?? '',
-        generalManager: i.dispatches.filter((d) => d.kind === 'TO_MANAGER').at(-1)?.assignedByName ?? '',
+        generalManager: generalManagerOf(i),
         manager: i.assignedManager?.name ?? '',
-        contractor: externalLabel(i.dispatches.filter((d) => d.kind === 'TO_EXTERNAL').at(-1)),
-        contractorContact: i.dispatches
-          .filter((d) => d.kind === 'TO_EXTERNAL')
-          .map((d) => [d.contractor?.phone, d.contractor?.specialty].filter(Boolean).join(' · '))
-          .filter(Boolean)
-          .join('\n'),
+        contractor: contractorOf(i),
+        contractorContact: contractorContactOf(i),
         // The persisted cost of every completed outside job, never a typed-in total.
-        repairCost: costOf(i.dispatches),
+        repairCost: repairCostOf(i),
       });
-      const events = [
-        ...i.assignments.map((a) => ({
-          at: a.createdAt,
-          kind: 'Giao kĩ thuật khách sạn',
-          from: `${a.assignedByName}`,
-          to: a.technicianName,
-          note: a.note ?? '',
-          completedAt: null as string | null,
-          cost: null as number | null,
-        })),
-        ...i.dispatches.map((d) => ({
-          at: d.createdAt,
-          kind: d.kind === 'TO_MANAGER' ? 'Giao quản lý kỹ thuật' : 'Giao kĩ thuật bên ngoài',
-          from: `${d.assignedByName}${d.assignedByRoleLabel ? ` (${d.assignedByRoleLabel})` : ''}`,
-          to: d.kind === 'TO_MANAGER' ? (d.manager?.name ?? '') : externalLabel(d),
-          note: d.note,
-          completedAt: d.completedAt,
-          cost: d.repairCost,
-        })),
-      ].sort((a, b) => a.at.localeCompare(b.at));
-      for (const e of events) {
+      for (const e of handoffEvents(i)) {
         handoffs.addRow({
           branch: branchLabel(section),
           location: i.locationLabel,
@@ -785,20 +762,6 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
     });
   }
   return Buffer.from(await wb.xlsx.writeBuffer());
-}
-
-type SerializedDispatch = OperationalReportData['branches'][number]['technical'][number]['dispatches'][number];
-
-/** "Nguyễn Văn A — Công ty ABC" / "Nguyễn Văn B (Cá nhân)". */
-function externalLabel(d: SerializedDispatch | undefined): string {
-  if (!d?.contractor) return '';
-  return d.contractor.company ? `${d.contractor.name} — ${d.contractor.company}` : `${d.contractor.name ?? ''} (${d.contractor.typeLabel})`;
-}
-
-/** The sum of the recorded costs of completed outside jobs, or empty when there were none. */
-function costOf(dispatches: SerializedDispatch[]): number | null {
-  const costs = dispatches.filter((d) => d.repairCost !== null).map((d) => d.repairCost!);
-  return costs.length ? costs.reduce((a, b) => a + b, 0) : null;
 }
 
 /* ------------------------------ Buồng phòng ------------------------------ */

@@ -24,6 +24,7 @@ import { Modal } from './Modal';
 import { QueryState } from './PageState';
 import { NewPaymentForm } from './PaymentLedger';
 import { DeliveryForm, GuestRequestForm, RoomServiceForm, ServiceQualityForm } from './OperationalForms';
+import { NewIssueModal } from './IncidentReporting';
 import { CATEGORY_MARKERS, CATEGORY_ORDER, PAYMENT_SOURCE_FALLBACK } from '../lib/reportCategories';
 import { ReportSubmitContext, type ReportSubmit } from '../lib/reportSubmit';
 import { formatDateTime, hcmToday } from '../lib/format';
@@ -120,8 +121,12 @@ function DeletedRow({ report: r, label }: { report: OperationalReport; label: st
  * Nhập bù
  * ------------------------------------------------------------------ */
 
-/** The categories a late entry may carry — an incident is reported now, with its own lifecycle. */
-const LATE_CATEGORIES = CATEGORY_ORDER.filter((c) => c !== 'FACILITY_ISSUE');
+/**
+ * Every category a receptionist reports. A facility incident goes through the
+ * incident form itself (validation, duplicate warning, photo), filed on the
+ * original shift together with its journal entry.
+ */
+const LATE_CATEGORIES = CATEGORY_ORDER;
 
 export function LateEntryDialog({
   branches,
@@ -147,6 +152,7 @@ export function LateEntryDialog({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [category, setCategory] = useState<ReportCategory | null>(null);
   const [reason, setReason] = useState('');
+  const [incidentOpen, setIncidentOpen] = useState(false);
   const branch = branches.find((b) => b.id === branchId) ?? null;
   const dateValid = /^\d{4}-\d{2}-\d{2}$/.test(date) && date <= today;
 
@@ -281,7 +287,6 @@ export function LateEntryDialog({
                   </button>
                 ))}
               </div>
-              <p className="mt-1 text-xs text-slate-500">Sự cố cơ sở vật chất được báo cáo trực tiếp, không nhập bù.</p>
             </section>
 
             <section>
@@ -320,6 +325,15 @@ export function LateEntryDialog({
                     <RoomServiceForm bare options={options} onCancel={onClose} onCreated={done} />
                   ) : category === 'HOTEL_DELIVERY' ? (
                     <DeliveryForm bare options={options} onCancel={onClose} onCreated={done} />
+                  ) : category === 'FACILITY_ISSUE' ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2">
+                      <p className="text-sm text-slate-600">
+                        Sự cố được tạo bằng biểu mẫu báo cáo sự cố (kiểm tra trùng lặp như thường lệ) và ghi vào nhật ký ca gốc.
+                      </p>
+                      <Button onClick={() => setIncidentOpen(true)} data-testid="late-facility-open">
+                        Mở biểu mẫu sự cố
+                      </Button>
+                    </div>
                   ) : null}
                 </ReportSubmitContext.Provider>
               </section>
@@ -340,6 +354,15 @@ export function LateEntryDialog({
         ) : null}
         {sessions.isError ? <ErrorAlert>{toUserMessage(sessions.error)}</ErrorAlert> : null}
       </div>
+      {incidentOpen && chosen && branch && category === 'FACILITY_ISSUE' && reason.trim() ? (
+        <NewIssueModal
+          branchId={branch.id}
+          branchLabel={`${branchLabel(branch)} — nhập bù ${chosen.shiftName}, ${dayLabel(chosen.businessDate)}`}
+          lateEntry={{ shiftSessionId: chosen.id, reason: reason.trim() }}
+          onClose={() => setIncidentOpen(false)}
+          onCreated={() => void done()}
+        />
+      ) : null}
     </Modal>
   );
 }

@@ -34,6 +34,9 @@ import { computeIssueSummary, computeTechnicalCounts } from '../issue/issueSumma
 import { STATISTICS_PERIOD_DAYS, computeIncidentStatistics } from '../issue/issueStatistics';
 import type { UserWithBranch } from '../auth/serialize';
 import { requireCapability } from '../auth/capabilities';
+import { branchScopeOf, scopeIncludes } from '../auth/branchScope';
+import { createLateIncident } from '../reception/reportService';
+import { ApiError } from '../lib/errors';
 
 const CATEGORY = z.enum([
   'DOOR',
@@ -75,6 +78,12 @@ const createSchema = z.object({
   /** "Nguyên nhân" — optional: Reception often does not know it yet. */
   cause: z.string().trim().max(1000).optional(),
   severity: SEVERITY.optional(),
+});
+
+/** "Nhập bù": the incident form plus the finished shift it belongs to and the required reason. */
+const lateEntrySchema = createSchema.omit({ branchId: true }).extend({
+  shiftSessionId: z.string().trim().min(1, 'Vui lòng chọn ca.').max(100),
+  reason: z.string().trim().min(1, 'Vui lòng nhập lý do nhập bù.').max(1000),
 });
 
 const updateSchema = z
@@ -295,6 +304,25 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
+  // POST /api/issues/late-entry — "Nhập bù": a receptionist's missed incident
+  // report, entered by a manager on the ORIGINAL finished shift (with the
+  // shift's journal entry, in one transaction). Multipart, like POST /issues.
+  router.post(
+    '/issues/late-entry',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.lateEntry'),
+    proofUpload(),
+    (req, res, next) => {
+      (async () => {
+        const input = lateEntrySchema.parse(req.body ?? {});
+        const photo = req.file ? { buffer: req.file.buffer, size: req.file.size } : undefined;
+        const { issue, reportId } = await createLateIncident({ ...input, photo }, req.currentUser!, getClock());
+        res.status(201).json({ issue: serializeIssue(issue, undefined, req.currentUser!.role), reportId });
+      })().catch(next);
+    },
+  );
+
   // GET /api/issues — list, newest first, through `issueVisibilityWhere`: a
   // receptionist its branch, a supervisor its scope, a technician ONLY its own
   // assigned work and history, the technical manager everything.
@@ -410,11 +438,17 @@ export function createIssuesRouter(): Router {
     },
   );
 
-  // GET /api/issues/technicians — the active technicians, by full name, for the
-  // "Giao kỹ thuật" picker. Declared before "/issues/:id".
-  router.get('/issues/technicians', requireAuth, requirePasswordChanged, requireAssigner, (_req, res, next) => {
+  // GET /api/issues/technicians[?branchId=] — the active technicians, by full
+  // name. With a branch (the "Giao kỹ thuật" pickers): only those assigned to
+  // it, and only for a branch in the reader's scope. Without: all, for filters.
+  // Declared before "/issues/:id".
+  router.get('/issues/technicians', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
     (async () => {
-      res.json({ technicians: await listAssignableTechnicians() });
+      const { branchId } = z.object({ branchId: z.coerce.number().int().positive().optional() }).parse(req.query);
+      if (branchId !== undefined && !scopeIncludes(branchScopeOf(actor(req.currentUser!)), branchId)) {
+        throw ApiError.branchAccessDenied();
+      }
+      res.json({ technicians: await listAssignableTechnicians(branchId) });
     })().catch(next);
   });
 

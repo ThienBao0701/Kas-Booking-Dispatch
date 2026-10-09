@@ -56,41 +56,20 @@ const unfinishedJournal: Prisma.ReceptionOperationalReportWhereInput = {
  * II and IV, ACTIVE: every live record of the branch that is unfinished, or was
  * received within the last 12 hours.
  *
- * Plus the OPEN SHIFT's withdrawn rows, so a receptionist who voids an entry
- * still sees it struck through where it was — exactly as before — rather than
- * watching it vanish. "The open shift's" means both the rows it CREATED and
- * the rows it VOIDED: the active set is cross-shift, so Ca B can withdraw a
- * request Ca A recorded, and the void is Ca B's act even though the row's own
- * `shiftSessionId` stays Ca A's. The VOID audit row carries the shift the
- * void was made on. Other shifts' withdrawn rows are not the desk's business
- * any more and stay in the journal and the Admin's view.
+ * LIVE ONLY. A withdrawn record — the desk's own "Hủy" or a supervisor's "Xóa" —
+ * leaves the working view, like every other list and total; who withdrew it,
+ * when and why is read in "Lịch sử xóa", never lost.
  */
 export function activeJournalWhere(
   scope: Prisma.ReceptionOperationalReportWhereInput,
   now: Date,
-  currentShiftSessionId?: string | null,
 ): Prisma.ReceptionOperationalReportWhereInput {
   const cutoff = archiveCutoff(now);
   return {
     AND: [
       scope,
       { category: { in: [...ARCHIVABLE_CATEGORIES] } },
-      {
-        OR: [
-          { voidedAt: null, OR: [unfinishedJournal, { createdAt: { gt: cutoff } }] },
-          ...(currentShiftSessionId
-            ? [
-                {
-                  voidedAt: { not: null },
-                  OR: [
-                    { shiftSessionId: currentShiftSessionId },
-                    { audits: { some: { action: 'VOID' as const, shiftSessionId: currentShiftSessionId } } },
-                  ],
-                },
-              ]
-            : []),
-        ],
-      },
+      { voidedAt: null, OR: [unfinishedJournal, { createdAt: { gt: cutoff } }] },
     ],
   };
 }

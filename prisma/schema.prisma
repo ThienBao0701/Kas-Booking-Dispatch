@@ -638,6 +638,7 @@ model User {
   operationalReportsVoided ReceptionOperationalReport[]  @relation("OperationalReportVoidedBy")
   reportsEnteredLate       ReceptionOperationalReport[]  @relation("OperationalReportEnteredBy")
   issuesManaged            HotelIssue[]                  @relation("IssueAssignedManager")
+  issuesEnteredLate        HotelIssue[]                  @relation("IssueEnteredBy")
   issueDispatchesMade      HotelIssueDispatch[]          @relation("DispatchAssignedBy")
   issueDispatchesReceived  HotelIssueDispatch[]          @relation("DispatchManager")
   issueDispatchesCompleted HotelIssueDispatch[]          @relation("DispatchCompletedBy")
@@ -1948,6 +1949,15 @@ model HotelIssue {
   shiftSessionId String?
   shiftType      ShiftType?
 
+  /// "Nhập bù" — a manager entered this report LATE, for the receptionist who
+  /// worked `shiftSessionId` (who stays the reporter). Null on every incident
+  /// reported live. `createdAt` is the actual entry time; the business date and
+  /// shift are the session's.
+  enteredByUserId       Int?
+  enteredByNameSnapshot String?
+  enteredByRole         UserRole?
+  lateEntryReason       String?
+
   /// "Đúng" / "Sai", set at "Hoàn thành"; "Lý do báo cáo sai" when "Sai".
   reportVerdict   ReportVerdict?
   incorrectReason String?
@@ -1989,6 +1999,7 @@ model HotelIssue {
   /// Hand-offs to a Quản lý kỹ thuật and to outside contractors, oldest first.
   dispatches         HotelIssueDispatch[]     @relation("IssueDispatches")
   assignedManager    User?                    @relation("IssueAssignedManager", fields: [assignedManagerUserId], references: [id])
+  enteredBy          User?                    @relation("IssueEnteredBy", fields: [enteredByUserId], references: [id])
   assignedTechnician User?                    @relation("IssueAssignedTechnician", fields: [assignedTechnicianUserId], references: [id])
   /// Every assignment and reassignment, oldest first when read.
   assignments        HotelIssueAssignment[]   @relation("IssueAssignments")
@@ -2016,6 +2027,7 @@ model HotelIssue {
   @@index([shiftSessionId])
   @@index([voidedAt])
   @@index([reportVerdict])
+  @@index([enteredByUserId])
 }
 
 /// What a Chat box submission is ABOUT.

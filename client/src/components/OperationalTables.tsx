@@ -23,6 +23,8 @@ import { CheckCircle2, Pencil, Trash2 } from 'lucide-react';
 import { type OperationalReport, type RoomServiceType } from '../api/receptionReports';
 import { DataTable, RowAction, type DataColumn } from './DataTable';
 import { Actions } from './RecordRowActions';
+import { useAuth } from '../auth/AuthProvider';
+import { mayVoidRecord } from '../lib/deskVoid';
 import { ReportSection, type SectionFrame } from './ReportSection';
 import {
   CompleteRecordDialog,
@@ -158,6 +160,7 @@ function RequestHandling({
   onVoid: () => void;
 }) {
   const request = row.guestRequest;
+  const { user } = useAuth();
   if (row.voided || !request) return <span className="text-xs text-slate-300">—</span>;
   return (
     <div className="space-y-1.5">
@@ -175,10 +178,12 @@ function RequestHandling({
             <Pencil className="h-3 w-3" aria-hidden="true" />
             Sửa
           </RowAction>
-          <RowAction onClick={onVoid} tone="danger" testId={`void-${row.id}`}>
-            <Trash2 className="h-3 w-3" aria-hidden="true" />
-            Hủy
-          </RowAction>
+          {mayVoidRecord(row, user) ? (
+            <RowAction onClick={onVoid} tone="danger" testId={`void-${row.id}`}>
+              <Trash2 className="h-3 w-3" aria-hidden="true" />
+              Hủy
+            </RowAction>
+          ) : null}
         </div>
       ) : null}
     </div>

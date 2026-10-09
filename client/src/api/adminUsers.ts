@@ -63,6 +63,15 @@ export function requiresBranchSet(role: UserRole | undefined): boolean {
   return role === 'RECEPTION_MANAGER' || role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER';
 }
 
+/**
+ * Kỹ thuật viên: the branches it can be GIVEN WORK at ("Giao kỹ thuật" lists
+ * only the technicians of the incident's branch). Ticked like a manager's set;
+ * an older account without any keeps working but cannot be assigned anywhere.
+ */
+export function isTechnicianBranchRole(role: UserRole | undefined): boolean {
+  return role === 'TECHNICAL';
+}
+
 export interface CreateUserInput {
   username: string;
   fullName: string;

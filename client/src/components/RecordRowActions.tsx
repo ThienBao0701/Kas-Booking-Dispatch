@@ -9,6 +9,8 @@
 import { Pencil, Trash2 } from 'lucide-react';
 import type { OperationalReport } from '../api/receptionReports';
 import { RowAction } from './DataTable';
+import { useAuth } from '../auth/AuthProvider';
+import { mayVoidRecord } from '../lib/deskVoid';
 
 export function Actions({
   row,
@@ -21,6 +23,7 @@ export function Actions({
   onEdit: () => void;
   onVoid: () => void;
 }) {
+  const { user } = useAuth();
   if (!canEdit || row.voided) return <span className="text-xs text-slate-300">—</span>;
   return (
     <>
@@ -28,10 +31,13 @@ export function Actions({
         <Pencil className="h-3 w-3" aria-hidden="true" />
         Sửa
       </RowAction>
-      <RowAction onClick={onVoid} tone="danger" testId={`void-${row.id}`}>
-        <Trash2 className="h-3 w-3" aria-hidden="true" />
-        Hủy
-      </RowAction>
+      {/* The desk withdraws only its own entry of the shift still running. */}
+      {mayVoidRecord(row, user) ? (
+        <RowAction onClick={onVoid} tone="danger" testId={`void-${row.id}`}>
+          <Trash2 className="h-3 w-3" aria-hidden="true" />
+          Hủy
+        </RowAction>
+      ) : null}
     </>
   );
 }

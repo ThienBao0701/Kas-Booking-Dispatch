@@ -185,7 +185,9 @@ export async function branchOperationalReport(
   const now = getClock().now();
   const closed = sessions.filter((s) => s.closedAt !== null);
   const closedIds = closed.map((s) => s.id);
-  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow };
+  // The official report counts what is in force: a deleted record is not printed
+  // (its totals already excluded it); it stays on file in "Lịch sử xóa".
+  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow, includeVoided: false };
 
   // "Đơn mới" and "Buồng phòng" are by day, not by shift: the full report only.
   const fullDay = category === undefined && unshiftedWindow !== undefined;

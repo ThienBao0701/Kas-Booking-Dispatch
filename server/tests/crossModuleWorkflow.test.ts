@@ -19,9 +19,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
-import { userIdOf } from './helpers/issues';
+import { serveBranches, userIdOf } from './helpers/issues';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
-import { resetClock, setClock } from '../src/lib/clock';
+import { hcmDateOnly, resetClock, setClock } from '../src/lib/clock';
 
 // Two apps: the login limiter allows ten sign-ins per app, and this file signs in eleven accounts.
 const apps = [createApp(), createApp()];
@@ -80,6 +80,8 @@ beforeAll(async () => {
   // A manager of the OTHER branch only — never a valid target for a CN1 incident.
   await staff('qlkt3', 'QLKT Ba', 'TECHNICAL_MANAGER', [cn2]);
   tech = await staff('kythuat', 'Kỹ thuật Một', 'TECHNICAL');
+  // The technician serves CN1 only — the Admin's ticked branch.
+  await serveBranches(ids.kythuat!, [cn1]);
 });
 
 beforeEach(async () => {
@@ -173,6 +175,42 @@ describe('A. deleting a journal record', () => {
     const stored = await testPrisma.receptionPayment.findUniqueOrThrow({ where: { reportId: gone } });
     expect(stored.amount).toBe(500000);
     expect(kept).not.toBe(gone);
+  });
+
+  it('limits the desk’s "Hủy" to its own entry on its open shift — never a general delete', async () => {
+    setClock({ now: () => hcm('2026-10-08', '06:05') });
+    await checkIn(letan1, 'A', 'Lan');
+    const mine = await payment(letan1, 400000);
+    const kept = await payment(letan1, 200000);
+    // A supervisor's record on the same branch is not the desk's to withdraw.
+    const bySupervisor = await rm1.post('/api/reception/reports').send({
+      branchId: cn1,
+      category: 'CUSTOMER_COMPLAINT',
+      complaint: { guestName: 'Khách B', description: 'Nước yếu' },
+    });
+    expect(bySupervisor.status).toBe(201);
+    const refused = await letan1.post(`/api/reception/reports/${bySupervisor.body.report.id}/void`).send({ reason: 'Nhầm' });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error.message).toContain('chính mình nhập trong ca đang làm');
+
+    // Its own payment of the shift still running: withdrawn, audited, out of the drawer.
+    const ok = await letan1.post(`/api/reception/reports/${mine}/void`).send({ reason: 'Thu nhầm' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.report).toMatchObject({ voided: true, voidedByRole: 'RECEPTIONIST' });
+    const cash = (await letan1.get('/api/reception/shifts/cash')).body.cash;
+    expect(cash.cashCollected).toBe(200000);
+    expect(cash.voidedCount).toBe(1);
+
+    // Once the shift is handed over, even its own record is a supervisor's to delete.
+    setClock({ now: () => hcm('2026-10-08', '14:02') });
+    expect((await letan1.post('/api/reception/shifts/close').send({})).status).toBe(200);
+    setClock({ now: () => hcm('2026-10-08', '14:05') });
+    await checkIn(letan1, 'B', 'Lan');
+    expect((await letan1.post(`/api/reception/reports/${kept}/void`).send({ reason: 'Muộn' })).status).toBe(403);
+    // …and the closed shift's drawer is untouched by the refusal.
+    expect(await testPrisma.receptionReportAudit.count({ where: { reportId: kept, action: 'VOID' } })).toBe(0);
+    // The supervisor's audited "Xóa" still reaches it.
+    expect((await rm1.post(`/api/reception/reports/${kept}/void`).send({ reason: 'Thu trùng' })).status).toBe(200);
   });
 
   it('shows "Lịch sử xóa" to the desk of that branch and the supervisors of it — and to nobody else', async () => {
@@ -316,6 +354,87 @@ describe('C. "Nhập bù" — a missed record on its original shift', () => {
 
     // The Tổng quản lý lễ tân reaches every branch.
     expect((await rgm.post('/api/reception/reports/late-entry').send({ ...body, shiftSessionId: otherSession, reason: 'Bổ sung' })).status).toBe(201);
+  });
+
+  const DOOR = { areaCategory: 'ROOM', roomNumber: '301', category: 'DOOR', description: 'Cửa phòng 301 kẹt' };
+
+  it('files a missed facility incident on the original shift — for its receptionist, by the manager, with its journal entry', async () => {
+    const sessionId = await yesterdaysShift();
+    const res = await rm1.post('/api/issues/late-entry').send({ ...DOOR, shiftSessionId: sessionId, reason: 'Lễ tân quên báo sự cố' });
+    expect(res.status).toBe(201);
+    expect(res.body.issue).toMatchObject({
+      branchId: cn1,
+      status: 'NEW',
+      shiftType: 'A',
+      reportedBy: { id: ids.letan1 },
+      reportedByName: 'Lễ tân CN1',
+      reportedByRole: 'RECEPTIONIST',
+      // The real entry time, kept apart from the business date and shift.
+      createdAt: hcm('2026-10-08', '10:30').toISOString(),
+      lateEntry: {
+        enteredBy: { id: ids.quanly1, name: 'Quản lý CN1' },
+        enteredByRole: 'RECEPTION_MANAGER',
+        enteredByRoleLabel: 'Quản lý lễ tân',
+        reason: 'Lễ tân quên báo sự cố',
+        enteredAt: hcm('2026-10-08', '10:30').toISOString(),
+      },
+    });
+    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id: res.body.issue.id } });
+    expect(stored.shiftSessionId).toBe(sessionId);
+
+    // The journal entry: same shift, same receptionist, same stamp, audited.
+    const report = await testPrisma.receptionOperationalReport.findUniqueOrThrow({
+      where: { id: res.body.reportId },
+      include: { facility: true },
+    });
+    expect(report).toMatchObject({
+      category: 'FACILITY_ISSUE',
+      shiftSessionId: sessionId,
+      createdByUserId: ids.letan1,
+      createdByRole: 'RECEPTIONIST',
+      enteredByUserId: ids.quanly1,
+      lateEntryReason: 'Lễ tân quên báo sự cố',
+    });
+    expect(report.facility?.issueId).toBe(res.body.issue.id);
+    const audit = await testPrisma.receptionReportAudit.findFirstOrThrow({ where: { reportId: report.id } });
+    expect(audit).toMatchObject({ action: 'LATE_ENTRY', actorUserId: ids.quanly1, actorRole: 'RECEPTION_MANAGER' });
+
+    // It belongs to the 7th, shift A — in the journal and the incident list — never to the 8th.
+    const seventh = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&from=2026-10-07&to=2026-10-07&category=FACILITY_ISSUE`);
+    expect(seventh.body.reports.map((r: { id: string }) => r.id)).toEqual([report.id]);
+    const eighth = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&from=2026-10-08&to=2026-10-08&category=FACILITY_ISSUE`);
+    expect(eighth.body.reports).toHaveLength(0);
+    const listed7 = await admin.get(`/api/issues?from=2026-10-07&to=2026-10-07&branchId=${cn1}&shiftType=A`);
+    expect(listed7.body.issues.map((i: { id: string }) => i.id)).toEqual([res.body.issue.id]);
+    const listed8 = await admin.get(`/api/issues?from=2026-10-08&to=2026-10-08&branchId=${cn1}`);
+    expect(listed8.body.issues).toHaveLength(0);
+    // And it is a real incident: the branch's reception sees it, technical works it.
+    expect((await letan1.get(`/api/issues/${res.body.issue.id}`)).status).toBe(200);
+  });
+
+  it('refuses a late incident without a reason, outside the scope, on an open shift, from the desk — and keeps the incident rules', async () => {
+    const sessionId = await yesterdaysShift();
+    const late = (agent: Agent, body: Record<string, unknown>) => agent.post('/api/issues/late-entry').send(body);
+    expect((await late(rm1, { ...DOOR, shiftSessionId: sessionId })).status).toBe(422);
+    expect((await late(rm1, { ...DOOR, shiftSessionId: sessionId, reason: '   ' })).status).toBe(422);
+    expect((await late(letan1, { ...DOOR, shiftSessionId: sessionId, reason: 'x' })).status).toBe(403);
+    expect((await late(tgm, { ...DOOR, shiftSessionId: sessionId, reason: 'x' })).status).toBe(403);
+    // The incident's own validation is not bypassed: a room outside the branch catalog is refused.
+    expect((await late(rm1, { ...DOOR, roomNumber: '9999', shiftSessionId: sessionId, reason: 'x' })).status).toBe(422);
+    expect((await late(rm1, { ...DOOR, description: '  ', shiftSessionId: sessionId, reason: 'x' })).status).toBe(422);
+
+    setClock({ now: () => hcm('2026-10-07', '06:05') });
+    const otherSession = await checkIn(letan2, 'A', 'Hoa');
+    setClock({ now: () => hcm('2026-10-07', '14:02') });
+    await letan2.post('/api/reception/shifts/close').send({});
+    setClock({ now: () => hcm('2026-10-08', '10:30') });
+    // A client-supplied branch never redirects it: the shift decides, and another branch's shift is refused.
+    expect((await late(rm1, { ...DOOR, branchId: cn2, shiftSessionId: otherSession, reason: 'x' })).status).toBe(403);
+    const open = await checkIn(letan1, 'A', 'Lan');
+    expect((await late(rm1, { ...DOOR, shiftSessionId: open, reason: 'x' })).status).toBe(409);
+    // Nothing was written by any refusal.
+    expect(await testPrisma.hotelIssue.count()).toBe(0);
+    expect(await testPrisma.receptionOperationalReport.count({ where: { category: 'FACILITY_ISSUE' } })).toBe(0);
   });
 });
 
@@ -503,5 +622,124 @@ describe('E. the Tổng quản lý kỹ thuật account', () => {
     expect(created.status).toBe(201);
     expect(created.body.user.managedBranches.map((b: { id: number }) => b.id).sort()).toEqual([cn1, cn2].sort());
     expect(await userIdOf(tgm)).toBe(ids.tongkt);
+  });
+});
+
+/* ================================================================== */
+describe('F. the technical exports carry the dispatch chain — PDF and XLSX alike', () => {
+  /** CN1 incident: Tổng QLKT → QLKT Một → outside company, completed with a cost. */
+  async function dispatchedAndCompleted() {
+    setClock({ now: () => hcm('2026-10-08', '08:30') });
+    const id = await incident(letan1, '301');
+    setClock({ now: () => hcm('2026-10-08', '09:00') });
+    expect((await tgm.post(`/api/issues/${id}/dispatch-manager`).send({ managerUserId: ids.qlkt1, note: 'Kiểm tra máy lạnh' })).status).toBe(200);
+    setClock({ now: () => hcm('2026-10-08', '10:00') });
+    const hired = await qlkt1.post(`/api/issues/${id}/dispatch-external`).send({
+      name: 'Nguyễn Thợ',
+      phone: '0901 234 567',
+      specialty: 'Điện lạnh',
+      type: 'COMPANY',
+      company: 'Công ty Lạnh Việt',
+      note: 'Thay block máy lạnh',
+    });
+    expect(hired.status).toBe(200);
+    setClock({ now: () => hcm('2026-10-08', '15:00') });
+    expect((await qlkt1.post(`/api/issues/${id}/complete-external`).send({ repairCost: 250000, verdict: 'CORRECT' })).status).toBe(200);
+    return id;
+  }
+
+  /*
+    An incident's \`createdAt\` is the DATABASE's clock (the column default), not
+    the test clock — so the technical report, which reads incidents by their
+    reported day, is asked for the real HCM day.
+  */
+  const TODAY = hcmDateOnly(new Date());
+
+  async function technicalData(viewer: { id: number; role: string; managedBranchIds?: number[] }) {
+    const { operationalReport } = await import('../src/reception/operationalReport');
+    return operationalReport(
+      { id: viewer.id, role: viewer.role as never, branchId: null, fullName: 'x', managedBranchIds: viewer.managedBranchIds },
+      { from: TODAY, to: TODAY, branchId: cn1, section: 'TECHNICAL' },
+    );
+  }
+
+  it('maps the reporter, shift, chain, hand-offs with notes, completion and cost into the PDF columns', async () => {
+    const id = await dispatchedAndCompleted();
+    const { TECHNICAL_PDF_COLUMNS, handoffLines, HANDOFF_PDF_COLUMNS } = await import('../src/report/operationalPdf');
+    const data = await technicalData({ id: ids.admin!, role: 'ADMIN' });
+    const row = data.branches[0]!.technical.find((i) => i.id === id)!;
+    const cell = (header: string) => TECHNICAL_PDF_COLUMNS.find((c) => c.header === header)!.value({ ...row, stt: 1 });
+
+    expect(cell('Người báo / ca')).toContain('Lễ tân CN1');
+    expect(cell('Điều phối')).toContain('Tổng QLKT: Tổng quản lý kỹ thuật > QLKT: QLKT Một');
+    expect(cell('Điều phối')).toContain('Bên ngoài: Nguyễn Thợ — Công ty Lạnh Việt');
+    expect(cell('Giai đoạn / kết quả')).toContain('Hoàn thành: QLKT Một');
+    expect(cell('Giai đoạn / kết quả')).toContain('Chi phí sửa chữa: 250.000');
+
+    const lines = handoffLines([row]);
+    expect(lines.map((l) => [l.kind, l.note])).toEqual([
+      ['Giao quản lý kỹ thuật', 'Kiểm tra máy lạnh'],
+      ['Giao kĩ thuật bên ngoài', 'Thay block máy lạnh'],
+    ]);
+    const cost = HANDOFF_PDF_COLUMNS.find((c) => c.header === 'Chi phí (₫)')!;
+    expect(cost.value(lines[1]!)).toBe('250.000');
+    expect(HANDOFF_PDF_COLUMNS.find((c) => c.header === 'Hoàn thành')!.value(lines[1]!)).toContain('QLKT Một');
+
+    // The files themselves: the department PDF, the XLSX, and the Admin's incident PDF.
+    const bytes = (path: string, agent: Agent = admin) =>
+      agent
+        .get(path)
+        .buffer(true)
+        .parse((r, cb) => {
+          const chunks: Buffer[] = [];
+          r.on('data', (c: Buffer) => chunks.push(c));
+          r.on('end', () => cb(null, Buffer.concat(chunks)));
+        });
+    const pdf = await bytes(`/api/admin/reports/operational.pdf?from=${TODAY}&to=${TODAY}&branchId=${cn1}&section=TECHNICAL`, tgm);
+    expect(pdf.status).toBe(200);
+    expect((pdf.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
+    const incidents = await bytes(`/api/admin/reports/incidents.pdf?from=${TODAY}&to=${TODAY}`);
+    expect(incidents.status).toBe(200);
+    expect((incidents.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
+    // The XLSX states the same chain, from the same mapping.
+    const xlsx = await bytes(`/api/admin/reports/operational.xlsx?from=${TODAY}&to=${TODAY}&branchId=${cn1}&section=TECHNICAL`, tgm);
+    expect(xlsx.status).toBe(200);
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(xlsx.body as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    const sheet = wb.getWorksheet('Kỹ thuật')!;
+    const header = (name: string) => (sheet.getRow(1).values as unknown[]).indexOf(name);
+    expect(sheet.getRow(2).getCell(header('Tổng QLKT giao')).value).toBe('Tổng quản lý kỹ thuật');
+    expect(sheet.getRow(2).getCell(header('Kĩ thuật bên ngoài')).value).toBe('Nguyễn Thợ — Công ty Lạnh Việt');
+    expect(sheet.getRow(2).getCell(header('Chi phí sửa chữa')).value).toBe(250000);
+    const handoffSheet = wb.getWorksheet('Lịch sử giao việc')!;
+    expect(handoffSheet.rowCount).toBe(3);
+  });
+
+  it('withholds the contractor’s company and contact from a reader without contractor access, in both formats', async () => {
+    await dispatchedAndCompleted();
+    const { TECHNICAL_PDF_COLUMNS, handoffLines } = await import('../src/report/operationalPdf');
+    const { contractorContactOf } = await import('../src/report/technicalDispatch');
+    const data = await technicalData({ id: ids.quanly1!, role: 'RECEPTION_MANAGER', managedBranchIds: [cn1] });
+    const row = data.branches[0]!.technical[0]!;
+    const chain = TECHNICAL_PDF_COLUMNS.find((c) => c.header === 'Điều phối')!.value({ ...row, stt: 1 });
+    expect(chain).toContain('Bên ngoài: Nguyễn Thợ (Công ty)');
+    expect(chain).not.toContain('Công ty Lạnh Việt');
+    expect(handoffLines([row]).map((l) => l.to).join(' ')).not.toContain('Công ty Lạnh Việt');
+    expect(contractorContactOf(row)).toBe('');
+    // The cost is not contact data: it is reported to every reader of the report.
+    expect(TECHNICAL_PDF_COLUMNS.find((c) => c.header === 'Giai đoạn / kết quả')!.value({ ...row, stt: 1 })).toContain('250.000');
+    // The Quản lý kỹ thuật sees it all.
+    const own = await technicalData({ id: ids.qlkt1!, role: 'TECHNICAL_MANAGER', managedBranchIds: [cn1] });
+    expect(contractorContactOf(own.branches[0]!.technical[0]!)).toContain('0901 234 567');
+  });
+
+  it('leaves a deleted incident out of the technical export', async () => {
+    const kept = await dispatchedAndCompleted();
+    setClock({ now: () => hcm('2026-10-08', '16:00') });
+    const gone = await incident(letan1, '302');
+    expect((await admin.post(`/api/issues/${gone}/void`).send({ reason: 'Báo trùng' })).status).toBe(200);
+    const data = await technicalData({ id: ids.admin!, role: 'ADMIN' });
+    expect(data.branches[0]!.technical.map((i) => i.id)).toEqual([kept]);
   });
 });

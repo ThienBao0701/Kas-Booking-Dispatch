@@ -1138,3 +1138,59 @@ describe('who can see which branch', () => {
     expect(own.body.reports.every((r: { branchId: number }) => r.branchId === cn1)).toBe(true);
   });
 });
+
+/* ================================================================== */
+describe('a deleted record in the official export', () => {
+  const download = (path: string) =>
+    admin
+      .get(path)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+
+  it('is neither printed nor totalled in the PDF/XLSX data — and stays in "Lịch sử xóa"', async () => {
+    const { paymentId, requestId } = await seedFullDay(letan, 'Nguyễn Văn A', { end: false });
+    // The desk withdraws its own request on its own open shift; the Admin deletes the payment.
+    expect((await letan.post(`/api/reception/reports/${requestId}/void`).send({ reason: 'Nhập nhầm' })).status).toBe(200);
+    expect((await admin.post(`/api/reception/reports/${paymentId}/void`).send({ reason: 'Trùng' })).status).toBe(200);
+    await endShift(letan);
+
+    // The data both the PDF and the XLSX are built from.
+    const { operationalReport } = await import('../src/reception/operationalReport');
+    const adminUser = await testPrisma.user.findUniqueOrThrow({ where: { username: 'admin' } });
+    const data = await operationalReport(
+      { id: adminUser.id, role: 'ADMIN', branchId: null, fullName: adminUser.fullName },
+      { from: '2026-09-19', to: '2026-09-19', branchId: cn1 },
+    );
+    const section = data.branches[0]!;
+    expect(section.byCategory.PAYMENT).toEqual([]);
+    expect(section.byCategory.GUEST_REQUEST).toEqual([]);
+    expect(section.counts.PAYMENT).toBe(0);
+    expect(section.counts.GUEST_REQUEST).toBe(0);
+    // Facility, complaint, room service remain — and only they are counted.
+    expect(section.total).toBe(3);
+    expect(section.cash.cashCollected).toBe(0);
+    expect(section.cash.voidedCount).toBe(1);
+
+    const xlsx = await download(`/api/admin/reports/operational.xlsx?from=2026-09-19&to=2026-09-19&branchId=${cn1}`);
+    expect(xlsx.status).toBe(200);
+    const wb = await loadWorkbook(xlsx.body as Buffer);
+    // Header only: nothing deleted is printed, nothing is marked "Đã hủy".
+    expect(wb.getWorksheet('Theo dõi thanh toán')!.rowCount).toBe(1);
+    expect(wb.getWorksheet('Vấn đề khách yêu cầu')!.rowCount).toBe(1);
+    const pdf = await download(`/api/admin/reports/operational.pdf?from=2026-09-19&to=2026-09-19&branchId=${cn1}`);
+    expect(pdf.status).toBe(200);
+
+    // Nothing is lost: both are in the deletion history, with who, role and why.
+    const history = await admin.get(`/api/reception/reports/deleted?branchId=${cn1}`);
+    expect(history.body.reports.map((r: { id: string }) => r.id).sort()).toEqual([paymentId, requestId].sort());
+    expect(history.body.reports.find((r: { id: string }) => r.id === paymentId)).toMatchObject({ voidReason: 'Trùng', voidedByRole: 'ADMIN' });
+    // The desk's own journal no longer lists them either.
+    const own = await letan.get('/api/reception/reports?from=2026-09-19&to=2026-09-19');
+    expect(own.body.reports.map((r: { id: string }) => r.id)).not.toContain(paymentId);
+    expect(own.body.reports.map((r: { id: string }) => r.id)).not.toContain(requestId);
+  });
+});

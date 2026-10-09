@@ -13,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, testPrisma } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, serveAllBranches } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -196,6 +196,7 @@ describe('a technician reads their own work', () => {
     const other = await testPrisma.user.create({
       data: { username: 'kythuat2', passwordHash: 'x', fullName: 'Kỹ thuật 2', role: 'TECHNICAL', mustChangePassword: false },
     });
+    await serveAllBranches(other.id);
     expect((await admin.post(`/api/issues/${again}/assign`).send({ technicianUserId: other.id })).status).toBe(200);
 
     const s = await stats(tech);

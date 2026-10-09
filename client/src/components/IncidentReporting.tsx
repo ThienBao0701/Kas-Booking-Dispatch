@@ -375,6 +375,7 @@ export function NewIssueModal({
   onCreated,
   branchId,
   branchLabel,
+  lateEntry,
 }: {
   onClose: () => void;
   onCreated: (issue: Issue) => void;
@@ -385,6 +386,12 @@ export function NewIssueModal({
   branchId?: number;
   /** Shown at the top so the target branch stays unmistakable while typing. */
   branchLabel?: string;
+  /**
+   * "Nhập bù": the finished shift and the required reason. The SAME form, the
+   * same duplicate warning — sent to the late-entry endpoint, which files the
+   * incident on that shift for its receptionist.
+   */
+  lateEntry?: { shiftSessionId: string; reason: string };
 }) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -428,8 +435,8 @@ export function NewIssueModal({
   });
 
   const create = useMutation({
-    mutationFn: () =>
-      issuesApi.create({
+    mutationFn: () => {
+      const input = {
         branchId,
         areaCategory: form.areaCategory,
         description: form.description,
@@ -441,7 +448,9 @@ export function NewIssueModal({
         areaSubtype: fields.areaSubtype && form.areaSubtype ? form.areaSubtype : undefined,
         locationDetail: form.locationDetail || undefined,
         photo: file ?? undefined,
-      }),
+      };
+      return lateEntry ? issuesApi.createLate({ ...input, ...lateEntry }) : issuesApi.create(input);
+    },
     onSuccess: ({ issue }) => {
       void queryClient.invalidateQueries({ queryKey: ['issues'] });
       clearFile();

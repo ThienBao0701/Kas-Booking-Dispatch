@@ -17,40 +17,10 @@
 import type { RequestHandler } from 'express';
 import type { UserRole } from '@prisma/client';
 import { ApiError } from '../lib/errors';
+import { CAPABILITY_TABLE } from './capabilityTable';
 
-const RECEPTION_SUPERVISORS = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'] as const;
-const RECEPTION_MANAGERS = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'] as const;
-
-export const CAPABILITIES = {
-  /** "Xóa" a journal record from the overview and the category pages (a void, audited). */
-  'reports.delete': [...RECEPTION_SUPERVISORS],
-  /** The desk's own "Hủy" on its branch's records — unchanged, existing behaviour. */
-  'reports.voidOwnBranch': ['RECEPTIONIST'],
-  /** "Lịch sử xóa" — the deleted records of the reader's branches. */
-  'reports.deletionHistory': ['RECEPTIONIST', ...RECEPTION_SUPERVISORS],
-  /** "Nhập bù" — a record the receptionist missed, entered on its original shift. */
-  'reports.lateEntry': [...RECEPTION_SUPERVISORS],
-  /** A correction made for a receptionist must say why ("Lý do sửa" required). */
-  'reports.editRequiresReason': [...RECEPTION_MANAGERS],
-
-  /** "Giao việc → Nhân sự": hand an incident to a Quản lý kỹ thuật. */
-  'technical.dispatchToManager': ['TECHNICAL_GENERAL_MANAGER'],
-  /** "Giao kỹ thuật" to an in-house technician. */
-  'technical.assignTechnician': [
-    ...RECEPTION_SUPERVISORS,
-    'TECHNICAL_MANAGER',
-    'TECHNICAL_GENERAL_MANAGER',
-  ],
-  /** "Giao cho kĩ thuật bên ngoài". */
-  'technical.dispatchExternal': ['TECHNICAL_MANAGER'],
-  /** Complete an outside contractor's work and record its cost. */
-  'technical.completeExternal': ['TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'],
-  /** Read an outside contractor's name, phone and company. */
-  'technical.viewContractor': ['ADMIN', 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'],
-
-  /** "Bắt đầu dọn" — only the housekeeper the room is given to. */
-  'housekeeping.startCleaning': ['HOUSEKEEPING'],
-} as const satisfies Record<string, readonly UserRole[]>;
+/** The shared table (`capabilityTable.ts`), checked here against the database's roles. */
+export const CAPABILITIES = CAPABILITY_TABLE satisfies Record<string, readonly UserRole[]>;
 
 export type Capability = keyof typeof CAPABILITIES;
 

@@ -26,8 +26,8 @@ export function AssignTechnicianDialog({
   onAssigned: (issue: Issue) => void;
 }) {
   const technicians = useQuery({
-    queryKey: ['issues', 'technicians'],
-    queryFn: () => issuesApi.technicians(),
+    queryKey: ['issues', 'technicians', issue.branchId],
+    queryFn: () => issuesApi.technicians(issue.branchId),
     staleTime: 60_000,
   });
   const current = issue.assignedTechnician ?? null;
@@ -103,6 +103,11 @@ export function AssignTechnicianDialog({
             ))}
           </select>
         </label>
+        {technicians.isSuccess && technicians.data.technicians.length === 0 ? (
+          <p className="text-xs text-amber-800" data-testid="no-branch-technicians">
+            Chi nhánh này chưa có kỹ thuật viên được phân công. Admin cần chọn chi nhánh cho tài khoản kỹ thuật viên.
+          </p>
+        ) : null}
         {technicians.isError ? <ErrorAlert>{toUserMessage(technicians.error)}</ErrorAlert> : null}
         {assign.isError ? <ErrorAlert>{toUserMessage(assign.error)}</ErrorAlert> : null}
         <p className="text-xs text-slate-500">Kỹ thuật viên nhận thông báo ngay khi được giao.</p>

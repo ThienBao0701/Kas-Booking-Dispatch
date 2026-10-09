@@ -240,6 +240,32 @@ describe('the sheet', () => {
     expect(cells).toHaveLength(headers.length);
   });
 
+  it('offers "Hủy" only on the desk’s own entry of the open shift — never on a colleague’s or a manager’s late entry', async () => {
+    installApiMock(
+      shellRoutes({
+        'GET /api/reception/reports?shiftSessionId=s1': () => ({
+          status: 200,
+          body: {
+            reports: [
+              payment(),
+              payment({ id: 'p2', createdBy: { id: 9, fullName: 'Lễ tân Hai' } }),
+              payment({
+                id: 'p3',
+                lateEntry: { enteredBy: { id: 20, name: 'QL' }, enteredByRole: 'RECEPTION_MANAGER', enteredByRoleLabel: 'Quản lý lễ tân', reason: 'x', enteredAt: '' },
+              }),
+            ],
+            counts: { ...EMPTY_COUNTS, PAYMENT: 3 },
+          },
+        }),
+      }),
+    );
+    await openPayment();
+    const table = await screen.findByTestId('payment-table');
+    expect(within(within(table).getByTestId('payment-row-p1')).getByTestId('payment-void-p1')).toHaveTextContent('Hủy');
+    expect(within(within(table).getByTestId('payment-row-p2')).queryByTestId('payment-void-p2')).not.toBeInTheDocument();
+    expect(within(within(table).getByTestId('payment-row-p3')).queryByTestId('payment-void-p3')).not.toBeInTheDocument();
+  });
+
   it('shows a card payment under "Cà thẻ" and a debt under "Công nợ", and none under "Chuyển khoản"', async () => {
     installApiMock(
       shellRoutes({

@@ -142,14 +142,18 @@ describe('accounts, by department', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/admin/users?includeAdmins=true')).toBe(true);
   });
 
-  it('shows the branch a receptionist belongs to, and a global account as every branch', async () => {
+  it('shows the branch a receptionist belongs to, a global account as every branch, and flags a technician without branches', async () => {
     mount();
     renderApp('/app/settings');
 
     const reception = await screen.findByTestId('department-RECEPTIONIST');
     expect(within(within(reception).getByTestId('row-2')).getByText('05 Trương Định')).toBeInTheDocument();
+    const booking = screen.getByTestId('department-BOOKING_DEPARTMENT');
+    expect(within(within(booking).getByTestId('row-6')).getByText('Tất cả chi nhánh')).toBeInTheDocument();
+    // A Kỹ thuật viên is given work only at its ticked branches — none yet is flagged, never "every branch".
     const technical = screen.getByTestId('department-TECHNICAL');
-    expect(within(within(technical).getByTestId('row-3')).getByText('Tất cả chi nhánh')).toBeInTheDocument();
+    expect(within(within(technical).getByTestId('row-3')).getByTestId('needs-branch-3')).toHaveTextContent('Cần gán chi nhánh');
+    expect(within(technical).queryByText('Tất cả chi nhánh')).not.toBeInTheDocument();
   });
 
   it('shows the compact columns, with status and last sign-in', async () => {

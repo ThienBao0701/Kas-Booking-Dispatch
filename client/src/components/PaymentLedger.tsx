@@ -52,6 +52,8 @@ import { ErrorAlert } from './ErrorAlert';
 import { MoneyInput } from './MoneyInput';
 import { Modal } from './Modal';
 import { VoidDialog } from './RecordDialogs';
+import { useAuth } from '../auth/AuthProvider';
+import { mayVoidRecord } from '../lib/deskVoid';
 import { DataTable, type DataColumn } from './DataTable';
 import type { SectionFrame } from './ReportSection';
 import { formatVnd, groupDigits, parseVnd, parseVndOrZero } from '../lib/money';
@@ -835,6 +837,7 @@ function ReadRow({
   onVoid: () => void;
 }) {
   const p = row.payment!;
+  const { user } = useAuth();
   return (
     <tr
       data-testid={`payment-row-${row.id}`}
@@ -883,15 +886,18 @@ function ReadRow({
               <Pencil className="h-3 w-3" aria-hidden="true" />
               Sửa
             </button>
-            <button
-              type="button"
-              onClick={onVoid}
-              data-testid={`payment-void-${row.id}`}
-              className="ml-1 inline-flex items-center gap-1 rounded-lg border border-rose-300 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
-            >
-              <Trash2 className="h-3 w-3" aria-hidden="true" />
-              Xóa
-            </button>
+            {/* The desk withdraws only its own payment of the shift still running (the drawer is not yet counted). */}
+            {mayVoidRecord(row, user) ? (
+              <button
+                type="button"
+                onClick={onVoid}
+                data-testid={`payment-void-${row.id}`}
+                className="ml-1 inline-flex items-center gap-1 rounded-lg border border-rose-300 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
+              >
+                <Trash2 className="h-3 w-3" aria-hidden="true" />
+                Hủy
+              </button>
+            ) : null}
           </>
         )}
       </td>

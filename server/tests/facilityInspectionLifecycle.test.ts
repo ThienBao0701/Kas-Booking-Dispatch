@@ -28,6 +28,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { getClock, resetClock, setClock } from '../src/lib/clock';
+import { serveAllBranches, userIdOf } from './helpers/issues';
 import { setInspectionEnabledForTests } from '../src/issue/issueLifecycle';
 
 const app = createApp();
@@ -90,6 +91,9 @@ beforeAll(async () => {
     mustChangePassword: false,
   });
   tech2 = (await loginAgent(app, 'kythuat2', TECHNICAL2_PASSWORD)).agent;
+  // Both technicians serve every branch: this file is about the repair lifecycle.
+  await serveAllBranches(techId);
+  await serveAllBranches(await userIdOf(tech2));
 
   managerId = (
     await createUser({

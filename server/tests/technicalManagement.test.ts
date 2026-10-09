@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
-import { assignTo, userIdOf } from './helpers/issues';
+import { assignTo, serveAllBranches, userIdOf } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -54,7 +54,8 @@ beforeAll(async () => {
     ['kythuat1', 'Nguyễn Văn A'],
     ['kythuat2', 'Nguyễn Văn B'],
   ] as const) {
-    await createUser({ username, password: PASSWORD, fullName, role: 'TECHNICAL', branchId: null, mustChangePassword: false });
+    const created = await createUser({ username, password: PASSWORD, fullName, role: 'TECHNICAL', branchId: null, mustChangePassword: false });
+    await serveAllBranches(created.id);
   }
   tech = (await loginAgent(app, 'kythuat1', PASSWORD)).agent;
   tech2 = (await loginAgent(app, 'kythuat2', PASSWORD)).agent;

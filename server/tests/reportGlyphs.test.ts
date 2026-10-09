@@ -42,7 +42,8 @@ const FONTS = [
 function pdfSources(): string[] {
   return fs
     .readdirSync(REPORT_DIR)
-    .filter((f) => f === 'pdf.ts' || f === 'format.ts' || f.endsWith('Pdf.ts'))
+    // technicalDispatch.ts writes the dispatch-chain text both PDFs print.
+    .filter((f) => f === 'pdf.ts' || f === 'format.ts' || f === 'technicalDispatch.ts' || f.endsWith('Pdf.ts'))
     .map((f) => path.join(REPORT_DIR, f));
 }
 

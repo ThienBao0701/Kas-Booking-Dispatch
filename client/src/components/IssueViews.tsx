@@ -473,6 +473,16 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
           ) : null}
           <Field label="Người báo" value={issue.reporterName} wrap empty="—" />
           <Field label="Thời gian báo cáo" value={formatDateTime(issue.createdAt)} wrap />
+          {issue.lateEntry ? (
+            // "Nhập bù": who actually entered it, in what role, and why — the reporter above is the shift's receptionist.
+            <div className="sm:col-span-2" data-testid="issue-late-entry">
+              <Field
+                label="Nhập bù"
+                value={`${issue.lateEntry.enteredBy.name}${issue.lateEntry.enteredByRoleLabel ? ` (${issue.lateEntry.enteredByRoleLabel})` : ''} — ${issue.lateEntry.reason ?? ''}`}
+                wrap
+              />
+            </div>
+          ) : null}
           <Field label="Khu vực" value={issue.locationLabel} wrap />
           <div className="sm:col-span-2">
             <Field label="Sự cố" value={issue.description} wrap />

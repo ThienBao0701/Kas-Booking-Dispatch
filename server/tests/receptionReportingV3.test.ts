@@ -276,25 +276,30 @@ describe('the 12-hour completion archive (II and IV)', () => {
     expect(after.guestRequest?.resolution).toBe('OK');
   });
 
-  it('shows the open shift its own withdrawn rows, struck through — and not another shift\'s', async () => {
+  /**
+   * A WITHDRAWN ROW IS NOT AN ACTIVE ONE. The desk's own "Hủy" takes it out of
+   * the working view at once, like every list and total; who withdrew it, when
+   * and why stays on file and is read in "Lịch sử xóa".
+   */
+  it('takes the open shift\'s own withdrawn row out of the active view, into "Lịch sử xóa"', async () => {
     at('2026-09-25', '08:00');
     await checkIn(letanA, 'A', 'Đức');
     const req = await request(letanA);
     expect((await letanA.post(`/api/reception/reports/${req}/void`).send({ reason: 'Nhập nhầm' })).status).toBe(200);
-    expect(await activeIds(letanA)).toContain(req);
-    at('2026-09-25', '14:00');
-    await closeShift(letanA);
-    at('2026-09-25', '14:05');
-    await checkIn(letanB, 'B', 'Lan');
-    expect(await activeIds(letanB)).not.toContain(req);
+    expect(await activeIds(letanA)).not.toContain(req);
+    const history = await letanA.get('/api/reception/reports/deleted');
+    expect(history.status).toBe(200);
+    expect(history.body.reports).toEqual([
+      expect.objectContaining({ id: req, voided: true, voidReason: 'Nhập nhầm', voidedByRole: 'RECEPTIONIST' }),
+    ]);
   });
 
   /**
-   * THE ACTIVE SET IS CROSS-SHIFT, SO A VOID CAN BE TOO. Ca B withdrawing what
-   * Ca A recorded is Ca B's act: the row stays in front of Ca B, struck through,
-   * though its own shift is still Ca A's — and is gone for the shift after.
+   * THE DESK'S "HỦY" IS NOT A DELETE RIGHT. Ca B cannot withdraw what Ca A
+   * recorded — that is a supervisor's audited "Xóa" — and the row stays in
+   * front of Ca B, unchanged.
    */
-  it('keeps a row the open shift withdrew — even one an earlier shift recorded — struck through', async () => {
+  it('refuses Ca B withdrawing a row an earlier shift recorded — it stays active', async () => {
     at('2026-09-25', '08:00');
     await checkIn(letanA, 'A', 'Đức');
     const req = await request(letanA, 'Khách ca A');
@@ -303,19 +308,10 @@ describe('the 12-hour completion archive (II and IV)', () => {
 
     at('2026-09-25', '14:05');
     await checkIn(letanB, 'B', 'Lan');
-    expect((await letanB.post(`/api/reception/reports/${req}/void`).send({ reason: 'Trùng' })).status).toBe(200);
-    const active = await letanB.get('/api/reception/reports/active');
-    const row = (active.body.reports as { id: string; voided: boolean; voidReason: string; shiftSessionId: string }[]).find(
-      (r) => r.id === req,
-    );
-    expect(row).toMatchObject({ voided: true, voidReason: 'Trùng' });
-    expect(await archiveIds(letanB)).not.toContain(req);
-
-    at('2026-09-25', '22:00');
-    await closeShift(letanB);
-    at('2026-09-25', '22:05');
-    await checkIn(letanA, 'C', 'Minh');
-    expect(await activeIds(letanA)).not.toContain(req);
+    const refused = await letanB.post(`/api/reception/reports/${req}/void`).send({ reason: 'Trùng' });
+    expect(refused.status).toBe(403);
+    expect(await activeIds(letanB)).toContain(req);
+    expect(await testPrisma.receptionReportAudit.count({ where: { reportId: req, action: 'VOID' } })).toBe(0);
   });
 
   it('returns each category\'s full count with the active page', async () => {

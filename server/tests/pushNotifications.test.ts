@@ -16,6 +16,7 @@ import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, createAdmin, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { serveAllBranches } from './helpers/issues';
 import { notifyOperational, pushNotification, setPushSender, settlePushes } from '../src/push/pushService';
 import { encryptPayload, generateVapidKeys, isPushServiceEndpoint, vapidAuthorization } from '../src/push/webPush';
 
@@ -64,6 +65,7 @@ beforeAll(async () => {
   hoa = await person('hoa', 'Chị Hoa', 'HOUSEKEEPING', cn1);
   await person('mai', 'Chị Mai', 'HOUSEKEEPING', cn2);
   await person('kythuat', 'Kỹ thuật', 'TECHNICAL', null);
+  await serveAllBranches(ids.kythuat!);
   const tm = await admin.post('/api/admin/users').send({ username: 'qlkt2', fullName: 'QLKT CN2', temporaryPassword: PASSWORD, role: 'TECHNICAL_MANAGER', branchIds: [cn2] });
   expect(tm.status).toBe(201);
   await testPrisma.user.update({ where: { id: tm.body.user.id }, data: { mustChangePassword: false } });

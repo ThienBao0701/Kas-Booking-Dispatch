@@ -35,7 +35,7 @@ import { journalPeriodWhere, sessionsForBusinessDates, type ReportPeriod } from 
 import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
 import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
 import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
-import { ISSUE_INCLUDE, serializeIssue } from '../issue/issueService';
+import { ISSUE_INCLUDE, createIssue, serializeIssue, type CreateIssueInput, type IssueDetail } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
 import { DEFAULT_SEVERITY, SEVERITY_LABELS, parseSeverity, prioritise, severityLabel } from '../issue/severity';
 import {
@@ -910,7 +910,7 @@ async function buildCreateData(
     /** "Nhập bù" only: the manager who actually entered it, and why. */
     lateEntry?: { userId: number; name: string; role: UserRole; reason: string };
   },
-  client: PrismaClient,
+  client: PrismaClient | Prisma.TransactionClient,
 ): Promise<Prisma.ReceptionOperationalReportCreateInput> {
   const scalars = {
     ...(base.lateEntry
@@ -1170,17 +1170,16 @@ async function pageByCategory(
 /**
  * II and IV as the desk sees them NOW — the branch's unfinished records and its
  * completions from the last 12 hours, whichever shift took them. See
- * `completionArchive.ts` for the rule; `currentShiftSessionId` only adds the
- * open shift's withdrawn rows back, struck through, where they were.
+ * `completionArchive.ts` for the rule. Withdrawn records are not here: they are
+ * read in "Lịch sử xóa".
  */
 export async function listActiveJournal(
   actor: ReportActor,
   now: Date,
-  currentShiftSessionId: string | null,
   client: PrismaClient = prisma,
   severity?: IssueSeverity,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
-  const where = activeJournalWhere(reportVisibilityWhere(actor), now, currentShiftSessionId);
+  const where = activeJournalWhere(reportVisibilityWhere(actor), now);
   const page = await pageByCategory(severity ? { AND: [where, severityWhere(severity)] } : where, ACTIVE_PAGE_SIZE, client);
   return { ...page, reports: prioritiseJournal(page.reports) };
 }
@@ -1772,6 +1771,26 @@ export async function voidReport(
   const current = await loadOwn(id, actor, client);
   if (current.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy trước đó.');
   const writer = await correctionWriter(actor, client);
+  /*
+    THE DESK'S "HỦY" IS NOT A DELETE RIGHT. A receptionist withdraws only what
+    it entered ITSELF on the shift it is still working — a mistake caught before
+    the drawer is counted and handed over. A colleague's record, a finished
+    shift's (already reconciled) or a manager's late entry is deleted through
+    the supervisors' audited "Xóa" ('reports.delete'), never from the desk.
+  */
+  if (!can(actor.role, 'reports.delete')) {
+    if (
+      !can(actor.role, 'reports.voidOwnShiftEntry') ||
+      current.createdByUserId !== actor.id ||
+      current.shiftSessionId === null ||
+      current.shiftSessionId !== writer.shiftSessionId ||
+      current.enteredByUserId !== null
+    ) {
+      throw ApiError.forbidden(
+        'Lễ tân chỉ hủy được bản ghi do chính mình nhập trong ca đang làm. Bản ghi khác do quản lý lễ tân xóa.',
+      );
+    }
+  }
 
   return client.$transaction(async (tx) => {
     /*
@@ -1919,7 +1938,11 @@ export async function listDeletedReports(
  * "Nhập bù" — a record the receptionist missed, entered on its own shift
  * ------------------------------------------------------------------ */
 
-/** The categories a late entry may carry. An incident is reported now, with its own lifecycle. */
+/**
+ * The categories `createLateReport` carries. A facility incident goes through
+ * `createLateIncident` instead: the incident itself must be created (with its
+ * own validation and lifecycle), and the journal entry points at it.
+ */
 const LATE_ENTRY_CATEGORIES: readonly CreateReportInput['category'][] = [
   'PAYMENT',
   'GUEST_REQUEST',
@@ -1993,17 +2016,9 @@ export async function createLateReport(
   const reason = required(input.reason, 'lý do nhập bù');
   if (reason.length > 1000) throw ApiError.validation('Lý do nhập bù quá dài.');
   if (!LATE_ENTRY_CATEGORIES.includes(input.category)) {
-    throw ApiError.validation('Sự cố cơ sở vật chất được báo cáo trực tiếp, không nhập bù.');
+    throw ApiError.validation('Sự cố cơ sở vật chất được nhập bù bằng biểu mẫu báo cáo sự cố.');
   }
-  const session = await client.receptionShiftSession.findUnique({
-    where: { id: input.shiftSessionId },
-    select: { id: true, branchId: true, userId: true, receptionistName: true, shiftType: true, closedAt: true },
-  });
-  if (!session) throw ApiError.notFound('Không tìm thấy ca làm việc.');
-  assertBranchInScope(actor, session.branchId);
-  if (session.closedAt === null) {
-    throw ApiError.conflict('Ca này chưa kết thúc — lễ tân đang trong ca tự ghi báo cáo.');
-  }
+  const session = await lateEntrySession(input.shiftSessionId, actor, client);
   const now = clock.now();
   const data = await buildCreateData(
     input,
@@ -2039,4 +2054,105 @@ export async function createLateReport(
     return created.id;
   });
   return client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+}
+
+/**
+ * The FINISHED shift a late entry goes on, inside the actor's scope — the one
+ * check every "Nhập bù" shares.
+ */
+async function lateEntrySession(shiftSessionId: string, actor: ReportActor, client: PrismaClient) {
+  const session = await client.receptionShiftSession.findUnique({
+    where: { id: shiftSessionId },
+    select: {
+      id: true,
+      branchId: true,
+      userId: true,
+      receptionistName: true,
+      shiftType: true,
+      closedAt: true,
+      user: { select: { fullName: true } },
+    },
+  });
+  if (!session) throw ApiError.notFound('Không tìm thấy ca làm việc.');
+  assertBranchInScope(actor, session.branchId);
+  if (session.closedAt === null) {
+    throw ApiError.conflict('Ca này chưa kết thúc — lễ tân đang trong ca tự ghi báo cáo.');
+  }
+  return session;
+}
+
+/**
+ * "NHẬP BÙ" OF A FACILITY INCIDENT — the receptionist's missed report, entered
+ * by a manager on the ORIGINAL finished shift.
+ *
+ *   * The INCIDENT is created by `createIssue` — the same location, room
+ *     catalog, repeat-link and photo rules as a live report — on that shift
+ *     (so it counts on that business date), reported by that shift's
+ *     receptionist, with the manager and the reason in `enteredBy…`.
+ *   * The JOURNAL ENTRY (category FACILITY_ISSUE) points at it on the same
+ *     shift, with the same late-entry stamp and a LATE_ENTRY audit row.
+ *   * Both land in ONE transaction: never an incident missing from the shift's
+ *     journal, never a journal entry pointing at nothing.
+ *
+ * `createdAt` is the real entry time on both. The incident then follows its
+ * normal lifecycle (it is NEW: Bộ phận kỹ thuật is notified as for any report).
+ */
+export async function createLateIncident(
+  input: CreateIssueInput & LateEntryInput,
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<{ issue: IssueDetail; reportId: string }> {
+  assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền nhập bù báo cáo.');
+  const reason = required(input.reason, 'lý do nhập bù');
+  if (reason.length > 1000) throw ApiError.validation('Lý do nhập bù quá dài.');
+  const session = await lateEntrySession(input.shiftSessionId, actor, client);
+  const now = clock.now();
+  let reportId = '';
+  const issue = await createIssue(
+    { ...input, branchId: session.branchId },
+    { ...actor, managedBranchIds: actor.managedBranchIds ? [...actor.managedBranchIds] : undefined },
+    {
+      shiftSessionId: session.id,
+      shiftType: session.shiftType,
+      branchId: session.branchId,
+      reporter: { userId: session.userId, name: session.user.fullName },
+      reason,
+      now,
+      inTransaction: async (tx, issueId) => {
+        const data = await buildCreateData(
+          { category: 'FACILITY_ISSUE', facility: { issueId } },
+          {
+            branchId: session.branchId,
+            shiftSessionId: session.id,
+            shiftType: session.shiftType,
+            createdByUserId: session.userId,
+            createdByNameSnapshot: session.receptionistName,
+            createdByRole: 'RECEPTIONIST',
+            category: 'FACILITY_ISSUE',
+            createdAt: now,
+            lateEntry: { userId: actor.id, name: actor.fullName, role: actor.role, reason },
+          },
+          tx,
+        );
+        const created = await tx.receptionOperationalReport.create({ data, select: { id: true } });
+        await tx.receptionReportAudit.create({
+          data: {
+            branchId: session.branchId,
+            reportId: created.id,
+            shiftSessionId: null,
+            action: 'LATE_ENTRY',
+            reason,
+            actorUserId: actor.id,
+            actorNameSnapshot: actor.fullName,
+            actorShiftType: null,
+            actorRole: actor.role,
+            createdAt: now,
+          },
+        });
+        reportId = created.id;
+      },
+    },
+  );
+  return { issue, reportId };
 }
