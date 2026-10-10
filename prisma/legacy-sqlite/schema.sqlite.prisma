@@ -1,0 +1,925 @@
+// hotel-booking-dispatch — database schema
+//
+// Money rule: every monetary field is an Int holding whole VND (đồng).
+// VND has no minor unit in practice, so integer arithmetic is exact and
+// floating point is never used for money anywhere in this system.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  RECEPTIONIST
+}
+
+enum BookingStatus {
+  DRAFT
+  READY
+  NEW
+  COMPLETED
+  ARCHIVED
+}
+
+enum PaymentStatus {
+  PAY_BEFORE
+  PAY_AFTER
+}
+
+/// Where a reservation originated. Existing rows default to BOOKING_COM.
+enum BookingSource {
+  BOOKING_COM
+  AGODA
+}
+
+/// Operational business type of a booking, independent of the OTA source.
+/// DIRECT  = an ordinary retail reservation.
+/// PARTNER = a B2B / agency / corporate / partner-rate reservation.
+/// UNKNOWN = the detector had no confident evidence; the Admin should confirm.
+enum BookingBusinessType {
+  DIRECT
+  PARTNER
+  UNKNOWN
+}
+
+/// Proof-of-creation lifecycle for a dispatched booking. A receptionist creates
+/// the reservation in the external hotel system, uploads a screenshot, and the
+/// Admin approves or rejects it.
+enum VerificationStatus {
+  NOT_SUBMITTED
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+/// A single screenshot proof attempt.
+enum ProofStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+/// Lifecycle of one OCR analysis run over a proof screenshot. Advisory only —
+/// the analysis never approves/rejects a proof and never compares against the
+/// booking. DISABLED means the OCR feature flag was off when the run was created;
+/// FAILED means the provider errored (the proof itself stays valid regardless).
+enum ProofAnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  DISABLED
+}
+
+/// Overall verdict of one proof-vs-booking comparison run. Advisory only — it
+/// never approves/rejects a proof and never changes any status.
+/// MATCH       = every critical field that was detected matches safely.
+/// WARNING     = no confirmed critical mismatch, but some fields are missing,
+///               uncertain or need manual review.
+/// MISMATCH    = at least one critical (or opposite-payment) field clearly differs.
+/// UNAVAILABLE = OCR was disabled/pending/failed, or no completed analysis exists.
+enum ProofComparisonOverallStatus {
+  MATCH
+  WARNING
+  MISMATCH
+  UNAVAILABLE
+}
+
+/// Why an Admin rejected a proof attempt (a stable code; UI shows Vietnamese).
+enum ProofReviewReason {
+  WRONG_CUSTOMER_NAME
+  WRONG_BOOKING_CODE
+  WRONG_DATES
+  WRONG_ROOM_COUNT
+  WRONG_ROOM_TYPE
+  WRONG_PRICE
+  MISSING_ROOM
+  UNCLEAR_IMAGE
+  OTHER
+}
+
+/// Which external platform a branch alias belongs to. MANUAL/OTHER exist so a
+/// future source can be configured without another schema redesign.
+enum BranchAliasSource {
+  BOOKING_COM
+  AGODA
+  MANUAL
+  OTHER
+}
+
+/// How an alias is compared against the hotel name found in pasted text.
+/// EXACT      = only a case/accent/whitespace-normalised equality resolves it.
+/// SIMILARITY = the Booking.com prefix-tolerant token score may also resolve it.
+enum BranchAliasMatchMode {
+  EXACT
+  SIMILARITY
+}
+
+/// What changed on a branch (audit trail for Admin branch management).
+/// The ROOM_MAPPING_* / ROOM_CLASS_* members extend the SAME audit trail to
+/// branch room-class configuration — room classes are branch configuration, so
+/// they belong in BranchChangeLog rather than in a second audit system.
+enum BranchChangeAction {
+  BRANCH_CREATED
+  BRANCH_NUMBER_CHANGED
+  BRANCH_NAME_CHANGED
+  BRANCH_ADDRESS_CHANGED
+  BRANCH_BREAKFAST_CHANGED
+  BRANCH_CONTACT_CHANGED
+  BRANCH_ACTIVATED
+  BRANCH_DEACTIVATED
+  ALIAS_ADDED
+  ALIAS_RENAMED
+  ALIAS_ENABLED
+  ALIAS_DISABLED
+  ALIAS_REMOVED
+  ROOM_MAPPING_DRAFT_CREATED
+  ROOM_MAPPING_DRAFT_CANCELLED
+  ROOM_CLASS_ADDED
+  ROOM_CLASS_UPDATED
+  ROOM_CLASS_DEACTIVATED
+  ROOM_CLASS_REORDERED
+  ROOM_CLASS_ALIAS_ADDED
+  ROOM_CLASS_ALIAS_REMOVED
+  ROOM_MAPPING_VALIDATED
+  ROOM_MAPPING_ACTIVATED
+  ROOM_MAPPING_ACTIVATION_FAILED
+}
+
+/// Lifecycle of one branch room-class mapping version.
+/// DRAFT    = being prepared; never used to resolve a booking.
+/// ACTIVE   = the single version new bookings resolve against (one per branch).
+/// ARCHIVED = superseded, kept forever so historical snapshots stay explainable.
+enum RoomMappingVersionStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+/// Where a room-class alias came from.
+enum RoomClassAliasSource {
+  SEED
+  ADMIN
+  PARSER
+}
+
+/// How a room name was resolved to a branch room class for a booking room.
+/// RESOLVED   = matched a configured name/alias of the booking's own branch.
+/// MANUAL     = an authorized user selected the class explicitly.
+/// UNRESOLVED = no deterministic match; the source text is preserved verbatim
+///              and the room is flagged for manual review. Never guessed.
+/// LEGACY     = pre-C.3.8 row backfilled from its stored room text; the note
+///              keeps using the legacy abbreviation until a human resolves it.
+enum RoomClassResolutionStatus {
+  RESOLVED
+  MANUAL
+  UNRESOLVED
+  LEGACY
+}
+
+/// Booking-scoped audit trail (guests, room-mapping re-application). Mirrors the
+/// shape of BranchChangeLog so both trails read the same way.
+enum BookingAuditAction {
+  BOOKING_GUEST_ADDED
+  BOOKING_GUEST_UPDATED
+  BOOKING_GUEST_REMOVED
+  BOOKING_PRIMARY_GUEST_CHANGED
+  BOOKING_ROOM_MAPPING_REAPPLIED
+}
+
+/// Severity of an extraction warning surfaced to the admin during preview.
+enum WarningSeverity {
+  INFO
+  WARNING
+  ERROR
+}
+
+/// Category of a receptionist-reported hotel issue.
+enum IssueCategory {
+  DOOR
+  AIR_CONDITIONER
+  TOILET
+  TV
+  WIFI
+  ELECTRICITY
+  WATER
+  FURNITURE
+  HOUSEKEEPING
+  GUEST_REQUEST
+  OTHER
+}
+
+/// Lifecycle of a reported hotel issue. Deliberately minimal: no workflow beyond
+/// NEW → IN_PROGRESS → RESOLVED.
+enum IssueStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+}
+
+/// Application user: one administrator plus receptionists bound to a branch.
+model User {
+  id                 Int       @id @default(autoincrement())
+  username           String    @unique
+  passwordHash       String
+  fullName           String
+  role               UserRole
+  /// Required for RECEPTIONIST, always null for ADMIN (admin sees all branches).
+  branchId           Int?
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  /// Set on every successful login; null until the account logs in for the first time.
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  branch                Branch?                    @relation(fields: [branchId], references: [id])
+  bookingsSent          Booking[]                  @relation("BookingSentBy")
+  bookingsCompleted     Booking[]                  @relation("BookingCompletedBy")
+  bookingsReviewed      Booking[]                  @relation("BookingReviewedBy")
+  bookingsCreated       Booking[]                  @relation("BookingCreatedBy")
+  proofsSubmitted       BookingCreationProof[]     @relation("ProofSubmittedBy")
+  proofsReviewed        BookingCreationProof[]     @relation("ProofReviewedBy")
+  statusChanges         BookingStatusHistory[]
+  notifications         Notification[]
+  sessions              Session[]
+  issuesReported        HotelIssue[]               @relation("IssueReportedBy")
+  issuesAccepted        HotelIssue[]               @relation("IssueAcceptedBy")
+  issuesResolved        HotelIssue[]               @relation("IssueResolvedBy")
+  branchChanges         BranchChangeLog[]
+  roomMappingsCreated   BranchRoomMappingVersion[] @relation("RoomMappingCreatedBy")
+  roomMappingsActivated BranchRoomMappingVersion[] @relation("RoomMappingActivatedBy")
+  bookingAuditEvents    BookingAuditEvent[]
+
+  @@index([branchId])
+  @@index([role])
+}
+
+/// Server-side login session backing express-session.
+///
+/// A native SQLite session store (connect-sqlite3 / better-sqlite3) is blocked
+/// by this project's install-script allow-list, so sessions live in the same
+/// Prisma/SQLite database — the simplest reliable persistent store here.
+/// The browser only ever holds the opaque `id` (the session cookie); all
+/// session data stays server-side in `data`. `userId` is denormalised out of
+/// `data` so a user's sessions can be invalidated on disable / password reset.
+model Session {
+  id        String   @id
+  /// express-session serialised session payload (JSON).
+  data      String
+  /// Owner of the session once authenticated; null for anonymous sessions.
+  userId    Int?
+  /// Absolute expiry; rows past this are pruned and treated as absent.
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// A batch of generated development demo data (dev-test tools only). Records the
+/// generation parameters + summary so the whole batch can be deleted reliably.
+/// Never created in production; every business row it spawns is tagged isDemo.
+model DemoDataBatch {
+  id              String   @id @default(cuid())
+  /// The seed + counts used, serialised as JSON (for reproducibility/audit).
+  paramsJson      String
+  /// A JSON summary of how many of each entity were created.
+  summaryJson     String
+  createdByUserId Int?
+  createdAt       DateTime @default(now())
+}
+
+/// A hotel branch bookings are dispatched to. Admin-managed at runtime: branch
+/// count is NOT fixed at 8, and platform hotel names live in BranchSourceAlias
+/// rather than in source code.
+model Branch {
+  id                Int      @id @default(autoincrement())
+  /// Immutable stable code (A–Z, 0–9, underscore), e.g. "BUI_THI_XUAN_40".
+  /// Parser routing and authorization key off this, never off branchNumber.
+  code              String   @unique
+  /// Internal display name. Also the legacy Booking.com matching name for the
+  /// originally seeded branches — every platform name now lives in
+  /// BranchSourceAlias, so renaming this never moves a booking.
+  hotelName         String
+  address           String
+  /// Human-readable branch number shown as "Chi nhánh N". Editable, unique among
+  /// ACTIVE branches, never derived from `id` or from list order, and never an
+  /// authorization key. 0 only until the additive migration backfills it.
+  branchNumber      Int      @default(0)
+  /// Whether this branch serves breakfast (operator configuration only — an
+  /// extracted booking's own text still decides its PMS note wording).
+  breakfastIncluded Boolean  @default(false)
+  /// Optional operational contact details, shown to the Admin only.
+  phone             String?
+  email             String?
+  contactName       String?
+  note              String?
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  users               User[]
+  bookings            Booking[]
+  issues              HotelIssue[]
+  aliases             BranchSourceAlias[]
+  changeLogs          BranchChangeLog[]
+  roomMappingVersions BranchRoomMappingVersion[]
+  roomClasses         BranchRoomClass[]
+}
+
+/// One immutable-once-activated version of a branch's room-class mapping.
+///
+/// Exactly one ACTIVE version per branch at any time (enforced by the activation
+/// transaction plus a partial unique index created in the migration). A new
+/// configuration is prepared as a DRAFT copy, so the live mapping keeps serving
+/// reception while an Admin edits — and activation is a single atomic swap.
+model BranchRoomMappingVersion {
+  id                String                   @id @default(cuid())
+  branchId          Int
+  /// 1-based, monotonically increasing per branch. Shown to operators.
+  versionNumber     Int
+  status            RoomMappingVersionStatus @default(DRAFT)
+  createdByUserId   Int?
+  activatedByUserId Int?
+  createdAt         DateTime                 @default(now())
+  activatedAt       DateTime?
+  archivedAt        DateTime?
+  /// Operator-supplied reason, shown in the version history.
+  changeReason      String?
+
+  branch      Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createdBy   User?             @relation("RoomMappingCreatedBy", fields: [createdByUserId], references: [id])
+  activatedBy User?             @relation("RoomMappingActivatedBy", fields: [activatedByUserId], references: [id])
+  roomClasses BranchRoomClass[]
+
+  @@unique([branchId, versionNumber])
+  @@index([branchId, status])
+}
+
+/// One room class of one branch, within one mapping version.
+///
+/// Room classes are BUSINESS-MANAGED data, never a code enum: each branch has
+/// its own display names and PMS codes, and the same code (e.g. STAN) legitimately
+/// exists in several branches. `stableKey` is what identifies "the same room
+/// class" across versions of a branch, so a booking snapshot stays explainable
+/// after a rename.
+model BranchRoomClass {
+  id             String  @id @default(cuid())
+  branchId       Int
+  versionId      String
+  /// Stable across versions of this branch, e.g. "standard", "deluxe-bal".
+  stableKey      String
+  displayName    String
+  /// Case/diacritic/punctuation-folded form used for deterministic lookup.
+  normalizedName String
+  /// The exact PMS note code, e.g. STAN, LUXDEL, PRE_DD.
+  pmsCode        String
+  active         Boolean @default(true)
+  sortOrder      Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch  Branch                   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  version BranchRoomMappingVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  aliases BranchRoomClassAlias[]
+
+  /// Within one version: no duplicate normalized name, PMS code or stable key.
+  @@unique([versionId, normalizedName])
+  @@unique([versionId, pmsCode])
+  @@unique([versionId, stableKey])
+  @@index([branchId])
+  @@index([versionId, active])
+}
+
+/// A recognised spelling of a room class, scoped to its branch AND version.
+///
+/// `versionId` is denormalised so the database itself can guarantee an alias is
+/// unambiguous within a version — two room classes of the same branch may never
+/// claim the same normalized alias.
+model BranchRoomClassAlias {
+  id              String               @id @default(cuid())
+  roomClassId     String
+  versionId       String
+  branchId        Int
+  alias           String
+  normalizedAlias String
+  source          RoomClassAliasSource @default(SEED)
+  active          Boolean              @default(true)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  roomClass BranchRoomClass @relation(fields: [roomClassId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, normalizedAlias])
+  @@index([roomClassId])
+  @@index([branchId])
+}
+
+/// One guest on a booking.
+///
+/// Introduced in C.3.8. `Booking.customerName` / `Booking.phone` remain the
+/// denormalised mirror of the PRIMARY guest so every existing read path, note
+/// builder, export and comparison keeps working unchanged; the service layer
+/// keeps the two in step inside one transaction.
+model BookingGuest {
+  id             String  @id @default(cuid())
+  bookingId      String
+  fullName       String
+  phone          String?
+  email          String?
+  nationality    String?
+  /// Passport / national id number, and which kind it is.
+  identityNumber String?
+  identityType   String?
+  note           String?
+  /// Exactly one primary guest per booking (enforced by the service).
+  isPrimary      Boolean @default(false)
+  sortOrder      Int     @default(0)
+
+  createdByUserId Int?
+  updatedByUserId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([bookingId, isPrimary])
+}
+
+/// Immutable booking-scoped audit trail (guest edits, mapping re-application).
+model BookingAuditEvent {
+  id            String             @id @default(cuid())
+  bookingId     String
+  action        BookingAuditAction
+  field         String?
+  oldValue      String?
+  newValue      String?
+  reason        String?
+  actorUserId   Int?
+  actorRole     UserRole?
+  /// Request correlation id, when the caller supplied one.
+  correlationId String?
+  createdAt     DateTime           @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  actor   User?   @relation(fields: [actorUserId], references: [id])
+
+  @@index([bookingId, createdAt])
+  @@index([action])
+}
+
+/// One external platform hotel name that resolves to a branch. Replaces the
+/// hardcoded Booking.com/Agoda name tables for normal operation: renaming a
+/// property on an OTA is an Admin action, not a code change.
+///
+/// `normalizedAlias` is the case/accent/whitespace-folded form used for lookup.
+/// At most one ACTIVE alias may exist per (source, normalizedAlias) across all
+/// branches — enforced by the branch service so a name can never route to two
+/// branches. Old names stay as additional (optionally inactive) rows so
+/// historical text keeps resolving until the Admin deactivates them explicitly.
+model BranchSourceAlias {
+  id              Int                  @id @default(autoincrement())
+  branchId        Int
+  source          BranchAliasSource
+  alias           String
+  normalizedAlias String
+  matchMode       BranchAliasMatchMode @default(EXACT)
+  active          Boolean              @default(true)
+  /// Higher wins when several aliases of one branch could apply (display order).
+  priority        Int                  @default(0)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  /// The same normalized name may never be stored twice for one branch+source.
+  @@unique([branchId, source, normalizedAlias])
+  @@index([source, normalizedAlias])
+  @@index([source, active])
+  @@index([branchId])
+}
+
+/// Immutable audit trail of Admin branch/alias configuration changes. Values are
+/// plain configuration strings only — never passwords or session data.
+model BranchChangeLog {
+  id              String             @id @default(cuid())
+  branchId        Int
+  action          BranchChangeAction
+  /// Which field changed, for the value-level actions (e.g. "address").
+  field           String?
+  oldValue        String?
+  newValue        String?
+  changedByUserId Int?
+  changedAt       DateTime           @default(now())
+
+  branch    Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  changedBy User?  @relation(fields: [changedByUserId], references: [id])
+
+  @@index([branchId, changedAt])
+  @@index([changedAt])
+}
+
+/// A Booking.com reservation extracted by the admin and dispatched to a branch.
+model Booking {
+  id String @id @default(cuid())
+
+  /// Booking.com confirmation code. Not unique: a duplicate raises a warning
+  /// for the admin rather than a hard database rejection.
+  bookingCode String
+  hotelName   String?
+  branchId    Int?
+
+  customerName String
+  phone        String?
+
+  /// Which platform the reservation came from. Defaults to BOOKING_COM so every
+  /// pre-existing row is safe without a data backfill surprise.
+  sourcePlatform BookingSource @default(BOOKING_COM)
+
+  /// Operational business type, detected deterministically at extraction and
+  /// optionally confirmed/overridden by an Admin. Defaults to UNKNOWN so existing
+  /// rows migrate safely. Independent of sourcePlatform / branch / payment / proof.
+  businessType                  BookingBusinessType @default(UNKNOWN)
+  /// 0–100 confidence of the automatic detection (null when never detected).
+  businessTypeConfidence        Int?
+  /// A short machine tag for how the type was decided (e.g. "auto:partner-rate",
+  /// "manual"), for audit — never shown to receptionists.
+  businessTypeDetectionSource   String?
+  /// True once an Admin has explicitly confirmed/overridden the type. When true
+  /// the detector never runs again for this booking.
+  businessTypeManuallyConfirmed Boolean             @default(false)
+
+  /// Date-only values stored at UTC midnight. Times are free-form strings
+  /// ("14:00", "sau 15:00") because Booking.com text is not consistent.
+  /// Nullable so a partial extraction can still be stored as a DRAFT while a
+  /// "missing dates" warning flags it for the admin to complete.
+  checkInDate  DateTime?
+  checkInTime  String?
+  checkOutDate DateTime?
+  checkOutTime String?
+
+  /// Whole VND. Null when the total could not be extracted.
+  totalAmount   Int?
+  currency      String        @default("VND")
+  paymentStatus PaymentStatus
+
+  specialRequest String?
+  /// Original pasted Booking.com text, kept permanently for auditing.
+  rawText        String
+
+  status       BookingStatus @default(DRAFT)
+  /// True when check-in is today in Asia/Ho_Chi_Minh at dispatch time.
+  isLastMinute Boolean       @default(false)
+
+  /// Dispatch timestamp. History is grouped by this and it is never
+  /// overwritten by completedAt.
+  sentAt            DateTime?
+  sentByUserId      Int?
+  /// The receptionist's claim that they created the reservation externally
+  /// (set when the first proof is submitted). Never overwritten by review.
+  completedAt       DateTime?
+  completedByUserId Int?
+  completionNote    String?
+
+  /// Proof-of-creation review state. NOT_SUBMITTED until a receptionist submits.
+  verificationStatus VerificationStatus @default(NOT_SUBMITTED)
+  /// The Admin who approved/rejected the current proof, and when.
+  reviewedByUserId   Int?
+  reviewedAt         DateTime?
+
+  /// Which extraction-engine version produced this draft.
+  parserVersion   String?
+  /// The admin who ran the extraction that created this booking.
+  createdByUserId Int?
+
+  /// When the operator-facing PMS note was last generated, and under which note
+  /// ruleset. A room-mapping change never regenerates a historical note.
+  noteGeneratedAt DateTime?
+  noteVersion     String?
+
+  /// Development demo marker (dev-test tools only). Real bookings are always false.
+  isDemo      Boolean @default(false)
+  /// The demo batch this row belongs to (null for real data).
+  demoBatchId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch           Branch?                  @relation(fields: [branchId], references: [id])
+  sentBy           User?                    @relation("BookingSentBy", fields: [sentByUserId], references: [id])
+  completedBy      User?                    @relation("BookingCompletedBy", fields: [completedByUserId], references: [id])
+  reviewedBy       User?                    @relation("BookingReviewedBy", fields: [reviewedByUserId], references: [id])
+  createdBy        User?                    @relation("BookingCreatedBy", fields: [createdByUserId], references: [id])
+  rooms            BookingRoom[]
+  guests           BookingGuest[]
+  auditEvents      BookingAuditEvent[]
+  statusHistory    BookingStatusHistory[]
+  notifications    Notification[]
+  warnings         BookingExtractWarning[]
+  proofs           BookingCreationProof[]
+  proofComparisons BookingProofComparison[]
+
+  @@index([bookingCode])
+  @@index([branchId, status])
+  @@index([status])
+  @@index([branchId, verificationStatus])
+  @@index([verificationStatus])
+  @@index([sourcePlatform])
+  @@index([businessType])
+  @@index([sentAt])
+  @@index([checkInDate])
+  @@index([isLastMinute])
+  @@index([customerName])
+  @@index([phone])
+  @@index([isDemo])
+  @@index([demoBatchId])
+}
+
+/// One immutable screenshot proof attempt that a receptionist created the
+/// reservation in the external hotel system. Attempts are never overwritten or
+/// hard-deleted; a resubmission creates a new attempt with the next number.
+model BookingCreationProof {
+  id                String   @id @default(cuid())
+  bookingId         String
+  /// 1-based attempt sequence for this booking (unique per booking).
+  attemptNumber     Int
+  /// Server-generated file name on disk (never the client's original name).
+  storedFileName    String
+  /// The client's original name, kept only for display/audit — never trusted.
+  originalFileName  String
+  mimeType          String
+  fileSize          Int
+  submissionNote    String?
+  submittedByUserId Int?
+  submittedAt       DateTime @default(now())
+
+  status           ProofStatus        @default(PENDING_REVIEW)
+  reviewedByUserId Int?
+  reviewedAt       DateTime?
+  reviewReasonCode ProofReviewReason?
+  reviewNote       String?
+
+  createdAt DateTime @default(now())
+
+  booking     Booking                  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  submittedBy User?                    @relation("ProofSubmittedBy", fields: [submittedByUserId], references: [id])
+  reviewedBy  User?                    @relation("ProofReviewedBy", fields: [reviewedByUserId], references: [id])
+  analyses    BookingProofAnalysis[]
+  comparisons BookingProofComparison[]
+
+  @@unique([bookingId, attemptNumber])
+  @@index([bookingId])
+  @@index([status])
+}
+
+/// One immutable OCR analysis run over a proof screenshot. A proof may have many
+/// runs (re-analysis creates a new row; earlier rows are never overwritten). The
+/// extracted text and the structured fields are stored as plain TEXT (the JSON is
+/// serialised to a string), never as image BLOBs and never as a filesystem path.
+/// This record is advisory extraction only: it carries no MATCH/MISMATCH verdict
+/// and no approval recommendation.
+model BookingProofAnalysis {
+  id                String              @id @default(cuid())
+  proofId           String
+  status            ProofAnalysisStatus @default(PENDING)
+  /// Which provider produced the run, e.g. "tesseract", "disabled", "mock".
+  provider          String
+  /// A version stamp for the extraction logic, so old runs remain interpretable.
+  analysisVersion   String
+  /// Raw OCR text, length-capped by the service before it is stored (never bytes).
+  extractedText     String?
+  /// Structured fields serialised as a JSON string (validated before storage).
+  extractedDataJson String?
+  /// Sanitised, user-safe error message when status is FAILED (never a stack/path).
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  proof       BookingCreationProof     @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  comparisons BookingProofComparison[]
+
+  @@index([proofId])
+  @@index([proofId, status])
+  @@index([createdAt])
+}
+
+/// One immutable proof-vs-booking comparison run. It compares the persisted
+/// booking (what the Admin dispatched) against the structured fields of a
+/// COMPLETED OCR analysis, and stores a field-by-field result as validated JSON
+/// text. Advisory only: it carries no automatic approval/rejection and never
+/// changes booking or proof status. Re-analysis creates a new comparison; earlier
+/// runs are preserved. Only one comparison per (analysis, comparisonVersion).
+model BookingProofComparison {
+  id                String                       @id @default(cuid())
+  bookingId         String
+  proofId           String
+  analysisId        String
+  overallStatus     ProofComparisonOverallStatus
+  /// Stable version tag for the comparison ruleset (e.g. "proof-compare-v1").
+  comparisonVersion String
+  /// Field-by-field result serialised as a validated JSON string (no BLOB/path).
+  resultJson        String
+  /// Sanitised, user-safe error message when a run failed (never a stack/path).
+  errorMessage      String?
+  /// The Admin who triggered a manual re-comparison; null for a system run.
+  createdByUserId   Int?
+  createdAt         DateTime                     @default(now())
+
+  booking  Booking              @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  proof    BookingCreationProof @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  analysis BookingProofAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@unique([analysisId, comparisonVersion])
+  @@index([proofId])
+  @@index([bookingId])
+  @@index([createdAt])
+}
+
+/// One room within a booking. Rooms are never merged; each keeps its own prices.
+model BookingRoom {
+  id           String  @id @default(cuid())
+  bookingId    String
+  /// 1-based position as shown in the UI ("Phòng 1", "Phòng 2").
+  roomIndex    Int
+  roomType     String?
+  /// Whole VND, null when not stated in the source text.
+  roomSubtotal Int?
+  taxAmount    Int?
+  feeAmount    Int?
+
+  /// ---------------------------------------------------------------------
+  /// IMMUTABLE ROOM-CLASS SNAPSHOT (C.3.8)
+  ///
+  /// Captured when the room is created or explicitly re-resolved, and NEVER
+  /// rewritten by a later mapping change. A booking made today under
+  /// "Premium / LUXDEL / version 1" keeps showing Premium / LUXDEL forever,
+  /// even after an Admin activates a version that renames or re-codes it.
+  ///
+  /// The snapshot is what every note, export and comparison reads; the live
+  /// mapping is only ever consulted to CREATE a snapshot.
+  /// ---------------------------------------------------------------------
+  /// The resolved room class, kept for provenance. Nulled if that class row is
+  /// ever removed — the *_Snapshot columns below stay authoritative regardless.
+  roomClassId          String?
+  roomClassVersionId   String?
+  /// The branch the class belonged to, so a cross-branch edit is detectable.
+  roomClassBranchId    Int?
+  /// Verbatim copies — deliberately duplicated, never joined at read time.
+  roomClassDisplayName String?
+  roomClassPmsCode     String?
+  /// The exact source text that was resolved (or failed to resolve).
+  roomClassSourceText  String?
+  roomClassStatus      RoomClassResolutionStatus?
+  roomClassResolvedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  booking Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  nights  BookingNightPrice[]
+
+  @@unique([bookingId, roomIndex])
+  @@index([bookingId])
+}
+
+/// The price of one individual stay night of one individual room.
+/// One row per expected night: check-in inclusive to check-out exclusive.
+model BookingNightPrice {
+  id                String   @id @default(cuid())
+  bookingRoomId     String
+  /// Date-only at UTC midnight. Never the check-out date.
+  stayDate          DateTime
+  /// Whole VND. Null means "Chưa xác định" — never guessed, averaged or
+  /// derived by dividing a total.
+  amount            Int?
+  currency          String   @default("VND")
+  /// True when the admin typed or corrected this amount by hand.
+  manuallyCorrected Boolean  @default(false)
+  /// True when the amount is a system estimate rather than a value Booking.com
+  /// stated. The extraction engine never estimates money, so it always writes
+  /// false; reserved for a future explicit "estimate" action.
+  isEstimated       Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  bookingRoom BookingRoom @relation(fields: [bookingRoomId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingRoomId, stayDate])
+  @@index([bookingRoomId])
+  @@index([stayDate])
+}
+
+/// A single validation finding produced while extracting a booking from raw
+/// Booking.com text (e.g. unknown hotel, missing dates, missing nightly price).
+model BookingExtractWarning {
+  id        String          @id @default(cuid())
+  bookingId String
+  /// Stable machine code, e.g. "UNKNOWN_HOTEL", "MISSING_NIGHTLY_PRICE".
+  code      String
+  /// Human-readable Vietnamese message shown to the admin.
+  message   String
+  severity  WarningSeverity @default(WARNING)
+  createdAt DateTime        @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([code])
+}
+
+/// Immutable audit trail of every booking status transition.
+model BookingStatusHistory {
+  id              String         @id @default(cuid())
+  bookingId       String
+  oldStatus       BookingStatus?
+  newStatus       BookingStatus
+  changedByUserId Int?
+  changedAt       DateTime       @default(now())
+  note            String?
+
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  changedBy User?   @relation(fields: [changedByUserId], references: [id])
+
+  @@index([bookingId])
+  @@index([changedAt])
+}
+
+/// In-app notification delivered to a user (new booking / completion).
+model Notification {
+  id        String    @id @default(cuid())
+  userId    Int
+  bookingId String?
+  title     String
+  body      String
+  read      Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  /// Development demo marker (dev-test tools only). Real notifications are false.
+  isDemo      Boolean @default(false)
+  demoBatchId String?
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([createdAt])
+  @@index([isDemo])
+}
+
+/// A hotel issue a receptionist reports to the Admin after receiving a booking
+/// (broken door, AC not cold, clogged toilet, guest request, …). Reports are kept
+/// permanently — never hard-deleted — and are scoped to the reporter's branch.
+model HotelIssue {
+  id              String        @id @default(cuid())
+  branchId        Int
+  /// Optional room number the issue relates to (free-form).
+  roomNumber      String?
+  category        IssueCategory
+  description     String
+  /// Server-generated file name of the (optional, single) attached photo. Only
+  /// metadata + a safe relative path live here, never the image bytes.
+  photoStoredName String?
+  photoMimeType   String?
+
+  status IssueStatus @default(NEW)
+
+  reportedByUserId Int
+  /// The Admin who moved the issue to IN_PROGRESS / RESOLVED (audit).
+  acceptedByUserId Int?
+  resolvedByUserId Int?
+  resolvedAt       DateTime?
+
+  /// Development demo marker (dev-test tools only). Real issues are always false.
+  isDemo      Boolean @default(false)
+  demoBatchId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch     Branch @relation(fields: [branchId], references: [id])
+  reportedBy User   @relation("IssueReportedBy", fields: [reportedByUserId], references: [id])
+  acceptedBy User?  @relation("IssueAcceptedBy", fields: [acceptedByUserId], references: [id])
+  resolvedBy User?  @relation("IssueResolvedBy", fields: [resolvedByUserId], references: [id])
+
+  @@index([branchId, status])
+  @@index([status])
+  @@index([createdAt])
+  @@index([reportedByUserId])
+  @@index([isDemo])
+  @@index([demoBatchId])
+}

@@ -1,11 +1,10 @@
 import fs from 'node:fs';
+import { fixtureBranches } from './helpers/branchFixtures';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseAgodaBooking } from '../src/booking/agoda';
 import { buildAgodaPmsNote, isAgodaPartnerEmail, parseAgodaPartnerBooking } from '../src/booking/agodaPartner';
 import { matchBranch } from '../src/booking/branchMatcher';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch } from '../src/booking/types';
 
 /**
  * Regression suite for the real-world paste.
@@ -21,12 +20,8 @@ import type { MatchableBranch } from '../src/booking/types';
  * a room quantity of 120, a room type carrying the whole table row, and a phone
  * containing the guest's name.
  */
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 const PASTED = fs.readFileSync(path.join(__dirname, 'fixtures', 'agoda', '06-partner-pasted-flattened.txt'), 'utf8');
 const p = () => parseAgodaPartnerBooking(PASTED);
@@ -140,14 +135,15 @@ describe('Agoda pasted layout — room table', () => {
 });
 
 describe('Agoda pasted layout — hotel, money and note', () => {
-  it('the hotel resolves to the branch address; Property ID stays absent', () => {
+  it('the hotel resolves to the branch address, never to the Property ID', () => {
     const r = routed();
     expect(r.hotelName).toBe('40-42 Bùi Thị Xuân');
     expect(r.agoda!.branchCode).toBe('BUI_THI_XUAN_40');
     expect(r.agoda!.sourceHotelName).toBe('KAS Sonata Luxury Hotel');
-    const serialized = JSON.stringify(r);
-    expect(serialized).not.toContain('245858');
-    expect(serialized).not.toMatch(/propertyId/i);
+    // The id is recorded, but it is not part of any name and did not choose
+    // the branch — that came from the configured platform identity.
+    expect(r.hotelName).not.toContain('245858');
+    expect(r.agoda!.sourceHotelName).not.toContain('245858');
   });
 
   it('money ignores commission, other programs, tax and promotions', () => {

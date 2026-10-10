@@ -1,0 +1,557 @@
+import { api } from './client';
+import type { Issue } from './issues';
+import type { ShiftType } from './shifts';
+
+export type ReportCategory =
+  | 'PAYMENT'
+  | 'GUEST_REQUEST'
+  | 'FACILITY_ISSUE'
+  | 'CUSTOMER_COMPLAINT'
+  | 'ROOM_SERVICE'
+  | 'HOTEL_DELIVERY';
+
+export type PaymentMethod = 'CASH' | 'TRANSFER' | 'CARD' | 'DEBT';
+
+/** "Mức độ" — on requests, incidents and service-quality reports only. */
+export type Severity = 'HIGH' | 'MEDIUM' | 'LOW';
+
+/** One method's part of ONE transaction. */
+export interface PaymentAllocation {
+  method: PaymentMethod;
+  amount: number;
+}
+
+/** "Bộ phận" of a delivered item. */
+export type DeliveryDepartment = 'RECEPTION' | 'HOUSEKEEPING' | 'TECHNICAL';
+
+export type RoomServiceType = 'ROOM_SALE' | 'UPGRADE' | 'SMOKING' | 'LAUNDRY' | 'OTHER' | 'REVIEW';
+
+/**
+ * The labels come from the SERVER, not from a constant here.
+ *
+ * The same words appear on this screen, on the Admin drill-down, in the PDF and
+ * in the XLSX — and two of those four are built on the server. A copy in React
+ * is how the exported file and the screen it was exported from start disagreeing
+ * about what a column is called.
+ */
+export interface ReportOptions {
+  categories: { code: ReportCategory; label: string }[];
+  paymentMethods: { code: PaymentMethod; label: string }[];
+  roomServiceTypes: { code: RoomServiceType; label: string }[];
+  /** "Nguồn" for a new payment — a closed list, the server's. */
+  paymentSources: string[];
+  deliveryDepartments: { code: DeliveryDepartment; label: string }[];
+  /** "Giao nhận hàng hóa của khách sạn" — the full name; `categories` carries the short one. */
+  deliveryTitle: string;
+  /** How long a completed delivery stays active before "Hoàn thành vấn đề". */
+  deliveryArchiveHours: number;
+  /** Cao / Trung bình / Thấp, in priority order. */
+  severities?: { code: Severity; label: string }[];
+}
+
+export interface ReportAudit {
+  id: string;
+  action: 'EDIT' | 'VOID' | 'OPENING_CASH';
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  reason: string | null;
+  actor: { id: number; name: string };
+  shiftType: ShiftType | null;
+  createdAt: string;
+}
+
+export interface PaymentDetail {
+  ezCode: string | null;
+  source: string | null;
+  guestName: string | null;
+  roomNumber: string | null;
+  /** The primary method (the largest allocation). */
+  method: PaymentMethod;
+  methodLabel: string;
+  /** "Tổng tiền thu". */
+  amount: number;
+  /** Every method that paid it, in the selector's order — one per method. */
+  allocations: (PaymentAllocation & { label: string })[];
+  receivable: number;
+  expense: number;
+  note: string | null;
+  /** Split by method on the server, so the three columns cannot drift. */
+  cash: number;
+  transfer: number;
+  card: number;
+  /** The amount when the method IS Công nợ. */
+  debt: number;
+}
+
+/**
+ * "Đã tiếp nhận" from the moment it is recorded (the report's `createdAt`),
+ * "Đã hoàn thành" once `completed` — with `resolution` saying how.
+ */
+export interface GuestRequestDetail {
+  guestName: string;
+  ezCode: string | null;
+  /** "Nội dung" as the server reads it — the note, or a legacy row's "Ký gửi" and note. */
+  content: string;
+  note: string | null;
+  /** Legacy "Ký gửi" and "Số phòng", no longer asked for. Null on current rows. */
+  itemType: string | null;
+  roomNumber: string | null;
+  completed: boolean;
+  completedBy: { id: number; fullName: string } | null;
+  completedByName: string | null;
+  completedAt: string | null;
+  completedShiftType: ShiftType | null;
+  completedShiftName: string | null;
+  /** "Cách xử lý (nếu có)". Optional, so null on many completed requests too. */
+  resolution: string | null;
+  /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
+  reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
+  incorrectReason?: string | null;
+  /** "Mức độ"; null ("Chưa phân mức") on requests recorded before it existed. */
+  severity: Severity | null;
+  severityLabel: string;
+}
+
+/**
+ * The LIVE incident, read through the reference — never a copy of it.
+ *
+ * Typed as the full `Issue` because that is what arrives: the server runs the
+ * SAME `serializeIssue` here as it does for the technical queue, so the journal
+ * row carries the incident's status, attempts and times exactly as the incident
+ * screens show them. Note that `issue.updatedAt` is the INCIDENT's own stamp,
+ * which moves when a technician works it — unlike the report's `updatedAt`.
+ */
+export interface FacilityIssueDetail {
+  issueId: string;
+  issue: Issue;
+}
+
+/** "Đã tiếp nhận" from creation, "Đã hoàn thành" once `completed`. */
+export interface ComplaintDetail {
+  guestName: string;
+  ezCode: string | null;
+  description: string;
+  /** Legacy "Số phòng / Khác" — null on every report recorded since. */
+  location: string | null;
+  completed: boolean;
+  completedBy: { id: number; fullName: string } | null;
+  completedByName: string | null;
+  completedAt: string | null;
+  completedShiftType: ShiftType | null;
+  completedShiftName: string | null;
+  /** "Hướng xử lý (nếu có)". */
+  resolution: string | null;
+  /** "Đúng" / "Sai" from "Hoàn thành" (null: older completion, read as "Đúng"). */
+  reportVerdict?: 'CORRECT' | 'INCORRECT' | null;
+  incorrectReason?: string | null;
+  severity: Severity | null;
+  severityLabel: string;
+}
+
+export interface RoomServiceDetail {
+  serviceType: RoomServiceType;
+  serviceTypeLabel: string;
+  guestName: string;
+  ezCode: string | null;
+  roomClass: string | null;
+  fromRoomClass: string | null;
+  toRoomClass: string | null;
+  /** Số đêm — "Bán phòng" and "Upgrade". */
+  nights: number | null;
+  price: number;
+  note: string | null;
+  /** "Review" only — the counts the receptionist reports; null elsewhere. */
+  tripadvisorCount: number | null;
+  googleCount: number | null;
+  /** False for "Review": a count, never revenue. Decided by the server. */
+  countsAsRevenue: boolean;
+  /** Legacy fields, no longer asked for; null on current rows. */
+  phone: string | null;
+  roomNumber: string | null;
+  serviceName: string | null;
+}
+
+/**
+ * One delivered item — born "Đã hoàn thành". `archived` is the SERVER's reading
+ * of the 12-hour rule on this very response; the client never computes it.
+ */
+export interface DeliveryDetail {
+  department: DeliveryDepartment;
+  departmentLabel: string;
+  itemName: string;
+  quantity: number;
+  note: string | null;
+  status: 'COMPLETED';
+  statusLabel: string;
+  completedAt: string;
+  archived: boolean;
+  title: string;
+}
+
+export interface OperationalReport {
+  id: string;
+  category: ReportCategory;
+  categoryLabel: string;
+  branchId: number;
+  branch: { id: number; code: string; hotelName: string; address: string; branchNumber: number } | null;
+  shiftSessionId: string | null;
+  shiftType: ShiftType | null;
+  shiftName: string | null;
+  shiftWindow: string | null;
+  /**
+   * "YYYY-MM-DD" — the HCM day the SHIFT belongs to, decided on the server
+   * from the session. Ca C of the 22nd owns its 02:15 entries too, so this is
+   * what an Admin view groups by; a record's own `createdAt` is not.
+   */
+  shiftDate: string;
+  /** The receptionist ON the shift, as they checked in. Null without a session. */
+  shiftReceptionistName: string | null;
+  /**
+   * Has the shift pressed "Kết thúc ca"? Only closed shifts are in the official
+   * report for their business date; an open one is shown, and flagged.
+   */
+  shiftClosed: boolean;
+  createdBy: { id: number; fullName: string } | null;
+  /** The name the SHIFT recorded — never the account's current one. */
+  createdByName: string;
+  /** The creator's role at creation; null on older rows (all Reception). */
+  createdByRole?: string | null;
+  /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor entered it; null for the desk's own. */
+  sourceLabel?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  summary: string;
+  voided: boolean;
+  voidedAt: string | null;
+  voidedBy: { id: number; fullName: string } | null;
+  voidedByName: string | null;
+  voidReason: string | null;
+  /** The role of whoever deleted it; null on rows deleted before it was kept. */
+  voidedByRole?: string | null;
+  voidedByRoleLabel?: string | null;
+  /** "Nhập bù": entered after its shift by a manager, for the receptionist in `createdBy`. */
+  lateEntry?: LateEntryInfo | null;
+  payment: PaymentDetail | null;
+  guestRequest: GuestRequestDetail | null;
+  facility: FacilityIssueDetail | null;
+  complaint: ComplaintDetail | null;
+  roomService: RoomServiceDetail | null;
+  delivery: DeliveryDetail | null;
+  audits: ReportAudit[];
+}
+
+export type CategoryCounts = Record<ReportCategory, number>;
+
+export interface LateEntryInfo {
+  enteredBy: { id: number; name: string };
+  enteredByRole: string | null;
+  enteredByRoleLabel: string | null;
+  reason: string | null;
+  enteredAt: string;
+}
+
+/** A finished shift a "Nhập bù" can go to, with the receptionist who worked it. */
+export interface LateEntrySession {
+  id: string;
+  branchId: number;
+  businessDate: string;
+  shiftType: ShiftType;
+  shiftName: string;
+  shiftWindow: string;
+  receptionist: { id: number | null; name: string };
+  startedAt: string;
+  closedAt: string;
+}
+
+/**
+ * The drawer. `openingCash` and `endingCash` are NULLABLE, and null means
+ * "chưa kiểm đếm" rather than zero — an uncounted drawer and an empty one are
+ * different facts, and only one of them lets the ending figure be trusted.
+ */
+export interface CashSummary {
+  openingCash: number | null;
+  cashCollected: number;
+  transferCollected: number;
+  cardCollected: number;
+  receivable: number;
+  cashExpense: number;
+  endingCash: number | null;
+  paymentCount: number;
+  voidedCount: number;
+}
+
+export interface NewPaymentInput {
+  ezCode?: string;
+  source?: string;
+  guestName?: string;
+  /** The older single-method body; `allocations` is the current one. */
+  method?: PaymentMethod;
+  /** "Tổng tiền thu". */
+  amount: number;
+  /** One line per method, summing to `amount`. */
+  allocations?: PaymentAllocation[];
+  /** LEGACY; the form no longer sends it — Công nợ is a method now. */
+  receivable?: number;
+  expense?: number;
+  note?: string;
+}
+
+/** Tên khách, Mã EZ and Nội dung — the whole of the form. */
+export interface NewGuestRequestInput {
+  guestName: string;
+  ezCode?: string;
+  note: string;
+  severity?: Severity;
+}
+
+export interface NewComplaintInput {
+  guestName: string;
+  ezCode?: string;
+  description: string;
+  severity?: Severity;
+}
+
+export interface NewRoomServiceInput {
+  serviceType: RoomServiceType;
+  guestName: string;
+  ezCode?: string;
+  roomClass?: string;
+  fromRoomClass?: string;
+  toRoomClass?: string;
+  nights?: number;
+  /** Every service but "Review", which is a count, not a sale. */
+  price?: number;
+  note?: string;
+  /** "Review" only. */
+  tripadvisorCount?: number;
+  googleCount?: number;
+}
+
+/**
+ * A discriminated union, mirroring the server's own schema: a report is exactly
+ * one category, and a body carrying two is refused rather than resolved.
+ */
+export type NewReportInput =
+  | { category: 'PAYMENT'; payment: NewPaymentInput }
+  | { category: 'GUEST_REQUEST'; guestRequest: NewGuestRequestInput }
+  | { category: 'FACILITY_ISSUE'; facility: { issueId: string } }
+  | { category: 'CUSTOMER_COMPLAINT'; complaint: NewComplaintInput }
+  | { category: 'ROOM_SERVICE'; roomService: NewRoomServiceInput }
+  | { category: 'HOTEL_DELIVERY'; delivery: NewDeliveryInput };
+
+/** Bộ phận, Tên hàng hóa, Số lượng (a number) and an optional note. */
+export interface NewDeliveryInput {
+  department: DeliveryDepartment;
+  itemName: string;
+  quantity: number;
+  note?: string;
+}
+
+export interface UpdateReportInput {
+  payment?: Partial<NewPaymentInput>;
+  guestRequest?: Partial<NewGuestRequestInput>;
+  complaint?: Partial<NewComplaintInput>;
+  roomService?: Partial<NewRoomServiceInput>;
+  delivery?: Partial<NewDeliveryInput>;
+  reason?: string;
+}
+
+interface ListResponse {
+  reports: OperationalReport[];
+  counts: CategoryCounts;
+}
+
+/** II and IV as the desk must see them — see `completionArchive.ts` on the server. */
+export interface ActiveJournalResponse {
+  reports: OperationalReport[];
+  /** Each category's full count — `reports` is a page (newest first). */
+  totals: { GUEST_REQUEST: number; CUSTOMER_COMPLAINT: number };
+  archiveAfterHours: number;
+}
+
+/** "Hoàn thành vấn đề": completed II and IV received at least 12 hours ago. */
+export interface ArchivedJournalResponse {
+  reports: OperationalReport[];
+  totals: { GUEST_REQUEST: number; CUSTOMER_COMPLAINT: number };
+  /** The received-day window the server applied, or null for the whole archive. */
+  range: { from: string; to: string } | null;
+  archiveAfterHours: number;
+}
+
+function query(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : '';
+}
+
+export const reportsApi = {
+  options: () => api.get<ReportOptions>('/reception/reports/options'),
+
+  list: (params: { category?: ReportCategory; shiftSessionId?: string; from?: string; to?: string } = {}) =>
+    api.get<ListResponse>(`/reception/reports${query(params)}`),
+
+  /**
+   * Requests and service-quality reports, across shifts: unfinished at any age,
+   * or completed within 12 hours of receipt. The server clock decides.
+   */
+  active: (params: { severity?: Severity } = {}) =>
+    api.get<ActiveJournalResponse>(`/reception/reports/active${query(params)}`),
+
+  /**
+   * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —
+   * optionally only those RECEIVED between `from` and `to` (inclusive days).
+   */
+  /** `branchId`: a reception manager narrowing to one branch of its scope. */
+  archive: (
+    params: {
+      from?: string;
+      to?: string;
+      branchId?: number;
+      shiftType?: string;
+      verdict?: 'CORRECT' | 'INCORRECT';
+      severity?: Severity;
+    } = {},
+  ) =>
+    api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
+
+  /**
+   * One record. `branchId` is read ONLY for a supervisor (Admin, Quản lý lễ tân,
+   * Tổng quản lý lễ tân), who must name exactly one branch of its scope; a
+   * receptionist's branch is its open shift's.
+   */
+  create: (input: NewReportInput & { branchId?: number }) =>
+    api.post<{ report: OperationalReport }>('/reception/reports', input),
+
+  update: (id: string, patch: UpdateReportInput) =>
+    api.patch<{ report: OperationalReport }>(`/reception/reports/${id}`, patch),
+
+  /**
+   * "Xóa", implemented as a withdrawal. NOT a DELETE: the row keeps its place in
+   * the journal with the reason attached, and drops out of every total.
+   */
+  void: (id: string, reason: string) =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/void`, { reason }),
+
+  /** "Lịch sử xóa" — the deleted records the reader may see (optionally a business-date period). */
+  deleted: (params: { from?: string; to?: string; branchId?: number; category?: ReportCategory } = {}) =>
+    api.get<{ reports: OperationalReport[] }>(`/reception/reports/deleted${query(params)}`),
+
+  /** "Nhập bù" — the finished shifts of one business date at one branch. */
+  lateEntrySessions: (branchId: number, date: string) =>
+    api.get<{ sessions: LateEntrySession[] }>(`/reception/reports/late-entry/sessions${query({ branchId, date })}`),
+
+  /** "Nhập bù" — a record on its original shift, with the required reason. */
+  lateEntry: (input: NewReportInput & { shiftSessionId: string; reason: string }) =>
+    api.post<{ report: OperationalReport }>('/reception/reports/late-entry', input),
+
+  /**
+   * "Hoàn thành" on a guest request or a service-quality report. The handling
+   * text is optional; the server stamps who, when and which shift.
+   */
+  /** "Hoàn thành": the verdict is required ("Đúng" + optional handling, or "Sai" + its reason). */
+  complete: (id: string, input: { verdict: 'CORRECT' | 'INCORRECT'; resolution?: string; incorrectReason?: string }) =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/complete`, input),
+
+  cash: () => api.get<{ cash: CashSummary }>('/reception/shifts/cash'),
+
+  setOpeningCash: (openingCash: number) =>
+    api.put<{ cash: CashSummary }>('/reception/shifts/cash', { openingCash }),
+};
+
+/**
+ * "Giao nhận hàng hóa" as every role that may read it sees it — the SAME rows as
+ * the reception journal, scoped by the server to the caller's role. `active` is
+ * the working list; `archived` is "Hoàn thành vấn đề".
+ */
+export const deliveriesApi = {
+  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string; shiftType?: string } = {}) =>
+    api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[]; total?: number }>(
+      `/hotel-deliveries${query({ scope, ...params })}`,
+    ),
+};
+
+/* ---------------------------- Admin drill-down ---------------------------- */
+
+export interface AdminOperationalResponse {
+  reports: OperationalReport[];
+  counts: CategoryCounts;
+  /** Null for an all-branch view: a drawer belongs to one desk. */
+  cash: CashSummary | null;
+  /**
+   * The HCM days `cash` covers — today when no period was asked for.
+   *
+   * Carried so the panel can NAME the period. An unlabelled cash figure on a
+   * screen whose record list is unfiltered reads as "the cash position", and
+   * there is no such number.
+   */
+  cashPeriod: { from: string; to: string } | null;
+  /** Every matching record, however many were returned. */
+  total: number;
+  /** True when the list was cut short — stated, never silent. */
+  truncated: boolean;
+  /** Shifts of the period that have not pressed "Kết thúc ca" yet. */
+  openShifts: OpenShiftNotice[];
+  /** The server's own sentence for them, so every surface says the same thing. */
+  openShiftWarning: string;
+}
+
+export interface OpenShiftNotice {
+  sessionId: string;
+  branchId: number;
+  branchAddress: string;
+  businessDate: string;
+  shiftName: string;
+  shiftWindow: string;
+  receptionistName: string;
+}
+
+export const adminReportsApi = {
+  operational: (params: {
+    branchId?: number;
+    /** Several branches, "1,2,3". */
+    branchIds?: string;
+    shiftType?: string;
+    category?: ReportCategory;
+    from?: string;
+    to?: string;
+    /** "Mức độ" — on II, III and IV. */
+    severity?: Severity;
+  }) =>
+    api.get<AdminOperationalResponse>(`/admin/reports/operational${query(params)}`),
+};
+
+/**
+ * Export URLs, opened as ordinary links rather than fetched.
+ *
+ * The browser's own download handling gets the file name from
+ * Content-Disposition and the bytes straight to disk; fetching into memory to
+ * build a blob would hold a multi-megabyte file in the tab for no gain.
+ *
+ * PDF AND EXCEL, from the same scope: the export dialog offers both (the Excel
+ * action is back at the operators' request), and the server names both files alike.
+ */
+/** The export's scope — the same three filters the screen uses. */
+export interface OperationalExportScope {
+  from: string;
+  to: string;
+  branchId?: number;
+  /** Several branches at once, "1,2,3" — the server checks each against the reader's scope. */
+  branchIds?: string;
+  /** One shift type ('A', 'B', 'C', 'A4', 'C4'); every shift when absent. */
+  shiftType?: string;
+  category?: ReportCategory;
+  /** A department's report from the same engine: "Kỹ thuật" or "Buồng phòng". */
+  section?: 'TECHNICAL' | 'HOUSEKEEPING';
+}
+
+export function operationalPdfUrl(params: OperationalExportScope): string {
+  return `/api/admin/reports/operational.pdf${query({ ...params })}`;
+}
+
+export function operationalXlsxUrl(params: OperationalExportScope): string {
+  return `/api/admin/reports/operational.xlsx${query({ ...params })}`;
+}

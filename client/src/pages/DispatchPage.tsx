@@ -2,10 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { FilePlus2, Send, Sparkles } from 'lucide-react';
-import { bookingsApi, branchesApi, BUSINESS_TYPE_LABEL, SOURCE_LABEL, type AgodaPartnerExtras, type BookingDetail, type BookingEdit, type BookingSource, type BusinessType, type ParserQuality, type WarningView } from '../api/bookings';
+import { bookingsApi, branchesApi, BUSINESS_TYPE_LABEL, SOURCE_LABEL, type AgodaPartnerExtras, type BookingComDispatchPayload, type BookingSource, type BusinessType, type ExtractResponse, type ParserQuality, type WarningView } from '../api/bookings';
+import { roomMappingApi } from '../api/roomMapping';
 import { ApiError, toUserMessage } from '../api/errors';
 import { branchLabel } from '../auth/types';
 import { AgodaPartnerCard } from '../components/AgodaPartnerCard';
+import { OtaReviewPanel } from '../components/OtaReviewPanel';
+import { BookingComRoomReview, type ReviewRoomView } from '../components/BookingComRoomReview';
+import { UNMAPPED_ROOM_MESSAGE, everyRoomHasPmsCode } from '../lib/bookingComRoomClass';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
 import { ErrorAlert } from '../components/ErrorAlert';
@@ -16,9 +20,22 @@ interface NightDraft {
   stayDate: string;
   amount: string;
 }
+/**
+ * One room of the review.
+ *
+ * The room-class fields live HERE rather than in a separate server-owned
+ * object: with no draft to hold them, the Admin's choice is part of the same
+ * local state as everything else they are editing, and it travels to the server
+ * once, in the dispatch payload.
+ */
 interface RoomDraft {
   roomIndex: number;
   roomType: string;
+  roomSubtotal: number | null;
+  roomClassId: string | null;
+  roomClassPmsCode: string | null;
+  roomClassDisplayName: string | null;
+  roomClassStatus: 'RESOLVED' | 'MANUAL' | 'UNRESOLVED' | 'LEGACY' | null;
   nights: NightDraft[];
 }
 interface FormState {
@@ -44,21 +61,32 @@ function stayDatesBetween(checkIn: string, checkOut: string): string[] {
   return out;
 }
 
-function toForm(b: BookingDetail): FormState {
+/** The extraction preview, as the editable review the Admin works on. */
+function toForm(res: ExtractResponse): FormState {
   return {
-    hotelName: b.hotelName ?? '',
-    customerName: b.customerName ?? '',
-    phone: b.phone ?? '',
-    bookingCode: b.bookingCode ?? '',
-    checkInDate: b.checkInDate ?? '',
-    checkOutDate: b.checkOutDate ?? '',
-    totalAmount: b.totalAmount != null ? String(b.totalAmount) : '',
-    paymentStatus: b.paymentStatus,
-    specialRequest: b.specialRequest ?? '',
-    rooms: b.rooms.map((r) => ({
+    hotelName: res.booking.hotelName ?? '',
+    customerName: res.booking.guestName ?? '',
+    phone: res.booking.phone ?? '',
+    bookingCode: res.booking.bookingCode ?? '',
+    checkInDate: res.booking.checkIn ?? '',
+    checkOutDate: res.booking.checkOut ?? '',
+    totalAmount: res.booking.totalAmount != null ? String(res.booking.totalAmount) : '',
+    paymentStatus: res.booking.paymentStatus,
+    specialRequest: res.booking.specialRequest ?? '',
+    rooms: res.rooms.map((r) => ({
       roomIndex: r.roomIndex,
-      roomType: r.roomType ?? '',
-      nights: r.nights.map((n) => ({ stayDate: n.stayDate ?? '', amount: n.amount != null ? String(n.amount) : '' })),
+      roomType: r.roomName ?? '',
+      roomSubtotal: r.roomTotal,
+      // No branch is chosen yet, so nothing can be resolved yet. These fill in
+      // when the Admin picks a branch — see the resolve effect below.
+      roomClassId: null,
+      roomClassPmsCode: null,
+      roomClassDisplayName: null,
+      roomClassStatus: null,
+      nights: r.nights.map((n) => ({
+        stayDate: n.stayDate,
+        amount: n.amount != null ? String(n.amount) : '',
+      })),
     })),
   };
 }
@@ -68,10 +96,24 @@ function parseAmount(s: string): number | null {
   return digits.length > 0 ? Number(digits) : null;
 }
 
-function buildEdit(form: FormState, branchId: number | undefined): BookingEdit {
+/**
+ * The whole reviewed reservation, as one request.
+ *
+ * Replaces the old save-then-send pair. Nothing here was ever written to the
+ * database: this IS the booking, assembled at the moment the Admin sends it.
+ */
+function buildDispatch(
+  form: FormState,
+  branchId: number,
+  rawText: string,
+  businessType: BusinessType | null,
+  manuallyConfirmed: boolean,
+  acknowledgedWarningCodes: string[],
+): BookingComDispatchPayload {
   return {
+    rawText,
+    branchId,
     hotelName: form.hotelName || null,
-    branchId: branchId ?? null,
     customerName: form.customerName,
     phone: form.phone || null,
     bookingCode: form.bookingCode,
@@ -85,20 +127,81 @@ function buildEdit(form: FormState, branchId: number | undefined): BookingEdit {
       roomType: r.roomType || null,
       roomSubtotal: r.nights.every((n) => parseAmount(n.amount) !== null)
         ? r.nights.reduce((acc, n) => acc + (parseAmount(n.amount) ?? 0), 0)
-        : null,
+        : r.roomSubtotal,
+      roomClassId: r.roomClassId,
       nights: r.nights.map((n) => ({ stayDate: n.stayDate, amount: parseAmount(n.amount) })),
     })),
+    // Sent only when a human actually decided it; otherwise the server's own
+    // detector runs, exactly as it does today.
+    ...(manuallyConfirmed && (businessType === 'DIRECT' || businessType === 'PARTNER')
+      ? { businessType }
+      : {}),
+    acknowledgedWarningCodes,
   };
 }
 
 const inputClass =
   'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
 
+/**
+ * What to paste, per platform. CTrip's line is deliberately explicit about the
+ * conservative extraction: it is better for a receptionist to expect to check a
+ * few fields than to trust a value the engine could not actually read.
+ */
+const SOURCE_HELP: Record<BookingSource, string> = {
+  BOOKING_COM: 'Dán từ trang chi tiết đặt phòng trong Extranet (bao gồm cả bảng giá từng đêm).',
+  AGODA: 'Dán email đặt phòng của đối tác (YCS) hoặc trang xác nhận dành cho khách.',
+  CTRIP:
+    'Dán trang xác nhận đặt phòng CTrip / Trip.com. Một số trường có thể cần bạn kiểm tra và bổ sung thủ công — hệ thống sẽ báo rõ trường nào.',
+};
+
+/*
+  PLATFORMS THAT ARE LISTED BUT NOT YET BUILT.
+
+  Deliberately NOT `BookingSource` values. That enum is a database type written
+  onto every booking, and adding a member would be a migration for two tabs that
+  cannot yet produce a booking. They exist here only as tabs, they never reach
+  the extractor, and nothing can be dispatched under them.
+*/
+const PLACEHOLDER_SOURCES = ['TRIPADVISOR', 'G2J', 'TRAVELOKA'] as const;
+type PlaceholderSource = (typeof PLACEHOLDER_SOURCES)[number];
+type SourceTab = BookingSource | PlaceholderSource;
+
+const PLACEHOLDER_LABEL: Record<PlaceholderSource, string> = {
+  TRIPADVISOR: 'Tripadvisor',
+  G2J: 'G2J',
+  TRAVELOKA: 'Traveloka',
+};
+
+/** The exact wording the operator asked for. */
+export const COMING_SOON = 'Ứng dụng sẽ phát triển phần này sớm nhất';
+
+function isPlaceholder(tab: SourceTab): tab is PlaceholderSource {
+  return (PLACEHOLDER_SOURCES as readonly string[]).includes(tab);
+}
+
+function tabLabel(tab: SourceTab): string {
+  return isPlaceholder(tab) ? PLACEHOLDER_LABEL[tab] : SOURCE_LABEL[tab];
+}
+
 export function DispatchPage() {
   const navigate = useNavigate();
-  const [source, setSource] = useState<BookingSource>('BOOKING_COM');
+  const [source, setSource] = useState<SourceTab>('BOOKING_COM');
   const [rawText, setRawText] = useState('');
-  const [draftId, setDraftId] = useState<string | null>(null);
+  // Agoda and CTrip go through the server-authoritative review panel; the
+  // Booking.com flow below is untouched.
+  const [otaRawText, setOtaRawText] = useState<string | null>(null);
+  /**
+   * The Booking.com review, held ENTIRELY in the browser.
+   *
+   * `reviewing` replaces the old `draftId`: it says a review is open, not that a
+   * record exists. Nothing has been written at this point, and nothing will be
+   * until the Admin presses Gửi — so a refresh loses the review, which is the
+   * accepted cost of not leaving a row behind for every abandoned paste.
+   */
+  const [reviewing, setReviewing] = useState(false);
+  /** The pasted text, kept for the dispatch: the server re-parses it itself. */
+  const [reviewRawText, setReviewRawText] = useState('');
   const [form, setForm] = useState<FormState | null>(null);
   const [branchId, setBranchId] = useState<number | undefined>(undefined);
   const [warnings, setWarnings] = useState<WarningView[]>([]);
@@ -110,15 +213,41 @@ export function DispatchPage() {
   const [businessTypeManuallyConfirmed, setBusinessTypeManuallyConfirmed] = useState(false);
   const [pendingWarnings, setPendingWarnings] = useState<WarningView[] | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [saveNote, setSaveNote] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), staleTime: 5 * 60_000 });
 
+  /** Clears the open review. Used by "Đơn khác" and by a fresh extraction. */
+  const resetReview = () => {
+    setReviewing(false);
+    setReviewRawText('');
+    setForm(null);
+    setBranchId(undefined);
+    setWarnings([]);
+    setQuality(null);
+    setAgoda(null);
+    setBranchConfidence(null);
+    setBusinessType(null);
+    setBusinessTypeConfidence(null);
+    setBusinessTypeManuallyConfirmed(false);
+    setPendingWarnings(null);
+    setSendError(null);
+  };
+
   const extractMut = useMutation({
-    mutationFn: (text: string) => bookingsApi.extract(text, source),
-    onSuccess: (res) => {
-      setDraftId(res.booking.id);
+    mutationFn: (text: string) => {
+      // Unreachable: a placeholder tab renders no textarea and no extract
+      // button. Refusing here rather than coercing to another platform means a
+      // future caller cannot quietly send Tripadvisor text to the Booking parser.
+      if (isPlaceholder(source)) throw new Error(COMING_SOON);
+      return bookingsApi.extract(text, source);
+    },
+    onSuccess: (res, text) => {
+      // A new extraction REPLACES whatever was on screen. There is nothing to
+      // clean up in the database, because the previous review was never there.
+      setForm(toForm(res));
+      setReviewRawText(text);
+      setWarnings(res.warnings);
       setBranchId(res.branchConfident && res.suggestedBranch ? res.suggestedBranch.id : undefined);
       setQuality(res.parserQuality);
       setAgoda(res.agoda ?? null);
@@ -126,42 +255,116 @@ export function DispatchPage() {
       setBusinessType(res.businessType);
       setBusinessTypeConfidence(res.businessTypeConfidence);
       setBusinessTypeManuallyConfirmed(false);
+      setPendingWarnings(null);
+      setSendError(null);
+      setReviewing(true);
     },
   });
 
-  const confirmBusinessMut = useMutation({
-    mutationFn: (type: 'DIRECT' | 'PARTNER') => bookingsApi.confirmBusinessType(draftId!, type),
-    onSuccess: (res) => {
-      setBusinessType(res.booking.businessType);
-      setBusinessTypeConfidence(res.booking.businessTypeConfidence ?? 100);
-      setBusinessTypeManuallyConfirmed(true);
-    },
-  });
+  /**
+   * The Admin's business-type decision, recorded locally.
+   *
+   * It used to PATCH the draft. There is no draft: the choice rides along in the
+   * dispatch payload, where the server applies the same rule the old endpoint
+   * did — manual wins, confidence 100, source `manual:<admin>`.
+   */
+  const confirmBusinessType = (type: 'DIRECT' | 'PARTNER') => {
+    setBusinessType(type);
+    setBusinessTypeConfidence(100);
+    setBusinessTypeManuallyConfirmed(true);
+  };
 
-  const detailQuery = useQuery({
-    queryKey: ['admin-booking', draftId],
-    queryFn: () => bookingsApi.adminDetail(draftId!),
-    enabled: !!draftId,
-  });
-
+  /**
+   * Pre-fills each room's internal code once a branch is known.
+   *
+   * This is the work the extract-time snapshot used to do. It could not stay
+   * there: resolution is scoped to a branch, and the branch is chosen here. The
+   * server answers from the branch's ACTIVE mapping and writes nothing.
+   *
+   * A code the ADMIN chose is never overwritten — the same rule the stored
+   * snapshot followed. This only fills blanks.
+   */
+  const roomNamesKey = form?.rooms.map((r) => r.roomType).join(' ') ?? '';
   useEffect(() => {
-    if (detailQuery.data) {
-      const b = detailQuery.data.booking;
-      setForm(toForm(b));
-      setWarnings(b.warnings);
-      if (b.branchId) setBranchId(b.branchId);
-    }
-  }, [detailQuery.data]);
+    if (branchId === undefined || !form || form.rooms.length === 0) return;
+    let cancelled = false;
+    const names = form.rooms.map((r) => r.roomType || null);
 
-  const saveMut = useMutation({
-    mutationFn: () => bookingsApi.update(draftId!, buildEdit(form!, branchId)),
-    onSuccess: (res) => {
-      setForm(toForm(res.booking));
-      setWarnings(res.booking.warnings);
-      setSaveNote('Đã lưu thay đổi.');
-      setTimeout(() => setSaveNote(null), 2000);
-    },
-  });
+    void roomMappingApi
+      .resolve(branchId, names)
+      .then((res) => {
+        if (cancelled) return;
+        setForm((f) => {
+          if (!f) return f;
+          return {
+            ...f,
+            rooms: f.rooms.map((room, i) => {
+              if (room.roomClassStatus === 'MANUAL') return room;
+              const r = res.rooms[i];
+              if (!r || r.roomClassId === null) {
+                return {
+                  ...room,
+                  roomClassId: null,
+                  roomClassPmsCode: null,
+                  roomClassDisplayName: null,
+                  roomClassStatus: 'UNRESOLVED' as const,
+                };
+              }
+              return {
+                ...room,
+                roomClassId: r.roomClassId,
+                roomClassPmsCode: r.pmsCode,
+                roomClassDisplayName: r.displayName,
+                roomClassStatus: r.status,
+              };
+            }),
+          };
+        });
+      })
+      .catch(() => {
+        // Never block the review on resolution: the Admin can still pick each
+        // code by hand, and the dispatch refuses anything left unmapped.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    /*
+      Keyed on the branch and the room NAMES, not on `form`.
+
+      `form` changes on every keystroke and this effect writes back into it, so
+      depending on it would re-resolve on each character typed and never settle.
+      The two things resolution actually depends on are exactly the two listed:
+      which branch's mapping to ask, and which names to ask about.
+    */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branchId, roomNamesKey]);
+
+  /** Records the Admin's explicit choice for one room. */
+  const applyRoomClass = (
+    roomIndex: number,
+    roomClassId: string,
+    pmsCode: string,
+    displayName: string,
+  ) =>
+    setForm((f) =>
+      f
+        ? {
+            ...f,
+            rooms: f.rooms.map((r) =>
+              r.roomIndex === roomIndex
+                ? {
+                    ...r,
+                    roomClassId,
+                    roomClassPmsCode: pmsCode,
+                    roomClassDisplayName: displayName,
+                    roomClassStatus: 'MANUAL' as const,
+                  }
+                : r,
+            ),
+          }
+        : f,
+    );
 
   const updateForm = (patch: Partial<FormState>) => setForm((f) => (f ? { ...f, ...patch } : f));
 
@@ -181,14 +384,29 @@ export function DispatchPage() {
     });
   };
 
+  /**
+   * Sends the review — the one and only write.
+   *
+   * On failure the review stays exactly as it is, so the Admin corrects the
+   * problem and presses Gửi again rather than re-pasting the whole reservation.
+   * Nothing partial was created to clean up first.
+   */
   async function doSend(ackCodes: string[]) {
-    if (!draftId || branchId === undefined || !form) return;
+    if (!reviewing || branchId === undefined || !form) return;
     setSending(true);
     setSendError(null);
     try {
-      await bookingsApi.update(draftId, buildEdit(form, branchId));
-      await bookingsApi.send(draftId, branchId, ackCodes);
-      navigate(`/app/booking/${draftId}`);
+      const res = await bookingsApi.dispatchBookingCom(
+        buildDispatch(
+          form,
+          branchId,
+          reviewRawText,
+          businessType,
+          businessTypeManuallyConfirmed,
+          ackCodes,
+        ),
+      );
+      navigate(`/app/booking/${res.booking.id}`);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'WARNINGS_NOT_ACKNOWLEDGED') {
         const details = err.details as { warnings?: WarningView[] } | undefined;
@@ -209,15 +427,75 @@ export function DispatchPage() {
     [branches.data, branchId],
   );
 
+  /**
+   * The reservation as the PMS note reads it, built from the review alone.
+   *
+   * There is no stored booking to merge with any more, so everything here is
+   * local except the branch — which comes from the branches list, because the
+   * note's breakfast line is the BRANCH's configuration, not the booking's.
+   */
+  const notePreview = useMemo(() => {
+    if (!form) return null;
+    return {
+      bookingCode: form.bookingCode || null,
+      rooms: form.rooms.map<ReviewRoomView>((r) => ({
+        roomIndex: r.roomIndex,
+        roomType: r.roomType || null,
+        roomClassId: r.roomClassId,
+        roomClassPmsCode: r.roomClassPmsCode,
+        roomClassDisplayName: r.roomClassDisplayName,
+        roomClassStatus: r.roomClassStatus,
+        nights: r.nights,
+      })),
+      checkInDate: form.checkInDate || null,
+      checkOutDate: form.checkOutDate || null,
+      totalAmount: parseAmount(form.totalAmount),
+      paymentStatus: form.paymentStatus,
+      branch: selectedBranch ?? null,
+      specialRequest: form.specialRequest || null,
+      phone: form.phone || null,
+      businessType: businessType ?? undefined,
+    };
+  }, [form, selectedBranch, businessType]);
+
+  const roomsMapped = form ? everyRoomHasPmsCode(form.rooms) : false;
+
+  // --- Agoda / CTrip: server-authoritative review ---
+  if (otaRawText !== null && (source === 'AGODA' || source === 'CTRIP')) {
+    return (
+      <div className="space-y-4">
+        <PageHeader
+          title={`Kiểm tra & gửi — ${SOURCE_LABEL[source]}`}
+          description="Kiểm tra thông tin, gán hạng phòng, chọn hình thức thanh toán rồi sao chép ghi chú."
+        />
+        <OtaReviewPanel
+          source={source}
+          rawText={otaRawText}
+          onBack={() => {
+            setOtaRawText(null);
+            setRawText('');
+          }}
+        />
+      </div>
+    );
+  }
+
   // --- Stage 1: paste + extract ---
-  if (!draftId) {
-    const sources: BookingSource[] = ['BOOKING_COM', 'AGODA'];
+  if (!reviewing) {
+    // The three platforms with a real intake parser, then the two that are
+    // listed but not built. Selecting one of the latter says so plainly rather
+    // than handing its text to an extractor written for a different format.
+    const sources: SourceTab[] = ['BOOKING_COM', 'AGODA', 'CTRIP', ...PLACEHOLDER_SOURCES];
     return (
       <div>
         <PageHeader title="Nhập đơn" description="Chọn nguồn, dán nội dung đặt phòng để trích xuất thông tin." />
         <Card className="p-5">
-          {/* Source tabs */}
-          <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-slate-50 p-1" role="tablist" aria-label="Nguồn đặt phòng">
+          {/* Source tabs — horizontally scrollable so they never cramp on a tablet. */}
+          <div
+            className="mb-4 -mx-1 flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 p-1"
+            role="tablist"
+            aria-label="Nguồn đặt phòng"
+          >
             {sources.map((s) => (
               <button
                 key={s}
@@ -226,51 +504,82 @@ export function DispatchPage() {
                 aria-selected={source === s}
                 onClick={() => {
                   setSource(s);
+                  setOtaRawText(null);
                   extractMut.reset();
                 }}
-                className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                className={`flex-shrink-0 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
                   source === s ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                 }`}
               >
-                {SOURCE_LABEL[s]}
+                {tabLabel(s)}
               </button>
             ))}
           </div>
 
-          {extractMut.isError ? (
-            <div className="mb-3">
-              <ErrorAlert>{toUserMessage(extractMut.error)}</ErrorAlert>
-            </div>
-          ) : null}
-          <label className="mb-1 block text-sm font-medium text-slate-600">Nội dung {SOURCE_LABEL[source]}</label>
-          <textarea
-            value={rawText}
-            onChange={(e) => setRawText(e.target.value)}
-            rows={14}
-            placeholder={`Dán toàn bộ nội dung (Ctrl+A, Ctrl+C) từ trang chi tiết đặt phòng ${SOURCE_LABEL[source]}…`}
-            className={`${inputClass} font-mono`}
-          />
-          <div className="mt-4">
-            <Button
-              onClick={() => extractMut.mutate(rawText)}
-              disabled={rawText.trim().length === 0}
-              loading={extractMut.isPending}
+          {isPlaceholder(source) ? (
+            /*
+              No textarea and no extract button on purpose. An input that accepts
+              text and then does nothing with it is worse than no input: the
+              operator would reasonably believe the order had been taken.
+            */
+            <p
+              data-testid="source-coming-soon"
+              role="status"
+              className="rounded-xl bg-amber-50 px-4 py-6 text-center text-sm font-medium text-amber-900 ring-1 ring-inset ring-amber-200"
             >
-              <Sparkles className="h-4 w-4" aria-hidden="true" />
-              Trích xuất thông tin
-            </Button>
-          </div>
+              {COMING_SOON}
+            </p>
+          ) : (
+            <>
+              {extractMut.isError ? (
+                <div className="mb-3">
+                  <ErrorAlert>{toUserMessage(extractMut.error)}</ErrorAlert>
+                </div>
+              ) : null}
+              <label className="mb-1 block text-sm font-medium text-slate-600">Nội dung {SOURCE_LABEL[source]}</label>
+              <textarea
+                value={rawText}
+                onChange={(e) => setRawText(e.target.value)}
+                rows={14}
+                placeholder={`Dán toàn bộ nội dung (Ctrl+A, Ctrl+C) từ trang chi tiết đặt phòng ${SOURCE_LABEL[source]}…`}
+                className={`${inputClass} font-mono`}
+              />
+              <p className="mt-1 text-xs text-slate-500">{SOURCE_HELP[source]}</p>
+              <div className="mt-4">
+                <Button
+                  onClick={() => {
+                    // Booking.com parses into an in-browser review; Agoda and
+                    // CTrip go to their own server-authoritative panel.
+                    if (source === 'BOOKING_COM') extractMut.mutate(rawText);
+                    else setOtaRawText(rawText);
+                  }}
+                  disabled={rawText.trim().length === 0}
+                  loading={extractMut.isPending}
+                >
+                  <Sparkles className="h-4 w-4" aria-hidden="true" />
+                  Trích xuất thông tin
+                </Button>
+              </div>
+            </>
+          )}
         </Card>
       </div>
     );
   }
 
   // --- Stage 2: review / edit / send ---
-  if (!form || detailQuery.isLoading) {
+  if (!form) {
     return <PageHeader title="Nhập đơn Booking.com" description="Đang tải thông tin đã trích xuất…" />;
   }
 
-  const canSend = branchId !== undefined && form.customerName.trim() !== '' && form.bookingCode.trim() !== '';
+  // Every room must carry an internal code: the note a receptionist pastes is
+  // generated from that snapshot, and a missing one silently falls back to the
+  // legacy keyword abbreviation rather than the branch's real PMS code.
+  const canSend =
+    branchId !== undefined &&
+    form.customerName.trim() !== '' &&
+    form.bookingCode.trim() !== '' &&
+    roomsMapped;
 
   return (
     <div className="space-y-5">
@@ -281,15 +590,9 @@ export function DispatchPage() {
           <Button
             variant="ghost"
             onClick={() => {
-              setDraftId(null);
-              setForm(null);
+              // Nothing to withdraw or delete: the review only ever existed here.
+              resetReview();
               setRawText('');
-              setQuality(null);
-              setAgoda(null);
-              setBranchConfidence(null);
-              setBusinessType(null);
-              setBusinessTypeConfidence(null);
-              setBusinessTypeManuallyConfirmed(false);
             }}
           >
             <FilePlus2 className="h-4 w-4" aria-hidden="true" />
@@ -308,8 +611,8 @@ export function DispatchPage() {
           type={businessType}
           confidence={businessTypeConfidence}
           manuallyConfirmed={businessTypeManuallyConfirmed}
-          onConfirm={(t) => confirmBusinessMut.mutate(t)}
-          confirming={confirmBusinessMut.isPending}
+          onConfirm={confirmBusinessType}
+          confirming={false}
         />
       ) : null}
 
@@ -394,6 +697,23 @@ export function DispatchPage() {
         </Card>
       ))}
 
+      {/*
+        Room classes + the Booking.com PMS note. Placed after the room prices
+        and before the branch/send card so the Admin reads the booking, then
+        confirms what it maps to, then decides to send — the note is the last
+        thing seen before dispatch, which is what it is for.
+      */}
+      {notePreview ? (
+        <BookingComRoomReview
+          booking={notePreview}
+          // The branch currently chosen. There is no "saved" branch to lag
+          // behind it any more, so the codes offered are always the ones the
+          // order will actually be validated against.
+          branchId={branchId}
+          onRoomClassChanged={applyRoomClass}
+        />
+      ) : null}
+
       {/* Branch + send */}
       <Card className="p-5">
         <Field label="Chọn chi nhánh gửi đến">
@@ -424,21 +744,24 @@ export function DispatchPage() {
             <ErrorAlert>{sendError}</ErrorAlert>
           </div>
         ) : null}
-        {saveMut.isError ? (
-          <div className="mt-3">
-            <ErrorAlert>{toUserMessage(saveMut.error)}</ErrorAlert>
-          </div>
+
+        {/* Says WHY the button is disabled, rather than leaving it dead. */}
+        {branchId !== undefined && !roomsMapped ? (
+          <p className="mt-3 text-sm text-red-700" data-testid="dispatch-room-blocking">
+            {UNMAPPED_ROOM_MESSAGE}
+          </p>
         ) : null}
 
+        {/*
+          "Lưu thay đổi" is gone, and its absence is the feature. It saved an
+          unsent review to the database — the DRAFT this whole change removes.
+          Edits now live on this screen until Gửi writes the booking once.
+        */}
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button variant="secondary" onClick={() => saveMut.mutate()} loading={saveMut.isPending}>
-            Lưu thay đổi
-          </Button>
           <Button onClick={() => doSend([])} disabled={!canSend} loading={sending}>
             <Send className="h-4 w-4" aria-hidden="true" />
             Gửi xuống chi nhánh
           </Button>
-          {saveNote ? <span className="text-sm text-green-600">{saveNote}</span> : null}
         </div>
       </Card>
 

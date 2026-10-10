@@ -2,17 +2,29 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
-import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, loginAgent } from './helpers/auth';
+import { assignTo } from './helpers/issues';
+import {
+  ADMIN_PASSWORD,
+  RECEPTIONIST_PASSWORD,
+  createAdmin,
+  createReceptionist,
+  createUser,
+  loginAgent,
+} from './helpers/auth';
 import { pngBuffer, notAnImageBuffer } from './helpers/images';
 
 let app: ReturnType<typeof createApp>;
 let adminAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let ownAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let otherAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
+let techAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let ownBranchId: number;
 let otherBranchId: number;
 let adminId: number;
 let ownReceptionistId: number;
+let techId: number;
+
+const TECHNICAL_PASSWORD = 'Technical1';
 
 beforeEach(async () => {
   await resetAll();
@@ -27,6 +39,20 @@ beforeEach(async () => {
   ownAgent = (await loginAgent(app, 'letan_own', RECEPTIONIST_PASSWORD)).agent;
   await createReceptionist(otherBranchId, { username: 'letan_other', mustChangePassword: false });
   otherAgent = (await loginAgent(app, 'letan_other', RECEPTIONIST_PASSWORD)).agent;
+
+  // Bộ phận kỹ thuật: global (no branch), and the ONLY role that may move an
+  // incident through its workflow.
+  techId = (
+    await createUser({
+      username: 'kythuat',
+      password: TECHNICAL_PASSWORD,
+      fullName: 'Kỹ thuật viên trực',
+      role: 'TECHNICAL',
+      branchId: null,
+      mustChangePassword: false,
+    })
+  ).id;
+  techAgent = (await loginAgent(app, 'kythuat', TECHNICAL_PASSWORD)).agent;
 });
 
 afterAll(async () => {
@@ -36,6 +62,8 @@ afterAll(async () => {
 function createBody(agent: typeof ownAgent, over: Record<string, string> = {}) {
   return agent
     .post('/api/issues')
+    // WHERE the incident is, asked first — it decides which other fields apply.
+    .field('areaCategory', over.areaCategory ?? 'ROOM')
     .field('category', over.category ?? 'AIR_CONDITIONER')
     .field('description', over.description ?? 'Máy lạnh không lạnh')
     .field('roomNumber', over.roomNumber ?? '301');
@@ -123,51 +151,108 @@ describe('GET /api/issues (branch isolation + admin all)', () => {
   });
 });
 
-describe('status transitions (admin only)', () => {
+describe('status transitions (Bộ phận kỹ thuật only)', () => {
   async function newIssue(): Promise<string> {
     const res = await createBody(ownAgent);
     return res.body.issue.id;
   }
 
-  it('admin accepts (NEW → IN_PROGRESS) then resolves (→ RESOLVED)', async () => {
+  const ACCEPT = { technicianName: 'Trần Văn B', technicianPhone: '0901234567' };
+
+  it('technical accepts (NEW → IN_PROGRESS) then completes (→ COMPLETED)', async () => {
     const id = await newIssue();
 
-    const accepted = await adminAgent.post(`/api/issues/${id}/accept`).send({});
+    await assignTo(adminAgent, id, techAgent);
+    const accepted = await techAgent.post(`/api/issues/${id}/accept`).send(ACCEPT);
     expect(accepted.status).toBe(200);
     expect(accepted.body.issue.status).toBe('IN_PROGRESS');
-    expect(accepted.body.issue.acceptedBy.id).toBe(adminId);
+    expect(accepted.body.issue.acceptedBy.id).toBe(techId);
+    // Accepting always names the person holding the spanner.
+    expect(accepted.body.issue.technicianName).toBe('Trần Văn B');
+    expect(accepted.body.issue.technicianPhone).toBe('0901234567');
+    expect(accepted.body.issue.acceptedAt).not.toBeNull();
 
-    const resolved = await adminAgent.post(`/api/issues/${id}/resolve`).send({});
-    expect(resolved.status).toBe(200);
-    expect(resolved.body.issue.status).toBe('RESOLVED');
-    expect(resolved.body.issue.resolvedBy.id).toBe(adminId);
-    expect(resolved.body.issue.resolvedAt).not.toBeNull();
+    const completed = await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
+    expect(completed.status).toBe(200);
+    expect(completed.body.issue.status).toBe('COMPLETED');
+    expect(completed.body.issue.completedBy.id).toBe(techId);
+    expect(completed.body.issue.completedAt).not.toBeNull();
 
     // The reporter is notified on each status change.
     const notes = await testPrisma.notification.findMany({ where: { userId: ownReceptionistId } });
     expect(notes.some((n) => n.title === 'Sự cố đang được xử lý')).toBe(true);
-    expect(notes.some((n) => n.title === 'Sự cố đã được xử lý')).toBe(true);
+    expect(notes.some((n) => n.title === 'Sự cố đã hoàn thành')).toBe(true);
+  });
+
+  /**
+   * THE ADMIN IS READ-ONLY FOR THE WORKFLOW.
+   *
+   * An Admin used to drive these transitions, which recorded an administrator as
+   * having done maintenance work. They monitor and report now; the API refuses
+   * them, so the rule holds for anyone with a terminal rather than only for
+   * someone looking at a screen with the buttons hidden.
+   */
+  it('forbids an ADMIN from accepting or completing', async () => {
+    const id = await newIssue();
+
+    expect((await adminAgent.post(`/api/issues/${id}/accept`).send(ACCEPT)).status).toBe(403);
+
+    await assignTo(adminAgent, id, techAgent);
+    await techAgent.post(`/api/issues/${id}/accept`).send(ACCEPT);
+    expect((await adminAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
+
+    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
+    expect(stored.status).toBe('IN_PROGRESS');
+    expect(stored.completedAt).toBeNull();
   });
 
   it('forbids a receptionist from changing status', async () => {
     const id = await newIssue();
-    expect((await ownAgent.post(`/api/issues/${id}/accept`).send({})).status).toBe(403);
-    expect((await ownAgent.post(`/api/issues/${id}/resolve`).send({})).status).toBe(403);
+    expect((await ownAgent.post(`/api/issues/${id}/accept`).send(ACCEPT)).status).toBe(403);
+    expect((await ownAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
+  });
+
+  /**
+   * COMPLETED is reachable ONLY from IN_PROGRESS, which is what guarantees a
+   * completed incident always names the technician who did the work.
+   */
+  it('refuses to complete an incident nobody accepted', async () => {
+    const id = await newIssue();
+    // Given to the technician, but not yet taken.
+    await assignTo(adminAgent, id, techAgent);
+    const res = await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
+    expect(res.status).toBe(409);
+
+    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
+    expect(stored.status).toBe('NEW');
   });
 });
 
 describe('receptionist edit rules', () => {
-  it('lets the reporter edit while NEW but not after the admin accepts', async () => {
+  /*
+    "Sửa vấn đề": an OPEN incident can be corrected by the desk that reported it,
+    including while a technician is on it (the old description is kept in
+    HotelIssueEdit). Only a COMPLETED incident is a closed record.
+  */
+  it('lets the reporter edit while the incident is open, and refuses once completed', async () => {
     const id = (await createBody(ownAgent)).body.issue.id;
 
     const edited = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Cập nhật mô tả' });
     expect(edited.status).toBe(200);
     expect(edited.body.issue.description).toBe('Cập nhật mô tả');
 
-    await adminAgent.post(`/api/issues/${id}/accept`).send({});
+    await assignTo(adminAgent, id, techAgent);
+    await techAgent
+      .post(`/api/issues/${id}/accept`)
+      .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
 
-    const afterAccept = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa sau khi tiếp nhận' });
-    expect(afterAccept.status).toBe(409);
+    const whileWorked = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa khi đang xử lý' });
+    expect(whileWorked.status).toBe(200);
+    expect(whileWorked.body.issue.status).toBe('IN_PROGRESS');
+
+    await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
+    const afterComplete = await ownAgent.put(`/api/issues/${id}`).send({ description: 'Sửa sau khi xong' });
+    expect(afterComplete.status).toBe(409);
   });
 
   it("forbids editing another branch's issue", async () => {

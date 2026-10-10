@@ -1,14 +1,17 @@
 import { normalizeText, removeDiacritics, toLines } from './text';
+import {
+  resolveBranchIdentityFromLines,
+  type IdentityBranch,
+  type IdentityPlatform,
+} from './identityResolver';
 import { detectCurrency, looksLikeMoney, parseFirstAmount } from './money';
 import { findDate, generateStayDates, parseDateRangeStayDate } from './dates';
 import { resolvePaymentStatus } from './paymentStatus';
 import { extractSpecialRequest } from './arrivalNote';
-import {
-  BRANCH_CONFIDENT_THRESHOLD,
-  BRANCH_MATCH_THRESHOLD,
-  findBestBranch,
-  matchBranch,
-} from './branchMatcher';
+// BRANCH_CONFIDENT_THRESHOLD is deliberately NOT imported any more: a
+// similarity score, however high, no longer makes a branch match "confident".
+// Only an exact identity / internal-name / branch-code match assigns a branch.
+import { BRANCH_MATCH_THRESHOLD, findBestBranch, matchBranch } from './branchMatcher';
 import type {
   ExtractWarning,
   FieldConfidence,
@@ -407,6 +410,8 @@ function extractField(field: string, line: string): string | null {
 export function parseBooking(
   rawText: string,
   branches: readonly MatchableBranch[],
+  /** Which platform's current identities to resolve the hotel name against. */
+  platform: IdentityPlatform = 'BOOKING_COM',
 ): ParsedBooking {
   const lines = toLines(rawText);
 
@@ -535,9 +540,30 @@ export function parseBooking(
     branchCandidate = labelMatch.branch;
   }
 
-  const suggestedBranch = branchMatchScore >= BRANCH_MATCH_THRESHOLD ? branchCandidate : null;
-  const branchConfident = suggestedBranch !== null && branchMatchScore >= BRANCH_CONFIDENT_THRESHOLD;
-  const hotelName = cleanHotelName(hotelLabel ?? branchLine ?? otherLines[0] ?? null);
+  // EXACT resolution against the branch's CURRENT platform identity, its
+  // internal name, or a trusted stable code. This is the ONLY thing that may
+  // auto-assign a branch: the similarity scan above now feeds suggestions and
+  // the preview score, never the assignment itself. A wrong automatic branch
+  // sends a real guest to the wrong hotel.
+  const identity = resolveBranchIdentityFromLines(
+    [hotelLabel, ...otherLines],
+    platform,
+    branches as readonly IdentityBranch[],
+  );
+  const exactBranch =
+    identity.resolution.branchId !== null
+      ? (branches.find((b) => b.id === identity.resolution.branchId) ?? null)
+      : null;
+
+  // A similarity hit is still shown to the Admin as a candidate, but it never
+  // makes the match "confident" and therefore never assigns the branch.
+  const suggestedBranch =
+    exactBranch ?? (branchMatchScore >= BRANCH_MATCH_THRESHOLD ? branchCandidate : null);
+  const branchConfident = exactBranch !== null;
+  const branchAmbiguous = identity.resolution.reason === 'AMBIGUOUS';
+  const hotelName = cleanHotelName(
+    hotelLabel ?? identity.matchedLine ?? branchLine ?? otherLines[0] ?? null,
+  );
 
   // --- Scalar fields --------------------------------------------------------
   const guestName = captured.guestName?.value ?? null;
@@ -787,7 +813,15 @@ export function parseBooking(
   }
 
   // --- Booking-level validation & confidence warnings -----------------------
-  if (!suggestedBranch) {
+  if (branchAmbiguous) {
+    warnings.unshift({
+      code: 'AMBIGUOUS_HOTEL',
+      severity: 'WARNING',
+      message: hotelName
+        ? `Tên khách sạn "${hotelName}" khớp với nhiều chi nhánh. Vui lòng chọn chi nhánh thủ công.`
+        : 'Tên khách sạn khớp với nhiều chi nhánh. Vui lòng chọn chi nhánh thủ công.',
+    });
+  } else if (!suggestedBranch) {
     warnings.unshift({
       code: 'UNKNOWN_HOTEL',
       severity: 'WARNING',
@@ -796,6 +830,7 @@ export function parseBooking(
         : 'Không tìm thấy tên khách sạn. Vui lòng chọn chi nhánh thủ công.',
     });
   } else if (!branchConfident) {
+    // A similarity suggestion — offered, never applied.
     warnings.unshift({
       code: 'LOW_BRANCH_CONFIDENCE',
       severity: 'WARNING',
@@ -873,7 +908,11 @@ export function parseBooking(
 
   // 0–100 scale of the matcher score for the *suggested* branch; 0 when the hotel
   // is unknown (no branch reached the suggest threshold).
-  const branchConfidence = suggestedBranch ? Math.round(branchMatchScore * 100) : 0;
+  const branchConfidence = branchConfident
+    ? 100
+    : suggestedBranch
+      ? Math.round(branchMatchScore * 100)
+      : 0;
   const parserQuality = computeParserQuality({
     bookingCode,
     guestName,

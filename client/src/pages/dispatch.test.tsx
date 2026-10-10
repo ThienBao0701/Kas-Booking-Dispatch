@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, installApiMock, renderApp } from '../test/utils';
 
@@ -11,61 +11,29 @@ afterEach(() => {
 const BRANCH = { id: 1, code: 'TRUONG_DINH_05', hotelName: 'Saigon Hotel & Ben Thanh', address: '05 Trương Định' };
 const BRANCH2 = { id: 2, code: 'LY_TU_TRONG_260', hotelName: 'Luxury Elegance Hotel Ben Than', address: '260 Lý Tự Trọng' };
 
-function detail(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'd1',
-    status: 'DRAFT',
-    sourcePlatform: 'BOOKING_COM',
-    verificationStatus: 'NOT_SUBMITTED',
-    businessType: 'DIRECT',
-    businessTypeManuallyConfirmed: false,
-    hotelName: 'Saigon Hotel & Ben Thanh Market',
-    branch: BRANCH,
-    branchId: 1,
-    customerName: 'Thùy Chi Phan',
-    phone: '+84 964 934 713',
+/**
+ * The extraction preview — the whole review, held in the browser.
+ *
+ * There is no `booking.id` and no second fetch for a stored detail: extracting
+ * a Booking.com reservation writes nothing, so the screen renders straight from
+ * this response.
+ */
+const DEFAULT_EXTRACT = {
+  persisted: false,
+  booking: {
     bookingCode: '6312474567',
-    checkInDate: '2026-07-23',
-    checkOutDate: '2026-07-25',
-    checkInTime: null,
-    checkOutTime: null,
-    totalAmount: 3_078_000,
+    hotelName: 'Saigon Hotel & Ben Thanh Market',
+    sourcePlatform: 'BOOKING_COM',
+    guestName: 'Thùy Chi Phan',
+    phone: '+84 964 934 713',
+    checkIn: '2026-07-23',
+    checkOut: '2026-07-25',
     currency: 'VND',
+    totalAmount: 3_078_000,
     paymentStatus: 'PAY_AFTER',
     specialRequest: null,
-    rawText: 'raw',
     parserVersion: '4a.2.0',
-    isLastMinute: false,
-    rooms: [
-      {
-        id: 'r1',
-        roomIndex: 1,
-        roomType: 'Phòng Tiêu Chuẩn Giường Đôi',
-        roomSubtotal: 1_539_000,
-        taxAmount: null,
-        feeAmount: null,
-        nights: [{ id: 'n1', stayDate: '2026-07-23', amount: 648_000, currency: 'VND', manuallyCorrected: false, isEstimated: false }],
-      },
-    ],
-    warnings: [],
-    statusHistory: [],
-    proofs: [],
-    createdBy: null,
-    sentBy: null,
-    completedBy: null,
-    reviewedBy: null,
-    createdAt: '2026-07-20T00:00:00.000Z',
-    updatedAt: '2026-07-20T00:00:00.000Z',
-    sentAt: null,
-    completedAt: null,
-    completionNote: null,
-    reviewedAt: null,
-    ...overrides,
-  };
-}
-
-const DEFAULT_EXTRACT = {
-  booking: { id: 'd1', status: 'DRAFT' },
+  },
   suggestedBranch: BRANCH,
   branchConfidence: 100,
   branchConfident: true,
@@ -75,7 +43,32 @@ const DEFAULT_EXTRACT = {
   businessTypeConfidence: 90,
   businessTypeRequiresAdminConfirmation: false,
   businessTypeMatchedRules: ['retail-rate'],
+  rooms: [
+    {
+      roomIndex: 1,
+      roomName: 'Phòng Tiêu Chuẩn Giường Đôi',
+      roomTotal: 1_539_000,
+      nights: [{ stayDate: '2026-07-23', amount: 648_000, currency: 'VND', isEstimated: false }],
+    },
+  ],
   warnings: [],
+  agoda: null,
+};
+
+const NO_MAPPING = { active: null, draft: null };
+const NOTHING_RESOLVED = {
+  versionId: null,
+  rooms: [
+    {
+      sourceRoomName: 'Phòng Tiêu Chuẩn Giường Đôi',
+      status: 'UNRESOLVED',
+      roomClassId: null,
+      displayName: null,
+      pmsCode: null,
+      matchedAlias: null,
+      matchType: 'NONE',
+    },
+  ],
 };
 
 function mockDispatch(
@@ -87,7 +80,12 @@ function mockDispatch(
     'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH2] } }),
     'POST /api/bookings/extract': () => ({ status: 201, body: extract }),
-    'GET /api/admin/bookings/d1': () => ({ status: 200, body: { booking: detail() } }),
+    // The room-class surface is covered in its own file; here it only needs to
+    // answer so the review renders.
+    'GET /api/admin/branches/1/room-mapping': () => ({ status: 200, body: NO_MAPPING }),
+    'GET /api/admin/branches/2/room-mapping': () => ({ status: 200, body: NO_MAPPING }),
+    'POST /api/admin/branches/1/room-mapping/resolve': () => ({ status: 200, body: NOTHING_RESOLVED }),
+    'POST /api/admin/branches/2/room-mapping/resolve': () => ({ status: 200, body: NOTHING_RESOLVED }),
     ...extra,
   });
 }
@@ -153,10 +151,12 @@ describe('DispatchPage — branch address field', () => {
   });
 
   it('shows an empty address with the placeholder when no branch is resolved', async () => {
-    mockDispatch(
-      { ...DEFAULT_EXTRACT, suggestedBranch: null, branchConfident: false, branchConfidence: 0 },
-      { 'GET /api/admin/bookings/d1': () => ({ status: 200, body: { booking: detail({ branch: null, branchId: null }) } }) },
-    );
+    mockDispatch({
+      ...DEFAULT_EXTRACT,
+      suggestedBranch: null,
+      branchConfident: false,
+      branchConfidence: 0,
+    });
     const user = userEvent.setup();
     renderApp('/app/dispatch');
     await extract(user);
@@ -196,11 +196,20 @@ describe('DispatchPage — business type', () => {
   });
 
   it('prompts for confirmation on UNKNOWN and lets the Admin mark it a partner', async () => {
-    const partnerBooking = detail({ businessType: 'PARTNER', businessTypeManuallyConfirmed: true });
-    mockDispatch(
-      { ...DEFAULT_EXTRACT, businessType: 'UNKNOWN', businessTypeConfidence: 0, businessTypeRequiresAdminConfirmation: true, businessTypeMatchedRules: [] },
-      { 'POST /api/admin/bookings/d1/business-type': () => ({ status: 200, body: { booking: partnerBooking } }) },
-    );
+    /*
+      The decision used to PATCH the draft and adopt the response. With no draft
+      to patch it is recorded locally and travels in the dispatch payload, where
+      the server applies the same rule the old endpoint did. So no request is
+      made here — asserted below, because a silent write would mean the DRAFT
+      lifecycle had crept back in.
+    */
+    const fetchMock = mockDispatch({
+      ...DEFAULT_EXTRACT,
+      businessType: 'UNKNOWN',
+      businessTypeConfidence: 0,
+      businessTypeRequiresAdminConfirmation: true,
+      businessTypeMatchedRules: [],
+    });
     const user = userEvent.setup();
     renderApp('/app/dispatch');
     await extract(user);
@@ -210,5 +219,133 @@ describe('DispatchPage — business type', () => {
 
     await screen.findByText('Admin đã xác nhận');
     expect(statusHas(/Đơn đối tác/)).toBe(true);
+
+    expect(
+      fetchMock.mock.calls.some(([u]) => String(u).includes('/business-type')),
+    ).toBe(false);
+  });
+
+  it('carries the confirmed type into the dispatch request', async () => {
+    const fetchMock = mockDispatch(
+      {
+        ...DEFAULT_EXTRACT,
+        businessType: 'UNKNOWN',
+        businessTypeConfidence: 0,
+        businessTypeRequiresAdminConfirmation: true,
+        businessTypeMatchedRules: [],
+        // A room the branch mapping recognises, so Gửi is reachable.
+        rooms: DEFAULT_EXTRACT.rooms,
+      },
+      {
+        'POST /api/admin/branches/1/room-mapping/resolve': () => ({
+          status: 200,
+          body: {
+            versionId: 'v-1',
+            rooms: [
+              {
+                sourceRoomName: 'Phòng Tiêu Chuẩn Giường Đôi',
+                status: 'RESOLVED',
+                roomClassId: 'rc-stan',
+                displayName: 'Standard',
+                pmsCode: 'STAN',
+                matchedAlias: null,
+                matchType: 'DISPLAY_NAME',
+              },
+            ],
+          },
+        }),
+        'POST /api/admin/bookings/dispatch': () => ({
+          status: 201,
+          body: { booking: { id: 'created-1' } },
+        }),
+      },
+    );
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+
+    await screen.findByText('Không thể tự xác định loại đơn. Admin vui lòng xác nhận.');
+    await user.click(screen.getByRole('button', { name: 'Đánh dấu là Đơn đối tác' }));
+    await screen.findByText('Admin đã xác nhận');
+
+    const send = screen.getByRole('button', { name: /Gửi xuống chi nhánh/ });
+    await waitFor(() => expect(send).toBeEnabled());
+    await user.click(send);
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([u, i]) =>
+          String(u) === '/api/admin/bookings/dispatch' && (i as RequestInit)?.method === 'POST',
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse(String((call![1] as RequestInit).body)).businessType).toBe('PARTNER');
+    });
+  });
+});
+
+/* ================================================================== */
+/* Nothing is persisted before Gửi                                     */
+/* ================================================================== */
+
+describe('DispatchPage — the review is not a record', () => {
+  it('extracting writes nothing: no draft fetch, no save, no send', async () => {
+    const fetchMock = mockDispatch();
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+
+    await screen.findByLabelText('Mã đặt phòng');
+
+    // The only write in the whole review stage is the extraction itself, and
+    // the server answers that one without touching the database.
+    const writes = fetchMock.mock.calls.filter(([u, i]) => {
+      const method = (i as RequestInit)?.method ?? 'GET';
+      return method !== 'GET' && !String(u).endsWith('/room-mapping/resolve');
+    });
+    expect(writes.map(([u]) => String(u))).toEqual(['/api/bookings/extract']);
+  });
+
+  it('editing a field never calls the server', async () => {
+    const fetchMock = mockDispatch();
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+
+    const nameField = await screen.findByLabelText('Tên khách');
+    const before = fetchMock.mock.calls.length;
+
+    await user.clear(nameField);
+    await user.type(nameField, 'Người Khác');
+    expect(nameField).toHaveValue('Người Khác');
+
+    // Typing is typing. Nothing is saved until the order is sent.
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it('re-extracting replaces the review, with no draft to clean up', async () => {
+    const second = {
+      ...DEFAULT_EXTRACT,
+      booking: { ...DEFAULT_EXTRACT.booking, bookingCode: '9999999999', guestName: 'Khách Thứ Hai' },
+    };
+    let call = 0;
+    mockDispatch(DEFAULT_EXTRACT, {
+      'POST /api/bookings/extract': () => ({
+        status: 201,
+        body: call++ === 0 ? DEFAULT_EXTRACT : second,
+      }),
+    });
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+
+    expect(await screen.findByLabelText('Mã đặt phòng')).toHaveValue('6312474567');
+
+    await user.click(screen.getByRole('button', { name: /Đơn khác/ }));
+    await extract(user);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Mã đặt phòng')).toHaveValue('9999999999'),
+    );
+    expect(screen.getByLabelText('Tên khách')).toHaveValue('Khách Thứ Hai');
   });
 });

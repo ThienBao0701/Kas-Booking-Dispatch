@@ -3,25 +3,32 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Inbox, RefreshCw } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
-import { bookingsApi, branchesApi, type NewListItem } from '../api/bookings';
+import { isReceptionSupervisor } from '../auth/types';
+import { bookingsApi, branchesApi, type BookingDetail, type NewListItem } from '../api/bookings';
 import { toUserMessage } from '../api/errors';
 import { Card } from '../components/Card';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { ConnectionWarning } from '../components/ConnectionWarning';
 import { SkeletonList } from '../components/Skeleton';
-import { LastMinuteBadge, PaymentBadge, StatusBadge } from '../components/Badges';
+import { LastMinuteBadge, StatusBadge, WorkflowBadge } from '../components/Badges';
 import { Pagination } from '../components/Pagination';
 import { PageHeader, InlineSpinner, QueryState } from '../components/PageState';
 import { BookingDetailView } from '../components/BookingDetailView';
+import { ResponseSla } from '../components/ResponseSla';
 import { Toast } from '../components/Toast';
+import { useCut } from '../hooks/useCut';
 import { formatDate, formatDateTime } from '../lib/format';
 
 const POLL_MS = 20_000;
 
 export function NewBookingsPage() {
   const { user } = useAuth();
-  return user?.role === 'ADMIN' ? <AdminWaitingList /> : <ReceptionistInbox />;
+  if (user?.role === 'ADMIN') return <AdminWaitingList />;
+  // A reception manager reads the same orders over its branches — the Admin's
+  // table, whose branch list and rows the server scopes. It takes no order.
+  if (user && isReceptionSupervisor(user.role)) return <AdminWaitingList manager />;
+  return <ReceptionistInbox />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -136,6 +143,7 @@ function ReceptionistInbox() {
                   <BookingListRow
                     booking={b}
                     selected={b.id === selectedId}
+                    serverNow={list.data?.serverNow ?? null}
                     onSelect={() => {
                       setSelectedId(b.id);
                       lastIndexRef.current = bookings.findIndex((x) => x.id === b.id);
@@ -167,10 +175,13 @@ function BookingListRow({
   booking: b,
   selected,
   onSelect,
+  serverNow,
 }: {
   booking: NewListItem;
   selected: boolean;
   onSelect: () => void;
+  /** The server's clock from the list payload, so the SLA is not PC-clock based. */
+  serverNow?: string | null;
 }) {
   return (
     <button
@@ -181,17 +192,28 @@ function BookingListRow({
         selected ? 'bg-brand-50' : 'hover:bg-slate-50'
       } ${b.isLastMinute ? 'border-l-4 border-l-red-500' : 'border-l-4 border-l-transparent'}`}
     >
+      {/*
+        Guest, one workflow state, and the last-minute flag. Nothing else:
+        branch is where the receptionist already is, and the code, dates,
+        rooms and payment are all on the detail panel beside this list.
+      */}
       <div className="flex items-center justify-between gap-2">
         <span className="truncate font-medium text-slate-900">{b.customerName ?? 'Khách chưa rõ'}</span>
         {b.isLastMinute ? <LastMinuteBadge /> : null}
       </div>
-      <div className="mt-0.5 flex items-center justify-between gap-2 text-xs">
-        <span className="font-mono text-slate-500">{b.bookingCode ?? '—'}</span>
-        <span className="text-slate-400">Gửi {formatDateTime(b.sentAt)}</span>
-      </div>
-      <div className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-        <span>Nhận phòng: {formatDate(b.checkInDate)}</span>
-        <PaymentBadge status={b.paymentStatus} />
+      {/*
+        The response SLA sits beside the workflow state, which is where a
+        receptionist already looks to decide what to pick up next. It is an
+        indicator only — nothing about the order changes when it runs out, and
+        the CẮT controls and claim countdown on the detail panel are untouched.
+      */}
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        <WorkflowBadge status={b.verificationStatus} />
+        <ResponseSla
+          slaStartedAt={b.slaStartedAt ?? b.sentAt}
+          claimedAt={b.claimedAt}
+          serverNow={serverNow}
+        />
       </div>
     </button>
   );
@@ -208,12 +230,50 @@ function SelectedBookingPanel({ id, onChanged }: { id: string; onChanged: (m?: s
   if (query.isLoading) return <InlineSpinner />;
   if (query.isError) return <ErrorAlert>{toUserMessage(query.error)}</ErrorAlert>;
   if (!query.data) return null;
+  const booking = query.data.booking;
+  const isAdmin = user?.role === 'ADMIN';
+
+  /*
+    THERE IS NO SEPARATE "TAKE THIS ORDER" STEP ANY MORE.
+
+    The card that used to sit above this detail — "Nhận đơn để tạo trên hệ
+    thống", with its own CUT button — is gone. Taking the order is not a
+    decision a receptionist makes in the abstract; it is what happens the first
+    time they take a value off it. So the claim now starts from the CẮT controls
+    on the fields themselves, and there is no global CUT anywhere.
+  */
+  return (
+    <SelectedBookingBody booking={booking} isAdmin={isAdmin} serverNow={query.data.serverNow ?? null} onChanged={onChanged} />
+  );
+}
+
+/**
+ * Split out so the CẮT hook is called unconditionally.
+ *
+ * `SelectedBookingPanel` returns early while the query is loading, and a hook
+ * after those returns would break the rules of hooks the first time a booking
+ * is selected.
+ */
+function SelectedBookingBody({
+  booking,
+  isAdmin,
+  serverNow,
+  onChanged,
+}: {
+  booking: BookingDetail;
+  isAdmin: boolean;
+  serverNow: string | null;
+  onChanged: (m?: string) => void;
+}) {
+  const cut = useCut(booking.id, booking.cutFields, booking);
   return (
     <BookingDetailView
-      booking={query.data.booking}
-      isAdmin={user?.role === 'ADMIN'}
+      booking={booking}
+      isAdmin={isAdmin}
       onCompleted={onChanged}
       suppressInternalToast
+      serverNow={serverNow}
+      {...(isAdmin ? {} : { cut })}
     />
   );
 }
@@ -222,7 +282,7 @@ function SelectedBookingPanel({ id, onChanged }: { id: string; onChanged: (m?: s
 /* Admin: waiting list (dispatched, awaiting a branch to confirm creation)     */
 /* -------------------------------------------------------------------------- */
 
-function AdminWaitingList() {
+function AdminWaitingList({ manager = false }: { manager?: boolean }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialBranch = searchParams.get('branchId');
@@ -248,8 +308,12 @@ function AdminWaitingList() {
   return (
     <div>
       <PageHeader
-        title="Chờ chi nhánh tạo"
-        description="Đơn đã gửi xuống chi nhánh, đang chờ lễ tân xác nhận đã tạo trên hệ thống khách sạn."
+        title={manager ? 'Đơn mới' : 'Chờ chi nhánh tạo'}
+        description={
+          manager
+            ? 'Đơn mới gửi đến các chi nhánh bạn quản lý, đúng như lễ tân đang thấy. Chỉ xem — lễ tân nhận và tạo đơn.'
+            : 'Đơn đã gửi xuống chi nhánh, đang chờ lễ tân xác nhận đã tạo trên hệ thống khách sạn.'
+        }
         actions={
           <select
             value={branchId ?? ''}
@@ -260,7 +324,7 @@ function AdminWaitingList() {
             aria-label="Lọc theo chi nhánh"
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
-            <option value="">Tất cả chi nhánh</option>
+            <option value="">{manager ? 'Tất cả chi nhánh được giao' : 'Tất cả chi nhánh'}</option>
             {branches.data?.branches.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.address} — {b.hotelName}

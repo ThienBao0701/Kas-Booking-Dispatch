@@ -9,6 +9,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** The five platform rows a branch always returns, with one name configured. */
+function identityRows(bookingComName: string | null) {
+  const platforms = ['BOOKING_COM', 'AGODA', 'CTRIP', 'TRIPADVISOR', 'TRAVELOKA'] as const;
+  return platforms.map((platform) => ({
+    platform,
+    name: platform === 'BOOKING_COM' ? bookingComName : null,
+    normalizedName: null,
+    needsConfirmation: false,
+    updatedAt: null,
+  }));
+}
+
 function branch(over: Partial<AdminBranch> = {}): AdminBranch {
   return {
     id: 1,
@@ -59,6 +71,14 @@ function renderBranches(extra: Record<string, (init: RequestInit) => { status: n
     'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
     ...SHELL_MOCKS,
     'GET /api/admin/branches': () => ({ status: 200, body: { branches: [branch(), SECOND] } }),
+    'GET /api/admin/branches/1/platform-identities': () => ({
+      status: 200,
+      body: { identities: identityRows('Market Ben Thanh Kas Hotel Passion') },
+    }),
+    'GET /api/admin/branches/2/platform-identities': () => ({
+      status: 200,
+      body: { identities: identityRows('Elegance Hotel - Ben Thanh Market - Central HCMC') },
+    }),
     ...extra,
   });
   renderApp('/app/branches');
@@ -95,14 +115,17 @@ describe('BranchesPage — access', () => {
     const first = await rowFor('05 Trương Định');
     expect(within(first).getByText('TRUONG_DINH_05')).toBeInTheDocument();
     expect(within(first).getByText('Không ăn sáng')).toBeInTheDocument();
-    expect(within(first).getByText(/KAS Passion Boutique Hotel/)).toBeInTheDocument();
-    // Once as the internal name, once as the Booking.com alias.
-    expect(within(first).getAllByText(/Saigon Hotel & Ben Thanh/)).toHaveLength(2);
+    // Only the CURRENT platform name appears — never a superseded alias, and
+    // never a struck-through disabled one.
+    expect(await within(first).findByText(/Market Ben Thanh Kas Hotel Passion/)).toBeInTheDocument();
     expect(within(first).getByText('Đang hoạt động')).toBeInTheDocument();
+    expect(first.querySelector('.line-through')).toBeNull();
 
     const second = await rowFor('260 Lý Tự Trọng');
     expect(within(second).getByText('Có ăn sáng')).toBeInTheDocument();
-    expect(within(second).getByText(/Bamboo Water Hotel/)).toBeInTheDocument();
+    expect(
+      await within(second).findByText(/Elegance Hotel - Ben Thanh Market - Central HCMC/),
+    ).toBeInTheDocument();
   });
 });
 
@@ -160,7 +183,7 @@ describe('BranchesPage — add branch', () => {
     expect(screen.getByRole('button', { name: 'Tạo chi nhánh' })).toBeDisabled();
   });
 
-  it('7/8/9. adds Booking.com and Agoda names and can remove an unsaved one', async () => {
+  it('7/8/9. does not collect platform names at creation time', async () => {
     let posted: unknown = null;
     renderBranches({
       'POST /api/admin/branches': (init) => {
@@ -173,34 +196,16 @@ describe('BranchesPage — add branch', () => {
     await user.type(screen.getByLabelText(/Tên nội bộ/), 'Chi nhánh thử nghiệm');
     await user.type(screen.getByLabelText(/Địa chỉ/), '12 Nguyễn Huệ');
 
-    // Agoda's matching rule is explained in the form.
-    expect(screen.getByText(/Agoda chỉ đối chiếu chính xác tuyệt đối/)).toBeInTheDocument();
-
-    const nameField = screen.getByLabelText('Tên khách sạn', { selector: '#new-alias-name' });
-    const sourceField = screen.getByLabelText('Nguồn', { selector: '#new-alias-source' });
-    const addButton = screen.getByRole('button', { name: 'Thêm tên' });
-
-    await user.type(nameField, 'Nguyen Hue Grand Hotel');
-    await user.click(addButton);
-    await user.selectOptions(sourceField, 'AGODA');
-    await user.type(nameField, 'KAS Nguyen Hue Hotel');
-    await user.click(addButton);
-    await user.type(nameField, 'Sai Ten Khach San');
-    await user.click(addButton);
-
-    // 9. an unsaved name can be removed again before the branch is created.
-    await user.click(screen.getByRole('button', { name: 'Xóa tên Sai Ten Khach San' }));
-    expect(screen.queryByText(/Sai Ten Khach San/)).not.toBeInTheDocument();
+    // Platform names are no longer collected here: a branch has exactly one
+    // CURRENT name per platform, set from the dedicated manager after creation.
+    expect(screen.getByText(/Sau khi tạo chi nhánh/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Thêm tên' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Nguồn', { selector: '#new-alias-source' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Tạo chi nhánh' }));
-    expect(posted).toMatchObject({
-      branchNumber: 9,
-      code: 'NGUYEN_HUE_12',
-      aliases: [
-        { source: 'BOOKING_COM', alias: 'Nguyen Hue Grand Hotel' },
-        { source: 'AGODA', alias: 'KAS Nguyen Hue Hotel' },
-      ],
-    });
+    expect(posted).toMatchObject({ branchNumber: 9, code: 'NGUYEN_HUE_12' });
+    // The create payload carries no platform names at all.
+    expect(posted).not.toHaveProperty('aliases');
   });
 });
 
@@ -257,21 +262,51 @@ describe('BranchesPage — edit branch', () => {
 });
 
 describe('BranchesPage — platform names', () => {
-  it('16. shows an alias conflict error from the server', async () => {
+  it('16. shows a name-collision error from the server, in Vietnamese', async () => {
     renderBranches({
-      'POST /api/admin/branches/1/aliases': () => ({
+      'PUT /api/admin/branches/1/platform-identities/AGODA': () => ({
         status: 409,
-        body: { error: { code: 'CONFLICT', message: 'Tên khách sạn này đã được dùng cho chi nhánh 40-42 Bùi Thị Xuân.' } },
+        body: {
+          error: {
+            code: 'CONFLICT',
+            message: 'Tên "KAS Sonata Luxury Hotel" đã được dùng cho một chi nhánh khác trên nền tảng này.',
+          },
+        },
       }),
     });
     const user = userEvent.setup();
     const row = await rowFor('05 Trương Định');
     await user.click(within(row).getByRole('button', { name: /Quản lý tên trên nền tảng/ }));
 
-    await user.type(screen.getByLabelText('Tên khách sạn', { selector: '#alias-name' }), 'KAS Sonata Luxury Hotel');
-    await user.click(screen.getByRole('button', { name: 'Thêm' }));
+    // Agoda has no current name yet, so the action is "Thêm".
+    const agodaRow = (await screen.findByLabelText('Tên khách sạn theo nền tảng'))
+      .querySelectorAll('li')[1] as HTMLElement;
+    await user.click(within(agodaRow).getByRole('button', { name: 'Thêm' }));
+    await user.type(screen.getByLabelText('Tên trên Agoda'), 'KAS Sonata Luxury Hotel');
+    await user.click(within(agodaRow).getByRole('button', { name: 'Lưu' }));
 
-    expect(await screen.findByText(/đã được dùng cho chi nhánh 40-42 Bùi Thị Xuân/)).toBeInTheDocument();
+    expect(await screen.findByText(/đã được dùng cho một chi nhánh khác/)).toBeInTheDocument();
+  });
+
+  it('16b. shows one current name per platform, an empty state, and no toggles', async () => {
+    renderBranches();
+    const user = userEvent.setup();
+    const row = await rowFor('05 Trương Định');
+    await user.click(within(row).getByRole('button', { name: /Quản lý tên trên nền tảng/ }));
+
+    const list = await screen.findByLabelText('Tên khách sạn theo nền tảng');
+    const items = list.querySelectorAll('li');
+    expect(items).toHaveLength(5);
+
+    // The configured platform shows its single current value…
+    expect(within(items[0] as HTMLElement).getByText('Market Ben Thanh Kas Hotel Passion')).toBeInTheDocument();
+    // …and the unconfigured ones say so clearly.
+    expect(within(items[1] as HTMLElement).getByText('Chưa thiết lập')).toBeInTheDocument();
+
+    // No enable/disable toggles and no struck-through history in the live list.
+    expect(within(list).queryByRole('button', { name: 'Tắt' })).not.toBeInTheDocument();
+    expect(within(list).queryByRole('button', { name: 'Bật lại' })).not.toBeInTheDocument();
+    expect(list.querySelector('.line-through')).toBeNull();
   });
 });
 
@@ -318,7 +353,7 @@ describe('receptionist assignment uses the live active branches', () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       ...SHELL_MOCKS,
-      'GET /api/admin/users': () => ({ status: 200, body: { users: [] } }),
+      'GET /api/admin/users?includeAdmins=true': () => ({ status: 200, body: { users: [] } }),
       'GET /api/branches': () => ({ status: 200, body: { branches } }),
       'GET /api/dev-test/status': () => ({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'x' } } }),
     });
@@ -331,7 +366,7 @@ describe('receptionist assignment uses the live active branches', () => {
       { id: 9, code: 'NGUYEN_HUE_12', hotelName: 'Chi nhánh thử nghiệm', address: '12 Nguyễn Huệ', branchNumber: 9 },
     ]);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: /Thêm lễ tân/ }));
+    await user.click(await screen.findByRole('button', { name: /Thêm bộ phận/ }));
 
     const select = screen.getByLabelText(/Chi nhánh/);
     expect(within(select).getByRole('option', { name: 'Chi nhánh 9 — 12 Nguyễn Huệ' })).toBeInTheDocument();
@@ -343,7 +378,7 @@ describe('receptionist assignment uses the live active branches', () => {
     // branch is simply absent from the assignment list.
     renderSettings([{ id: 1, code: 'TRUONG_DINH_05', hotelName: 'H1', address: '05 Trương Định', branchNumber: 1 }]);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: /Thêm lễ tân/ }));
+    await user.click(await screen.findByRole('button', { name: /Thêm bộ phận/ }));
 
     const select = screen.getByLabelText(/Chi nhánh/);
     expect(within(select).queryByRole('option', { name: /12 Nguyễn Huệ/ })).not.toBeInTheDocument();

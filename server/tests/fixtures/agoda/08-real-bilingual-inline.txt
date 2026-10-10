@@ -1,0 +1,38 @@
+Booking ID
+Mã số đặt phòng
+1756224954
+
+KAS Zody Boutique Hotel
+(Property ID 55198617)
+
+Customer First Name Tên Khách Hàng Nga
+Customer Last Name Họ Khách Hàng Đỗ
+Country of Residence Quốc gia cư trú Vietnam
+
+Check-in Nhận phòng 4-Aug-2026 (4-08-2026)
+Check-out Trả phòng 5-Aug-2026 (5-08-2026)
+
+Other Guests Khách Khác
+[RmNo.1] Guest of Nga Đỗ, [RmNo.1] Nga Đỗ
+
+Room Type
+Loại Phòng
+No. of Rooms
+Số phòng
+Occupancy
+Số người
+No. of Extra Bed
+Số Giường Thêm
+
+Superior Double Room 1 2 Adults 0
+
+August 4, 2026
+VND 529,537.00
+
+Reference sell rate (incl. taxes & fees)
+Giá bán tham khảo (bao gồm thuế & phí)
+VND 875,000.00
+
+Net rate (incl. taxes & fees)
+Giá thực tế (bao gồm thuế & phí)
+VND 529,537.00

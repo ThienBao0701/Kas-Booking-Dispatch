@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, KeyRound, LogOut, Users } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
+import { ROLE_LABEL } from '../auth/types';
 
 function initials(fullName: string): string {
   const parts = fullName.trim().split(/\s+/);
@@ -18,7 +19,7 @@ export function AccountMenu() {
 
   if (!user) return null;
 
-  const roleLabel = user.role === 'ADMIN' ? 'Quản trị viên' : 'Lễ tân';
+  const roleLabel = ROLE_LABEL[user.role];
 
   const onLogout = async () => {
     setOpen(false);

@@ -6,6 +6,7 @@ import { App } from './app/App';
 import { queryClient } from './app/queryClient';
 import { AuthProvider } from './auth/AuthProvider';
 import { PwaManager } from './pwa/PwaManager';
+import { ServerWatch } from './components/ServerWatch';
 import './styles/index.css';
 
 const rootElement = document.getElementById('root');
@@ -20,6 +21,7 @@ ReactDOM.createRoot(rootElement).render(
         <AuthProvider>
           <App />
           <PwaManager />
+          <ServerWatch />
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

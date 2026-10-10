@@ -6,27 +6,46 @@
  * read endpoints, which expose routing configuration.
  */
 import { Router } from 'express';
+import type { NextFunction, Request } from 'express';
 import { z } from 'zod';
 import { requireAuth, requireAdmin, requirePasswordChanged } from '../middleware/auth';
 import { ApiError } from '../lib/errors';
 import {
   activateBranch,
-  addAlias,
   createBranch,
-  createAliasSchema,
   createBranchSchema,
   deactivateBranch,
   getBranch,
   listBranchHistory,
   listBranches,
   receptionistsOfBranch,
-  removeAlias,
   suggestBranchCode,
-  updateAlias,
-  updateAliasSchema,
   updateBranch,
   updateBranchSchema,
 } from '../branch/branchService';
+import {
+  confirmIdentity,
+  deleteIdentity,
+  listIdentities,
+  listIdentityHistory,
+  parsePlatform,
+  setIdentity,
+  setIdentitySchema,
+  type Actor,
+} from '../branch/platformIdentityService';
+
+/**
+ * The acting Admin plus the request correlation id, so every identity change is
+ * traceable to one HTTP request. Role and id come from the SERVER-loaded
+ * session user — never from anything the client sent.
+ */
+function actorOf(req: Request): Actor {
+  return {
+    id: req.currentUser?.id ?? null,
+    role: req.currentUser?.role ?? null,
+    correlationId: req.requestId ?? null,
+  };
+}
 
 const suggestQuery = z.object({ address: z.string().trim().min(1).max(200) });
 
@@ -36,11 +55,6 @@ function branchIdOf(raw: string | undefined): number {
   return id;
 }
 
-function aliasIdOf(raw: string | undefined): number {
-  const id = Number(raw);
-  if (!Number.isInteger(id) || id <= 0) throw ApiError.notFound('Không tìm thấy tên khách sạn.');
-  return id;
-}
 
 export function createAdminBranchesRouter(): Router {
   const router = Router();
@@ -112,36 +126,84 @@ export function createAdminBranchesRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/admin/branches/:id/aliases — add a platform hotel name.
-  router.post('/admin/branches/:id/aliases', (req, res, next) => {
+  /* ---------------------------------------------------------------- */
+  /* Platform identities — the ONE current name per (branch, platform) */
+  /* ---------------------------------------------------------------- */
+
+  // GET /api/admin/branches/:id/platform-identities — all five rows, including
+  // the platforms with no value yet, so the UI renders a complete table.
+  router.get('/admin/branches/:id/platform-identities', (req, res, next) => {
     (async () => {
       const id = branchIdOf(req.params.id);
-      const input = createAliasSchema.parse(req.body ?? {});
-      const branch = await addAlias(id, input, req.currentUser?.id ?? null);
-      res.status(201).json({ branch });
+      res.json({ identities: await listIdentities(id) });
     })().catch(next);
   });
 
-  // PATCH /api/admin/branches/:id/aliases/:aliasId — rename / enable / disable.
-  router.patch('/admin/branches/:id/aliases/:aliasId', (req, res, next) => {
+  // PUT /api/admin/branches/:id/platform-identities/:platform — create OR
+  // replace. One call, one row: there is no "add a second name" operation.
+  router.put('/admin/branches/:id/platform-identities/:platform', (req, res, next) => {
     (async () => {
       const id = branchIdOf(req.params.id);
-      const aliasId = aliasIdOf(req.params.aliasId);
-      const input = updateAliasSchema.parse(req.body ?? {});
-      const branch = await updateAlias(id, aliasId, input, req.currentUser?.id ?? null);
-      res.json({ branch });
+      const platform = parsePlatform(req.params.platform);
+      const input = setIdentitySchema.parse(req.body ?? {});
+      const identities = await setIdentity(id, platform, input, actorOf(req));
+      res.json({ identities });
     })().catch(next);
   });
 
-  // DELETE /api/admin/branches/:id/aliases/:aliasId — remove entirely.
-  router.delete('/admin/branches/:id/aliases/:aliasId', (req, res, next) => {
+  // DELETE /api/admin/branches/:id/platform-identities/:platform — remove from
+  // active recognition. History is preserved; past bookings are untouched.
+  router.delete('/admin/branches/:id/platform-identities/:platform', (req, res, next) => {
     (async () => {
       const id = branchIdOf(req.params.id);
-      const aliasId = aliasIdOf(req.params.aliasId);
-      const branch = await removeAlias(id, aliasId, req.currentUser?.id ?? null);
-      res.json({ branch });
+      const platform = parsePlatform(req.params.platform);
+      const identities = await deleteIdentity(id, platform, actorOf(req));
+      res.json({ identities });
     })().catch(next);
   });
+
+  // POST /api/admin/branches/:id/platform-identities/:platform/confirm —
+  // clears the "migration had to choose" flag.
+  router.post('/admin/branches/:id/platform-identities/:platform/confirm', (req, res, next) => {
+    (async () => {
+      const id = branchIdOf(req.params.id);
+      const platform = parsePlatform(req.params.platform);
+      const identities = await confirmIdentity(id, platform, actorOf(req));
+      res.json({ identities });
+    })().catch(next);
+  });
+
+  // GET /api/admin/branches/:id/identity-history — the immutable trail,
+  // deliberately a SEPARATE endpoint so superseded names can never leak into
+  // the main current-name list.
+  router.get('/admin/branches/:id/identity-history', (req, res, next) => {
+    (async () => {
+      const id = branchIdOf(req.params.id);
+      res.json({ history: await listIdentityHistory(id) });
+    })().catch(next);
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* Legacy alias API — READ-ONLY for one release                      */
+  /* ---------------------------------------------------------------- */
+
+  // The alias model allowed several names per (branch, platform) with
+  // enable/disable toggles. It is superseded by platform identities. Reads stay
+  // available for one release so an operator can still see historical
+  // configuration; every mutation is refused with a message that names the
+  // replacement rather than failing obscurely.
+  const legacyAliasRemoved = (_req: unknown, _res: unknown, next: NextFunction): void => {
+    next(
+      ApiError.conflict(
+        'API tên khách sạn cũ đã ngừng hoạt động. Hãy dùng "Tên hiện tại theo nền tảng" ' +
+          '(PUT/DELETE /api/admin/branches/:id/platform-identities/:platform).',
+      ),
+    );
+  };
+
+  router.post('/admin/branches/:id/aliases', legacyAliasRemoved);
+  router.patch('/admin/branches/:id/aliases/:aliasId', legacyAliasRemoved);
+  router.delete('/admin/branches/:id/aliases/:aliasId', legacyAliasRemoved);
 
   // POST /api/admin/branches/:id/deactivate — stop new routing, keep all data.
   router.post('/admin/branches/:id/deactivate', (req, res, next) => {

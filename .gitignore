@@ -6,10 +6,22 @@ dist/
 build/
 client/dev-dist/
 
-# Environment
+# Environment — every real env file. The *.example templates are committed.
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+!.env.production.example
+
+# Production secrets: Docker secret files mounted into the app container.
+# These hold the session secret and the bootstrap Admin password.
+secrets/
+*.secret
+*.pem
+*.key
+
+# Local production data root (SQLite file, uploads, backups) when the stack is
+# run with bind mounts instead of named volumes.
+data/
 
 # Database (SQLite)
 *.db
@@ -36,8 +48,16 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# Production runtime directory: the five rotated logs and the single-instance
+# lock the runner writes (server/src/service/). Operator data, never committed —
+# the installer preserves it across upgrades.
+logs/
+
 # Proof-of-creation screenshot uploads (never committed).
 server/uploads/
 
 # Pre-official-launch backups (DB + uploads snapshots) — never committed.
 backups/
+
+# Packaged Windows releases (produced by scripts/production/windows/Package-Kas.ps1)
+release/

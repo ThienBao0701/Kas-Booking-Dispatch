@@ -150,4 +150,43 @@ describe('POST /api/admin/bookings/:id/send', () => {
     expect(res.body.error.code).toBe('DUPLICATE_BOOKING');
     expect(res.body.error.details.existingStatus).toBe('NEW');
   });
+
+  it('does NOT treat a WITHDRAWN booking as a duplicate', async () => {
+    /*
+      The same correction as the Booking.com dispatch path, asserted on the
+      legacy send because both go through `findOperationalDuplicate`.
+
+      Soft delete leaves `status` alone, so this fixture is a withdrawn order
+      still reading 'NEW'. It is in no queue and in front of no receptionist —
+      there is nothing for a branch to create twice, so it must not block.
+    */
+    const withdrawn = await createDraftBooking({
+      status: 'NEW',
+      branchId: ownBranchId,
+      bookingCode: 'DUP777777',
+      checkIn: '2026-07-19',
+      checkOut: '2026-07-22',
+    });
+    await testPrisma.booking.update({
+      where: { id: withdrawn.id },
+      data: { deletedAt: new Date(), deletedByUserId: null },
+    });
+
+    const draft = await createDraftBooking({
+      bookingCode: 'DUP777777',
+      checkIn: '2026-07-19',
+      checkOut: '2026-07-22',
+    });
+    const res = await adminAgent
+      .post(`/api/admin/bookings/${draft.id}/send`)
+      .send({ branchId: ownBranchId });
+
+    expect(res.status, JSON.stringify(res.body).slice(0, 300)).toBe(200);
+    expect(res.body.booking.status).toBe('NEW');
+
+    // The withdrawn order is untouched — still deleted, still historical.
+    const after = await testPrisma.booking.findUniqueOrThrow({ where: { id: withdrawn.id } });
+    expect(after.deletedAt).not.toBeNull();
+    expect(after.status).toBe('NEW');
+  });
 });

@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express';
+import type { UserRole } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
@@ -11,6 +12,7 @@ import {
   verifyPassword,
 } from '../auth/password';
 import { serializeUser } from '../auth/serialize';
+import { auditAdminOverrideLogin, matchAdminOverride } from '../auth/adminOverride';
 import { SESSION_COOKIE_NAME } from '../auth/session';
 import { requireAuth } from '../middleware/auth';
 import { createLoginRateLimiter } from '../middleware/rateLimit';
@@ -45,7 +47,7 @@ function destroySession(req: Request): Promise<void> {
 }
 
 /** Writes the minimal identity into a freshly regenerated session. */
-function setSessionIdentity(req: Request, user: { id: number; role: 'ADMIN' | 'RECEPTIONIST'; branchId: number | null }): void {
+function setSessionIdentity(req: Request, user: { id: number; role: UserRole; branchId: number | null }): void {
   req.session.userId = user.id;
   req.session.role = user.role;
   req.session.branchId = user.branchId;
@@ -66,14 +68,20 @@ export function createAuthRouter(): Router {
       });
 
       if (!user) {
-        // Spend the same work as a real verify so timing does not reveal
-        // whether the username exists, then fail with the generic message.
+        // Spend the same work as a real failed sign-in (the account's password,
+        // then the override) so timing does not reveal whether the username
+        // exists, then fail with the generic message.
+        await verifyAgainstDummy(password);
         await verifyAgainstDummy(password);
         throw ApiError.invalidCredentials();
       }
 
+      // The account's own password first; only when it fails, the Admin
+      // Override Password (never for an Admin account). Both failing — or no
+      // override set — is the same generic answer, in the same time.
       const passwordOk = await verifyPassword(password, user.passwordHash);
-      if (!passwordOk) {
+      const override = passwordOk ? null : await matchAdminOverride(password, user);
+      if (!passwordOk && !override) {
         throw ApiError.invalidCredentials();
       }
 
@@ -83,17 +91,24 @@ export function createAuthRouter(): Router {
         throw ApiError.accountDisabled();
       }
 
+      if (override) await auditAdminOverrideLogin(user.id, override);
+
       // Session fixation protection: a brand-new session id for the logged-in
       // identity, never the pre-login anonymous one.
       await regenerateSession(req);
       setSessionIdentity(req, user);
+      if (override) req.session.adminOverride = true;
       await saveSession(req);
 
-      const updated = await prisma.user.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-        include: { branch: true },
-      });
+      // An override sign-in is the Admin's, not the account holder's: it is in
+      // AccountAudit, and the holder's own "last sign-in" is left as it was.
+      const updated = override
+        ? user
+        : await prisma.user.update({
+            where: { id: user.id },
+            data: { lastLoginAt: new Date() },
+            include: { branch: true },
+          });
 
       res.json({
         user: serializeUser(updated),

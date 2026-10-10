@@ -9,6 +9,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { hasLegacyDefaults } from './branchMatcher';
+import type { BranchIdentity } from './identityResolver';
 import type { BranchAliasConfig, MatchableBranch } from './types';
 
 /** An active branch plus the platform names that route to it. */
@@ -16,6 +17,11 @@ export interface BranchConfig extends MatchableBranch {
   active: boolean;
   branchNumber: number;
   aliases?: readonly BranchAliasConfig[];
+  /**
+   * The branch's CURRENT name on each platform. This is what recognition
+   * resolves against; `aliases` is the superseded model kept for one release.
+   */
+  identities: readonly BranchIdentity[];
 }
 
 /**
@@ -36,7 +42,7 @@ export async function loadBranchConfigs(
   const branches = await client.branch.findMany({
     where: { active: true },
     orderBy: [{ branchNumber: 'asc' }, { id: 'asc' }],
-    include: { aliases: true },
+    include: { aliases: true, platformIdentities: true },
   });
 
   return branches.map((b) => ({
@@ -46,6 +52,11 @@ export async function loadBranchConfigs(
     address: b.address,
     active: b.active,
     branchNumber: b.branchNumber,
+    identities: b.platformIdentities.map((i) => ({
+      platform: i.platform,
+      name: i.name,
+      normalizedName: i.normalizedName,
+    })),
     aliases:
       b.aliases.length === 0 && hasLegacyDefaults(b.code)
         ? undefined

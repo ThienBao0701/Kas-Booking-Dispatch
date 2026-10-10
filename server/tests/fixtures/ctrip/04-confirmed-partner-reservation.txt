@@ -1,0 +1,13 @@
+Trip.com
+Reservation: 1658113703317875
+Property name: KAS Zody Boutique Hotel
+Guest: LEE/JENSON HWEE
+Check-in: 01/08/2026
+Check-out: 08/08/2026
+Room type: Standard Double Room No Window
+Room quantity: 1
+Original room rate: 6637080
+Discounts: 1991124
+Final room rate: 4645956
+Your payout: 4645956
+Meals: No meals

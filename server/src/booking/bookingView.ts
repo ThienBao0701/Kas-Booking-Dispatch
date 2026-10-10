@@ -9,7 +9,6 @@ export const BOOKING_DETAIL_INCLUDE = {
   branch: true,
   rooms: { include: { nights: true } },
   warnings: true,
-  statusHistory: { include: { changedBy: true }, orderBy: { changedAt: 'asc' } },
   sentBy: true,
   completedBy: true,
   reviewedBy: true,
@@ -18,6 +17,21 @@ export const BOOKING_DETAIL_INCLUDE = {
     include: { submittedBy: true, reviewedBy: true },
     orderBy: { attemptNumber: 'asc' },
   },
+  // Append-only corrections, loaded ONLY for the request provenance attached to
+  // each one. The corrections themselves are no longer projected onto the wire
+  // — 5.2d removed the edit-history table from every screen — but the requests
+  // that produced them remain the Admin's audit trail, and they are reachable
+  // only through this relation. The request context reaches ADMINS ONLY; the
+  // ops serializer strips it.
+  corrections: {
+    include: { correctedBy: true, requestAudit: true },
+    orderBy: { correctedAt: 'asc' },
+  },
+  receivedBy: true,
+  checkedInBy: true,
+  checkedOutBy: true,
+  cancelledBy: true,
+  claimedBy: true,
 } satisfies Prisma.BookingInclude;
 
 export type BookingDetail = Prisma.BookingGetPayload<{ include: typeof BOOKING_DETAIL_INCLUDE }>;
@@ -27,6 +41,7 @@ export const BOOKING_LIST_INCLUDE = {
   sentBy: true,
   completedBy: true,
   reviewedBy: true,
+  claimedBy: true,
   rooms: { include: { nights: true } },
   warnings: true,
   // Only the most recent proof attempt, for the list's status/reason display.
@@ -50,9 +65,25 @@ function isoDate(date: Date | null): string | null {
   return date ? date.toISOString().slice(0, 10) : null;
 }
 
+/**
+ * The branch fields every booking-scoped response carries.
+ *
+ * `breakfastIncluded` is part of this shape because it is OPERATIONAL data the
+ * receptionist's PMS note depends on. It used to be absent, which forced both
+ * the client note builder and the server proof-comparison to hardcode a set of
+ * branch codes — so an Admin toggling breakfast in branch management changed
+ * nothing. The database column is the single source of truth for every branch.
+ */
 function branchView(branch: BookingDetail['branch']) {
   return branch
-    ? { id: branch.id, code: branch.code, hotelName: branch.hotelName, address: branch.address }
+    ? {
+        id: branch.id,
+        code: branch.code,
+        hotelName: branch.hotelName,
+        address: branch.address,
+        branchNumber: branch.branchNumber,
+        breakfastIncluded: branch.breakfastIncluded,
+      }
     : null;
 }
 
@@ -66,6 +97,16 @@ function roomsView(rooms: BookingDetail['rooms']) {
       roomSubtotal: room.roomSubtotal,
       taxAmount: room.taxAmount,
       feeAmount: room.feeAmount,
+      // Immutable branch room-class snapshot (C.3.8). The note builders use
+      // `roomClassPmsCode` when present and fall back to the legacy keyword
+      // abbreviation only for rooms that predate the mapping or are still
+      // unresolved — so a historical note can never change.
+      roomClassId: room.roomClassId,
+      roomClassVersionId: room.roomClassVersionId,
+      roomClassDisplayName: room.roomClassDisplayName,
+      roomClassPmsCode: room.roomClassPmsCode,
+      roomClassSourceText: room.roomClassSourceText,
+      roomClassStatus: room.roomClassStatus,
       nights: [...room.nights]
         .sort((a, b) => a.stayDate.getTime() - b.stayDate.getTime())
         .map((night) => ({
@@ -81,17 +122,6 @@ function roomsView(rooms: BookingDetail['rooms']) {
 
 function warningsView(warnings: BookingDetail['warnings']) {
   return warnings.map((w) => ({ code: w.code, message: w.message, severity: w.severity }));
-}
-
-function statusHistoryView(history: BookingDetail['statusHistory']) {
-  return history.map((h) => ({
-    id: h.id,
-    oldStatus: h.oldStatus,
-    newStatus: h.newStatus,
-    changedBy: actor(h.changedBy),
-    changedAt: h.changedAt.toISOString(),
-    note: h.note,
-  }));
 }
 
 /** The authenticated image endpoint for a proof — never a filesystem path. */
@@ -113,6 +143,14 @@ export function proofView(bookingId: string, proof: ProofRow) {
     submissionNote: proof.submissionNote,
     submittedBy: actor(proof.submittedBy),
     submittedAt: proof.submittedAt.toISOString(),
+    /**
+     * Who created the order, and on which shift — resolved by the server at
+     * submission. Null on attempts made before shifts existed, where
+     * `submissionNote` is the only (typed, unverified) record of the name.
+     */
+    receptionistName: proof.receptionistNameSnapshot,
+    shiftType: proof.shiftType,
+    shiftSessionId: proof.shiftSessionId,
     reviewedBy: actor(proof.reviewedBy),
     reviewedAt: iso(proof.reviewedAt),
     reviewReasonCode: proof.reviewReasonCode,
@@ -127,9 +165,96 @@ function proofsView(bookingId: string, proofs: BookingDetail['proofs']) {
     .map((p) => proofView(bookingId, p));
 }
 
+/**
+ * The one thing a screen still reads from what the OTA said.
+ *
+ * This block used to carry twelve fields — rate plan, cancellation policy,
+ * country of residence, website language, property id, build hashes. None of
+ * them was ever acted on: a receptionist creates the reservation from the
+ * guest, the dates, the rooms and the note, and an Admin who needs the rest
+ * reads the original mail. 5.2d removed the card that displayed them, so the
+ * server stops sending them.
+ *
+ * `paymentType` survives because it is still displayed: it is the mail's own
+ * payment wording, and it is the fallback in the payment field for OTA bookings
+ * dispatched before `reviewedPaymentMode` was stored. Nothing here is derived,
+ * and the COLUMNS all remain — only the projection shrank.
+ */
+function otaMetadataView(booking: BookingDetail) {
+  return {
+    paymentType: booking.paymentType,
+  };
+}
+
+/** What actually happened during the stay, beside what was expected. */
+function operationalView(booking: BookingDetail) {
+  return {
+    receivedAt: iso(booking.receivedAt),
+    receivedBy: actor(booking.receivedBy),
+    actualCheckInAt: iso(booking.actualCheckInAt),
+    checkedInBy: actor(booking.checkedInBy),
+    actualCheckOutAt: iso(booking.actualCheckOutAt),
+    checkedOutBy: actor(booking.checkedOutBy),
+    cancelledAt: iso(booking.cancelledAt),
+    cancelledBy: actor(booking.cancelledBy),
+    cancellationReason: booking.cancellationReason,
+  };
+}
+
+/**
+ * The request context behind each recorded change. ADMIN ONLY.
+ *
+ * IP, user agent and session identify a device, not a booking. A receptionist
+ * needs none of it to serve a guest, and spreading it to every branch terminal
+ * would turn an audit record into ambient surveillance of colleagues.
+ */
+function adminAuditView(booking: BookingDetail) {
+  const seen = new Map<string, ReturnType<typeof auditRow>>();
+  for (const c of booking.corrections) {
+    if (c.requestAudit && !seen.has(c.requestAudit.id)) {
+      seen.set(c.requestAudit.id, auditRow(c.requestAudit));
+    }
+  }
+  return {
+    parserCommit: booking.parserCommit,
+    reviewBuildId: booking.reviewBuildId,
+    requests: [...seen.values()],
+  };
+}
+
+function auditRow(audit: NonNullable<BookingDetail['corrections'][number]['requestAudit']>) {
+  return {
+    id: audit.id,
+    correlationId: audit.correlationId,
+    route: audit.route,
+    ipAddress: audit.ipAddress,
+    userAgent: audit.userAgent,
+    sessionId: audit.sessionId,
+    occurredAt: audit.occurredAt.toISOString(),
+  };
+}
+
 /** The full booking detail an Admin sees (includes rawText). */
 export function serializeAdminBookingDetail(booking: BookingDetail) {
   return {
+    ...claimView(booking),
+    /*
+      Whether this order may be sent back to its branch.
+
+      DERIVED FROM THE ROW, and from exactly the same three conditions the server
+      enforces on the write — so the button and the endpoint cannot disagree.
+      Computing it here rather than in the browser means one rule, in one place,
+      that a screen cannot get wrong.
+
+      APPROVED is excluded because that status asserts the reservation already
+      exists in the hotel system; offering to send it back would be offering to
+      create a duplicate. See `redispatchDeletedBooking`.
+    */
+    canRedispatch:
+      booking.sentAt !== null &&
+      booking.deletedAt !== null &&
+      booking.verificationStatus !== 'APPROVED',
+    deletedAt: iso(booking.deletedAt),
     id: booking.id,
     status: booking.status,
     sourcePlatform: booking.sourcePlatform,
@@ -157,7 +282,6 @@ export function serializeAdminBookingDetail(booking: BookingDetail) {
     isLastMinute: booking.isLastMinute,
     rooms: roomsView(booking.rooms),
     warnings: warningsView(booking.warnings),
-    statusHistory: statusHistoryView(booking.statusHistory),
     proofs: proofsView(booking.id, booking.proofs),
     createdBy: actor(booking.createdBy),
     sentBy: actor(booking.sentBy),
@@ -169,6 +293,19 @@ export function serializeAdminBookingDetail(booking: BookingDetail) {
     completedAt: iso(booking.completedAt),
     completionNote: booking.completionNote,
     reviewedAt: iso(booking.reviewedAt),
+
+    // The PMS note as it was produced at dispatch and stored, and the payment
+    // mode the Admin accepted. Null for Booking.com, which generates its note
+    // from the booking itself, and for everything dispatched before these
+    // columns existed.
+    adminPmsNote: booking.adminPmsNote,
+    reviewedPaymentMode: booking.reviewedPaymentMode,
+
+    // Phase 5 operational record, all of it already stored.
+    ota: otaMetadataView(booking),
+    operational: operationalView(booking),
+    // ADMIN ONLY — stripped for reception below.
+    requestAudit: adminAuditView(booking),
   };
 }
 
@@ -177,15 +314,24 @@ export function serializeAdminBookingDetail(booking: BookingDetail) {
  * structured data minus rawText, so raw Booking.com personal data is not spread
  * further than it needs to be.
  */
-export function serializeOpsBookingDetail(booking: BookingDetail, includeRawText: boolean) {
+export function serializeOpsBookingDetail(booking: BookingDetail, isAdmin: boolean) {
   const full = serializeAdminBookingDetail(booking);
-  if (includeRawText) return full;
+  // An Admin on an operational route sees exactly what the admin route serves.
+  // This flag is the CALLER ROLE, not a display preference: it gates raw text
+  // AND request metadata together, so it can never be flipped on to reveal one
+  // without knowingly revealing the other.
+  if (isAdmin) return full;
   // Receptionists see the final persisted business type only — never the raw
   // text nor the internal detection debug (confidence / detection source).
   const {
     rawText: _omitRaw,
     businessTypeConfidence: _omitConf,
     businessTypeDetectionSource: _omitSource,
+    // Request metadata identifies a DEVICE, not a booking. A receptionist
+    // needs none of it to serve a guest, and spreading IP, user agent and
+    // session to every branch terminal would turn an audit record into
+    // ambient surveillance of colleagues.
+    requestAudit: _omitAudit,
     ...rest
   } = full;
   return rest;
@@ -253,6 +399,32 @@ export function serializeNewListItem(booking: BookingListItem) {
     latestRejectionReason: proof?.status === 'REJECTED' ? proof.reviewReasonCode : null,
     submittedAt: iso(proof?.submittedAt ?? null),
     reviewedAt: iso(booking.reviewedAt),
+    ...claimView(booking),
+  };
+}
+
+/**
+ * The claim ("CUT") fields the client needs.
+ *
+ * `claimExpiresAt` is sent as the ABSOLUTE server instant and the client
+ * subtracts a server-supplied `now` from it. Sending "seconds remaining"
+ * instead would bake the latency of this response into the deadline and let a
+ * slow network quietly extend the window; sending the instant means a refresh,
+ * a second tab and a wound-back PC clock all render the same countdown.
+ */
+export function claimView(booking: {
+  claimedByUserId: number | null;
+  claimedAt: Date | null;
+  claimExpiresAt: Date | null;
+  claimCycle: number;
+  claimedBy?: ActorUser;
+}) {
+  return {
+    claimedBy: actor(booking.claimedBy ?? null),
+    claimedByUserId: booking.claimedByUserId,
+    claimedAt: iso(booking.claimedAt),
+    claimExpiresAt: iso(booking.claimExpiresAt),
+    claimCycle: booking.claimCycle,
   };
 }
 
@@ -305,5 +477,6 @@ export function serializeHistoryListItem(booking: BookingListItem) {
     reviewedBy: actor(booking.reviewedBy),
     reviewedAt: iso(booking.reviewedAt),
     createdAt: booking.createdAt.toISOString(),
+    reviewedPaymentMode: booking.reviewedPaymentMode,
   };
 }

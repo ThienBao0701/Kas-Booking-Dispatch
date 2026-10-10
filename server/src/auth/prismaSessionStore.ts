@@ -92,6 +92,15 @@ export class PrismaSessionStore extends Store {
     return result.count;
   }
 
+  /**
+   * Ends every session opened with the Admin Override Password (the payload's
+   * `adminOverride: true`) — when that password is changed or turned off.
+   */
+  async destroyAdminOverrideSessions(): Promise<number> {
+    const result = await this.prisma.session.deleteMany({ where: { data: { contains: '"adminOverride":true' } } });
+    return result.count;
+  }
+
   /** Deletes all expired sessions. Returns the number removed. */
   async prune(): Promise<number> {
     const result = await this.prisma.session.deleteMany({

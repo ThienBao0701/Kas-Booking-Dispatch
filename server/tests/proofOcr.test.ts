@@ -14,6 +14,7 @@ let adminAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let ownAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let otherAgent: Awaited<ReturnType<typeof loginAgent>>['agent'];
 let ownBranchId: number;
+let ownReceptionistId: number;
 let otherBranchId: number;
 
 beforeEach(async () => {
@@ -25,8 +26,20 @@ beforeEach(async () => {
 
   await createAdmin({ mustChangePassword: false });
   adminAgent = (await loginAgent(app, 'admin', ADMIN_PASSWORD)).agent;
-  await createReceptionist(ownBranchId, { username: 'letan_own', mustChangePassword: false });
+  ownReceptionistId = (await createReceptionist(ownBranchId, { username: 'letan_own', mustChangePassword: false })).id;
   ownAgent = (await loginAgent(app, 'letan_own', RECEPTIONIST_PASSWORD)).agent;
+  /*
+    The receptionist checks in to a shift.
+
+    Submitting a proof IS the receptionist asserting "I created this
+    reservation", so the server takes the order's creator from the shift they
+    are working and refuses the submission when there is none. That rule is the
+    subject of bookingCreatorAttribution.test.ts; here it is only the
+    precondition these cases need before they can reach OCR at all.
+  */
+  await ownAgent
+    .post('/api/reception/shifts/check-in')
+    .send({ shiftType: 'A', receptionistName: 'Lễ tân trực' });
   await createReceptionist(otherBranchId, { username: 'letan_other', mustChangePassword: false });
   otherAgent = (await loginAgent(app, 'letan_other', RECEPTIONIST_PASSWORD)).agent;
 });
@@ -40,7 +53,14 @@ afterAll(async () => {
 });
 
 async function newBooking(code = 'OCR0000001') {
-  return createDraftBooking({ status: 'NEW', branchId: ownBranchId, bookingCode: code, verificationStatus: 'NOT_SUBMITTED' });
+  // Already claimed: CUT is a hard prerequisite for submitting proof.
+  return createDraftBooking({
+    status: 'NEW',
+    branchId: ownBranchId,
+    bookingCode: code,
+    verificationStatus: 'NOT_SUBMITTED',
+    claimedByUserId: ownReceptionistId,
+  });
 }
 
 /** Submits a proof as the branch receptionist and returns { bookingId, proofId }. */

@@ -8,9 +8,6 @@ import type { ProofExtractedData } from '../ocr/types';
 import type { DetectedProof, ExpectedBooking } from './engine';
 import type { DetectedConfidences } from './enrich';
 
-/** Branches that serve breakfast (mirrors the client PMS-note config, by code). */
-const BREAKFAST_BRANCH_CODES: ReadonlySet<string> = new Set(['LY_TU_TRONG_260', 'NGUYEN_TRAI_47A', 'NGUYEN_THAI_BINH_170']);
-
 function isoDate(d: Date | null | undefined): string | null {
   return d ? d.toISOString().slice(0, 10) : null;
 }
@@ -60,7 +57,11 @@ export function deriveExpected(booking: BookingDetail): ExpectedBooking {
       total: booking.totalAmount ?? null,
       payment: booking.paymentStatus,
       partner: booking.businessType === 'PARTNER',
-      breakfast: booking.branch ? BREAKFAST_BRANCH_CODES.has(booking.branch.code) : false,
+      // Same database-backed source as the client's PMS note: the branch's own
+      // Branch.breakfastIncluded, for every branch. Never a hardcoded code set —
+      // the expectation must follow the Admin's configuration, or the comparison
+      // would flag a correct note as a mismatch after a breakfast change.
+      breakfast: booking.branch?.breakfastIncluded === true,
       arrival: arrivalOf(booking.specialRequest),
     },
   };

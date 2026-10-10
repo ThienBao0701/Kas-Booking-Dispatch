@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
+import { withLifecycle } from '../test/issueFixtures';
+import { hcmToday } from '../lib/format';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -10,122 +12,257 @@ afterEach(() => {
 
 const BRANCH = { id: 1, code: 'TRUONG_DINH_05', hotelName: 'Saigon Hotel & Ben Thanh', address: '05 Trương Định' };
 
+/** The receptionist is checked in, so the shift picker never interrupts. */
+const OPEN_SHIFT = {
+  status: 200,
+  body: {
+    session: {
+      id: 's1',
+      branchId: 1,
+      shiftType: 'A',
+      shiftName: 'Ca A',
+      shiftWindow: '06:00 – 14:00',
+      receptionistName: 'Lễ tân Một',
+      startedAt: '2026-09-16T23:00:00.000Z',
+      nominalEndAt: '2026-09-17T07:00:00.000Z',
+      graceEndAt: '2026-09-17T07:10:00.000Z',
+      closedAt: null,
+      promptDue: false,
+    },
+  },
+};
+
 function issue(over: Record<string, unknown> = {}) {
-  return {
+  return withLifecycle({
     id: 'i1',
     branchId: 1,
     branch: BRANCH,
+    areaCategory: 'ROOM',
     roomNumber: '301',
+    floorNumber: null,
+    areaSubtype: null,
+    locationDetail: null,
+    locationLabel: 'Phòng · Phòng 301',
     category: 'AIR_CONDITIONER',
     description: 'Máy lạnh không lạnh',
     photoUrl: null,
     status: 'NEW',
     reportedBy: { id: 2, fullName: 'Lễ tân Một' },
+    reportedByName: 'Lễ tân Một',
     acceptedBy: null,
-    resolvedBy: null,
+    acceptedByName: null,
+    acceptedAt: null,
+    technicianName: null,
+    technicianPhone: null,
+    completedBy: null,
+    completedByName: null,
+    completedAt: null,
     createdAt: '2026-07-24T02:00:00.000Z',
     updatedAt: '2026-07-24T02:00:00.000Z',
-    resolvedAt: null,
+    // The server ALWAYS sends these; a fixture that omits them describes a
+    // response the API cannot produce.
+    shiftType: null,
+    shiftReceptionistName: null,
+    durationSeconds: null,
+    durationLabel: null,
+    attempts: [],
+    cannotRepairCount: 0,
+    needsRework: false,
     ...over,
-  };
+  });
 }
 
 function listBody(issues: unknown[]) {
   return { status: 200, body: { issues, pagination: { page: 1, pageSize: 100, total: issues.length, totalPages: 1 } } };
 }
 
-describe('IssuesPage — receptionist', () => {
-  it('creates a new issue report via the modal form', async () => {
+const TODAY = hcmToday();
+
+/**
+ * The shell and "Báo cáo vấn đề" around the incident category. The old
+ * standalone incident screen is gone; its address lands here.
+ */
+function receptionRoutes(extra: Record<string, (init: RequestInit) => { status: number; body?: unknown }> = {}) {
+  return {
+    'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTIONIST_USER } }),
+    'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
+    'GET /api/reception/shifts/current': () => OPEN_SHIFT,
+    'GET /api/reception/reports/options': () => ({
+      status: 200,
+      body: { categories: [], paymentMethods: [], roomServiceTypes: [], guestRequestItems: [] },
+    }),
+    'GET /api/reception/reports?shiftSessionId=s1': () => ({ status: 200, body: { reports: [], counts: {} } }),
+    ...extra,
+  };
+}
+
+function adminRoutes(issues: unknown[]) {
+  return {
+    'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
+    'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
+    'GET /api/admin/branches': () => ({ status: 200, body: { branches: [{ ...BRANCH, branchNumber: 1, active: true }] } }),
+    // Every branch, today — where the old "Sự cố khách sạn" address lands.
+    [`GET /api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`]: () => listBody(issues),
+  };
+}
+
+describe('incidents — receptionist, in "Sự cố cơ sở vật chất đang xử lý"', () => {
+  it('creates a new issue report via the existing modal form', async () => {
     let created = false;
-    const fetchMock = installApiMock({
-      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTIONIST_USER } }),
-      'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
-      'GET /api/issues?pageSize=100': () => listBody(created ? [issue()] : []),
-      'POST /api/issues': () => {
-        created = true;
-        return { status: 201, body: { issue: issue() } };
-      },
-    });
+    const journal: unknown[] = [];
+    const fetchMock = installApiMock(
+      receptionRoutes({
+        'GET /api/issues?scope=active&pageSize=100': () => listBody(created ? [issue()] : []),
+        'POST /api/issues': () => {
+          created = true;
+          return { status: 201, body: { issue: issue() } };
+        },
+        // The shift journal records the new incident by reference, in the same step.
+        'POST /api/reception/reports': (init) => {
+          journal.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: { id: 'f1' } } };
+        },
+      }),
+    );
 
     const user = userEvent.setup();
+    // The old address still works, and opens the category.
     renderApp('/app/issues');
 
     // Empty state until a report is filed.
-    expect(await screen.findByText('Chưa có báo cáo nào')).toBeInTheDocument();
+    expect(await screen.findByTestId('facility-board-empty')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Báo cáo mới' }));
+    await user.click(screen.getByTestId('category-add'));
     const dialog = await screen.findByRole('dialog');
-    // Room number is clearly marked optional with helper text.
-    expect(within(dialog).getByText('Để trống nếu sự cố không liên quan đến phòng.')).toBeInTheDocument();
-    await user.type(within(dialog).getByLabelText('Mô tả'), 'Máy lạnh không lạnh');
+
+    // The area is asked FIRST, and it decides the rest of the form.
+    expect(within(dialog).getByLabelText('Khu vực')).toHaveValue('ROOM');
+    await user.type(within(dialog).getByText('Số phòng').querySelector('input')!, '301');
+    await user.type(within(dialog).getByLabelText('Sự cố'), 'Máy lạnh không lạnh');
     await user.click(within(dialog).getByRole('button', { name: 'Gửi báo cáo' }));
 
-    expect(await screen.findByText('Đã gửi báo cáo sự cố cho Admin.')).toBeInTheDocument();
+    expect(await screen.findByText('Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.')).toBeInTheDocument();
     const called = fetchMock.mock.calls.some(
       ([url, init]) => String(url) === '/api/issues' && (init as RequestInit).method === 'POST',
     );
     expect(called).toBe(true);
+    expect(journal).toEqual([{ category: 'FACILITY_ISSUE', facility: { issueId: 'i1' } }]);
+    expect(await within(screen.getByTestId('facility-board')).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
+  });
+
+  it('shows the reported incident with its location and status, not who reported it', async () => {
+    installApiMock(
+      receptionRoutes({ 'GET /api/issues?scope=active&pageSize=100': () => listBody([issue()]) }),
+    );
+
+    renderApp('/app/reports?category=FACILITY_ISSUE');
+
+    const board = await screen.findByTestId('facility-board');
+    const row = await within(board).findByTestId('row-i1');
+    expect(within(row).getByText('Phòng · Phòng 301')).toBeInTheDocument();
+    expect(within(row).getByText('Máy lạnh không lạnh')).toBeInTheDocument();
+    // A fresh report waits for the technician — said as the status, not the queue name.
+    expect(within(row).getByText('Chờ kỹ thuật')).toBeInTheDocument();
+    // "Người báo" is not a reception column any more.
+    expect(within(row).queryByText('Lễ tân Một')).not.toBeInTheDocument();
   });
 });
 
-describe('IssuesPage — admin', () => {
-  it('lists issues and accepts then resolves one', async () => {
-    let status: 'NEW' | 'IN_PROGRESS' | 'RESOLVED' = 'NEW';
-    const fetchMock = installApiMock({
-      'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
-      'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
-      'GET /api/issues?pageSize=100': () => listBody([issue({ status })]),
-      'POST /api/issues/i1/accept': () => {
-        status = 'IN_PROGRESS';
-        return { status: 200, body: { issue: issue({ status }) } };
-      },
-      'POST /api/issues/i1/resolve': () => {
-        status = 'RESOLVED';
-        return { status: 200, body: { issue: issue({ status }) } };
-      },
-    });
+describe('incidents — admin, in "Sự cố cơ sở vật chất đang xử lý"', () => {
+  /**
+   * THE ADMIN IS READ-ONLY FOR THE WORKFLOW.
+   *
+   * This test used to accept and resolve an incident from here, which recorded
+   * an administrator as having done maintenance work. Bộ phận kỹ thuật does that
+   * now, and the API refuses an Admin outright — so what this screen must show
+   * is the state, not a way to change it.
+   */
+  it('lists issues with their technician, and offers no workflow actions', async () => {
+    installApiMock(
+      adminRoutes([
+        issue({
+          status: 'IN_PROGRESS',
+          technicianName: 'Trần Văn B',
+          technicianPhone: '0901234567',
+          acceptedAt: '2026-07-24T03:00:00.000Z',
+        }),
+      ]),
+    );
 
-    const user = userEvent.setup();
     renderApp('/app/issues');
 
-    const table = await screen.findByRole('table');
-    expect(within(table).getByText('05 Trương Định')).toBeInTheDocument();
-    expect(within(table).getByText('Máy lạnh')).toBeInTheDocument();
-    expect(within(table).getByText('Lễ tân Một')).toBeInTheDocument();
+    const table = await screen.findByTestId('admin-incident-table');
+    const row = await within(table).findByTestId('row-i1');
+    // Every branch on screen, so each row names its branch.
+    expect(within(row).getByText('05 Trương Định')).toBeInTheDocument();
+    expect(within(row).getByText('Máy lạnh')).toBeInTheDocument();
+    expect(within(row).getByText('Lễ tân Một')).toBeInTheDocument();
+    // The technician and how to reach them.
+    expect(within(row).getByText('Trần Văn B')).toBeInTheDocument();
+    expect(within(row).getByText('0901234567')).toBeInTheDocument();
 
-    await user.click(within(table).getByRole('button', { name: 'Tiếp nhận' }));
-    expect(await screen.findByText('Đã tiếp nhận sự cố.')).toBeInTheDocument();
-
-    await user.click(within(table).getByRole('button', { name: /Đã xử lý/ }));
-    expect(await screen.findByText('Đã đánh dấu sự cố đã xử lý.')).toBeInTheDocument();
-
-    const acceptCalled = fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/issues/i1/accept' && (i as RequestInit).method === 'POST');
-    const resolveCalled = fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/issues/i1/resolve' && (i as RequestInit).method === 'POST');
-    expect(acceptCalled).toBe(true);
-    expect(resolveCalled).toBe(true);
+    // No way to transition anything from here.
+    expect(within(table).queryByRole('button', { name: 'Tiếp nhận' })).toBeNull();
+    expect(within(table).queryByRole('button', { name: /Hoàn thành/ })).toBeNull();
+    expect(within(table).queryByRole('button', { name: /Đã xử lý/ })).toBeNull();
   });
 
-  it('renders visually distinct NEW / IN_PROGRESS / RESOLVED status badges', async () => {
-    installApiMock({
-      'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
-      'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
-      'GET /api/issues?pageSize=100': () =>
-        listBody([
-          issue({ id: 'a', status: 'NEW' }),
-          issue({ id: 'b', status: 'IN_PROGRESS' }),
-          issue({ id: 'c', status: 'RESOLVED' }),
-        ]),
-    });
+  it('renders visually distinct badges for every stage — and no inspection while it is dormant', async () => {
+    installApiMock(
+      adminRoutes([
+        issue({ id: 'a', status: 'NEW' }),
+        issue({ id: 'b', status: 'IN_PROGRESS' }),
+        issue({ id: 'c', status: 'COMPLETED' }),
+        // Finished before inspection was switched off: it reads as finished.
+        issue({ id: 'd', status: 'AWAITING_INSPECTION' }),
+        issue({ id: 'e', status: 'NEW', needsRework: true }),
+      ]),
+    );
     renderApp('/app/issues');
 
-    const table = await screen.findByRole('table');
-    const rows = within(table).getAllByRole('row').slice(1); // skip the header row
-    // Rows are newest-first but each was created with the same timestamp, so match
-    // by the badge label within its own row. Each status has a distinct colour
-    // class (colour is not the sole signal — the labels differ too).
-    expect(within(rows.find((r) => within(r).queryByText('Mới'))!).getByText('Mới').className).toMatch(/amber/);
-    expect(within(rows.find((r) => within(r).queryByText('Đang xử lý'))!).getByText('Đang xử lý').className).toMatch(/blue/);
-    const resolvedRow = rows.find((r) => within(r).queryByText('Đã xử lý') && !within(r).queryByRole('button', { name: /Đã xử lý/ }))!;
-    expect(within(resolvedRow).getByText('Đã xử lý').className).toMatch(/green/);
+    const table = await screen.findByTestId('admin-incident-table');
+    const badge = (id: string, label: string) => within(within(table).getByTestId(`row-${id}`)).getByText(label).className;
+
+    await within(table).findByTestId('row-a');
+    expect(badge('a', 'Chờ kỹ thuật')).toMatch(/amber/);
+    expect(badge('b', 'Đang sửa')).toMatch(/blue/);
+    expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('d', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
+    expect(within(table).queryByText('Chờ nghiệm thu')).not.toBeInTheDocument();
+    expect(within(table).queryByTestId('issue-inspection')).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Nghiệm thu' })).not.toBeInTheDocument();
+  });
+
+  it('with inspection switched on, adds "Chờ nghiệm thu" and the inspection beside every stage', async () => {
+    installApiMock(
+      adminRoutes([
+        issue({ id: 'a', status: 'NEW', inspectionEnabled: true }),
+        issue({ id: 'b', status: 'IN_PROGRESS', inspectionEnabled: true }),
+        issue({ id: 'c', status: 'COMPLETED', inspectionEnabled: true }),
+        issue({ id: 'd', status: 'AWAITING_INSPECTION', inspectionEnabled: true }),
+        issue({ id: 'e', status: 'NEW', needsRework: true, inspectionEnabled: true }),
+      ]),
+    );
+    renderApp('/app/issues');
+
+    const table = await screen.findByTestId('admin-incident-table');
+    // Each status has a distinct colour class (colour is not the sole signal —
+    // the labels differ too).
+    const badge = (id: string, label: string) => within(within(table).getByTestId(`row-${id}`)).getByText(label).className;
+
+    await within(table).findByTestId('row-a');
+    expect(badge('a', 'Chờ kỹ thuật')).toMatch(/amber/);
+    expect(badge('b', 'Đang sửa')).toMatch(/blue/);
+    expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
+    expect(badge('d', 'Chờ nghiệm thu')).toMatch(/violet/);
+    expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
+    // "Nghiệm thu" is its own labelled badge, never folded into the stage.
+    expect(within(within(table).getByTestId('row-c')).getByTestId('issue-inspection')).toHaveTextContent(
+      'Nghiệm thu: Chưa có dữ liệu',
+    );
+    expect(within(within(table).getByTestId('row-d')).getByTestId('issue-inspection')).toHaveTextContent(
+      'Nghiệm thu: Chưa nghiệm thu',
+    );
   });
 });

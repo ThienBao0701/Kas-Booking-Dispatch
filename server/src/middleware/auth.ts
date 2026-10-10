@@ -4,13 +4,20 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { devToolsActive, isTestReceptionist } from '../devtest/guard';
 import type { UserWithBranch } from '../auth/serialize';
+import { hasBranchSet } from '../auth/branchScope';
+
+/**
+ * The authenticated user as every route sees it: the account, its branch, and —
+ * for a Quản lý lễ tân — the branches it supervises (`managedBranchIds`).
+ */
+export type SessionUser = UserWithBranch & { managedBranchIds?: number[] };
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       /** The freshly loaded authenticated user, set by requireAuth. */
-      currentUser?: UserWithBranch;
+      currentUser?: SessionUser;
     }
   }
 }
@@ -18,13 +25,133 @@ declare global {
 /**
  * Loads the session's user straight from the database on every protected
  * request. Nothing authoritative is trusted from the session itself, so a
- * disabled account, a changed branch, or a forced password reset all take
- * effect immediately even while an old session cookie is still presented.
+ * disabled account, a changed branch, a forced password reset — or an Admin
+ * changing which branches a Quản lý lễ tân supervises — all take effect
+ * immediately even while an old session cookie is still presented.
  */
-async function loadSessionUser(req: Request): Promise<UserWithBranch | null> {
+async function loadSessionUser(req: Request): Promise<SessionUser | null> {
   const userId = req.session?.userId;
   if (typeof userId !== 'number') return null;
-  return prisma.user.findUnique({ where: { id: userId }, include: { branch: true } });
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { branch: true, branchAssignments: { select: { branchId: true } } },
+  });
+  if (!user) return null;
+  const { branchAssignments, ...rest } = user;
+  if (hasBranchSet(user.role)) {
+    return { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) };
+  }
+  /*
+    BỘ PHẬN BUỒNG PHÒNG WORKS AT THE ONE BRANCH THE ADMIN GAVE THE ACCOUNT —
+    `branchId`, exactly like a receptionist's. "Vào ca" opens the shift there;
+    every branch check downstream (the room catalog, room work, inspections)
+    reads it from here, never from the request. An account with no branch yet
+    has none, and its work is refused until the Admin assigns one.
+  */
+  return rest;
+}
+
+/**
+ * WHAT A QUẢN LÝ LỄ TÂN / TỔNG QUẢN LÝ LỄ TÂN MAY REACH — default deny, for the
+ * same reason as Housekeeping below: many routes decide "who is not an admin" by
+ * comparing `user.branchId`, and a branchless supervisor falling through them
+ * would get either nothing or, worse, something. The supervision screens need
+ * exactly these; each service then scopes by `branchScope.ts`.
+ */
+const RECEPTION_SUPERVISOR_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
+  /^\/api\/reception\/reports(\/|$)/,
+  // The five shifts and their clock times — the export's shift choices — and
+  // the shifts that actually ran in a period, for the report filter's "Ca".
+  /^\/api\/reception\/shifts\/(options|available)$/,
+  /^\/api\/issues(\/|$)/,
+  /^\/api\/chat\/channels(\/|$)/,
+  /^\/api\/chat\/attachments(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/hotel-deliveries(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+  /^\/api\/confidential-reports(\/|$)/,
+];
+
+/**
+ * "Đơn mới" — READ ONLY. A supervisor sees the orders sent to its branches and
+ * opens one, exactly as Reception does; it never claims, cuts or confirms one
+ * (those stay Reception's, on its shift), so only these two GETs are let through.
+ */
+const RECEPTION_SUPERVISOR_READ_ROUTES = [/^\/api\/bookings\/new$/, /^\/api\/bookings\/[^/]+$/];
+
+/**
+ * WHAT A QUẢN LÝ KỸ THUẬT MAY REACH — default deny: its incidents (scoped to its
+ * branches by the service), the branch list and room catalog, its notifications,
+ * and the technical export of the shared report.
+ */
+const TECHNICAL_MANAGER_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/issues(\/|$)/,
+  // The report filter's "Ca" — the shifts that ran in the period.
+  /^\/api\/reception\/shifts\/available$/,
+  /^\/api\/admin\/reports\/operational(\.pdf|\.xlsx)?$/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+];
+
+function supervisorMayReach(req: Request): boolean {
+  const path = req.originalUrl.split('?')[0] ?? '';
+  if (RECEPTION_SUPERVISOR_ROUTES.some((route) => route.test(path))) return true;
+  return req.method === 'GET' && RECEPTION_SUPERVISOR_READ_ROUTES.some((route) => route.test(path));
+}
+
+/**
+ * WHAT BỘ PHẬN BUỒNG PHÒNG MAY REACH — the only routes `requireAuth` lets a
+ * HOUSEKEEPING account through.
+ *
+ * DEFAULT DENY, AT THE ONE GATE EVERY PROTECTED ROUTE ALREADY PASSES. A
+ * housekeeping account is bound to a branch like a receptionist, and a good
+ * many routes decide "who is not an admin" by comparing `user.branchId` — the
+ * booking lists, the incident list, the reports. Left to those routes the role
+ * would silently read its own hotel's bookings and incidents. Listing what it
+ * MAY reach is one short list that cannot be forgotten by the next route added;
+ * listing what it may not would be every route in the application.
+ *
+ * `/auth` is here so it can sign in, read its own profile and change its
+ * password; `/nav-badges` and `/notifications` are per-user and empty for it.
+ */
+const HOUSEKEEPING_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/hotel-deliveries(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+  // The room catalog and the branch of its own account.
+  /^\/api\/branches\/\d+\/rooms$/,
+  /^\/api\/branches$/,
+];
+
+/**
+ * WHAT A QUẢN LÝ BUỒNG PHÒNG MAY REACH — default deny: the housekeeping module
+ * (its branch's room work, staff, inspections, KPI and reports — every service
+ * scopes to the account's one branch), its branch and room catalog, and its own
+ * notifications.
+ */
+const HOUSEKEEPING_MANAGER_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/housekeeping(\/|$)/,
+  /^\/api\/branches(\/|$)/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+];
+
+function housekeepingMayReach(req: Request): boolean {
+  const path = req.originalUrl.split('?')[0] ?? '';
+  return HOUSEKEEPING_ROUTES.some((route) => route.test(path));
 }
 
 export const requireAuth: RequestHandler = (req: Request, _res: Response, next: NextFunction) => {
@@ -38,6 +165,33 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
         // A session that outlived the account being disabled must stop working.
         next(ApiError.accountDisabled());
         return;
+      }
+      if (user.role === 'HOUSEKEEPING' && !housekeepingMayReach(req)) {
+        next(ApiError.forbidden());
+        return;
+      }
+      if (
+        (user.role === 'RECEPTION_MANAGER' || user.role === 'RECEPTION_GENERAL_MANAGER') &&
+        !supervisorMayReach(req)
+      ) {
+        next(ApiError.forbidden());
+        return;
+      }
+      if (user.role === 'HOUSEKEEPING_MANAGER') {
+        const path = req.originalUrl.split('?')[0] ?? '';
+        if (!HOUSEKEEPING_MANAGER_ROUTES.some((route) => route.test(path))) {
+          next(ApiError.forbidden());
+          return;
+        }
+      }
+      // The Tổng quản lý kỹ thuật reaches exactly what a Quản lý kỹ thuật does;
+      // every service then scopes it to its own ticked branches.
+      if (user.role === 'TECHNICAL_MANAGER' || user.role === 'TECHNICAL_GENERAL_MANAGER') {
+        const path = req.originalUrl.split('?')[0] ?? '';
+        if (!TECHNICAL_MANAGER_ROUTES.some((route) => route.test(path))) {
+          next(ApiError.forbidden());
+          return;
+        }
       }
       await applyTestBranchOverride(req, user);
       req.currentUser = user;
@@ -113,11 +267,32 @@ export const requirePasswordChanged: RequestHandler = (req, _res, next) => {
  * the client on its own — for a receptionist it must equal their own assigned
  * branch. Admins may reach any branch.
  */
+/**
+ * WHO IS NOT BOUND TO ONE BRANCH.
+ *
+ * ADMIN is the dispatch centre and monitors all eight; TECHNICAL is one
+ * maintenance team that works all eight, and TECHNICAL_MANAGER inspects that
+ * team's work at all eight. All three carry `branchId = null`.
+ *
+ * This exists as a named predicate, rather than as `role === 'ADMIN'` repeated
+ * at each site, because a branchless role that falls through a branch check does
+ * NOT get an error — it gets `user.branchId !== branchId` against null, i.e. a
+ * silent denial of every branch, or an empty list with nothing to explain it.
+ *
+ * BOOKING_DEPARTMENT is branchless too but is deliberately NOT here: it picks a
+ * branch per charge document and never reads branch-scoped operational data, so
+ * widening its access would grant something nothing asked for.
+ */
+export function seesAllBranches(role: UserRole): boolean {
+  // Quản lý kỹ thuật is scoped to its assigned branches (branchScope.ts) — not here.
+  return role === 'ADMIN' || role === 'TECHNICAL';
+}
+
 export function assertBranchAccess(
   user: UserWithBranch,
   branchId: number | null | undefined,
 ): void {
-  if (user.role === 'ADMIN') return;
+  if (seesAllBranches(user.role)) return;
   if (branchId == null || Number.isNaN(branchId)) {
     throw ApiError.branchAccessDenied();
   }

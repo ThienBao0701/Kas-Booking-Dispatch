@@ -1,0 +1,92 @@
+Gmail
+Search in mail
+Inbox
+Starred
+Sent
+Drafts
+
+New booking - KAS Passion Boutique Hotel - Agoda Booking ID 1756192483
+YCS Notification <no-reply@agoda.example>
+to me
+
+Booking Confirmation
+
+KAS Passion Boutique Hotel
+(Property ID 245858)
+
+Reservation Information
+
+Booking ID	Mã số đặt phòng
+1756192483
+
+Customer First Name	Tên khách
+THU UYEN
+
+Customer Last Name	Họ
+HO
+
+Other Guests	Khách khác
+[RmNo.1] Guest of THU UYEN HO, [RmNo.1] THU UYEN HO
+
+Country of Residence
+Vietnam
+
+Check-in	Check-out
+3-Aug-2026 (3-08-2026)	5-Aug-2026 (5-08-2026)
+
+Room Type	No. of Rooms	Occupancy	No. of Extra Bed
+Superior Room (2)	2	4 Adults	0
+
+Rate Plan Name
+Non-Refundable ()
+
+Benefits Included
+Coffee & tea, Drinking water, Welcome drink
+
+Rates
+August 3, 2026	VND 1,006,118.00
+August 4, 2026	VND 1,006,118.00
+
+Reference sell rate (incl. taxes & fees)
+VND
+3,325,000.0
+0
+
+Net rate (incl. taxes & fees)
+VND
+2,012,236.0
+0
+
+Commission
+VND 465,000.00
+
+Non-Targeted promotions
+VND 120,000.00
+
+Targeted promotions
+VND 0.00
+
+Withholding Tax
+VND 23,250.00
+
+Tax on Commission
+VND 46,500.00
+
+Compensation
+VND 0.00
+
+Other programs
+VND 0.00
+
+Cancellation Policy
+Non-refundable from 1-Jul-2026 (1-07-2026). Free cancellation before 30-Jun-2026 (30-06-2026).
+
+Booked and Payable by
+Agoda Company Pte Ltd
+
+Website Language
+English
+
+Promotion: book before August 30, 2026 and save on your next stay.
+
+Please do not reply to this email. Manage this reservation in YCS.

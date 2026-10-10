@@ -41,12 +41,81 @@ afterAll(async () => {
   await testPrisma.$disconnect();
 });
 
+/**
+ * Everything a Booking.com extraction used to write before anyone had decided
+ * the order was worth sending.
+ */
+async function persistedCounts() {
+  const [bookings, rooms, nights, warnings] = await Promise.all([
+    testPrisma.booking.count(),
+    testPrisma.bookingRoom.count(),
+    testPrisma.bookingNightPrice.count(),
+    testPrisma.bookingExtractWarning.count(),
+  ]);
+  return { bookings, rooms, nights, warnings };
+}
+
+const NOTHING = { bookings: 0, rooms: 0, nights: 0, warnings: 0 };
+
+/**
+ * Sends a previewed reservation the way the review screen does, so the cases
+ * that used to assert "extract persisted X" can assert "SEND persists X" — the
+ * same business intent, measured at the moment the record is actually made.
+ */
+async function dispatchPreview(res: { body: Record<string, unknown> }) {
+  const body = res.body as {
+    booking: Record<string, unknown>;
+    suggestedBranch: { id: number } | null;
+    rooms: { roomIndex: number; roomName: string | null; roomTotal: number | null; nights: { stayDate: string; amount: number | null }[] }[];
+  };
+  const branchId =
+    body.suggestedBranch?.id ?? (await testPrisma.branch.findFirstOrThrow({ where: { active: true } })).id;
+  const mapping = await testPrisma.branchRoomClass.findFirstOrThrow({
+    where: { branchId, active: true, version: { status: 'ACTIVE' } },
+  });
+
+  return adminAgent.post('/api/admin/bookings/dispatch').send({
+    rawText: body.booking.rawTextEcho ?? SINGLE_ROOM,
+    branchId,
+    hotelName: body.booking.hotelName,
+    customerName: body.booking.guestName ?? '',
+    phone: body.booking.phone,
+    bookingCode: body.booking.bookingCode ?? '',
+    checkInDate: body.booking.checkIn,
+    checkOutDate: body.booking.checkOut,
+    totalAmount: body.booking.totalAmount,
+    paymentStatus: body.booking.paymentStatus,
+    specialRequest: body.booking.specialRequest,
+    rooms: body.rooms.map((room) => ({
+      roomIndex: room.roomIndex,
+      roomType: room.roomName,
+      roomSubtotal: room.roomTotal,
+      roomClassId: mapping.id,
+      nights: room.nights,
+    })),
+    acknowledgedWarningCodes: [
+      'MISSING_PHONE',
+      'MISSING_TOTAL',
+      'NULL_NIGHTLY_PRICE',
+      'MISSING_ROOM_TYPE',
+      'NIGHTLY_SUBTOTAL_MISMATCH',
+      'ROOM_TOTAL_MISMATCH',
+      'LOW_CONFIDENCE_BRANCH',
+      'UNRESOLVED_EXTRACT_WARNINGS',
+    ],
+  });
+}
+
 describe('POST /api/bookings/extract', () => {
-  it('extracts, stores a DRAFT, and returns the structured preview', async () => {
+  it('extracts and returns the structured preview, storing NOTHING', async () => {
     const res = await adminAgent.post('/api/bookings/extract').send({ rawText: SINGLE_ROOM });
 
     expect(res.status).toBe(201);
-    expect(res.body.booking.status).toBe('DRAFT');
+    // No booking was created, so there is no id and no status to report. The
+    // response says so outright rather than handing back a placeholder.
+    expect(res.body.persisted).toBe(false);
+    expect(res.body.booking.id).toBeUndefined();
+    expect(res.body.booking.status).toBeUndefined();
     expect(res.body.booking.guestName).toBe('Nguyễn Văn A');
     expect(res.body.booking.bookingCode).toBe('1234567890');
     expect(res.body.booking.checkIn).toBe('2026-07-19');
@@ -63,18 +132,12 @@ describe('POST /api/bookings/extract', () => {
     ]);
     expect(res.body.warnings).toEqual([]);
 
-    // Persisted as a DRAFT with rooms, nights and the admin as creator.
-    const stored = await testPrisma.booking.findUniqueOrThrow({
-      where: { id: res.body.booking.id },
-      include: { rooms: { include: { nights: true } } },
-    });
-    expect(stored.status).toBe('DRAFT');
-    expect(stored.createdByUserId).not.toBeNull();
-    expect(stored.rooms).toHaveLength(1);
-    expect(stored.rooms[0]!.nights).toHaveLength(3);
+    // THE POINT OF THE CHANGE: reviewing is not an act of record. An Admin who
+    // pastes the wrong page or closes the tab leaves nothing behind.
+    expect(await persistedCounts()).toEqual(NOTHING);
   });
 
-  it('flows the two-room nightly-table sample through store + serialize to the review payload', async () => {
+  it('flows the two-room nightly-table sample into the review payload', async () => {
     const raw = fs.readFileSync(
       path.join(__dirname, 'fixtures', 'booking', '25-real-sample-two-room-nightly.txt'),
       'utf8',
@@ -106,19 +169,16 @@ describe('POST /api/bookings/extract', () => {
       ]);
       expect(room.nights.map((n: { amount: number }) => n.amount)).toEqual([648_000, 891_000]);
     }
-    expect(res.body.warnings).toEqual([]);
+    // Since 5.1 the extranet sample's hotel line — the internal name with the
+    // property id glued on — resolves by containment, so no branch-confirmation
+    // warning is raised. The branch itself is unchanged (asserted above).
+    expect(res.body.warnings.map((w: { code: string }) => w.code)).toEqual([]);
 
-    // Persisted through the store exactly as previewed.
-    const stored = await testPrisma.booking.findUniqueOrThrow({
-      where: { id: res.body.booking.id },
-      include: { rooms: { include: { nights: true } } },
-    });
-    expect(stored.rooms).toHaveLength(2);
-    expect(stored.totalAmount).toBe(3_078_000);
-    expect(stored.rooms.every((r) => r.nights.length === 2)).toBe(true);
+    // The preview carries both rooms and every night — and still stores nothing.
+    expect(await persistedCounts()).toEqual(NOTHING);
   });
 
-  it('persists extraction warnings for a missing nightly price', async () => {
+  it('reports an extraction warning in the preview without storing it', async () => {
     const text = `Saigon Hotel & Ben Thanh
 Mã đặt phòng: 999
 Khách: Test Guest
@@ -135,10 +195,30 @@ Thanh toán: Thanh toán tại chỗ`;
     const codes = res.body.warnings.map((w: { code: string }) => w.code);
     expect(codes).toContain('MISSING_NIGHTLY_PRICE');
 
-    const warningRows = await testPrisma.bookingExtractWarning.findMany({
-      where: { bookingId: res.body.booking.id },
+    // The Admin is told; the database is not. The warning becomes a row only if
+    // the order is actually sent — see the dispatch case below.
+    expect(await testPrisma.bookingExtractWarning.count()).toBe(0);
+    expect(await persistedCounts()).toEqual(NOTHING);
+  });
+
+  it('stores the extraction warning once the order is SENT', async () => {
+    // The original intent of the case above — a warning survives with the
+    // booking — measured where the booking now comes into existence.
+    const res = await adminAgent.post('/api/bookings/extract').send({ rawText: SINGLE_ROOM });
+    expect(res.status).toBe(201);
+
+    const sent = await dispatchPreview(res);
+    expect(sent.status, JSON.stringify(sent.body).slice(0, 300)).toBe(201);
+
+    const stored = await testPrisma.booking.findUniqueOrThrow({
+      where: { id: sent.body.booking.id as string },
+      include: { warnings: true, rooms: { include: { nights: true } } },
     });
-    expect(warningRows.some((w) => w.code === 'MISSING_NIGHTLY_PRICE')).toBe(true);
+    expect(stored.status).toBe('NEW');
+    // The server re-reads the pasted text, so the stored warnings are its own.
+    expect(stored.warnings.map((w) => w.code)).toEqual(
+      res.body.warnings.map((w: { code: string }) => w.code),
+    );
   });
 
   it('returns an unknown-hotel warning with no suggested branch', async () => {
@@ -204,14 +284,18 @@ Deluxe Room
     expect(res.body.suggestedBranch).not.toBeNull();
     expect(res.body.warnings.map((w: { code: string }) => w.code)).toContain('LOW_BRANCH_CONFIDENCE');
 
-    // …but branchId is never written until the admin confirms it.
-    const stored = await testPrisma.booking.findUniqueOrThrow({
-      where: { id: res.body.booking.id },
-    });
-    expect(stored.branchId).toBeNull();
+    // …and a branch the system is unsure about is not written ANYWHERE, because
+    // nothing is written. The original guarantee — never auto-assign a shaky
+    // branch — now holds by construction rather than by a careful null.
+    expect(await persistedCounts()).toEqual(NOTHING);
   });
 
-  it('persists booking, rooms, nights and warnings atomically', async () => {
+  it('writes booking, rooms, nights and warnings atomically — at SEND', async () => {
+    /*
+      The atomicity this case has always guarded, relocated to where the write
+      happens. Extraction writes nothing; the dispatch writes the booking
+      together with every one of its children, in one transaction.
+    */
     const text = `Saigon Hotel & Ben Thanh
 Mã đặt phòng: 4545454545
 Khách: Atomic Guest
@@ -224,35 +308,76 @@ Thanh toán: Thanh toán tại chỗ`;
 
     const res = await adminAgent.post('/api/bookings/extract').send({ rawText: text });
     expect(res.status).toBe(201);
+    expect(await persistedCounts()).toEqual(NOTHING);
+
+    // The Admin picks the internal code on the review screen; the branch's
+    // active mapping does not recognise Booking.com's own room name here.
+    const roomClass = await testPrisma.branchRoomClass.findFirstOrThrow({
+      where: { branchId: res.body.suggestedBranch.id, active: true, version: { status: 'ACTIVE' } },
+    });
+
+    const sent = await adminAgent.post('/api/admin/bookings/dispatch').send({
+      rawText: text,
+      branchId: res.body.suggestedBranch.id,
+      hotelName: res.body.booking.hotelName,
+      customerName: res.body.booking.guestName,
+      phone: res.body.booking.phone,
+      bookingCode: res.body.booking.bookingCode,
+      checkInDate: res.body.booking.checkIn,
+      checkOutDate: res.body.booking.checkOut,
+      totalAmount: res.body.booking.totalAmount,
+      paymentStatus: res.body.booking.paymentStatus,
+      specialRequest: res.body.booking.specialRequest,
+      rooms: res.body.rooms.map(
+        (r: { roomIndex: number; roomName: string; roomTotal: number | null; nights: unknown[] }) => ({
+          roomIndex: r.roomIndex,
+          roomType: r.roomName,
+          roomSubtotal: r.roomTotal,
+          roomClassId: roomClass.id,
+          nights: r.nights,
+        }),
+      ),
+      acknowledgedWarningCodes: [
+        'MISSING_PHONE',
+        'MISSING_TOTAL',
+        'NULL_NIGHTLY_PRICE',
+        'MISSING_ROOM_TYPE',
+        'NIGHTLY_SUBTOTAL_MISMATCH',
+        'ROOM_TOTAL_MISMATCH',
+        'LOW_CONFIDENCE_BRANCH',
+        'UNRESOLVED_EXTRACT_WARNINGS',
+      ],
+    });
+    expect(sent.status, JSON.stringify(sent.body).slice(0, 300)).toBe(201);
 
     const stored = await testPrisma.booking.findUniqueOrThrow({
-      where: { id: res.body.booking.id },
+      where: { id: sent.body.booking.id as string },
       include: { rooms: { include: { nights: true } }, warnings: true },
     });
-    // One transaction wrote the booking together with all of its children.
     expect(stored.rooms).toHaveLength(1);
     expect(stored.rooms[0]!.nights).toHaveLength(3);
     expect(stored.warnings.some((w) => w.code === 'MISSING_NIGHTLY_PRICE')).toBe(true);
   });
 
-  it('replaces the previous DRAFT when the same code is re-extracted', async () => {
+  it('has no previous DRAFT to replace when the same code is re-extracted', async () => {
+    /*
+      This case used to prove that re-extracting REPLACED the earlier draft, so
+      retries could not pile up rows for one confirmation code. The rows no
+      longer exist to pile up: extracting twice is two reads.
+
+      The guarantee is therefore stronger than it was, and needs no cascade
+      delete to hold — the mechanism it was protecting against is gone.
+    */
     const first = await adminAgent.post('/api/bookings/extract').send({ rawText: SINGLE_ROOM });
     const second = await adminAgent.post('/api/bookings/extract').send({ rawText: SINGLE_ROOM });
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
-    expect(second.body.booking.id).not.toBe(first.body.booking.id);
 
-    // Retrying does not pile up duplicate drafts for the same confirmation code.
-    const drafts = await testPrisma.booking.findMany({
-      where: { bookingCode: '1234567890', status: 'DRAFT' },
-    });
-    expect(drafts).toHaveLength(1);
-    expect(drafts[0]!.id).toBe(second.body.booking.id);
+    // Same reservation read twice — identical preview, and no id to differ by.
+    expect(second.body.booking.bookingCode).toBe(first.body.booking.bookingCode);
+    expect(second.body.booking.id).toBeUndefined();
 
-    // The superseded draft's rooms were cascaded away, leaving no orphans.
-    const orphanRooms = await testPrisma.bookingRoom.findMany({
-      where: { bookingId: first.body.booking.id },
-    });
-    expect(orphanRooms).toHaveLength(0);
+    expect(await testPrisma.booking.count({ where: { bookingCode: '1234567890' } })).toBe(0);
+    expect(await persistedCounts()).toEqual(NOTHING);
   });
 });
