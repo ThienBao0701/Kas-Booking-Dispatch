@@ -22,6 +22,7 @@ import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/
 import { serveBranches, userIdOf } from './helpers/issues';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { hcmDateOnly, resetClock, setClock } from '../src/lib/clock';
+import type { Worksheet } from 'exceljs';
 
 // Two apps: the login limiter allows ten sign-ins per app, and this file signs in eleven accounts.
 const apps = [createApp(), createApp()];
@@ -114,6 +115,30 @@ async function complaint(agent: Agent) {
   });
   expect(res.status).toBe(201);
   return res.body.report.id as string;
+}
+
+/** Downloads an export and loads it back as a workbook. */
+async function workbook(agent: Agent, path: string) {
+  const res = await agent
+    .get(path)
+    .buffer(true)
+    .parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+  expect(res.status).toBe(200);
+  const ExcelJS = (await import('exceljs')).default;
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(res.body as unknown as Parameters<typeof wb.xlsx.load>[0]);
+  return wb;
+}
+
+/** A cell of row `row` under the column headed `header`. */
+function cellUnder(sheet: Worksheet, header: string, row = 2): string {
+  const col = (sheet.getRow(1).values as unknown[]).indexOf(header);
+  expect(col, header).toBeGreaterThan(0);
+  return String(sheet.getRow(row).getCell(col).value ?? '');
 }
 
 async function incident(agent: Agent, room = '301') {
@@ -324,6 +349,18 @@ describe('C. "Nhập bù" — a missed record on its original shift', () => {
     expect(shiftA.body.reports).toHaveLength(1);
     const eighth = await admin.get(`/api/admin/reports/operational?branchId=${cn1}&from=2026-10-08&to=2026-10-08&category=PAYMENT`);
     expect(eighth.body.reports).toHaveLength(0);
+
+    // The official XLSX of the 7th prints it — with who typed it later, in what role, and why.
+    const wb = await workbook(admin, `/api/admin/reports/operational.xlsx?from=2026-10-07&to=2026-10-07&branchId=${cn1}`);
+    const payments = wb.getWorksheet('Theo dõi thanh toán')!;
+    expect(payments.rowCount).toBe(2);
+    const staff = cellUnder(payments, 'Nhân viên');
+    expect(staff).toContain('Lan');
+    expect(staff).toContain('Nhập bù: Quản lý CN1 - Quản lý lễ tân');
+    expect(staff).toContain('Lễ tân quên ghi khoản thu');
+    // …and the 8th's has nothing.
+    const wb8 = await workbook(admin, `/api/admin/reports/operational.xlsx?from=2026-10-08&to=2026-10-08&branchId=${cn1}`);
+    expect(wb8.getWorksheet('Theo dõi thanh toán')!.rowCount).toBe(1);
   });
 
   it('requires the reason and a finished shift of its own scope, and is the managers’ only', async () => {
@@ -410,6 +447,36 @@ describe('C. "Nhập bù" — a missed record on its original shift', () => {
     expect(listed8.body.issues).toHaveLength(0);
     // And it is a real incident: the branch's reception sees it, technical works it.
     expect((await letan1.get(`/api/issues/${res.body.issue.id}`)).status).toBe(200);
+  });
+
+  it('files a late incident on its ORIGINAL day in the technical export and the incident report — never on the day it was typed', async () => {
+    const sessionId = await yesterdaysShift();
+    const res = await rm1.post('/api/issues/late-entry').send({ ...DOOR, shiftSessionId: sessionId, reason: 'Lễ tân quên báo sự cố' });
+    expect(res.status).toBe(201);
+    const id = res.body.issue.id as string;
+
+    const { operationalReport } = await import('../src/reception/operationalReport');
+    const technical = (day: string) =>
+      operationalReport(
+        { id: ids.admin!, role: 'ADMIN', branchId: null, fullName: 'Quản trị viên' },
+        { from: day, to: day, branchId: cn1, section: 'TECHNICAL' },
+      );
+    const seventh = (await technical('2026-10-07')).branches[0]!.technical;
+    expect(seventh.map((i) => i.id)).toEqual([id]);
+    expect(seventh[0]!.lateEntry).toMatchObject({ enteredBy: { id: ids.quanly1 }, reason: 'Lễ tân quên báo sự cố' });
+    expect((await technical('2026-10-08')).branches[0]!.technical).toEqual([]);
+    // The technical XLSX of the 7th names the late entry.
+    const wb = await workbook(admin, `/api/admin/reports/operational.xlsx?from=2026-10-07&to=2026-10-07&branchId=${cn1}&section=TECHNICAL`);
+    expect(cellUnder(wb.getWorksheet('Kỹ thuật')!, 'Nhập bù')).toContain('Quản lý CN1 - Quản lý lễ tân');
+
+    // The Admin's incident report (screen, summary and PDF read the same rule).
+    const report7 = await admin.get(`/api/admin/reports/incidents?from=2026-10-07&to=2026-10-07&branchId=${cn1}`);
+    expect(report7.body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
+    expect((await admin.get(`/api/admin/reports/incidents?from=2026-10-08&to=2026-10-08&branchId=${cn1}`)).body.issues).toEqual([]);
+    const summary7 = await admin.get(`/api/admin/reports/incidents/summary?from=2026-10-07&to=2026-10-07&branchId=${cn1}`);
+    expect(summary7.body.summary.total).toBe(1);
+    const summary8 = await admin.get(`/api/admin/reports/incidents/summary?from=2026-10-08&to=2026-10-08&branchId=${cn1}`);
+    expect(summary8.body.summary.total).toBe(0);
   });
 
   it('refuses a late incident without a reason, outside the scope, on an open shift, from the desk — and keeps the incident rules', async () => {

@@ -151,6 +151,47 @@ describe('the technical report', () => {
   });
 });
 
+describe('"Giao cho tôi" — the Quản lý kỹ thuật’s own delegated work', () => {
+  const held = (id: string, managerId: number, over: Record<string, unknown> = {}) =>
+    issue(id, {
+      assignmentState: 'MANAGER_ASSIGNED',
+      assignmentStateLabel: 'Đã giao quản lý kỹ thuật',
+      assignedManager: { id: managerId, name: managerId === 5 ? 'Quản lý Hùng' : 'QLKT khác', assignedAt: null, assignedByName: 'Tổng KT', note: 'Kiểm tra' },
+      ...over,
+    });
+  const rows = [held('m1', 5), held('m2', 99), held('m3', 5, { status: 'COMPLETED', assignmentState: 'COMPLETED', assignmentStateLabel: 'Đã hoàn thành' }), issue('free')];
+  const list = (user: unknown) =>
+    routes(user, {
+      [LIST]: () => ({ status: 200, body: { issues: rows, pagination: { page: 1, pageSize: 500, total: rows.length, totalPages: 1 } } }),
+    });
+
+  it('counts and filters only the open work handed to this manager', async () => {
+    installApiMock(list(TECHNICAL_MANAGER_USER));
+    renderApp('/app');
+    const mine = await screen.findByTestId('tr-count-MINE');
+    expect(mine).toHaveTextContent('Giao cho tôi');
+    await screen.findByTestId('tr-issue-m1');
+    expect(mine).toHaveTextContent('Giao cho tôi1');
+    await userEvent.click(mine);
+    await waitFor(() => expect(screen.queryByTestId('tr-issue-m2')).not.toBeInTheDocument());
+    expect(screen.getByTestId('tr-issue-m1')).toBeInTheDocument();
+    expect(screen.queryByTestId('tr-issue-m3')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tr-issue-free')).not.toBeInTheDocument();
+    // Another manager's job offers this manager no hand-off.
+    await userEvent.click(mine);
+    expect(await screen.findByTestId('tr-issue-m2')).toBeInTheDocument();
+    expect(screen.queryByTestId('tr-hire-m2')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tr-hire-m1')).toBeInTheDocument();
+  });
+
+  it('is not offered to roles that are not a Quản lý kỹ thuật', async () => {
+    installApiMock(list(ADMIN_USER));
+    renderApp('/app/reports/technical');
+    await screen.findByTestId('tr-counts');
+    expect(screen.queryByTestId('tr-count-MINE')).not.toBeInTheDocument();
+  });
+});
+
 describe('"Báo cáo vấn đề" in the menu', () => {
   it('is one collapsible group: Lễ tân (its categories), Kỹ thuật, Buồng phòng — open where you are', async () => {
     installApiMock(routes(ADMIN_USER));

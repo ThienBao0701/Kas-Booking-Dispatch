@@ -334,6 +334,106 @@ function serializeDispatch(d: IssueDetail['dispatches'][number], viewerRole: Use
   };
 }
 
+export type DelegationKind = 'TO_MANAGER' | 'TO_TECHNICIAN' | 'TO_EXTERNAL';
+export type DelegationState = 'ACTIVE' | 'ENDED' | 'RETURNED' | 'COMPLETED';
+
+const DELEGATION_KIND_LABELS: Record<DelegationKind, string> = {
+  TO_MANAGER: 'Giao quản lý kỹ thuật',
+  TO_TECHNICIAN: 'Giao kĩ thuật khách sạn',
+  TO_EXTERNAL: 'Giao kĩ thuật bên ngoài',
+};
+
+const DELEGATION_STATE_LABELS: Record<DelegationState, string> = {
+  ACTIVE: 'Đang thực hiện',
+  ENDED: 'Đã chuyển người khác',
+  RETURNED: 'Đã chuyển về chờ giao',
+  COMPLETED: 'Đã hoàn thành',
+};
+
+/**
+ * THE DELEGATION CHAIN, ONE TIMELINE — every hand-off of the incident, oldest
+ * first, with its PARENT: the hand-off to a Quản lý kỹ thuật that the next step
+ * was taken under (the technician or contractor that manager then chose).
+ *
+ * Built from the rows that already record each step (`HotelIssueDispatch` for
+ * managers and contractors, `HotelIssueAssignment` for in-house technicians),
+ * never stored twice: the parent is the TO_MANAGER hand-off whose manager is
+ * the one who made the step, and which was in force at that moment. A step a
+ * Tổng quản lý kỹ thuật or an Admin took directly has no parent.
+ */
+function delegationChain(issue: IssueDetail, viewerRole: UserRole | undefined) {
+  const managerSteps = issue.dispatches.filter((d) => d.kind === 'TO_MANAGER');
+  const parentOf = (byUserId: number, at: Date): string | null => {
+    const held = managerSteps
+      .filter((d) => d.managerUserId === byUserId && d.createdAt <= at && (d.endedAt === null || d.endedAt > at))
+      .at(-1);
+    return held?.id ?? null;
+  };
+  const lastAssignment = issue.assignments.at(-1);
+  const steps = [
+    ...issue.dispatches.map((d) => {
+      const view = serializeDispatch(d, viewerRole);
+      const state: DelegationState =
+        d.kind === 'TO_EXTERNAL' && d.completedAt
+          ? 'COMPLETED'
+          : d.endedAt
+            ? 'ENDED'
+            : d.kind === 'TO_MANAGER' && issue.status === 'COMPLETED'
+              ? 'COMPLETED'
+              : 'ACTIVE';
+      return {
+        id: d.id,
+        kind: d.kind as DelegationKind,
+        at: d.createdAt,
+        by: { id: d.assignedByUserId, name: d.assignedByNameSnapshot, role: d.assignedByRole },
+        to:
+          d.kind === 'TO_MANAGER'
+            ? { name: d.managerNameSnapshot ?? '—', contractor: null }
+            : { name: d.contractorName ?? '—', contractor: view.contractor },
+        note: d.note,
+        parentId: d.kind === 'TO_EXTERNAL' ? parentOf(d.assignedByUserId, d.createdAt) : null,
+        state,
+        completedAt: d.completedAt,
+        completedByName: d.completedByNameSnapshot,
+        completionNote: d.completionNote,
+        repairCost: d.repairCost,
+      };
+    }),
+    ...issue.assignments.map((a) => {
+      const superseded = a !== lastAssignment;
+      const state: DelegationState = a.returnedAt
+        ? 'RETURNED'
+        : superseded
+          ? 'ENDED'
+          : issue.status === 'COMPLETED'
+            ? 'COMPLETED'
+            : 'ACTIVE';
+      return {
+        id: a.id,
+        kind: 'TO_TECHNICIAN' as DelegationKind,
+        at: a.createdAt,
+        by: { id: a.assignedByUserId, name: a.assignedByNameSnapshot, role: a.assignedByRole },
+        to: { name: a.technicianNameSnapshot, contractor: null },
+        note: a.note,
+        parentId: parentOf(a.assignedByUserId, a.createdAt),
+        state,
+        completedAt: state === 'COMPLETED' ? issue.completedAt : null,
+        completedByName: state === 'COMPLETED' ? issue.completedByNameSnapshot : null,
+        completionNote: null,
+        repairCost: null,
+      };
+    }),
+  ].sort((x, y) => x.at.getTime() - y.at.getTime());
+  return steps.map((st) => ({
+    ...st,
+    kindLabel: DELEGATION_KIND_LABELS[st.kind],
+    stateLabel: DELEGATION_STATE_LABELS[st.state],
+    at: st.at.toISOString(),
+    by: { ...st.by, roleLabel: roleLabel(st.by.role) },
+    completedAt: st.completedAt ? st.completedAt.toISOString() : null,
+  }));
+}
+
 /**
  * `viewerRole` decides only what an outside contractor's contact shows (see
  * `serializeDispatch`); every other field is the same for every reader the
@@ -486,6 +586,8 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now(),
       : null,
     /** The dispatch chain, oldest first: managers and outside contractors, with the cost. */
     dispatches: issue.dispatches.map((d) => serializeDispatch(d, viewerRole)),
+    /** Every hand-off as ONE timeline with parent links — see `delegationChain`. */
+    delegationChain: delegationChain(issue, viewerRole),
     /** The outside contractor working on it now, if any. */
     externalWork: (() => {
       const open = openExternal(issue);
@@ -1280,6 +1382,7 @@ function assertIssueManager(issue: IssueDetail, actor: Actor): void {
 export async function unassignIssue(id: string, actor: Actor, clock: Clock = getClock()): Promise<IssueDetail> {
   const issue = await loadIssue(id);
   assertIssueManager(issue, actor);
+  assertManagerHolds(issue, actor);
   if (issue.status !== 'NEW' || issue.assignedTechnicianUserId === null) {
     throw ApiError.conflict(
       issue.status === 'IN_PROGRESS'
@@ -1383,14 +1486,16 @@ export async function voidIssue(
 
 /**
  * ONCE A TỔNG QUẢN LÝ KỸ THUẬT HAS GIVEN AN INCIDENT TO ONE QUẢN LÝ KỸ THUẬT,
- * THAT MANAGER OWNS ITS NEXT STEP: another Quản lý kỹ thuật of the same branch
- * cannot hand it to a technician or a contractor. The Tổng quản lý kỹ thuật, the
- * Admin and the reception supervisors keep the rights they already had.
+ * THAT MANAGER OWNS ITS NEXT STEP — giving it to a technician, hiring outside,
+ * or taking a technician back off it. Only the holder, the Tổng quản lý kỹ thuật
+ * (within its branches, checked by the caller) and the Admin act on it; another
+ * Quản lý kỹ thuật, a reception manager or the desk is refused, so the
+ * delegation chain cannot be bypassed by a direct request.
  */
 function assertManagerHolds(issue: Pick<IssueDetail, 'assignedManagerUserId'>, actor: Actor): void {
-  if (actor.role === 'TECHNICAL_MANAGER' && issue.assignedManagerUserId !== null && issue.assignedManagerUserId !== actor.id) {
-    throw ApiError.forbidden('Sự cố đã được giao cho quản lý kỹ thuật khác.');
-  }
+  if (issue.assignedManagerUserId === null || issue.assignedManagerUserId === actor.id) return;
+  if (actor.role === 'ADMIN' || actor.role === 'TECHNICAL_GENERAL_MANAGER') return;
+  throw ApiError.forbidden('Sự cố đã được giao cho quản lý kỹ thuật khác — chỉ người được giao mới xử lý tiếp.');
 }
 
 /** Required free text, trimmed, within a length. */

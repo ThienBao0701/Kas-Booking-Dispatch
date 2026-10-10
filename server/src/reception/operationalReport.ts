@@ -37,6 +37,7 @@ import {
 import { perShiftCash, sessionsCashSummary, type CashSummary } from './cashService';
 import { CATEGORIES } from './reportTypes';
 import {
+  issuePeriodWhere,
   openShiftNotices,
   sessionsForBusinessDates,
   type BusinessDateSession,
@@ -288,11 +289,23 @@ async function sectionBranchReport(
   section: ReportSection,
   window: { from: Date; to: Date },
   client: PrismaClient,
+  /** This branch's shifts of the period's business dates — where an incident's shift puts it. */
+  sessions: BusinessDateSession[] = [],
 ): Promise<BranchOperationalReport> {
   const now = getClock().now();
   const base = { branch, ...emptyReceptionParts() };
   if (section === 'TECHNICAL') {
-    const where = { branchId: branch.id, voidedAt: null, createdAt: { gte: window.from, lt: window.to } };
+    /*
+      BY BUSINESS DATE, like the journal and the incident list: an incident is
+      the period's when the SHIFT that reported it is (a "Nhập bù" on its
+      original shift, a Ca C report after midnight on the shift's day), or — with
+      no shift — when its own HCM day is.
+    */
+    const where = {
+      branchId: branch.id,
+      voidedAt: null,
+      ...issuePeriodWhere({ sessions, sessionIds: sessions.map((s) => s.id), unshiftedWindow: { start: window.from, end: window.to } }),
+    };
     const [rows, total] = await Promise.all([
       client.hotelIssue.findMany({ where, include: ISSUE_INCLUDE, orderBy: { createdAt: 'asc' }, take: MAX_ROWS_PER_BRANCH }),
       client.hotelIssue.count({ where }),
@@ -378,7 +391,8 @@ export async function operationalReport(
     const range = hcmRange(params.from, params.to);
     const sections: BranchOperationalReport[] = [];
     for (const branch of branches) {
-      sections.push(await sectionBranchReport(actor, branch, params.section, { from: range.start, to: range.end }, client));
+      const mine = allSessions.filter((s) => s.branchId === branch.id);
+      sections.push(await sectionBranchReport(actor, branch, params.section, { from: range.start, to: range.end }, client, mine));
     }
     return { from: params.from, to: params.to, section: params.section, branches: sections, generatedAt: getClock().now() };
   }

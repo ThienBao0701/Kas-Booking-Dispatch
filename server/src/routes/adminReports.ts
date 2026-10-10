@@ -30,6 +30,7 @@ import { countByCategory, countReports, listReports, prioritiseJournal, serializ
 import { sessionsCashSummary } from '../reception/cashService';
 import {
   OPEN_SHIFT_WARNING,
+  issuePeriodWhere,
   openShiftNotices,
   resolveReportPeriod,
 } from '../reception/businessDate';
@@ -346,7 +347,7 @@ export function createAdminReportsRouter(): Router {
     (async () => {
       const q = rangeQuery.parse(req.query);
       const { start, end } = hcmRange(q.from, q.to);
-      const summary = await computeIncidentRangeSummary({ start, end, branchId: q.branchId });
+      const summary = await computeIncidentRangeSummary({ start, end, branchId: q.branchId, period: await incidentPeriod(q) });
       res.json({ range: { from: q.from, to: q.to }, summary });
     })().catch(next);
   });
@@ -425,7 +426,7 @@ export function createAdminReportsRouter(): Router {
         viewerRole: req.currentUser!.role,
         // The same query the screen's summary cards read, so the file and the
         // table it was printed from cannot report different figures.
-        summary: await computeIncidentRangeSummary({ start, end, branchId: q.branchId }),
+        summary: await computeIncidentRangeSummary({ start, end, branchId: q.branchId, period: await incidentPeriod(q) }),
       });
       sendPdf(res, pdf, incidentReportFileName(q.from, q.to));
     })().catch(next);
@@ -611,9 +612,18 @@ export function createAdminReportsRouter(): Router {
  * properties is one indexed query rather than every incident ever loaded into
  * the process and filtered in JavaScript.
  */
+/**
+ * The incident report's period as BUSINESS dates — the shifts of those days
+ * (and the shift-less reports of those days) — so a late-entered incident
+ * ("Nhập bù") is in the report of its original shift, never of the day it was
+ * typed. The same rule as the journal and the technical list. Admin-only routes.
+ */
+function incidentPeriod(q: { from: string; to: string; branchId?: number }) {
+  return resolveReportPeriod('ALL', { from: q.from, to: q.to, branchId: q.branchId });
+}
+
 async function loadIssues(q: { from: string; to: string; branchId?: number }) {
-  const { start, end } = hcmRange(q.from, q.to);
-  const where: Prisma.HotelIssueWhereInput = { voidedAt: null, createdAt: { gte: start, lt: end } };
+  const where: Prisma.HotelIssueWhereInput = { voidedAt: null, ...issuePeriodWhere(await incidentPeriod(q)) };
   if (q.branchId !== undefined) where.branchId = q.branchId;
   return prisma.hotelIssue.findMany({
     where,

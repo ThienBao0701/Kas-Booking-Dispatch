@@ -43,7 +43,7 @@ import {
   type IssueStage,
   type RepairAttempt,
 } from '../api/issues';
-import { IssueDispatchHistory } from './TechnicalDispatchDialogs';
+import { IssueDelegationChain } from './TechnicalDispatchDialogs';
 import { formatDateTime } from '../lib/format';
 
 /**
@@ -557,7 +557,7 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
 
       <IssueStageTimeline issue={issue} />
       <IssueRepeatNote issue={issue} />
-      <IssueDispatchHistory issue={issue} />
+      <IssueDelegationChain issue={issue} />
       <IssueAssignmentHistory issue={issue} />
       <IssueTimeline attempts={issue.attempts} stage={issue.stage} showInspection={issue.inspectionEnabled} />
     </div>

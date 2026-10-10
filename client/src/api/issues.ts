@@ -277,6 +277,12 @@ export interface Issue {
   assignmentStateLabel?: string;
   /** "Giao việc → Nhân sự": the Quản lý kỹ thuật holding the work now. */
   assignedManager?: IssueManagerHandoff | null;
+  /**
+   * Every hand-off as ONE timeline, oldest first, with the parent step it was
+   * taken under (a technician / contractor chosen by the Quản lý kỹ thuật the
+   * job was given to). Absent on older servers.
+   */
+  delegationChain?: DelegationStep[];
   /** The dispatch chain, oldest first: managers and outside contractors, with the cost. */
   dispatches?: IssueDispatch[];
   /** The outside contractor working on it now, if any. */
@@ -319,6 +325,26 @@ export interface IssueManagerHandoff {
  * One hand-off of the dispatch chain. An outside contractor's phone, speciality
  * and company are null unless the reader may see them (the server decides).
  */
+export type DelegationKind = 'TO_MANAGER' | 'TO_TECHNICIAN' | 'TO_EXTERNAL';
+export type DelegationState = 'ACTIVE' | 'ENDED' | 'RETURNED' | 'COMPLETED';
+
+export interface DelegationStep {
+  id: string;
+  kind: DelegationKind;
+  kindLabel: string;
+  at: string;
+  by: { id: number; name: string; role: string; roleLabel: string | null };
+  to: { name: string; contractor: IssueDispatch['contractor'] };
+  note: string | null;
+  parentId: string | null;
+  state: DelegationState;
+  stateLabel: string;
+  completedAt: string | null;
+  completedByName: string | null;
+  completionNote: string | null;
+  repairCost: number | null;
+}
+
 export interface IssueDispatch {
   id: string;
   kind: 'TO_MANAGER' | 'TO_EXTERNAL';

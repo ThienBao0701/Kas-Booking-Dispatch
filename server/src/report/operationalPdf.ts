@@ -151,7 +151,9 @@ function withVoid(row: SerializedReport, text: string | null | undefined): strin
  * did, so the file says what the screen says, in words rather than colour.
  */
 function creator(r: SerializedReport): string {
-  return r.sourceLabel ? `${r.createdByName}\n(${r.sourceLabel})` : r.createdByName;
+  const who = r.sourceLabel ? `${r.createdByName}\n(${r.sourceLabel})` : r.createdByName;
+  // "Nhập bù": the record stays on its original shift; this names who typed it later.
+  return r.lateEntry ? `${who}\n(Nhập bù: ${r.lateEntry.enteredBy.name})` : who;
 }
 
 /* --------------------------- I. Thu tiền thanh toán --------------------------- */

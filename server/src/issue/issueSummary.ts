@@ -11,6 +11,7 @@
  * every branch (including branches with zero unresolved issues); a receptionist
  * sees ONLY their own branch, and can never widen the scope.
  */
+import { issuePeriodWhere, type ReportPeriod } from '../reception/businessDate';
 import type { Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { seesAllBranches } from '../middleware/auth';
@@ -239,6 +240,13 @@ export interface IncidentRangeFilter {
   start: Date;
   end: Date;
   branchId?: number;
+  /**
+   * The period's BUSINESS dates, resolved to their shifts (\`resolveReportPeriod\`):
+   * an incident counts on the day of the shift that reported it — a "Nhập bù"
+   * on its original shift, a Ca C report after midnight on the shift's day —
+   * like the journal and the incident list. Absent: by \`createdAt\`, as before.
+   */
+  period?: ReportPeriod;
 }
 
 /**
@@ -259,10 +267,9 @@ export async function computeIncidentRangeSummary(
 ): Promise<IncidentRangeSummary> {
   // Deleted ("Xóa") incidents are in no figure.
   const branch = { ...LIVE_ISSUE, ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}) };
-  const reportedInRange: Prisma.HotelIssueWhereInput = {
-    ...branch,
-    createdAt: { gte: filter.start, lt: filter.end },
-  };
+  const reportedInRange: Prisma.HotelIssueWhereInput = filter.period
+    ? { ...branch, ...issuePeriodWhere(filter.period) }
+    : { ...branch, createdAt: { gte: filter.start, lt: filter.end } };
 
   /*
     An INTERACTIVE transaction, so every number is one consistent snapshot: a

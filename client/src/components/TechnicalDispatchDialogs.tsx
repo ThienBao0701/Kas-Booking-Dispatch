@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Building2, User } from 'lucide-react';
-import { issuesApi, type ExternalDispatchInput, type Issue } from '../api/issues';
+import { issuesApi, type DelegationStep, type ExternalDispatchInput, type Issue } from '../api/issues';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
 import { CompletionVerdictFields } from './CompletionVerdict';
@@ -318,55 +318,76 @@ export function CompleteExternalDialog({ issue, onClose, onDone }: { issue: Issu
 }
 
 /* ------------------------------------------------------------------ *
- * The dispatch history, read in the incident detail
+ * The delegation chain, read in the incident detail
  * ------------------------------------------------------------------ */
 
+const KIND_TONE: Record<DelegationStep['kind'], string> = {
+  TO_MANAGER: 'bg-indigo-100 text-indigo-800',
+  TO_TECHNICIAN: 'bg-sky-100 text-sky-800',
+  TO_EXTERNAL: 'bg-amber-100 text-amber-900',
+};
+
+const STATE_TONE: Record<DelegationStep['state'], string> = {
+  ACTIVE: 'text-brand-700',
+  ENDED: 'text-slate-500',
+  RETURNED: 'text-slate-500',
+  COMPLETED: 'text-emerald-700',
+};
+
 /**
- * The hand-offs to managers and outside contractors, oldest first. In-house
- * technician assignments stay in `IssueAssignmentHistory`, beside it.
+ * "CHUỖI GIAO VIỆC" — every hand-off, oldest first, each labelled as what it is
+ * (to a Quản lý kỹ thuật, to an in-house technician, to an outside contractor).
+ * A step taken under a manager's hand-off sits indented beneath it, so the
+ * chain Tổng QLKT → QLKT → kĩ thuật reads top to bottom. Contact details show
+ * only when the server sent them (contractor privacy is the server's).
  */
-export function IssueDispatchHistory({ issue }: { issue: Pick<Issue, 'dispatches'> }) {
-  const events = (issue.dispatches ?? []).map((d) => ({ at: d.createdAt, key: d.id, dispatch: d, assignment: null }));
-  if (events.length === 0) return null;
+export function IssueDelegationChain({ issue }: { issue: Pick<Issue, 'delegationChain'> }) {
+  const steps = issue.delegationChain ?? [];
+  if (steps.length === 0) return null;
+  const byId = new Map(steps.map((st) => [st.id, st]));
   return (
-    <section data-testid="issue-dispatch-history" className="rounded-xl border border-line bg-white px-3 py-2.5">
-      <h4 className="mb-1.5 font-semibold uppercase tracking-wide text-slate-600">Điều phối kỹ thuật</h4>
+    <section data-testid="issue-delegation-chain" className="rounded-xl border border-line bg-white px-3 py-2.5">
+      <h4 className="mb-1.5 font-semibold uppercase tracking-wide text-slate-600">Chuỗi giao việc</h4>
       <ol className="space-y-2">
-        {events.map(({ key, dispatch: d }) => (
-          <li key={key} className="border-l-2 border-slate-200 pl-2.5">
-            {d ? (
-              <>
-                <p className="text-slate-800">
-                  <span className="font-semibold">{d.assignedByName}</span>
-                  {d.assignedByRoleLabel ? ` (${d.assignedByRoleLabel})` : ''} →{' '}
-                  {d.kind === 'TO_MANAGER' ? (
-                    <span className="font-semibold">{d.manager?.name} (Quản lý kỹ thuật)</span>
-                  ) : (
-                    <span className="font-semibold">
-                      Kĩ thuật bên ngoài: {d.contractor?.name}
-                      {d.contractor?.company ? ` — ${d.contractor.company}` : ` (${d.contractor?.typeLabel})`}
-                    </span>
-                  )}
-                  <span className="text-xs text-slate-500"> · {formatDateTime(d.createdAt)}</span>
+        {steps.map((st) => {
+          const parent = st.parentId ? byId.get(st.parentId) : undefined;
+          const contractor = st.to.contractor;
+          return (
+            <li
+              key={st.id}
+              data-testid={`delegation-${st.id}`}
+              data-kind={st.kind}
+              className={`border-l-2 border-slate-200 pl-2.5 ${parent ? 'ml-5' : ''}`}
+            >
+              <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-slate-800">
+                <span className={`rounded-md px-1.5 py-0.5 text-xs font-semibold ${KIND_TONE[st.kind]}`}>{st.kindLabel}</span>
+                <span className="font-semibold">{st.by.name}</span>
+                {st.by.roleLabel ? <span className="text-xs text-slate-500">({st.by.roleLabel})</span> : null}
+                <span aria-hidden="true">→</span>
+                <span className="font-semibold">
+                  {st.to.name}
+                  {contractor ? (contractor.company ? ` — ${contractor.company}` : ` (${contractor.typeLabel})`) : ''}
+                </span>
+                <span className="text-xs text-slate-500">· {formatDateTime(st.at)}</span>
+              </p>
+              {parent ? (
+                <p className="text-xs text-slate-500" data-testid={`delegation-parent-${st.id}`}>
+                  Thuộc phần việc giao cho {parent.to.name}
                 </p>
-                {d.contractor?.phone || d.contractor?.specialty ? (
-                  <p className="text-xs text-slate-600">
-                    {[d.contractor.phone, d.contractor.specialty].filter(Boolean).join(' · ')}
-                  </p>
-                ) : null}
-                <p className="whitespace-pre-wrap text-slate-600">{d.note}</p>
-                {d.completedAt ? (
-                  <p className="text-xs font-medium text-emerald-700">
-                    Hoàn thành {formatDateTime(d.completedAt)} bởi {d.completedByName} — chi phí {formatVnd(d.repairCost)}
-                    {d.completionNote ? ` — ${d.completionNote}` : ''}
-                  </p>
-                ) : d.endedAt ? (
-                  <p className="text-xs text-slate-500">Đã chuyển giao cho người khác {formatDateTime(d.endedAt)}</p>
-                ) : null}
-              </>
-            ) : null}
-          </li>
-        ))}
+              ) : null}
+              {contractor?.phone || contractor?.specialty ? (
+                <p className="text-xs text-slate-600">{[contractor.phone, contractor.specialty].filter(Boolean).join(' · ')}</p>
+              ) : null}
+              {st.note ? <p className="whitespace-pre-wrap text-slate-600">{st.note}</p> : null}
+              <p className={`text-xs font-medium ${STATE_TONE[st.state]}`} data-testid={`delegation-state-${st.id}`}>
+                {st.stateLabel}
+                {st.completedAt ? ` · ${formatDateTime(st.completedAt)}${st.completedByName ? ` bởi ${st.completedByName}` : ''}` : ''}
+                {st.repairCost !== null ? ` — chi phí ${formatVnd(st.repairCost)}` : ''}
+                {st.completionNote ? ` — ${st.completionNote}` : ''}
+              </p>
+            </li>
+          );
+        })}
       </ol>
     </section>
   );

@@ -54,9 +54,16 @@ function voidState(row: SerializedReport): string {
   return row.voided ? 'Đã hủy' : '';
 }
 
-/** The creator, and "(Admin tạo)" when a supervisor entered the record. */
+/**
+ * The creator, "(Admin tạo)" when a supervisor entered the record, and — for a
+ * "Nhập bù" — who actually typed it later, in what role, and why. The row stays
+ * on its original shift and date; this only says how it got there.
+ */
 function creator(row: SerializedReport): string {
-  return row.sourceLabel ? `${row.createdByName} (${row.sourceLabel})` : row.createdByName;
+  const who = row.sourceLabel ? `${row.createdByName} (${row.sourceLabel})` : row.createdByName;
+  if (!row.lateEntry) return who;
+  const by = `${row.lateEntry.enteredBy.name}${row.lateEntry.enteredByRoleLabel ? ` - ${row.lateEntry.enteredByRoleLabel}` : ''}`;
+  return `${who}\nNhập bù: ${by} · ${when(row.lateEntry.enteredAt)}${row.lateEntry.reason ? ` · ${row.lateEntry.reason}` : ''}`;
 }
 
 function when(iso: string | null): string {
@@ -667,6 +674,8 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
     { header: 'Kĩ thuật bên ngoài', key: 'contractor', width: 26 },
     { header: 'Liên hệ bên ngoài', key: 'contractorContact', width: 22 },
     { header: 'Chi phí sửa chữa', key: 'repairCost', width: 16 },
+    // "Nhập bù": who typed it after its shift, and why — the row keeps its original shift.
+    { header: 'Nhập bù', key: 'lateEntry', width: 30 },
   ];
   headerRow(sheet);
   moneyColumns(sheet, ['repairCost']);
@@ -730,6 +739,9 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
         contractorContact: contractorContactOf(i),
         // The persisted cost of every completed outside job, never a typed-in total.
         repairCost: repairCostOf(i),
+        lateEntry: i.lateEntry
+          ? `${i.lateEntry.enteredBy.name}${i.lateEntry.enteredByRoleLabel ? ` - ${i.lateEntry.enteredByRoleLabel}` : ''} · ${when(i.lateEntry.enteredAt)}${i.lateEntry.reason ? ` · ${i.lateEntry.reason}` : ''}`
+          : '',
       });
       for (const e of handoffEvents(i)) {
         handoffs.addRow({

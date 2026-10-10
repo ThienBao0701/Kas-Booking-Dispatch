@@ -61,10 +61,17 @@ const BUCKETS = [
   { key: 'REASSIGNED', label: 'Đã giao lại' },
   { key: 'REWORK', label: 'Cần sửa lại' },
 ] as const;
-type Bucket = (typeof BUCKETS)[number]['key'];
+/**
+ * "Giao cho tôi" — a Quản lý kỹ thuật's own work: what a Tổng quản lý kỹ thuật
+ * handed to THIS manager and is not finished yet. Shown to that role only.
+ */
+const MINE_BUCKET = { key: 'MINE', label: 'Giao cho tôi' } as const;
+type Bucket = (typeof BUCKETS)[number]['key'] | typeof MINE_BUCKET.key;
 
-function inBucket(issue: Issue, bucket: Bucket): boolean {
+function inBucket(issue: Issue, bucket: Bucket, userId?: number): boolean {
   switch (bucket) {
+    case 'MINE':
+      return userId !== undefined && issue.assignedManager?.id === userId && issue.status !== 'COMPLETED';
     case 'UNASSIGNED':
       return issue.assignmentState === 'UNASSIGNED';
     case 'MANAGER_ASSIGNED':
@@ -148,7 +155,9 @@ export function TechnicalReportPage() {
     enabled: period !== null && filter.branch !== null,
   });
   const all = useMemo(() => list.data?.issues ?? [], [list.data]);
-  const shown = useMemo(() => (bucket ? all.filter((i) => inBucket(i, bucket)) : all), [all, bucket]);
+  const buckets: readonly { key: Bucket; label: string }[] =
+    user?.role === 'TECHNICAL_MANAGER' ? [MINE_BUCKET, ...BUCKETS] : BUCKETS;
+  const shown = useMemo(() => (bucket ? all.filter((i) => inBucket(i, bucket, user?.id)) : all), [all, bucket, user?.id]);
   const groups = useMemo(() => groupIssuesByBranchRoom(shown), [shown]);
 
   const exportScope = {
@@ -245,7 +254,7 @@ export function TechnicalReportPage() {
           Tình trạng
           <select className={FIELD} value={bucket} data-testid="tr-status" onChange={(e) => setBucket(e.target.value as Bucket | '')}>
             <option value="">Tất cả</option>
-            {BUCKETS.map((b) => (
+            {buckets.map((b) => (
               <option key={b.key} value={b.key}>
                 {b.label}
               </option>
@@ -267,7 +276,7 @@ export function TechnicalReportPage() {
 
       {/* Status at a glance, over the loaded rows; a press filters by it. */}
       <div className="mb-5 flex flex-wrap gap-2" data-testid="tr-counts">
-        {BUCKETS.map((b) => (
+        {buckets.map((b) => (
           <button
             key={b.key}
             type="button"
@@ -280,7 +289,7 @@ export function TechnicalReportPage() {
           >
             {b.label}
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold tabular-nums text-slate-800">
-              {all.filter((i) => inBucket(i, b.key)).length}
+              {all.filter((i) => inBucket(i, b.key, user?.id)).length}
             </span>
           </button>
         ))}

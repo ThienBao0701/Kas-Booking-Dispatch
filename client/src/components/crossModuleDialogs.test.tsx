@@ -26,7 +26,7 @@ import type { OperationalReport } from '../api/receptionReports';
 import { ADMIN_USER, installApiMock } from '../test/utils';
 import { RecordEditDialog, VoidDialog } from './RecordDialogs';
 import { DeletedHistoryDialog, LateEntryDialog } from './ReportManagementDialogs';
-import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog } from './TechnicalDispatchDialogs';
+import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog, IssueDelegationChain } from './TechnicalDispatchDialogs';
 import { phoneProblem } from '../lib/contractorPhone';
 
 afterEach(() => {
@@ -458,5 +458,72 @@ describe('Hoàn thành thuê ngoài', () => {
     await userEvent.click(confirm);
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(sent).toEqual([{ repairCost: 0, verdict: 'CORRECT' }]);
+  });
+});
+
+describe('Chuỗi giao việc', () => {
+  const step = (over: Record<string, unknown>) => ({
+    id: 's',
+    kind: 'TO_MANAGER',
+    kindLabel: 'Giao quản lý kỹ thuật',
+    at: '2026-10-10T01:00:00.000Z',
+    by: { id: 1, name: 'Tổng KT', role: 'TECHNICAL_GENERAL_MANAGER', roleLabel: 'Tổng quản lý kỹ thuật' },
+    to: { name: 'QLKT A', contractor: null },
+    note: 'Kiểm tra',
+    parentId: null,
+    state: 'ACTIVE',
+    stateLabel: 'Đang thực hiện',
+    completedAt: null,
+    completedByName: null,
+    completionNote: null,
+    repairCost: null,
+    ...over,
+  });
+
+  it('labels each hand-off by kind, indents the steps taken under a manager, and shows the outcome', () => {
+    const chain = [
+      step({ id: 'm' }),
+      step({
+        id: 't',
+        kind: 'TO_TECHNICIAN',
+        kindLabel: 'Giao kĩ thuật khách sạn',
+        by: { id: 7, name: 'QLKT A', role: 'TECHNICAL_MANAGER', roleLabel: 'Quản lý kỹ thuật' },
+        to: { name: 'Kỹ thuật Tâm', contractor: null },
+        parentId: 'm',
+        state: 'RETURNED',
+        stateLabel: 'Đã chuyển về chờ giao',
+      }),
+      step({
+        id: 'e',
+        kind: 'TO_EXTERNAL',
+        kindLabel: 'Giao kĩ thuật bên ngoài',
+        by: { id: 7, name: 'QLKT A', role: 'TECHNICAL_MANAGER', roleLabel: 'Quản lý kỹ thuật' },
+        to: { name: 'Thợ Ngoài', contractor: { name: 'Thợ Ngoài', type: 'COMPANY', typeLabel: 'Công ty', phone: null, specialty: null, company: null } },
+        parentId: 'm',
+        state: 'COMPLETED',
+        stateLabel: 'Đã hoàn thành',
+        completedAt: '2026-10-10T09:00:00.000Z',
+        completedByName: 'QLKT A',
+        repairCost: 450000,
+      }),
+    ];
+    render(<IssueDelegationChain issue={{ delegationChain: chain } as unknown as Issue} />);
+    const root = screen.getByTestId('issue-delegation-chain');
+    expect(within(root).getByTestId('delegation-m')).toHaveTextContent('Giao quản lý kỹ thuật');
+    expect(within(root).getByTestId('delegation-m')).toHaveAttribute('data-kind', 'TO_MANAGER');
+    expect(within(root).getByTestId('delegation-t')).toHaveTextContent('Giao kĩ thuật khách sạn');
+    expect(within(root).getByTestId('delegation-e')).toHaveTextContent('Giao kĩ thuật bên ngoài');
+    // Contact withheld by the server: only the type is shown.
+    expect(within(root).getByTestId('delegation-e')).toHaveTextContent('Thợ Ngoài (Công ty)');
+    expect(within(root).getByTestId('delegation-parent-t')).toHaveTextContent('Thuộc phần việc giao cho QLKT A');
+    expect(within(root).queryByTestId('delegation-parent-m')).not.toBeInTheDocument();
+    expect(within(root).getByTestId('delegation-state-t')).toHaveTextContent('Đã chuyển về chờ giao');
+    expect(within(root).getByTestId('delegation-state-e')).toHaveTextContent('Đã hoàn thành');
+    expect(within(root).getByTestId('delegation-state-e')).toHaveTextContent('450.000');
+  });
+
+  it('renders nothing for an incident nobody handed on', () => {
+    const { container } = render(<IssueDelegationChain issue={{ delegationChain: [] } as unknown as Issue} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
