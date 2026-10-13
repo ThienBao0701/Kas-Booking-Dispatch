@@ -311,9 +311,11 @@ describe('C. sequence synchronisation', () => {
 
     const schema = await introspectTarget(client);
     const columns = sequenceColumns(schema);
-    // The three Int @id @default(autoincrement()) tables, and no others.
+    // The four Int @id @default(autoincrement()) tables, and no others.
+    // UserBranchAssignment (SERIAL since 20261001120000) has no source table in
+    // the SQLite pilot, so it arrives empty — its sequence must still be valid.
     expect(columns.map((c) => `${c.table}.${c.column}`).sort()).toEqual([
-      'Branch.id', 'BranchSourceAlias.id', 'User.id',
+      'Branch.id', 'BranchSourceAlias.id', 'User.id', 'UserBranchAssignment.id',
     ]);
 
     for (const check of await checkSequences(client, schema)) {

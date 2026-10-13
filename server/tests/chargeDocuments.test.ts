@@ -511,9 +511,16 @@ describe('the monthly report', () => {
     await chargedOn('2026-08-20T03:00:00.000Z', 2_000_000, 'B');
 
     // A failure and a pending document in the same month: counted, never added.
+    // They have no chargedAt, so the report groups them by createdAt — which
+    // is pinned into August here, or the test would only pass while the wall
+    // clock happens to be in August.
     const failed = (await create({ amount: 500_000, guestName: 'C' })).body.document;
     await adminAgent.put(`/api/charge-documents/${failed.id}`).send({ status: 'CHARGE_THAT_BAI' });
-    await create({ amount: 700_000, guestName: 'D' });
+    const pending = (await create({ amount: 700_000, guestName: 'D' })).body.document;
+    await testPrisma.chargeDocument.updateMany({
+      where: { id: { in: [failed.id, pending.id] } },
+      data: { createdAt: new Date('2026-08-15T03:00:00.000Z') },
+    });
 
     const r = await report('2026-08');
     expect(r.totals.chargedCount).toBe(2);

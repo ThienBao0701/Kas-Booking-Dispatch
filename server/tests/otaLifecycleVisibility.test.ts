@@ -150,10 +150,17 @@ describe('a booking is never invisible to reception', () => {
   });
 
   it('shows a rejected proof on the rejected list, not lost', async () => {
+    // The one deliberate exception to "exactly one list": since the recreation
+    // flow (2d1dcc9) a "Cần tạo lại" order is back in "Đơn mới" — badged by its
+    // REJECTED status — AND stays on the dedicated recreate queue. It must
+    // still never sit in the pending-review queue it was rejected out of.
     const id = await dispatchOne();
     await testPrisma.booking.update({ where: { id }, data: { verificationStatus: 'REJECTED' } });
-    await expectVisible(id, 'proof rejected');
-    expect((await listsContaining(id))[0]).toBe('/api/bookings/rejected');
+    expect(await listsContaining(id)).toEqual(['/api/bookings/new', '/api/bookings/rejected']);
+
+    const inbox = await reception.get('/api/bookings/new');
+    const row = inbox.body.bookings.find((b: { id: string }) => b.id === id);
+    expect(row?.verificationStatus).toBe('REJECTED');
   });
 
   it('moves an approved booking to the confirmed list and nowhere else', async () => {
