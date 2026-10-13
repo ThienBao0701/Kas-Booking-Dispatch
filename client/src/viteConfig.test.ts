@@ -21,7 +21,12 @@ const RAW_TEXT = RAW_BYTES.toString('utf8');
 
 /** `defineConfig` here returns a plain object, so it is read directly. */
 const cfg = config as unknown as {
-  server?: { allowedHosts?: string[]; proxy?: Record<string, { target?: string }> };
+  server?: {
+    host?: string | boolean;
+    port?: number;
+    allowedHosts?: string[];
+    proxy?: Record<string, { target?: string }>;
+  };
   plugins?: unknown[];
 };
 
@@ -77,14 +82,20 @@ describe('vite.config.ts — dev server', () => {
     expect(RAW_TEXT).not.toContain('allowedHosts');
   });
 
-  it('still binds to all interfaces for LAN access', () => {
-    expect(RAW_TEXT).toContain('host: true');
+  it('binds to loopback only, on port 5173', () => {
+    expect(cfg.server?.host).toBe('127.0.0.1');
+    expect(cfg.server?.port).toBe(5173);
   });
 
   it('proxies /api to the backend', () => {
     const proxy = cfg.server?.proxy ?? {};
     expect(Object.keys(proxy)).toContain('/api');
     expect(proxy['/api']?.target).toBeTruthy();
+  });
+
+  it('defaults the /api proxy to the development backend on 3002, never 3001', () => {
+    expect(RAW_TEXT).toContain("process.env.BACKEND_URL ?? 'http://localhost:3002'");
+    expect(RAW_TEXT).not.toContain('localhost:3001');
   });
 });
 

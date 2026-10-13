@@ -107,9 +107,10 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
-    // Bind to all interfaces so receptionist machines on the LAN can reach the
-    // dev server; production is served same-origin by the backend.
-    host: true,
+    // Loopback ONLY. Nothing but this machine has any business reaching the
+    // development server — not the LAN, not a tunnel. Production is served
+    // same-origin by the backend.
+    host: '127.0.0.1',
     //
     // THE PRODUCTION HOSTNAME IS DELIBERATELY NOT ALLOW-LISTED HERE.
     //
