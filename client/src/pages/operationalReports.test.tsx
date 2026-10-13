@@ -2400,7 +2400,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
   it('shows the status, the repairer and the cause — and no inspection while it is dormant', async () => {
     const cellAt = await facilityRowCells(twiceRepaired());
     expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
-    expect(cellAt('Trạng thái')).not.toContain('Nghiệm thu');
+    expect(cellAt('Trạng thái')).not.toContain('Xác nhận');
     expect(cellAt('Người sửa')).toContain('Minh');
     expect(cellAt('Nguyên nhân')).toBe('Rò rỉ ống đồng');
     // "Lần sửa" is not a reception column: the attempts are one click down.
@@ -2416,7 +2416,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
   it('with inspection switched on, shows the inspection beneath the status', async () => {
     const cellAt = await facilityRowCells(twiceRepaired({ inspectionEnabled: true }));
     expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
-    expect(cellAt('Trạng thái')).toContain('Nghiệm thu: Đạt');
+    expect(cellAt('Trạng thái')).toContain('Xác nhận: Đã xác nhận');
     expect(cellAt('Người sửa')).toContain('Minh');
   });
 

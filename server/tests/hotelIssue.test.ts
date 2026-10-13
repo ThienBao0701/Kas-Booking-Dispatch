@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -159,7 +159,7 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
 
   const ACCEPT = { technicianName: 'Trần Văn B', technicianPhone: '0901234567' };
 
-  it('technical accepts (NEW → IN_PROGRESS) then completes (→ COMPLETED)', async () => {
+  it('technical accepts (NEW → IN_PROGRESS), completes (→ AWAITING_INSPECTION), a manager confirms (→ COMPLETED)', async () => {
     const id = await newIssue();
 
     await assignTo(adminAgent, id, techAgent);
@@ -174,9 +174,12 @@ describe('status transitions (Bộ phận kỹ thuật only)', () => {
 
     const completed = await techAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(completed.status).toBe(200);
-    expect(completed.body.issue.status).toBe('COMPLETED');
+    // Finished by the technician — not yet "Đã hoàn thành".
+    expect(completed.body.issue.status).toBe('AWAITING_INSPECTION');
     expect(completed.body.issue.completedBy.id).toBe(techId);
     expect(completed.body.issue.completedAt).not.toBeNull();
+    const confirmed = await confirmCompletion(adminAgent, id);
+    expect(confirmed.body.issue.status).toBe('COMPLETED');
 
     // The reporter is notified on each status change.
     const notes = await testPrisma.notification.findMany({ where: { userId: ownReceptionistId } });

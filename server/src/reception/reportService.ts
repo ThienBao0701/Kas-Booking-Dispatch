@@ -28,13 +28,14 @@
  * file, or in the routes above it, that calls `delete` on a report.
  */
 import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
+import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { parseCompletionVerdict, verdictWhere, type CompletionVerdictInput } from '../completion/verdict';
 import { journalPeriodWhere, sessionsForBusinessDates, type ReportPeriod } from './businessDate';
-import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
+import { getClock, hcmDateOnly, hcmWallClockToUtc, type Clock } from '../lib/clock';
 import { requireOpenSession, type ShiftActor } from '../shift/shiftService';
-import { shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
+import { shiftBoundaries, shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
 import { ISSUE_INCLUDE, createIssue, serializeIssue, type CreateIssueInput, type IssueDetail } from '../issue/issueService';
 import { describeLocation } from '../issue/issueArea';
 import { DEFAULT_SEVERITY, SEVERITY_LABELS, parseSeverity, prioritise, severityLabel } from '../issue/severity';
@@ -80,6 +81,7 @@ import {
 } from '../auth/branchScope';
 import { assertCan, can } from '../auth/capabilities';
 import { roleLabel } from '../auth/roleLabels';
+import { NO_HISTORY } from './lateEntryText';
 
 /**
  * The journal's actor: a receptionist on shift, or a reception SUPERVISOR
@@ -133,7 +135,20 @@ export const REPORT_INCLUDE = {
   branch: { select: { id: true, code: true, hotelName: true, address: true, branchNumber: true } },
   createdBy: { select: { id: true, fullName: true } },
   voidedBy: { select: { id: true, fullName: true } },
-  shiftSession: { select: { id: true, shiftType: true, receptionistName: true, startedAt: true, closedAt: true } },
+  shiftSession: {
+    select: {
+      id: true,
+      shiftType: true,
+      receptionistName: true,
+      startedAt: true,
+      closedAt: true,
+      // "Thêm ca": a shift added afterwards — shown on its heading.
+      backfilledByNameSnapshot: true,
+      backfilledByRole: true,
+      backfilledAt: true,
+      backfillReason: true,
+    },
+  },
   payment: true,
   guestRequest: { include: { completedBy: { select: { id: true, fullName: true } } } },
   /*
@@ -265,6 +280,8 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
      * official report for its business date; an open one can still change.
      */
     shiftClosed: row.shiftSession ? row.shiftSession.closedAt !== null : false,
+    /** "Ca thêm bù": the shift was added afterwards with "Thêm ca" — by whom, when, why. */
+    shiftBackfill: serializeShiftBackfill(row.shiftSession),
     createdBy: person(row.createdBy),
     /** The name the SHIFT recorded — not the account's current one. */
     createdByName: row.createdByNameSnapshot,
@@ -294,7 +311,7 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
      */
     lateEntry: row.enteredByUserId
       ? {
-          enteredBy: { id: row.enteredByUserId, name: row.enteredByNameSnapshot ?? '—' },
+          enteredBy: { id: row.enteredByUserId, name: row.enteredByNameSnapshot ?? NO_HISTORY },
           enteredByRole: row.enteredByRole,
           enteredByRoleLabel: roleLabel(row.enteredByRole),
           reason: row.lateEntryReason,
@@ -1935,6 +1952,51 @@ export async function listDeletedReports(
 }
 
 /* ------------------------------------------------------------------ *
+ * "Lịch sử chỉnh sửa" — the corrections, for the people who may see them
+ * ------------------------------------------------------------------ */
+
+/**
+ * THE AUDITED CORRECTIONS OF THE READER'S BRANCHES, newest first.
+ *
+ * Read from the trail every correction already writes — one EDIT row per
+ * changed field, with the old and new value, who, in what role, when and why —
+ * so nothing here is reconstructed: a record corrected before auditing existed
+ * simply has no rows. Deletions (VOID) and late entries (LATE_ENTRY) are other
+ * events and stay out; they have their own views. Scoped and narrowed exactly
+ * like "Lịch sử xóa": the record's branch and its BUSINESS date.
+ *
+ * Returns the audit rows and, once each, the records they belong to.
+ */
+export async function listEditHistory(
+  actor: ReportActor,
+  filter: { branchId?: number; category?: CreateReportInput['category']; period?: ReportPeriod | null },
+  client: PrismaClient = prisma,
+): Promise<{ audits: ReportDetail['audits']; reports: ReportDetail[]; truncated: boolean }> {
+  assertCan(actor.role, 'reports.editHistory', 'Bạn không có quyền xem lịch sử chỉnh sửa báo cáo.');
+  const LIMIT = 1000;
+  const reportWhere: Prisma.ReceptionOperationalReportWhereInput = {
+    AND: [
+      reportVisibilityWhere(actor, { branchId: filter.branchId }),
+      ...(filter.category ? [{ category: filter.category }] : []),
+      ...(filter.period ? [journalPeriodWhere(filter.period)] : []),
+    ],
+  };
+  const audits = await client.receptionReportAudit.findMany({
+    where: { action: 'EDIT', report: { is: reportWhere } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    take: LIMIT + 1,
+  });
+  const truncated = audits.length > LIMIT;
+  const page = audits.slice(0, LIMIT);
+  const ids = [...new Set(page.map((a) => a.reportId).filter((x): x is string => x !== null))];
+  const reports = await client.receptionOperationalReport.findMany({
+    where: { id: { in: ids } },
+    include: REPORT_INCLUDE,
+  });
+  return { audits: page, reports, truncated };
+}
+
+/* ------------------------------------------------------------------ *
  * "Nhập bù" — a record the receptionist missed, entered on its own shift
  * ------------------------------------------------------------------ */
 
@@ -1970,9 +2032,17 @@ export async function lateEntrySessions(
   );
   const users = await client.receptionShiftSession.findMany({
     where: { id: { in: sessions.map((s) => s.id) } },
-    select: { id: true, userId: true },
+    select: {
+      id: true,
+      userId: true,
+      backfilledByNameSnapshot: true,
+      backfilledByRole: true,
+      backfilledAt: true,
+      backfillReason: true,
+    },
   });
   const userOf = new Map(users.map((u) => [u.id, u.userId]));
+  const backfillOf = new Map(users.map((u) => [u.id, u]));
   return sessions
     .filter((s) => s.closedAt !== null)
     .map((s) => ({
@@ -1985,7 +2055,207 @@ export async function lateEntrySessions(
       receptionist: { id: userOf.get(s.id) ?? null, name: s.receptionistName },
       startedAt: s.startedAt.toISOString(),
       closedAt: s.closedAt!.toISOString(),
+      /** "Ca thêm bù": added afterwards with "Thêm ca" — by whom, when and why. */
+      backfill: serializeShiftBackfill(backfillOf.get(s.id)),
     }));
+}
+
+/** A backfilled shift's stamp, or null for a shift opened by a real check-in. */
+export function serializeShiftBackfill(
+  row:
+    | {
+        backfilledByNameSnapshot: string | null;
+        backfilledByRole: UserRole | null;
+        backfilledAt: Date | null;
+        backfillReason: string | null;
+      }
+    | null
+    | undefined,
+) {
+  if (!row?.backfilledAt) return null;
+  return {
+    // Never guessed: a stamp without a name says so.
+    backfilledByName: row.backfilledByNameSnapshot ?? 'Không có dữ liệu lịch sử',
+    backfilledByRole: row.backfilledByRole,
+    backfilledByRoleLabel: roleLabel(row.backfilledByRole),
+    backfilledAt: row.backfilledAt.toISOString(),
+    reason: row.backfillReason,
+  };
+}
+
+/**
+ * The receptionists a "Thêm ca" may name at one branch of the manager's scope:
+ * the branch's active Reception accounts, by name. Nobody else can be chosen —
+ * the server checks the same rule again when the shift is added.
+ */
+export async function lateEntryReceptionists(
+  actor: ReportActor,
+  params: { branchId: number },
+  client: PrismaClient = prisma,
+): Promise<{ id: number; fullName: string }[]> {
+  assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền nhập bù báo cáo.');
+  const branchId = assertBranchInScope(actor, params.branchId);
+  return client.user.findMany({
+    where: { role: 'RECEPTIONIST', active: true, branchId },
+    select: { id: true, fullName: true },
+    orderBy: { fullName: 'asc' },
+  });
+}
+
+export interface BackfillShiftInput {
+  branchId: number;
+  /** The shift's BUSINESS date, "YYYY-MM-DD" (Ca C of the 7th is the 7th's). */
+  businessDate: string;
+  shiftType: ShiftType;
+  /** The receptionist who worked it — must be an active receptionist of the branch. */
+  receptionistUserId: number;
+  /** Why the shift is missing ("Lễ tân quên vào ca A"); required. */
+  reason: string;
+}
+
+/**
+ * "THÊM CA" — a shift the receptionist worked but never checked in to.
+ *
+ * The missing records of that shift need a shift to go on, and filing them on
+ * another one would put them in the wrong drawer and under the wrong person.
+ * So the SHIFT itself is added — historically, and only as context:
+ *
+ *   * at its NOMINAL window from `SHIFT_DEFINITIONS` (Ca C of the 7th runs
+ *     22:00 on the 7th to 06:00 on the 8th), so it lands on that business date
+ *     by the same arithmetic as every check-in;
+ *   * already CLOSED at its nominal end: it never makes anyone "on shift",
+ *     never answers "is this person checked in?" and changes no roster;
+ *   * only once that shift is OVER — a shift still running is the
+ *     receptionist's own to check in to;
+ *   * for an ACTIVE RECEPTIONIST OF THAT BRANCH, never for whoever the request
+ *     names; the manager who adds it comes from the session, never the body;
+ *   * never twice: an existing session of the same receptionist, date and
+ *     shift — or any of theirs overlapping it — refuses it, and the unique
+ *     `backfillKey` refuses a second manager adding the same shift at once;
+ *   * with a SHIFT_BACKFILL audit row carrying the required reason.
+ *
+ * Nothing else is created: no report, no zero payment, no opening cash. The
+ * shift's records are then entered with the normal "Nhập bù" on it.
+ */
+export async function createBackfillShift(
+  input: BackfillShiftInput,
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+) {
+  assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền thêm ca nhập bù.');
+  const branchId = assertBranchInScope(actor, input.branchId);
+  const reason = required(input.reason, 'lý do thêm ca');
+  if (reason.length > 1000) throw ApiError.validation('Lý do thêm ca quá dài.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.businessDate)) {
+    throw ApiError.validation('Ngày làm việc không hợp lệ.');
+  }
+  const now = clock.now();
+  if (input.businessDate > hcmDateOnly(now)) {
+    throw ApiError.validation('Không thể thêm ca cho một ngày trong tương lai.');
+  }
+
+  const def = shiftDefinition(input.shiftType);
+  const startedAt = hcmWallClockToUtc(input.businessDate, def.startLocalTime);
+  const { nominalEndAt, graceEndAt } = shiftBoundaries(input.shiftType, startedAt);
+  // The same arithmetic every check-in uses — a guard, never expected to fire.
+  if (shiftBusinessDate(input.shiftType, startedAt) !== input.businessDate) {
+    throw ApiError.validation('Ca và ngày làm việc không khớp.');
+  }
+  if (nominalEndAt.getTime() > now.getTime()) {
+    throw ApiError.conflict('Ca này chưa kết thúc — lễ tân tự vào ca và ghi báo cáo.');
+  }
+
+  const receptionist = await client.user.findUnique({
+    where: { id: input.receptionistUserId },
+    select: { id: true, fullName: true, role: true, active: true, branchId: true },
+  });
+  if (!receptionist || receptionist.role !== 'RECEPTIONIST' || !receptionist.active || receptionist.branchId !== branchId) {
+    throw ApiError.validation('Lễ tân không thuộc chi nhánh này hoặc không còn hoạt động.');
+  }
+
+  // An equivalent shift, or one of theirs overlapping this window, already exists.
+  const sameDay = await sessionsForBusinessDates({ from: input.businessDate, to: input.businessDate, branchId }, client);
+  const sameDayIds = sameDay.filter((x) => x.shiftType === input.shiftType).map((x) => x.id);
+  const equivalent =
+    sameDayIds.length > 0
+      ? await client.receptionShiftSession.findFirst({
+          where: { id: { in: sameDayIds }, userId: receptionist.id },
+          select: { id: true },
+        })
+      : null;
+  if (equivalent) {
+    throw ApiError.conflict(`${def.name} ngày này của lễ tân đã có — chọn ca đó để nhập bù.`, {
+      shiftSessionId: equivalent.id,
+    });
+  }
+  // By NOMINAL windows: a session is often closed a few minutes after its end
+  // (at the next check-in), and Ca C ending at 06:00 does not overlap Ca A.
+  const overlapping = await client.receptionShiftSession.findFirst({
+    where: {
+      userId: receptionist.id,
+      startedAt: { lt: nominalEndAt },
+      nominalEndAt: { gt: startedAt },
+    },
+    select: { id: true },
+  });
+  if (overlapping) {
+    throw ApiError.conflict('Lễ tân đã có một ca trùng thời gian này.', { shiftSessionId: overlapping.id });
+  }
+
+  const backfillKey = `${branchId}:${input.businessDate}:${input.shiftType}:${receptionist.id}`;
+  let id: string;
+  try {
+    id = await client.$transaction(async (tx) => {
+      const created = await tx.receptionShiftSession.create({
+        data: {
+          branchId,
+          userId: receptionist.id,
+          shiftType: input.shiftType,
+          receptionistName: receptionist.fullName,
+          startedAt,
+          nominalEndAt,
+          graceEndAt,
+          closedAt: nominalEndAt,
+          backfilledByUserId: actor.id,
+          backfilledByNameSnapshot: actor.fullName,
+          backfilledByRole: actor.role,
+          backfilledAt: now,
+          backfillReason: reason,
+          backfillKey,
+        },
+        select: { id: true },
+      });
+      await tx.receptionReportAudit.create({
+        data: {
+          branchId,
+          reportId: null,
+          shiftSessionId: created.id,
+          action: 'SHIFT_BACKFILL',
+          field: 'shiftType',
+          oldValue: null,
+          newValue: input.shiftType,
+          reason,
+          actorUserId: actor.id,
+          actorNameSnapshot: actor.fullName,
+          actorShiftType: null,
+          actorRole: actor.role,
+          createdAt: now,
+        },
+      });
+      return created.id;
+    });
+  } catch (error) {
+    if (error instanceof PrismaNS.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw ApiError.conflict(`${def.name} ngày này của lễ tân vừa được thêm. Vui lòng tải lại.`);
+    }
+    throw error;
+  }
+  const session = (await lateEntrySessions(actor, { branchId, businessDate: input.businessDate }, client)).find(
+    (x) => x.id === id,
+  );
+  if (!session) throw new Error('A backfilled shift is missing from its own business date.');
+  return session;
 }
 
 export interface LateEntryInput {

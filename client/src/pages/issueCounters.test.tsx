@@ -4,7 +4,6 @@ import userEvent from '@testing-library/user-event';
 import { pickBranch } from '../test/reportFilter';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
-import { hcmToday } from '../lib/format';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -158,7 +157,6 @@ describe('Issue counters — dashboard card', () => {
   of counts.
 */
 describe('Issue counters — the branch selector carries them', () => {
-  const TODAY = hcmToday();
   const BRANCHES = BY_BRANCH.map((b, i) => ({
     id: b.branchId,
     code: b.code,
@@ -174,8 +172,8 @@ describe('Issue counters — the branch selector carries them', () => {
       'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
       'GET /api/issues/summary': () => ({ status: 200, body: { summary } }),
       'GET /api/admin/branches': () => ({ status: 200, body: { branches } }),
-      [`GET /api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`]: () => listBody([issue({ id: 'all' })]),
-      [`GET /api/issues?branchId=1&from=${TODAY}&to=${TODAY}&pageSize=100`]: () =>
+      'GET /api/issues?pageSize=100&outstanding=true': () => listBody([issue({ id: 'all' })]),
+      'GET /api/issues?branchId=1&pageSize=100&outstanding=true': () =>
         listBody([issue({ id: 'b1', description: 'Chỉ chi nhánh 1' })]),
     });
   }

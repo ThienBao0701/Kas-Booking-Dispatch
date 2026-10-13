@@ -169,7 +169,7 @@ describe('the two outcomes of a repair', () => {
    * records the result that Quản lý kỹ thuật will inspect, and nothing is sent
    * until there is one.
    */
-  it('asks for the result before it finishes the repair when inspection is on', async () => {
+  it('with the confirmation step, finishes through "Tình trạng vấn đề" — the result optional — and waits for a manager', async () => {
     let sent: Record<string, unknown> | null = null;
     installApiMock(
       routes('IN_PROGRESS', [issue({ inspectionEnabled: true })], {
@@ -183,16 +183,16 @@ describe('the two outcomes of a repair', () => {
     renderApp(`/app/technical/${QUEUE_PATH.IN_PROGRESS}`);
 
     await user.click(await screen.findByTestId('complete-i1'));
-    const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
     expect(sent).toBeNull();
-    expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
+    await user.click(within(dialog).getByTestId('stage-status-done'));
+    expect(dialog).toHaveTextContent('chỉ hoàn tất khi quản lý xác nhận');
+    expect(within(dialog).getByTestId('stage-confirm')).toBeDisabled();
     await user.click(within(dialog).getByTestId('verdict-CORRECT'));
-    // Whitespace is not a result.
-    await user.type(within(dialog).getByTestId('verdict-resolution'), '   ');
-    expect(within(dialog).getByTestId('complete-confirm')).toBeDisabled();
-
+    // "Cách xử lý (nếu có)": optional, as it always was.
+    expect(within(dialog).getByTestId('stage-confirm')).toBeEnabled();
     await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã thông tắc');
-    await user.click(within(dialog).getByTestId('complete-confirm'));
+    await user.click(within(dialog).getByTestId('stage-confirm'));
     await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã thông tắc' }));
   });
 

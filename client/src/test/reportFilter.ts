@@ -17,11 +17,14 @@ export async function pickBranch(id: number | string | 'ALL') {
 
 /**
  * "Khoảng ngày": the start, then the end, in the one calendar — which opens on
- * the month the current range ends in (`shown`, today's by default).
+ * the month the current range ends in (`shown`, today's by default). Where the
+ * filter offers "Khoảng ngày" alone, the calendar is opened directly.
  */
 export async function pickRange(from: string, to: string, shown = hcmToday().slice(0, 7)) {
-  await userEvent.click(await screen.findByTestId('period-RANGE'));
-  await userEvent.click(screen.getByTestId('period-range'));
+  // A range-only filter (the incident monitor) has no mode buttons to press.
+  const mode = screen.queryByTestId('period-RANGE');
+  if (mode) await userEvent.click(mode);
+  await userEvent.click(await screen.findByTestId('period-range'));
   for (let m = shown; m > from.slice(0, 7); m = monthBefore(m)) {
     await userEvent.click(screen.getByRole('button', { name: 'Tháng trước' }));
   }

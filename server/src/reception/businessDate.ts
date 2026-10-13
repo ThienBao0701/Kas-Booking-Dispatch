@@ -18,7 +18,7 @@
  * [D-1, D+2) and then keeping exactly those whose computed business date is in
  * range is a cheap indexed read; it never DECIDES membership.
  */
-import type { Prisma, PrismaClient, ShiftType } from '@prisma/client';
+import type { Prisma, PrismaClient, ShiftType, UserRole } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { hcmWallClockToUtc, nextHcmDay } from '../lib/clock';
 import { SHIFT_DEFINITIONS, shiftBusinessDate, shiftDefinition, shiftWindowLabel } from '../shift/shiftTypes';
@@ -35,6 +35,11 @@ export interface BusinessDateSession {
   closedAt: Date | null;
   /** Tiền đầu ca, as counted — null when it never was. */
   openingCash: number | null;
+  /** "Thêm ca": set only on a shift added afterwards from "Nhập bù báo cáo". */
+  backfilledByNameSnapshot: string | null;
+  backfilledByRole: UserRole | null;
+  backfilledAt: Date | null;
+  backfillReason: string | null;
   /** "YYYY-MM-DD" — the day this shift belongs to. */
   businessDate: string;
 }
@@ -61,6 +66,10 @@ export async function sessionsForBusinessDates(
       startedAt: true,
       closedAt: true,
       openingCash: true,
+      backfilledByNameSnapshot: true,
+      backfilledByRole: true,
+      backfilledAt: true,
+      backfillReason: true,
     },
     orderBy: { startedAt: 'asc' },
   });

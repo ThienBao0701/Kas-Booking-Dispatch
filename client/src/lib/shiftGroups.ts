@@ -22,6 +22,8 @@ export interface ShiftGroup {
   branchAddress: string | null;
   /** Has the shift pressed "Kết thúc ca"? Open shifts are not in the official report. */
   closed: boolean;
+  /** "Ca thêm bù": the shift was added afterwards with "Thêm ca" — by whom and why. */
+  backfill: OperationalReport['shiftBackfill'] | null;
   /** How many of the shift's records fall in each category. */
   counts: Partial<Record<ReportCategory, number>>;
   /** Oldest first — a shift reads forwards. */
@@ -72,6 +74,7 @@ export function groupByShift(rows: OperationalReport[]): DayGroup[] {
         employee: row.shiftReceptionistName ?? row.createdByName,
         branchAddress: row.branch?.address ?? null,
         closed: row.shiftClosed,
+        backfill: row.shiftBackfill ?? null,
         counts: {},
         rows: [],
       };

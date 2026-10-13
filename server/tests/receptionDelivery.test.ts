@@ -19,6 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
+import { addressOf } from './helpers/workplace';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -212,7 +213,7 @@ describe('one record, four views', () => {
     // A housekeeping account works where its shift is ("Vào ca").
     for (const [agent, branchId] of [[housekeeping, cn1], [housekeeping2, cn2]] as const) {
       await agent.post('/api/housekeeping/shift/end').send({});
-      expect((await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan' })).status).toBe(201);
+      expect((await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan', address: await addressOf(branchId) })).status).toBe(201);
     }
     expect(await names(housekeeping)).toEqual(['Khăn']);
     expect(await names(housekeeping2)).toEqual(['Ga giường']);

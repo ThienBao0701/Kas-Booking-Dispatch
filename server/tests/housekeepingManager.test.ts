@@ -20,6 +20,7 @@ import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { addressOf } from './helpers/workplace';
 import type { CleaningDetailRow } from '../src/housekeeping/housekeepingKpi';
 import { BEDDING_COLUMNS, REPLACEMENT_COLUMNS, ROOM_COLUMNS } from '../src/report/housekeepingCleaningPdf';
 import type { Column } from '../src/report/pdf';
@@ -104,7 +105,7 @@ async function setUp(agent: Agent, rooms: string[], assignee: number | null, bod
 }
 
 async function onShift(agent: Agent, branchId: number) {
-  expect((await agent.post('/api/housekeeping/shift/start').send({ branchId })).status).toBe(201);
+  expect((await agent.post('/api/housekeeping/shift/start').send({ branchId, address: await addressOf(branchId) })).status).toBe(201);
 }
 
 describe('the account and its one branch', () => {

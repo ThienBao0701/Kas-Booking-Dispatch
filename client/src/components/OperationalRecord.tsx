@@ -19,6 +19,7 @@ import { formatVnd } from '../lib/money';
 import { formatDateTime } from '../lib/format';
 import { ROOM_SERVICE_PRICE_LABEL } from '../lib/roomServiceFields';
 import { IssueTimeline } from './IssueViews';
+import { LateEntryNotice } from './LateEntry';
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -106,6 +107,16 @@ export function OperationalRecordDetail({
             </span>
           </span>
         </p>
+      ) : null}
+
+      {/* "Nhập bù": entered later by someone else, for the receptionist of the original shift. */}
+      {row.lateEntry ? (
+        <LateEntryNotice
+          lateEntry={row.lateEntry}
+          forName={row.createdByName}
+          shiftLabel={`${row.shiftName ?? 'Không có ca'}, ${row.shiftDate.split('-').reverse().join('/')}`}
+          testId={`record-late-entry-${row.id}`}
+        />
       ) : null}
 
       <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

@@ -11,6 +11,10 @@
  * "Hoàn thành dọn phòng" shows everything entered for a last check before it is
  * sent. The person is the account: no name is asked anywhere.
  *
+ * A SHARED AREA ("Hành lang - Tầng 5") is worked the same way; its inspection is
+ * what the housekeeper noted (it has no room findings), and its cleaning is the
+ * same form and the same times.
+ *
  * Phone first: every control is a large tap target, the sections stack, numbers
  * use the numeric keyboard, and the main action sits at the bottom of the screen.
  */
@@ -60,7 +64,7 @@ export function HousekeepingRoomPage() {
     <div className="mx-auto max-w-3xl pb-24">
       <Link to="/app/inspections" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        Danh sách phòng
+        Danh sách công việc
       </Link>
       <QueryState isLoading={task.isLoading || catalog.isLoading} isError={task.isError} error={task.error} onRetry={() => void task.refetch()}>
         {t && catalog.data ? (
@@ -93,7 +97,16 @@ export function HousekeepingRoomPage() {
             {t.state === 'NOT_STARTED' && active === 'inspect' ? (
               <p className="mb-3 text-sm text-slate-600">“Dọn phòng” mở sau khi lưu kiểm tra; thời gian dọn chỉ bắt đầu khi bấm “Bắt đầu dọn”.</p>
             ) : null}
-            {active === 'inspect' ? (
+            {active === 'inspect' && t.areaKind && t.areaKind !== 'ROOM' ? (
+              <AreaInspectPanel
+                task={t}
+                onSaved={(next) => {
+                  refresh(next);
+                  setTab('clean');
+                  setToast('Đã lưu kiểm tra. Bấm “Bắt đầu dọn” khi bắt đầu dọn.');
+                }}
+              />
+            ) : active === 'inspect' ? (
               <InspectPanel
                 task={t}
                 onSaved={(next) => {
@@ -162,8 +175,10 @@ function RoomHeader({ task }: { task: RoomTask }) {
   return (
     <section className="rounded-2xl border border-line-strong bg-white p-4 shadow-sm" data-testid="room-header">
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-2xl font-bold text-slate-900">PHÒNG {task.roomNumber}</h1>
-        <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-sm font-bold text-white">{task.statusCode}</span>
+        <h1 className="text-2xl font-bold text-slate-900">
+          {task.areaKind && task.areaKind !== 'ROOM' ? task.areaLabel : `PHÒNG ${task.roomNumber}`}
+        </h1>
+        <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-sm font-bold text-white">{task.taskLabel ?? task.statusCode}</span>
         <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${stateTone}`} data-testid="room-state">
           {task.stateLabel}
         </span>
@@ -220,6 +235,50 @@ function StartPanel({ task, onStarted }: { task: RoomTask; onStarted: (task: Roo
 }
 
 /* --------------------------------- Kiểm phòng -------------------------------- */
+
+/**
+ * "KIỂM TRA" OF A SHARED AREA — what the housekeeper saw, in words (optional),
+ * then "Lưu kiểm tra": "Chờ dọn phòng". Nothing starts until "Bắt đầu dọn".
+ */
+function AreaInspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomTask) => void }) {
+  const [note, setNote] = useState('');
+  const save = useMutation({
+    mutationFn: () => roomWorkApi.inspect(task.id, [], note.trim() || undefined),
+    onSuccess: ({ task: next }) => onSaved(next),
+  });
+  if (task.state !== 'NOT_STARTED') {
+    return (
+      <section className="rounded-2xl border border-line bg-white p-4" data-testid="inspection-saved">
+        <h2 className="text-base font-semibold text-slate-900">
+          Đã kiểm tra{task.inspectedAt ? ` lúc ${formatDateTime(task.inspectedAt)}` : ''}
+        </h2>
+        <p className="mt-2 text-base text-slate-700">{task.inspectionNote ?? 'Không ghi nhận gì thêm.'}</p>
+      </section>
+    );
+  }
+  return (
+    <section className="space-y-3 rounded-2xl border border-line bg-white p-4" data-testid="area-inspect">
+      <label className="block text-sm font-medium text-slate-700" htmlFor="area-inspection-note">
+        Ghi nhận khi kiểm tra (không bắt buộc)
+        <textarea
+          id="area-inspection-note"
+          className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900"
+          rows={3}
+          maxLength={2000}
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Ví dụ: Thảm hành lang bẩn, có rác ở chân cầu thang"
+          data-testid="area-inspection-note"
+        />
+      </label>
+      {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
+      <Button className="w-full" onClick={() => save.mutate()} loading={save.isPending} data-testid="area-inspect-save">
+        <Save className="h-4 w-4" aria-hidden="true" />
+        Lưu kiểm tra
+      </Button>
+    </section>
+  );
+}
 
 function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomTask) => void }) {
   const [checked, setChecked] = useState<Partial<Record<RoomIssueType, string>>>({});

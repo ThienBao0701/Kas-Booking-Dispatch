@@ -16,16 +16,29 @@
  * NOTHING IS DELETED. "Xóa" voids an item; its inspection, findings, collections
  * and event history stay, so a KPI or a collection can always be explained.
  */
-import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import type { HousekeepingAreaKind, Prisma, PrismaClient, UserRole } from '@prisma/client';
+import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { branchScopeOf, scopeIncludes, type BranchScope } from '../auth/branchScope';
-import { catalogRoom } from '../room/branchRooms';
+import { catalogFloor, catalogRoom, floorsForBranchCode } from '../room/branchRooms';
 import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
-import { accountBranch } from './workShiftService';
+import { accountBranch, openSegmentFor } from './workShiftService';
+import { can } from '../auth/capabilities';
+import {
+  AREA_KIND_LABELS,
+  WORK_PHASE_LABELS,
+  WORK_TASK_CODES,
+  placeLabel,
+  roomFloor,
+  taskLabel,
+  workAreasFor,
+  workPhase,
+} from './workAreas';
 import { notifyOperational } from '../push/pushService';
 
 export const TASK_INCLUDE = {
@@ -52,6 +65,9 @@ const EVENT_LABELS: Record<TaskRow['events'][number]['type'], string> = {
   VOIDED: 'Xóa',
   REVIEWED: 'Đánh giá chất lượng',
   STARTED: 'Bắt đầu dọn',
+  ACCEPTED: 'Nhận việc',
+  INSPECTION_STARTED: 'Bắt đầu kiểm tra',
+  CLAIM_REJECTED: 'Nhận việc không thành công',
 };
 
 const REVIEWED_LOCKED = 'Phòng này đã được đánh giá — lần dọn đã đánh giá không thể thay đổi.';
@@ -77,9 +93,18 @@ function reviewOf(row: TaskRow) {
   return null;
 }
 
-/** The next cycle's number for a room and day — every cycle counts, voided ones too. */
-async function nextCycle(tx: Prisma.TransactionClient, branchId: number, workDate: string, roomNumber: string): Promise<number> {
-  const { _max } = await tx.housekeepingRoomTask.aggregate({ where: { branchId, workDate, roomNumber }, _max: { cycleNumber: true } });
+/**
+ * The next cycle's number for one item (a room and day, and the item's key —
+ * "" for the one-per-room items of the board) — every cycle counts, voided too.
+ */
+async function nextCycle(
+  tx: Prisma.TransactionClient,
+  branchId: number,
+  workDate: string,
+  roomNumber: string,
+  itemKey = '',
+): Promise<number> {
+  const { _max } = await tx.housekeepingRoomTask.aggregate({ where: { branchId, workDate, roomNumber, itemKey }, _max: { cycleNumber: true } });
   return (_max.cycleNumber ?? 0) + 1;
 }
 
@@ -206,6 +231,25 @@ export function serializeTask(row: TaskRow, opts: { money: boolean; now?: Date }
     statusCode: row.statusCode,
     priority: row.priority,
     note: row.note,
+    /** The work item: where, what, and which submission it came in. */
+    itemKey: row.itemKey,
+    areaKind: row.areaKind,
+    areaKindLabel: AREA_KIND_LABELS[row.areaKind],
+    floor: row.floor,
+    /** "Khu vực": "Phòng - 502", "Hành lang - Tầng 5". */
+    areaLabel: placeLabel(row.areaKind, row.areaKind === 'ROOM' ? row.roomNumber : null, row.floor),
+    taskName: row.taskName,
+    /** "Việc cần làm": "OC", "Dọn lối đi", "Khác — Thay rèm". */
+    taskLabel: taskLabel(row),
+    groupId: row.groupId,
+    /** Where the item stands, in the work's own order (see workAreas.workPhase). */
+    phase: workPhase(row),
+    phaseLabel: WORK_PHASE_LABELS[workPhase(row)],
+    acceptedAt: row.acceptedAt?.toISOString() ?? null,
+    inspectionStartedAt: row.inspectionStartedAt?.toISOString() ?? null,
+    /** When the inspection was saved — the room inspection's own time on older rows. */
+    inspectedAt: (row.inspectedAt ?? row.inspection?.createdAt)?.toISOString() ?? null,
+    inspectionNote: row.inspectionNote,
     assignee: row.assigneeUserId ? { id: row.assigneeUserId, name: row.assigneeNameSnapshot ?? '—' } : null,
     state: row.state,
     stateLabel: ROOM_WORK_STATE_LABELS[row.state],
@@ -286,7 +330,8 @@ export async function listTasks(
   const rows = await client.housekeepingRoomTask.findMany({
     where: { ...managerBranchWhere(actor, filter.branchId), workDate, ...(filter.includeVoided ? {} : { voidedAt: null }) },
     include: TASK_INCLUDE,
-    orderBy: [{ branchId: 'asc' }, { roomNumber: 'asc' }],
+    // A room's cycles in order, then its items as they were created.
+    orderBy: [{ branchId: 'asc' }, { roomNumber: 'asc' }, { cycleNumber: 'asc' }, { createdAt: 'asc' }, { groupIndex: 'asc' }],
   });
   const now = getClock().now();
   return rows.map((r) => serializeTask(r, { money: true, now }));
@@ -564,7 +609,12 @@ export async function reviewTask(
         branchId: row.branchId,
         workDate: row.workDate,
         roomNumber: row.roomNumber,
-        cycleNumber: await nextCycle(tx, row.branchId, row.workDate, row.roomNumber),
+        // The same ITEM again: its key, place and name.
+        itemKey: row.itemKey,
+        areaKind: row.areaKind,
+        floor: row.floor,
+        taskName: row.taskName,
+        cycleNumber: await nextCycle(tx, row.branchId, row.workDate, row.roomNumber, row.itemKey),
         previousTaskId: id,
         statusCode: row.statusCode,
         priority: row.priority,
@@ -630,7 +680,7 @@ export async function myTasks(actor: HousekeepingActor, workDateRaw: unknown, cl
   const rows = await client.housekeepingRoomTask.findMany({
     where: { assigneeUserId: actor.id, branchId, workDate, voidedAt: null, state: { not: 'COMPLETED' } },
     include: TASK_INCLUDE,
-    orderBy: [{ branchId: 'asc' }, { priority: 'desc' }, { roomNumber: 'asc' }],
+    orderBy: [{ branchId: 'asc' }, { priority: 'desc' }, { roomNumber: 'asc' }, { cycleNumber: 'asc' }, { createdAt: 'asc' }],
   });
   const now = getClock().now();
   return rows.map((r) => serializeTask(r, { money: false, now }));
@@ -668,20 +718,27 @@ export async function openTask(actor: HousekeepingActor, id: string, clock: Cloc
 export async function inspectTask(
   actor: HousekeepingActor,
   id: string,
-  input: { issues: { type: unknown; note?: unknown }[] },
+  input: { issues: { type: unknown; note?: unknown }[]; note?: unknown },
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
   const row = await loadTask(id, client);
   assertAssignee(row, actor);
   if (row.state !== 'NOT_STARTED' || row.inspectionId) throw ApiError.conflict('Phòng này đã được kiểm.');
+  if (row.areaKind !== 'ROOM') return inspectArea(actor, row, input, clock, client);
   await createInspection({ roomNumber: row.roomNumber, issues: input.issues }, actor, clock, client, {
     allowNoFindings: true,
     branchId: row.branchId,
     onCreated: async (tx, inspection) => {
       const { count } = await tx.housekeepingRoomTask.updateMany({
         where: { id, voidedAt: null, state: 'NOT_STARTED', inspectionId: null, assigneeUserId: actor.id },
-        data: { state: 'INSPECTED', inspectionId: inspection.id },
+        data: {
+          state: 'INSPECTED',
+          inspectionId: inspection.id,
+          inspectedAt: inspection.createdAt,
+          // Saved without "Kiểm tra" first (an older client): it began when it was saved.
+          ...(row.inspectionStartedAt ? {} : { inspectionStartedAt: inspection.createdAt }),
+        },
       });
       if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
       await recordEvent(tx, id, 'INSPECTED', actor, inspection.createdAt, {
@@ -768,4 +825,470 @@ export function saveCleaning(actor: HousekeepingActor, id: string, raw: unknown,
 /** "HOÀN THÀNH DỌN PHÒNG": the form, the end time and the duration from the inspection. */
 export function completeTask(actor: HousekeepingActor, id: string, raw: unknown, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   return writeCleaning(actor, id, raw, true, clock, client);
+}
+
+/* ------------------------------------------------------------------ *
+ * WORK ITEMS — "Tạo công việc", "Nhận", "Kiểm tra", "Giao lại"
+ * ------------------------------------------------------------------ */
+
+/** "Chọn khu vực": the branch's floors and rooms, from its own catalog (see workAreas). */
+export async function listWorkAreas(actor: HousekeepingActor, query: { branchId?: unknown }, client: PrismaClient = defaultPrisma) {
+  const branch = await managedBranch(actor, query.branchId === '' ? undefined : query.branchId, client);
+  return { branchId: branch.id, ...workAreasFor(branch.code) };
+}
+
+export interface WorkItemInput {
+  areaKind?: unknown;
+  roomNumber?: unknown;
+  floor?: unknown;
+  /** A room's "Việc cần làm": OUT / OC / VC, or OTHER ("Khác"). */
+  taskCode?: unknown;
+  taskName?: unknown;
+  note?: unknown;
+  priority?: unknown;
+}
+
+export interface CreateWorkItemsInput {
+  branchId?: unknown;
+  workDate: unknown;
+  /** One per submission, generated by the form: a repeat of it creates nothing twice. */
+  requestId?: unknown;
+  items: unknown;
+}
+
+const MAX_WORK_ITEMS = 50;
+const REQUEST_ID = /^[A-Za-z0-9-]{8,64}$/;
+
+interface NormalizedItem {
+  areaKind: HousekeepingAreaKind;
+  roomNumber: string;
+  floor: string | null;
+  statusCode: string;
+  taskName: string | null;
+  note: string | null;
+  priority: boolean;
+}
+
+/**
+ * One item of "Tạo công việc", checked against the branch's own catalog:
+ *
+ *   PHÒNG       a room of the branch (refused otherwise), its "Việc cần làm"
+ *               (OUT / OC / VC, or "Khác" — which needs its "Ghi chú" saying
+ *               what to do); its floor is read from the catalog, never typed;
+ *   HÀNH LANG / CẦU THANG
+ *               a floor of the branch, a typed "Tên công việc" and a required
+ *               "Ghi chú / Hướng dẫn";
+ *   KHÁC        a typed "Tên công việc" and a required note saying where and
+ *               what; the floor when there is one.
+ */
+function normalizeItem(raw: WorkItemInput, branchCode: string, index: number): NormalizedItem {
+  const at = `Công việc ${index + 1}`;
+  const kind = raw.areaKind ?? 'ROOM';
+  if (kind !== 'ROOM' && kind !== 'HALLWAY' && kind !== 'STAIRCASE' && kind !== 'OTHER') {
+    throw ApiError.validation(`${at}: khu vực không hợp lệ.`);
+  }
+  const taskName = text(raw.taskName, 200, `${at}: Tên công việc`);
+  const note = text(raw.note, 1000, `${at}: Ghi chú`);
+  const priority = raw.priority === true;
+  const floors = floorsForBranchCode(branchCode);
+  if (kind === 'ROOM') {
+    const typed = typeof raw.roomNumber === 'string' ? raw.roomNumber.trim() : '';
+    if (!typed) throw ApiError.validation(`${at}: vui lòng chọn phòng.`);
+    if (typed.length > 50) throw ApiError.validation(`${at}: số phòng quá dài.`);
+    const roomNumber = catalogRoom(branchCode, typed)!;
+    const code = raw.taskCode;
+    if (typeof code !== 'string' || !(WORK_TASK_CODES as readonly string[]).includes(code)) {
+      throw ApiError.validation(`${at}: vui lòng chọn việc cần làm cho phòng ${roomNumber}.`);
+    }
+    if (code === 'OTHER' && !note) throw ApiError.validation(`${at}: "Khác" cần ghi chú nêu rõ việc cần làm.`);
+    return { areaKind: 'ROOM', roomNumber, floor: roomFloor(roomNumber, floors), statusCode: code, taskName, note, priority };
+  }
+  const typedFloor = typeof raw.floor === 'string' ? raw.floor.trim() : '';
+  if (typedFloor.length > 50) throw ApiError.validation(`${at}: tầng quá dài.`);
+  const floor = typedFloor ? catalogFloor(branchCode, typedFloor) : null;
+  if (kind !== 'OTHER' && !floor) throw ApiError.validation(`${at}: vui lòng chọn tầng của ${AREA_KIND_LABELS[kind].toLowerCase()}.`);
+  if (!taskName) throw ApiError.validation(`${at}: vui lòng nhập tên công việc.`);
+  if (!note) {
+    throw ApiError.validation(
+      kind === 'OTHER'
+        ? `${at}: "Khác" cần ghi chú nêu rõ vị trí và việc cần làm.`
+        : `${at}: ${AREA_KIND_LABELS[kind]} cần ghi chú / hướng dẫn.`,
+    );
+  }
+  return { areaKind: kind, roomNumber: placeLabel(kind, null, floor), floor, statusCode: 'OTHER', taskName, note, priority };
+}
+
+/**
+ * "TẠO CÔNG VIỆC" — one or many work items, saved together, each its OWN row:
+ * accepted, inspected, cleaned, reassigned and reviewed on its own. The
+ * submission's `requestId` groups them (`groupId` + `groupIndex`, unique
+ * together): a double-click or a retried request finds the group already saved
+ * and returns it instead of creating it again.
+ *
+ * Several items may share a room ("OC" and a "Khác" for 502). What is refused
+ * is the same room CODE twice while one is still open — the room has one
+ * OUT / OC / VC for the day, as on the board.
+ */
+export async function createWorkItems(
+  actor: HousekeepingActor,
+  input: CreateWorkItemsInput,
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  const branch = await managedBranch(actor, input.branchId, client);
+  const workDate = assertDate(input.workDate);
+  const requestId = typeof input.requestId === 'string' && REQUEST_ID.test(input.requestId) ? input.requestId : randomUUID();
+  const rawItems = Array.isArray(input.items) ? (input.items as WorkItemInput[]) : [];
+  if (rawItems.length === 0) throw ApiError.validation('Vui lòng thêm ít nhất một công việc.');
+  if (rawItems.length > MAX_WORK_ITEMS) throw ApiError.validation(`Tối đa ${MAX_WORK_ITEMS} công việc mỗi lần.`);
+
+  const already = await groupTasks(requestId, client);
+  if (already.length > 0) return { created: 0, duplicate: true, tasks: already };
+
+  const items = rawItems.map((raw, i) => normalizeItem(raw ?? {}, branch.code, i));
+  // The same room code twice in one submission, or while one is still open.
+  const codeKey = (i: { roomNumber: string; statusCode: string }) => `${i.roomNumber}|${i.statusCode}`;
+  const coded = items.filter((i) => i.areaKind === 'ROOM' && i.statusCode !== 'OTHER');
+  const seen = new Set<string>();
+  for (const i of coded) {
+    if (seen.has(codeKey(i))) throw ApiError.validation(`Phòng ${i.roomNumber} có hai việc ${i.statusCode} trong cùng một lần tạo.`);
+    seen.add(codeKey(i));
+  }
+  if (coded.length > 0) {
+    const open = await client.housekeepingRoomTask.findMany({
+      where: {
+        branchId: branch.id,
+        workDate,
+        voidedAt: null,
+        reviewResult: null,
+        OR: coded.map((i) => ({ roomNumber: i.roomNumber, statusCode: i.statusCode })),
+      },
+      select: { roomNumber: true, statusCode: true },
+    });
+    if (open.length > 0) {
+      throw ApiError.conflict(
+        `Đã có việc đang mở: ${open.map((o) => `Phòng ${o.roomNumber} · ${o.statusCode}`).join(', ')}. Sửa công việc đó thay vì tạo lại.`,
+      );
+    }
+  }
+
+  const now = clock.now();
+  try {
+    await client.$transaction(async (tx) => {
+      for (const [index, item] of items.entries()) {
+        const task = await tx.housekeepingRoomTask.create({
+          data: {
+            branchId: branch.id,
+            workDate,
+            roomNumber: item.roomNumber,
+            itemKey: randomUUID(),
+            areaKind: item.areaKind,
+            floor: item.floor,
+            taskName: item.taskName,
+            cycleNumber: 1,
+            statusCode: item.statusCode,
+            priority: item.priority,
+            note: item.note,
+            groupId: requestId,
+            groupIndex: index,
+            createdByUserId: actor.id,
+            createdByNameSnapshot: actor.fullName,
+            createdAt: now,
+          },
+        });
+        await recordEvent(tx, task.id, 'CREATED', actor, now, {
+          areaKind: item.areaKind,
+          place: item.roomNumber,
+          floor: item.floor,
+          statusCode: item.statusCode,
+          taskName: item.taskName,
+          priority: item.priority,
+          note: item.note,
+          groupId: requestId,
+        });
+      }
+    });
+  } catch (error) {
+    // The same submission racing itself: the other request saved the group.
+    if (error instanceof PrismaNS.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const saved = await groupTasks(requestId, client);
+      if (saved.length > 0) return { created: 0, duplicate: true, tasks: saved };
+      // Another submission opened the same room code a moment ago.
+      throw ApiError.conflict('Một phòng trong danh sách vừa được tạo cùng việc ở nơi khác. Vui lòng tải lại và thử lại.');
+    }
+    throw error;
+  }
+  return { created: items.length, duplicate: false, tasks: await groupTasks(requestId, client) };
+}
+
+async function groupTasks(groupId: string, client: PrismaClient) {
+  const rows = await client.housekeepingRoomTask.findMany({ where: { groupId }, include: TASK_INCLUDE, orderBy: { groupIndex: 'asc' } });
+  const now = getClock().now();
+  return rows.map((r) => serializeTask(r, { money: true, now }));
+}
+
+/** The open shift's segment — it must be at the item's branch to work it. */
+async function workingSegment(actor: HousekeepingActor, branchId: number, client: PrismaClient) {
+  const segment = await openSegmentFor(actor.id, client).catch(() => {
+    throw ApiError.conflict('Bạn cần "Vào ca" trước khi nhận hoặc làm công việc.');
+  });
+  if (segment.branchId !== branchId || segment.branchId !== accountBranch(actor)) {
+    throw ApiError.branchAccessDenied('Công việc này không thuộc nơi làm việc của ca hiện tại.');
+  }
+  return segment;
+}
+
+/**
+ * THE HOUSEKEEPER'S LIST — only once "Vào ca" has established where they work:
+ * the day's open items of THAT branch that are either theirs, or nobody's yet
+ * ("Chưa tiếp nhận", for "Nhận"). Each item is one row; two items of one room
+ * are two rows. Without an open shift there is nothing to show — no branch, no
+ * items.
+ */
+export async function workList(actor: HousekeepingActor, workDateRaw: unknown, client: PrismaClient = defaultPrisma) {
+  if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới có danh sách công việc.');
+  const home = accountBranch(actor);
+  const workDate = assertDate(workDateRaw);
+  const segment = await client.housekeepingWorkSegment.findFirst({
+    where: { endedAt: null, session: { userId: actor.id, endedAt: null } },
+    select: { branchId: true },
+  });
+  if (!segment || segment.branchId !== home) return { working: false, tasks: [] };
+  const rows = await client.housekeepingRoomTask.findMany({
+    where: {
+      branchId: segment.branchId,
+      workDate,
+      voidedAt: null,
+      state: { not: 'COMPLETED' },
+      OR: [{ assigneeUserId: actor.id }, { assigneeUserId: null, state: 'NOT_STARTED', reviewResult: null }],
+    },
+    include: TASK_INCLUDE,
+    orderBy: [{ priority: 'desc' }, { floor: 'asc' }, { roomNumber: 'asc' }, { createdAt: 'asc' }],
+  });
+  const now = getClock().now();
+  return { working: true, tasks: rows.map((r) => serializeTask(r, { money: false, now })) };
+}
+
+/**
+ * "NHẬN" — the housekeeper takes exactly the items they selected (one, or
+ * several at once), on their open shift at the items' branch.
+ *
+ * ALL OR NOTHING, AND NEVER TWO OWNERS. Each item is taken with a conditional
+ * write on "nobody has it, nothing has started", inside one transaction: if any
+ * one of them was taken a moment ago by somebody else, none is taken, the
+ * caller is told which, and the refusal is kept in that item's history.
+ * Accepting starts nothing — the item waits for "Kiểm tra".
+ */
+export async function claimTasks(
+  actor: HousekeepingActor,
+  input: { taskIds?: unknown },
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới nhận được công việc.');
+  const ids = Array.isArray(input.taskIds) ? [...new Set(input.taskIds.filter((x): x is string => typeof x === 'string' && x.length > 0))] : [];
+  if (ids.length === 0) throw ApiError.validation('Vui lòng chọn công việc cần nhận.');
+  if (ids.length > MAX_WORK_ITEMS) throw ApiError.validation(`Tối đa ${MAX_WORK_ITEMS} công việc mỗi lần.`);
+  const home = accountBranch(actor);
+  const segment = await workingSegment(actor, home, client);
+  const rows = await client.housekeepingRoomTask.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, branchId: true, areaKind: true, roomNumber: true, floor: true, taskName: true, statusCode: true },
+  });
+  // Another branch's item (or none at all) is not this housekeeper's to see.
+  if (rows.length !== ids.length || rows.some((r) => r.branchId !== segment.branchId)) {
+    throw ApiError.notFound('Không tìm thấy công việc.');
+  }
+  const now = clock.now();
+  const lost: string[] = [];
+  try {
+    await client.$transaction(async (tx) => {
+      for (const id of ids) {
+        const { count } = await tx.housekeepingRoomTask.updateMany({
+          where: { id, branchId: segment.branchId, assigneeUserId: null, voidedAt: null, state: 'NOT_STARTED', reviewResult: null },
+          data: { assigneeUserId: actor.id, assigneeNameSnapshot: actor.fullName, acceptedAt: now },
+        });
+        if (count === 0) lost.push(id);
+        else await recordEvent(tx, id, 'ACCEPTED', actor, now, { toId: actor.id, toName: actor.fullName, selected: ids.length });
+      }
+      if (lost.length > 0) throw ApiError.conflict('claim-lost');
+    });
+  } catch (error) {
+    if (lost.length === 0) throw error;
+    await client.$transaction(async (tx) => {
+      for (const id of lost) await recordEvent(tx, id, 'CLAIM_REJECTED', actor, now, { reason: 'TAKEN_OR_CHANGED' });
+    });
+    const names = rows
+      .filter((r) => lost.includes(r.id))
+      .map((r) => `${placeLabel(r.areaKind, r.areaKind === 'ROOM' ? r.roomNumber : null, r.floor)} · ${taskLabel(r)}`);
+    throw ApiError.conflict(
+      `Không nhận được: ${names.join('; ')} — công việc vừa được người khác nhận hoặc đã thay đổi. Vui lòng tải lại danh sách và thử lại.`,
+      { taskIds: lost },
+    );
+  }
+  const fresh = await client.housekeepingRoomTask.findMany({ where: { id: { in: ids } }, include: TASK_INCLUDE });
+  return fresh.map((r) => serializeTask(r, { money: false, now }));
+}
+
+/**
+ * "KIỂM TRA" — the inspection begins: "Đã tiếp nhận" → "Đang kiểm tra". Only
+ * the item's own housekeeper, on its shift there; once (a repeat changes
+ * nothing). Saving it ("Lưu kiểm tra") is what moves the item to "Chờ dọn phòng".
+ */
+export async function beginInspection(actor: HousekeepingActor, id: string, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
+  const row = await loadTask(id, client);
+  assertAssignee(row, actor);
+  await workingSegment(actor, row.branchId, client);
+  if (row.state !== 'NOT_STARTED') throw ApiError.conflict('Công việc này đã được kiểm tra.');
+  if (row.inspectionStartedAt) return serializeTask(row, { money: false });
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id, voidedAt: null, state: 'NOT_STARTED', inspectionStartedAt: null, assigneeUserId: actor.id },
+      data: { inspectionStartedAt: now },
+    });
+    if (count === 0) throw ApiError.conflict('Công việc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, id, 'INSPECTION_STARTED', actor, now);
+  });
+  return serializeTask(await loadTask(id, client), { money: false });
+}
+
+/**
+ * "LƯU KIỂM TRA" of a SHARED AREA. A hallway is not a room: it has no room
+ * inspection record and no guest damages to charge, so what the housekeeper
+ * saw is kept on the item itself (`inspectionNote`), at the server's time, on
+ * the open shift there. Then, as for a room: "Chờ dọn phòng", nothing started.
+ */
+async function inspectArea(
+  actor: HousekeepingActor,
+  row: TaskRow,
+  input: { issues: { type: unknown; note?: unknown }[]; note?: unknown },
+  clock: Clock,
+  client: PrismaClient,
+) {
+  await workingSegment(actor, row.branchId, client);
+  if (input.issues.length > 0) throw ApiError.validation('Khu vực chung không ghi nhận hư hỏng phòng — ghi vào phần ghi chú.');
+  const note = text(input.note, 2000, 'Ghi chú kiểm tra');
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id: row.id, voidedAt: null, state: 'NOT_STARTED', assigneeUserId: actor.id },
+      data: {
+        state: 'INSPECTED',
+        inspectedAt: now,
+        inspectionNote: note,
+        ...(row.inspectionStartedAt ? {} : { inspectionStartedAt: now }),
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Công việc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, row.id, 'INSPECTED', actor, now, { area: true, note });
+  });
+  return serializeTask(await loadTask(row.id, client), { money: false });
+}
+
+/* ------------------------------------------------------------------ *
+ * "Các công việc trong ngày" for the reception managers, and "Giao lại"
+ * ------------------------------------------------------------------ */
+
+/**
+ * WHO READS THE DAY'S WORK ITEMS: the Admin and Quản lý buồng phòng (as on the
+ * board), and Quản lý lễ tân / Tổng quản lý lễ tân over their own branches.
+ */
+function workReaderScope(actor: HousekeepingActor): BranchScope {
+  if (
+    actor.role !== 'ADMIN' &&
+    actor.role !== 'HOUSEKEEPING_MANAGER' &&
+    actor.role !== 'RECEPTION_MANAGER' &&
+    actor.role !== 'RECEPTION_GENERAL_MANAGER'
+  ) {
+    throw ApiError.forbidden('Bạn không có quyền xem công việc buồng phòng.');
+  }
+  return branchScopeOf(actor);
+}
+
+/** The day's work items of the reader's branches (one, when asked), one row each. */
+export async function listWorkOrders(
+  actor: HousekeepingActor,
+  filter: { workDate: unknown; branchId?: number },
+  client: PrismaClient = defaultPrisma,
+) {
+  const scope = workReaderScope(actor);
+  const workDate = assertDate(filter.workDate);
+  if (filter.branchId !== undefined && !scopeIncludes(scope, filter.branchId)) {
+    throw ApiError.branchAccessDenied('Chi nhánh này nằm ngoài phạm vi của bạn.');
+  }
+  const where: Prisma.HousekeepingRoomTaskWhereInput = {
+    workDate,
+    voidedAt: null,
+    ...(filter.branchId !== undefined ? { branchId: filter.branchId } : scope === 'ALL' ? {} : { branchId: { in: [...scope] } }),
+  };
+  const rows = await client.housekeepingRoomTask.findMany({
+    where,
+    include: TASK_INCLUDE,
+    orderBy: [{ branchId: 'asc' }, { floor: 'asc' }, { roomNumber: 'asc' }, { createdAt: 'asc' }],
+  });
+  const now = getClock().now();
+  return rows.map((r) => serializeTask(r, { money: false, now }));
+}
+
+/** The housekeepers a reassignment may name at one branch of the reader's scope. */
+export async function reassignableStaff(actor: HousekeepingActor, query: { branchId?: unknown }, client: PrismaClient = defaultPrisma) {
+  const scope = workReaderScope(actor);
+  const id = Number(query.branchId);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.validation('Vui lòng chọn chi nhánh.');
+  if (!scopeIncludes(scope, id)) throw ApiError.branchAccessDenied('Chi nhánh này nằm ngoài phạm vi của bạn.');
+  return client.user.findMany({ where: branchStaffWhere(id), select: { id: true, fullName: true }, orderBy: { fullName: 'asc' } });
+}
+
+/**
+ * "GIAO LẠI" AFTER THE INSPECTION — the handoff between two housekeepers: the
+ * item has been inspected ("Chờ dọn phòng") and nobody has begun cleaning it.
+ * The Admin, Quản lý buồng phòng and Quản lý lễ tân (`housekeeping.reassignAwaitingCleaning`),
+ * each within its branches, may give it to another active housekeeper of the
+ * item's branch. The previous and new housekeeper, the actor, the time and the
+ * reason are kept in the item's history; the inspection keeps its inspector.
+ *
+ * ONCE CLEANING HAS BEGUN the cleaner stays the cleaner: refused, with the
+ * reason — the board's own "Giao lại" (the manager's) is unchanged.
+ */
+export async function reassignAwaitingCleaning(
+  actor: HousekeepingActor,
+  id: string,
+  input: { assigneeUserId?: unknown; reason?: unknown },
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  if (!can(actor.role, 'housekeeping.reassignAwaitingCleaning')) {
+    throw ApiError.forbidden('Bạn không có quyền giao lại công việc buồng phòng.');
+  }
+  const row = await loadTask(id, client);
+  if (!scopeIncludes(branchScopeOf(actor), row.branchId)) throw ApiError.branchAccessDenied();
+  if (row.voidedAt) throw ApiError.conflict('Công việc này đã bị xóa.');
+  if (row.state === 'IN_PROGRESS') throw ApiError.conflict('Công việc đang được dọn — không thể đổi người thực hiện giữa chừng.');
+  if (row.state === 'COMPLETED') throw ApiError.conflict('Công việc đã hoàn thành, không thể giao lại.');
+  if (row.state !== 'INSPECTED') throw ApiError.conflict('Chỉ giao lại được công việc đã kiểm tra và đang chờ dọn phòng.');
+  if (input.assigneeUserId === null || input.assigneeUserId === undefined || input.assigneeUserId === '') {
+    throw ApiError.validation('Vui lòng chọn nhân viên nhận công việc.');
+  }
+  const person = (await assignee(input.assigneeUserId, row.branchId, client))!;
+  if (person.id === row.assigneeUserId) throw ApiError.validation('Công việc đang do nhân viên này thực hiện.');
+  const reason = text(input.reason, 1000, 'Lý do');
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id, voidedAt: null, state: 'INSPECTED', startedAt: null, assigneeUserId: row.assigneeUserId },
+      data: { assigneeUserId: person.id, assigneeNameSnapshot: person.fullName },
+    });
+    if (count === 0) throw ApiError.conflict('Công việc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, id, 'ASSIGNED', actor, now, {
+      fromId: row.assigneeUserId,
+      fromName: row.assigneeNameSnapshot,
+      toId: person.id,
+      toName: person.fullName,
+      reason,
+      stage: 'AWAITING_CLEANING',
+    });
+  });
+  await notifyAssignee(person.id, row.branchId, [{ id, roomNumber: row.roomNumber }], now, client);
+  return serializeTask(await loadTask(id, client), { money: actor.role === 'ADMIN' || actor.role === 'HOUSEKEEPING_MANAGER' });
 }

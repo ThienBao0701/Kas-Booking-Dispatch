@@ -15,6 +15,7 @@
  */
 import { useState } from 'react';
 import { SourceTag } from './SourceTag';
+import { RecordLateEntryBadge } from './LateEntry';
 import { deliveryEditFields } from '../lib/recordEdit';
 import { type OperationalReport, type ReportOptions } from '../api/receptionReports';
 import { DataTable, type DataColumn } from './DataTable';
@@ -91,6 +92,7 @@ export function DeliveryTable({
         <>
           {r.delivery?.itemName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
           <VoidedNote report={r} />
           {r.audits.some((a) => a.action === 'EDIT') ? (
             <span className="mt-0.5 block text-xs font-normal text-amber-700">Đã sửa</span>

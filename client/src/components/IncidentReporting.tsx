@@ -735,10 +735,10 @@ export function IncidentRangeSummary({
     { label: 'Tổng sự cố phát sinh', value: s.total },
     { label: 'Sự cố khách sạn', value: s.newCount },
     { label: 'Đang sửa', value: s.inProgressCount },
-    ...(inspection ? [{ label: 'Chờ nghiệm thu', value: s.awaitingInspectionCount, tone: 'text-violet-700' }] : []),
+    ...(inspection ? [{ label: 'Chờ quản lý xác nhận', value: s.awaitingInspectionCount, tone: 'text-violet-700' }] : []),
     { label: 'Đã hoàn thành', value: s.completedCount },
     { label: 'Lượt không sửa được', value: s.cannotRepairAttempts, tone: 'text-rose-700' },
-    ...(inspection ? [{ label: 'Nghiệm thu không đạt', value: s.failedInspections, tone: 'text-rose-700' }] : []),
+    ...(inspection ? [{ label: 'Xác nhận không đạt', value: s.failedInspections, tone: 'text-rose-700' }] : []),
     { label: 'Cần sửa lại', value: s.needsReworkIssues, tone: 'text-rose-700' },
   ];
 
@@ -828,7 +828,7 @@ export function IncidentExportModal({
         </p>
         <p className="text-xs text-slate-500" data-testid="incident-export-contents">
           Báo cáo gồm cả lịch sử xử lý từng lần — kể cả những lần không sửa được
-          {inspection ? ' — và kết quả nghiệm thu' : ''}.
+          {inspection ? ' — và kết quả xác nhận hoàn thành' : ''}.
         </p>
       </div>
     </Modal>
@@ -862,15 +862,16 @@ function statusCell(i: Issue): ReactNode {
 /** The latest verdict's who and when, under its badge — never in a tooltip. */
 function inspectionCell(i: Issue): ReactNode {
   const judged = currentVerdict(i);
+  // The confirmer is on the incident itself; an attempt's verdict names the same person.
+  const by = i.completionConfirmation?.confirmedBy.name ?? judged?.inspectedByName ?? null;
+  const at = i.completionConfirmation?.confirmedAt ?? judged?.inspectedAt ?? null;
   return (
     <div className="flex flex-col items-start gap-0.5">
       <IssueInspectionBadge issue={i} />
-      {judged ? (
+      {by || judged ? (
         <span className="text-xs text-slate-600">
-          {judged.inspectedByName ?? '—'}
-          {judged.inspectedAt ? (
-            <span className="block whitespace-nowrap text-slate-500">{formatDateTime(judged.inspectedAt)}</span>
-          ) : null}
+          {by ?? '—'}
+          {at ? <span className="block whitespace-nowrap text-slate-500">{formatDateTime(at)}</span> : null}
         </span>
       ) : null}
     </div>
@@ -1081,16 +1082,18 @@ export function IncidentTable({
     : [
         issue,
         location,
-        cause,
-        // The Admin has "Nghiệm thu" as a column of its own, so the stage cell
-        // carries the stage alone rather than saying the inspection twice.
+        { ...cause, hideBelow: '2xl' as const, coveredByDetail: true },
+        // The Admin has "Xác nhận" as a column of its own, so the stage cell
+        // carries the stage alone rather than saying the confirmation twice.
         { ...status, render: (i) => <IssueStageBadge issue={i} /> },
         ...(inspectionOn
           ? [
               {
                 key: 'inspection',
-                header: 'Nghiệm thu',
-                className: 'min-w-[8.5rem]',
+                header: 'Xác nhận',
+                hideBelow: '2xl' as const,
+                coveredByDetail: true,
+                className: 'min-w-[8.5rem] max-w-[12rem]',
                 render: inspectionCell,
               },
             ]
@@ -1098,8 +1101,9 @@ export function IncidentTable({
         {
           key: 'reporter',
           header: 'Người báo',
-          secondary: true,
-          className: 'whitespace-nowrap',
+          hideBelow: '3xl' as const,
+          coveredByDetail: true,
+          className: 'min-w-[7rem]',
           render: (i) => (
             <>
               {i.reporterName ?? muted('—')}
@@ -1111,19 +1115,22 @@ export function IncidentTable({
               {
                 key: 'branch',
                 header: 'Chi nhánh',
-                secondary: true,
+                hideBelow: '3xl' as const,
+                coveredByDetail: true,
                 className: 'min-w-[6rem] text-slate-600',
                 render: (i: Issue) => i.branch?.address ?? muted('—'),
               },
             ]
           : []),
         reportedAt,
-        repairer,
-        { ...completedAt, header: 'Hoàn thành' },
-        attempts,
+        { ...repairer, hideBelow: '3xl' as const, coveredByDetail: true },
+        { ...completedAt, header: 'Hoàn thành', hideBelow: '3xl' as const, coveredByDetail: true },
+        { ...attempts, hideBelow: '3xl' as const, coveredByDetail: true },
         {
           key: 'updatedAt',
           header: 'Cập nhật',
+          // Not in the lifecycle panel, so the panel lists it when it leaves the row.
+          hideBelow: '3xl' as const,
           className: 'min-w-[5.5rem] text-slate-600',
           render: (i) => formatDateTime(i.updatedAt),
         },

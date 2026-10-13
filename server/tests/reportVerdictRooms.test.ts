@@ -86,14 +86,15 @@ describe('"Hoàn thành" — Đúng / Sai, one rule', () => {
     expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'INCORRECT', incorrectReason: '  ' })).status).toBe(422);
     const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'INCORRECT', incorrectReason: 'Máy lạnh vẫn chạy bình thường' });
     expect(res.status).toBe(200);
-    expect(res.body.issue).toMatchObject({ status: 'COMPLETED', reportVerdict: 'INCORRECT', incorrectReason: 'Máy lạnh vẫn chạy bình thường' });
+    // The verdict is recorded; a "Sai" still waits for a manager's confirmation.
+    expect(res.body.issue).toMatchObject({ status: 'AWAITING_INSPECTION', reportVerdict: 'INCORRECT', incorrectReason: 'Máy lạnh vẫn chạy bình thường' });
   });
 
   it('keeps "Cách xử lý" optional on "Đúng"', async () => {
     const id = await report(letan1);
     await acceptedBy(tech, id);
     const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
-    expect(res.body.issue).toMatchObject({ status: 'COMPLETED', reportVerdict: 'CORRECT', incorrectReason: null });
+    expect(res.body.issue).toMatchObject({ status: 'AWAITING_INSPECTION', reportVerdict: 'CORRECT', incorrectReason: null });
   });
 
   it('applies the same rule to a guest request, and the archive splits by it', async () => {

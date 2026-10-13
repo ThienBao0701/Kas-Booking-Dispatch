@@ -9,24 +9,24 @@
  * a `status` still reads like a real response — and any field a test sets
  * explicitly wins.
  *
- * INSPECTION IS DORMANT BY DEFAULT, as it is on the server
- * (`TECHNICAL_INSPECTION_ENABLED` off): an AWAITING_INSPECTION row then reads
- * as "Đã hoàn thành". A fixture sets `inspectionEnabled: true` to describe the
- * server with inspection switched on.
+ * THE CONFIRMATION STEP IS OFF BY DEFAULT HERE, describing an older server
+ * that still had it dormant: an AWAITING_INSPECTION row then reads as "Đã hoàn
+ * thành". The current server always has it on ("Xác nhận hoàn thành"); a
+ * fixture sets `inspectionEnabled: true` to describe it.
  */
 const STAGE_LABELS: Record<string, string> = {
   WAITING: 'Chờ kỹ thuật',
   REWORK: 'Cần sửa lại',
   IN_PROGRESS: 'Đang sửa',
-  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  AWAITING_INSPECTION: 'Chờ quản lý xác nhận',
   COMPLETED: 'Đã hoàn thành',
 };
 
 const INSPECTION_LABELS: Record<string, string> = {
-  PENDING: 'Chưa nghiệm thu',
-  PASSED: 'Đạt',
+  PENDING: 'Chờ quản lý xác nhận',
+  PASSED: 'Đã xác nhận',
   FAILED: 'Không đạt',
-  NO_DATA: 'Chưa có dữ liệu',
+  NO_DATA: 'Không có dữ liệu',
 };
 
 interface FixtureAttempt {

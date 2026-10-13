@@ -540,12 +540,12 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     expect(screen.queryByText(/nghiệm thu/i)).not.toBeInTheDocument();
   });
 
-  it('with inspection switched on, shows the "Chờ nghiệm thu" queue and its count', async () => {
+  it('with the confirmation step on, shows the "Chờ quản lý xác nhận" queue and its count', async () => {
     installApiMock(technicalRoutes({}, TECHNICAL_USER, true));
     renderApp('/app/technical/new');
 
     const awaiting = await screen.findByTestId('technical-tab-awaiting-inspection');
-    expect(awaiting).toHaveTextContent('Chờ nghiệm thu');
+    expect(awaiting).toHaveTextContent('Chờ quản lý xác nhận');
     await waitFor(() => expect(awaiting).toHaveTextContent('4'));
   });
 
@@ -614,7 +614,7 @@ describe('Bộ phận kỹ thuật works the queues', () => {
       technicalRoutes({
         'POST /api/issues/i2/complete': (init: RequestInit) => {
           sent = JSON.parse(String(init.body));
-          return { status: 200, body: { issue: issue({ id: 'i2', status: 'COMPLETED' }) } };
+          return { status: 200, body: { issue: issue({ id: 'i2', status: 'AWAITING_INSPECTION' }) } };
         },
       }),
     );
@@ -635,7 +635,8 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     await user.click(within(dialog).getByTestId('verdict-CORRECT'));
     await user.click(within(dialog).getByTestId('stage-confirm'));
     await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT' }));
-    expect(await screen.findByText('Đã hoàn thành sự cố.')).toBeInTheDocument();
+    // Finished by the technician — not closed: a manager confirms it.
+    expect(await screen.findByText('Đã hoàn thành — sự cố chờ quản lý xác nhận.')).toBeInTheDocument();
   });
 
   /**
@@ -700,11 +701,11 @@ describe('Bộ phận kỹ thuật works the queues', () => {
   });
 
   /**
-   * WITH INSPECTION ON, "HOÀN THÀNH" RECORDS WHAT WAS DONE. The result is
-   * required — it is what the manager inspects — and the cause found during
-   * the repair goes with it.
+   * WITH THE CONFIRMATION STEP ON, "HOÀN THÀNH" IS STILL "TÌNH TRẠNG VẤN ĐỀ" —
+   * finished or one stage of several — and says the incident now waits for a
+   * manager. The result stays optional ("Cách xử lý (nếu có)").
    */
-  it('with inspection switched on, completes it with a result', async () => {
+  it('with the confirmation step on, finishes through "Tình trạng vấn đề" and says a manager confirms it', async () => {
     let sent: unknown = null;
     installApiMock(
       technicalRoutes(
@@ -722,30 +723,23 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     const user = userEvent.setup();
     renderApp('/app/technical/in-progress');
 
-    const queue = await screen.findByRole('list', { name: 'Đang sửa' });
-    expect(within(queue).getAllByText('Trần Văn B').length).toBeGreaterThan(0);
-    expect(within(queue).getAllByText(/0901234567/).length).toBeGreaterThan(0);
-
-    await user.click(screen.getByTestId('complete-i2'));
-    const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
-    const confirm = within(dialog).getByTestId('complete-confirm');
-    expect(confirm).toBeDisabled();
-
-    await user.type(within(dialog).getByTestId('complete-cause'), 'Thiếu gas');
+    await user.click(await screen.findByTestId('complete-i2'));
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    // Both outcomes are still offered — the stage workflow is unchanged.
+    expect(within(dialog).getByTestId('stage-status-follow')).toBeInTheDocument();
+    await user.click(within(dialog).getByTestId('stage-status-done'));
+    expect(dialog).toHaveTextContent('Đã hoàn thành chờ quản lý xác nhận');
     await user.click(within(dialog).getByTestId('verdict-CORRECT'));
-    // "Đúng" with inspection on: the result is what gets inspected — required.
-    expect(confirm).toBeDisabled();
     await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã nạp gas');
-    expect(confirm).toBeEnabled();
-    await user.click(confirm);
+    await user.click(within(dialog).getByTestId('stage-confirm'));
 
-    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã nạp gas', cause: 'Thiếu gas' }));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã nạp gas' }));
+    expect(await screen.findByText('Đã hoàn thành — sự cố chờ quản lý xác nhận.')).toBeInTheDocument();
   });
 
   /**
-   * THE PREFILL IS NOT A FINDING. The field starts with the cause on file so the
-   * technician can correct it; left as it is, nothing is sent, and the cause on
-   * file is not recorded again as this technician's own determination.
+   * THE CAUSE ON FILE IS NOT A FINDING. Finishing sends no cause at all: the
+   * technician records one with "Nguyên nhân", on its own, when they find it.
    */
   it('does not send the cause on file back as the technician\'s own', async () => {
     let sent: unknown = null;
@@ -778,12 +772,11 @@ describe('Bộ phận kỹ thuật works the queues', () => {
     renderApp('/app/technical/in-progress');
 
     await user.click(await screen.findByTestId('complete-i2'));
-    const dialog = await screen.findByRole('dialog', { name: 'Hoàn thành sửa chữa' });
-    expect(within(dialog).getByTestId('complete-cause')).toHaveValue('Hết gas');
+    const dialog = await screen.findByRole('dialog', { name: 'Tình trạng vấn đề' });
+    await user.click(within(dialog).getByTestId('stage-status-done'));
     await user.click(within(dialog).getByTestId('verdict-CORRECT'));
-    await user.type(within(dialog).getByTestId('verdict-resolution'), 'Đã nạp gas');
-    await user.click(within(dialog).getByTestId('complete-confirm'));
-    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT', result: 'Đã nạp gas' }));
+    await user.click(within(dialog).getByTestId('stage-confirm'));
+    await waitFor(() => expect(sent).toEqual({ verdict: 'CORRECT' }));
   });
 
   it('records the cause during the repair, on its own', async () => {
@@ -809,18 +802,18 @@ describe('Bộ phận kỹ thuật works the queues', () => {
   it('names the reporter by the employee name the server composed', async () => {
     installApiMock(technicalRoutes({}, TECHNICAL_USER, true));
     renderApp('/app/technical/awaiting-inspection');
-    const queue = await screen.findByRole('list', { name: 'Chờ nghiệm thu' });
+    const queue = await screen.findByRole('list', { name: 'Chờ quản lý xác nhận' });
     // "Đức", not "Lễ tân Một (Đức)" — nothing here parses a composite name.
     expect(within(queue).getByText(/Người báo: Đức ·/)).toBeInTheDocument();
     expect(within(queue).queryByText(/Lễ tân Một/)).not.toBeInTheDocument();
   });
 
-  it('cannot inspect: a finished repair offers the technician nothing', async () => {
+  it('cannot confirm: a finished repair offers the technician nothing', async () => {
     installApiMock(technicalRoutes({}, TECHNICAL_USER, true));
     renderApp('/app/technical/awaiting-inspection');
-    await screen.findByRole('list', { name: 'Chờ nghiệm thu' });
+    await screen.findByRole('list', { name: 'Chờ quản lý xác nhận' });
     expect(screen.queryByTestId('inspect-i3')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Nghiệm thu/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Xác nhận hoàn thành/ })).not.toBeInTheDocument();
   });
 
   it('says who assigned the job and when, and notes a repeat neutrally', async () => {
@@ -919,8 +912,8 @@ describe('the Admin monitors and does not act', () => {
     'GET /api/issues/summary': () => SUMMARY,
     'GET /api/nav-badges': () => BADGES,
     'GET /api/admin/branches': () => ({ status: 200, body: { branches: [] } }),
-    // The old address lands on the incident category: every branch, today.
-    [`GET /api/issues?from=${hcmToday()}&to=${hcmToday()}&pageSize=100`]: () =>
+    // The old address lands on the incident category: every branch, everything still open.
+    'GET /api/issues?pageSize=100&outstanding=true': () =>
       listBody([
         issue({
           status: 'IN_PROGRESS',

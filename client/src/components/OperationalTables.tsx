@@ -18,6 +18,7 @@
 import { SeverityBadge } from './Severity';
 import { useState } from 'react';
 import { SourceTag } from './SourceTag';
+import { RecordLateEntryBadge } from './LateEntry';
 import { GUEST_REQUEST_EDIT, SERVICE_QUALITY_EDIT, roomServiceEditFields } from '../lib/recordEdit';
 import { CheckCircle2, Pencil, Trash2 } from 'lucide-react';
 import { type OperationalReport, type RoomServiceType } from '../api/receptionReports';
@@ -237,6 +238,7 @@ export function GuestRequestTable({
         <>
           {r.guestRequest?.guestName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
         </>
       ),
     },
@@ -272,6 +274,7 @@ export function GuestRequestTable({
         <>
           {r.guestRequest?.guestName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
           <VoidedNote report={r} />
         </>
       ),
@@ -457,6 +460,7 @@ export function ServiceQualityTable({
         <>
           {r.complaint?.guestName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
         </>
       ),
     },
@@ -491,6 +495,7 @@ export function ServiceQualityTable({
         <>
           {r.complaint?.guestName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
           <VoidedNote report={r} />
         </>
       ),
@@ -645,6 +650,7 @@ export function RoomServiceTable({
         <>
           {r.roomService?.guestName ?? '—'}
           <SourceTag label={r.sourceLabel} />
+          <RecordLateEntryBadge row={r} />
           <VoidedNote report={r} />
         </>
       ),

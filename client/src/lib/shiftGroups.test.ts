@@ -73,6 +73,21 @@ describe('groupByShift', () => {
     expect(day!.shifts[0]!.employee).toBe('Trần Thị B');
   });
 
+  it('carries a "Thêm ca" stamp to the shift heading, and nothing for a real check-in', () => {
+    const backfill = {
+      backfilledByName: 'Quản lý Lan',
+      backfilledByRole: 'RECEPTION_MANAGER',
+      backfilledByRoleLabel: 'Quản lý lễ tân',
+      backfilledAt: '2026-10-08T03:30:00.000Z',
+      reason: 'Quên vào ca A',
+    };
+    const [day] = groupByShift([
+      row({ id: 'x', shiftSessionId: 'sA', shiftBackfill: backfill }),
+      row({ id: 'y', shiftSessionId: 'sB', shiftName: 'Ca B', createdAt: '2026-09-19T09:00:00.000Z' }),
+    ]);
+    expect(day!.shifts.map((s) => s.backfill)).toEqual([backfill, null]);
+  });
+
   it('never merges two people’s sessionless records into one group', () => {
     const [day] = groupByShift([
       row({ id: 'p', shiftSessionId: null, shiftReceptionistName: null, createdByName: 'Người P' }),

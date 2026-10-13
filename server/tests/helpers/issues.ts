@@ -56,3 +56,14 @@ export async function assignAndAccept(
   await assignTo(supervisor, issueId, technician);
   return technician.post(`/api/issues/${issueId}/accept`).send(who);
 }
+
+/**
+ * "Xác nhận hoàn thành" — a manager signs off a repair the technician finished.
+ * A technician's "Hoàn thành" only reaches AWAITING_INSPECTION; a test that
+ * needs a FINALLY completed incident confirms it, the way production does.
+ */
+export async function confirmCompletion(manager: Agent, issueId: string): Promise<request.Response> {
+  const res = await manager.post(`/api/issues/${issueId}/inspect`).send({ result: 'PASSED' });
+  expect(res.status).toBe(200);
+  return res;
+}

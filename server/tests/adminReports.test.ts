@@ -15,7 +15,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetBookingData, resetIssueData, resetShiftData, testPrisma, utcDate } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -261,6 +261,8 @@ describe('the hotel incident report', () => {
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn Bảo', technicianPhone: '0901234567' });
     await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
+    // "Đã hoàn thành" only once a manager confirms the finished repair.
+    await confirmCompletion(admin, id);
   }
 
   it('returns the incidents in the period with the technician information', async () => {

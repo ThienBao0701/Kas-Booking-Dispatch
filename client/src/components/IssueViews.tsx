@@ -44,6 +44,7 @@ import {
   type RepairAttempt,
 } from '../api/issues';
 import { IssueDelegationChain } from './TechnicalDispatchDialogs';
+import { LateEntryNotice } from './LateEntry';
 import { formatDateTime } from '../lib/format';
 
 /**
@@ -88,8 +89,8 @@ const INSPECTION_ICONS: Record<InspectionState, typeof CheckCircle2> = {
 };
 
 /**
- * "Nghiệm thu: Đạt". Outlined, with an icon and the word "Nghiệm thu" spelled
- * out, so it can never be mistaken for the stage badge beside it.
+ * "Xác nhận: Đã xác nhận". Outlined, with an icon and the word "Xác nhận"
+ * spelled out, so it can never be mistaken for the stage badge beside it.
  */
 export function InspectionBadge({
   state,
@@ -104,10 +105,10 @@ export function InspectionBadge({
   return (
     <span
       data-testid={testId}
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${INSPECTION_STYLES[state]}`}
+      className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium ${INSPECTION_STYLES[state]}`}
     >
       <Icon className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
-      Nghiệm thu: {label}
+      Xác nhận: {label}
     </span>
   );
 }
@@ -250,7 +251,7 @@ function AttemptInspection({ attempt, pending }: { attempt: RepairAttempt; pendi
       <div className="mt-1">
         <InspectionBadge
           state={pending ? 'PENDING' : 'NO_DATA'}
-          label={pending ? 'Chưa nghiệm thu' : 'Chưa có dữ liệu'}
+          label={pending ? 'Chờ quản lý xác nhận' : 'Không có dữ liệu'}
         />
       </div>
     );
@@ -474,13 +475,9 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
           <Field label="Người báo" value={issue.reporterName} wrap empty="—" />
           <Field label="Thời gian báo cáo" value={formatDateTime(issue.createdAt)} wrap />
           {issue.lateEntry ? (
-            // "Nhập bù": who actually entered it, in what role, and why — the reporter above is the shift's receptionist.
+            // "Nhập bù": who actually entered it and for whom — the reporter above is the shift's receptionist.
             <div className="sm:col-span-2" data-testid="issue-late-entry">
-              <Field
-                label="Nhập bù"
-                value={`${issue.lateEntry.enteredBy.name}${issue.lateEntry.enteredByRoleLabel ? ` (${issue.lateEntry.enteredByRoleLabel})` : ''} — ${issue.lateEntry.reason ?? ''}`}
-                wrap
-              />
+              <LateEntryNotice lateEntry={issue.lateEntry} forName={issue.reporterName} />
             </div>
           ) : null}
           <Field label="Khu vực" value={issue.locationLabel} wrap />
@@ -526,21 +523,38 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
           ) : null}
         </LifecyclePanel>
 
-        {/* Only while inspection is part of the workflow — dormant, it is not shown at all. */}
+        {/* "Xác nhận hoàn thành" — who signed the repair off, and when. Older servers omit it. */}
         {issue.inspectionEnabled ? (
-          <LifecyclePanel title="Nghiệm thu">
+          <LifecyclePanel title="Xác nhận hoàn thành">
             <div className="sm:col-span-2">
-              <dt className="text-[11px] uppercase tracking-wide text-slate-500">Trạng thái nghiệm thu</dt>
+              <dt className="text-[11px] uppercase tracking-wide text-slate-500">Trạng thái xác nhận</dt>
               <dd className="mt-0.5">
                 <IssueInspectionBadge issue={issue} />
               </dd>
             </div>
-            <Field label="Người nghiệm thu" value={judged?.inspectedByName} wrap empty="—" />
             <Field
-              label="Thời gian nghiệm thu"
-              value={judged?.inspectedAt ? formatDateTime(judged.inspectedAt) : null}
+              label="Người xác nhận"
+              value={
+                issue.completionConfirmation
+                  ? `${issue.completionConfirmation.confirmedBy.name}${
+                      issue.completionConfirmation.roleLabel ? ` (${issue.completionConfirmation.roleLabel})` : ''
+                    }`
+                  : judged?.inspectedByName
+              }
               wrap
-              empty="—"
+              empty={issue.status === 'COMPLETED' ? 'Không có dữ liệu' : '—'}
+            />
+            <Field
+              label="Thời gian xác nhận"
+              value={
+                issue.completionConfirmation
+                  ? formatDateTime(issue.completionConfirmation.confirmedAt)
+                  : judged?.inspectedAt
+                    ? formatDateTime(judged.inspectedAt)
+                    : null
+              }
+              wrap
+              empty={issue.status === 'COMPLETED' ? 'Không có dữ liệu' : '—'}
             />
             {judged?.note ? (
               <div className="sm:col-span-2">

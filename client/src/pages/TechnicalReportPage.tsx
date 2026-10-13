@@ -25,6 +25,8 @@ import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, isTechnicalAssigner, isTechnicalManagerRole, type Branch, type UserRole } from '../auth/types';
 import { can } from '../auth/capabilities';
 import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog } from '../components/TechnicalDispatchDialogs';
+import { ConfirmCompletionDialog } from '../components/ConfirmCompletionDialog';
+import { mayConfirmCompletion } from '../lib/completionConfirmation';
 import { formatVnd } from '../lib/money';
 import { useBranchRooms } from '../hooks/useBranchRooms';
 import { useIssueSummary } from '../hooks/useIssueSummary';
@@ -56,6 +58,7 @@ const BUCKETS = [
   { key: 'ASSIGNED', label: 'Đã giao' },
   { key: 'IN_PROGRESS', label: 'Đang sửa' },
   { key: 'EXTERNAL', label: 'Kĩ thuật bên ngoài' },
+  { key: 'AWAITING_CONFIRMATION', label: 'Chờ quản lý xác nhận' },
   { key: 'COMPLETED', label: 'Đã hoàn thành' },
   { key: 'CANNOT_REPAIR', label: 'Không sửa được' },
   { key: 'REASSIGNED', label: 'Đã giao lại' },
@@ -82,6 +85,8 @@ function inBucket(issue: Issue, bucket: Bucket, userId?: number): boolean {
       return issue.assignmentState === 'IN_PROGRESS';
     case 'EXTERNAL':
       return issue.assignmentState === 'EXTERNAL_IN_PROGRESS';
+    case 'AWAITING_CONFIRMATION':
+      return issue.status === 'AWAITING_INSPECTION';
     case 'COMPLETED':
       return issue.status === 'COMPLETED';
     case 'CANNOT_REPAIR':
@@ -122,6 +127,7 @@ export function TechnicalReportPage() {
   const [giving, setGiving] = useState<Issue | null>(null);
   const [hiring, setHiring] = useState<Issue | null>(null);
   const [completing, setCompleting] = useState<Issue | null>(null);
+  const [confirming, setConfirming] = useState<Issue | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const branches = useQuery({
@@ -364,6 +370,7 @@ export function TechnicalReportPage() {
                               onGive={() => setGiving(issue)}
                               onHire={() => setHiring(issue)}
                               onCompleteExternal={() => setCompleting(issue)}
+                              onConfirm={() => setConfirming(issue)}
                             />
                           ))}
                         </ul>
@@ -445,6 +452,17 @@ export function TechnicalReportPage() {
           }}
         />
       ) : null}
+      {confirming ? (
+        <ConfirmCompletionDialog
+          issue={confirming}
+          onClose={() => setConfirming(null)}
+          onDone={(message) => {
+            setConfirming(null);
+            void list.refetch();
+            setToast(message);
+          }}
+        />
+      ) : null}
       {viewing ? (
         <Modal open size="4xl" title="Chi tiết sự cố" onClose={() => setViewing(null)}>
           <IssueLifecycleDetail issue={viewing} />
@@ -471,6 +489,7 @@ function IssueRow({
   onGive,
   onHire,
   onCompleteExternal,
+  onConfirm,
 }: {
   issue: Issue;
   canManage: boolean;
@@ -482,6 +501,8 @@ function IssueRow({
   onGive: () => void;
   onHire: () => void;
   onCompleteExternal: () => void;
+  /** "Xác nhận hoàn thành" — a repair a technician finished, for a manager to sign off. */
+  onConfirm: () => void;
 }) {
   const last = issue.attempts[issue.attempts.length - 1];
   const open = issue.status === 'NEW' || issue.status === 'IN_PROGRESS';
@@ -554,10 +575,22 @@ function IssueRow({
               <dt className="inline text-slate-500">Nguyên nhân: </dt>
               <dd className="inline">{issue.cause ?? 'Chưa xác định'}</dd>
             </div>
-            {issue.status === 'COMPLETED' ? (
+            {issue.status === 'COMPLETED' || issue.status === 'AWAITING_INSPECTION' ? (
               <div>
                 <dt className="inline text-slate-500">Người hoàn thành: </dt>
                 <dd className="inline">{issue.completedByName ?? 'Hệ thống'}</dd>
+              </div>
+            ) : null}
+            {issue.status === 'COMPLETED' ? (
+              <div data-testid={`tr-confirmed-${issue.id}`}>
+                <dt className="inline text-slate-500">Người xác nhận: </dt>
+                <dd className="inline">
+                  {issue.completionConfirmation
+                    ? `${issue.completionConfirmation.confirmedBy.name}${
+                        issue.completionConfirmation.roleLabel ? ` (${issue.completionConfirmation.roleLabel})` : ''
+                      } · ${formatDateTime(issue.completionConfirmation.confirmedAt)}`
+                    : 'Không có dữ liệu'}
+                </dd>
               </div>
             ) : null}
             {last?.result ? (
@@ -590,6 +623,12 @@ function IssueRow({
             <button type="button" onClick={onHire} data-testid={`tr-hire-${issue.id}`} className={action}>
               <HardHat className="h-4 w-4" aria-hidden="true" />
               Thuê ngoài
+            </button>
+          ) : null}
+          {mayConfirmCompletion(issue, role, userId) ? (
+            <button type="button" onClick={onConfirm} data-testid={`tr-confirm-${issue.id}`} className={action}>
+              <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+              Xác nhận hoàn thành
             </button>
           ) : null}
           {mayCompleteExternal ? (

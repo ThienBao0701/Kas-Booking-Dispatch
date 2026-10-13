@@ -473,7 +473,8 @@ const ISSUE = withLifecycle({
   createdAt: '2026-09-19T01:00:00.000Z',
 });
 
-const ISSUES_TODAY = `GET /api/issues?branchId=11&from=${TODAY}&to=${TODAY}&pageSize=100`;
+/** The incident monitor opens on everything still open — a state, with no period. */
+const ISSUES_OPEN = 'GET /api/issues?branchId=11&pageSize=100&outstanding=true';
 
 const INCIDENT_SUMMARY = {
   total: 1,
@@ -488,7 +489,7 @@ const INCIDENT_SUMMARY = {
 /** The incident tab's two reads, for branch 11 and today. */
 function incidentRoutes(issues: unknown[] = [ISSUE]) {
   return {
-    [ISSUES_TODAY]: () => ({
+    [ISSUES_OPEN]: () => ({
       status: 200,
       body: { issues, pagination: { page: 1, pageSize: 100, total: issues.length, totalPages: 1 } },
     }),
@@ -796,8 +797,8 @@ describe('each category is a table', () => {
     expect(headers).not.toContain('Chi nhánh');
     expect(headers).not.toContain('Nghiệm thu');
 
-    // Scoped by the SERVER to the page's branch and period.
-    expect(fetchMock.mock.calls.some(([url]) => `GET ${String(url)}` === ISSUES_TODAY)).toBe(true);
+    // Scoped by the SERVER to the page's branch — everything still open.
+    expect(fetchMock.mock.calls.some(([url]) => `GET ${String(url)}` === ISSUES_OPEN)).toBe(true);
 
     // And it is a MONITOR: nothing here offers to create or pick an incident.
     expect(screen.queryByTestId('facility-form')).not.toBeInTheDocument();
@@ -822,13 +823,13 @@ describe('each category is a table', () => {
     expect(within(lifecycle).getByText(/Thiếu phụ tùng/)).toBeInTheDocument();
   });
 
-  it('switches to every incident still open, whatever day it was reported', async () => {
+  it('switches to the repairs waiting for a manager’s confirmation, whatever day they were reported', async () => {
     const fetchMock = installApiMock(
       shellRoutes({
         ...incidentRoutes(),
-        'GET /api/issues?branchId=11&pageSize=100&outstanding=true': () => ({
+        'GET /api/issues?branchId=11&stage=AWAITING_INSPECTION&pageSize=100': () => ({
           status: 200,
-          body: { issues: [ISSUE], pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 } },
+          body: { issues: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 0 } },
         }),
       }),
     );
@@ -836,16 +837,17 @@ describe('each category is a table', () => {
     await chooseBranch();
     await openCategory('FACILITY_ISSUE');
 
-    await userEvent.click(await screen.findByTestId('admin-incident-view-outstanding'));
+    // Two lists, both states: the period tab and "Chưa giao kỹ thuật" are gone.
+    expect(await screen.findByTestId('admin-incident-view-outstanding')).toHaveTextContent('Còn tồn đọng (mọi ngày báo)');
+    expect(screen.queryByTestId('admin-incident-view-period')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('admin-incident-view-unassigned')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('admin-incident-view-awaiting'));
     await waitFor(() =>
       expect(
-        fetchMock.mock.calls.some(([url]) =>
-          String(url) === '/api/issues?branchId=11&pageSize=100&outstanding=true',
-        ),
+        fetchMock.mock.calls.some(([url]) => String(url) === '/api/issues?branchId=11&stage=AWAITING_INSPECTION&pageSize=100'),
       ).toBe(true),
     );
-    // "Tồn đọng" has no period, so the period's counts step aside.
-    await waitFor(() => expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument());
+    expect(await screen.findByText('Không có sự cố nào đang chờ quản lý xác nhận hoàn thành.')).toBeInTheDocument();
   });
 
   it('exports the incident report for the same branch and period', async () => {

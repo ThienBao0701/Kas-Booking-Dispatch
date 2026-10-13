@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
-import { assignTo, serveAllBranches, userIdOf } from './helpers/issues';
+import { assignTo, confirmCompletion, serveAllBranches, userIdOf } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -217,7 +217,9 @@ describe('a repair in stages', () => {
     setClock({ now: () => hcm('2026-10-03', '10:00') });
     const done = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã sơn lại, tường khô' });
     expect(done.status).toBe(200);
-    expect(done.body.issue.status).toBe('COMPLETED');
+    // "Đã xử lý xong" ends the repair; a manager's confirmation closes the incident.
+    expect(done.body.issue.status).toBe('AWAITING_INSPECTION');
+    expect((await confirmCompletion(admin, id)).body.issue.status).toBe('COMPLETED');
     expect(done.body.issue.currentStageNumber).toBeNull();
     expect(done.body.issue.stages.map((s: { stageNumber: number; final: boolean }) => [s.stageNumber, s.final])).toEqual([
       [1, false],
@@ -267,6 +269,7 @@ describe('account management', () => {
 
     await goneAgent.post(`/api/issues/${id}/accept`).send({ technicianName: 'Kỹ thuật Xóa', technicianPhone: '0900' });
     await goneAgent.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã thay bản lề' });
+    await confirmCompletion(admin, id);
 
     // Not by a manager, not the Admin itself.
     expect((await techManager.delete(`/api/admin/users/${gone.id}`)).status).toBe(403);

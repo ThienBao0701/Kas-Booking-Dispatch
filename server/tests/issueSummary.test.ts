@@ -3,7 +3,7 @@ import type { IssueStatus } from '@prisma/client';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, testPrisma } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -164,7 +164,7 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
     expect(after.totalUnresolved).toBe(before.totalUnresolved); // unchanged
   });
 
-  it('completing decreases the unresolved total', async () => {
+  it('a confirmed completion decreases the unresolved total — the technician’s finish alone does not', async () => {
     const issue = await makeIssue(ownBranchId, 'NEW');
     const before = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     // COMPLETED is reachable only from IN_PROGRESS, so the incident is accepted
@@ -174,6 +174,9 @@ describe('GET /api/issues/summary — reflects workflow transitions', () => {
       .post(`/api/issues/${issue.id}/accept`)
       .send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
     await techAgent.post(`/api/issues/${issue.id}/complete`).send({ verdict: 'CORRECT' });
+    // Waiting for a manager is still unresolved.
+    expect((await summaryOf(adminAgent)).body.summary.totalUnresolved).toBe(before);
+    await confirmCompletion(adminAgent, issue.id);
     const after = (await summaryOf(adminAgent)).body.summary.totalUnresolved;
     expect(after).toBe(before - 1);
   });

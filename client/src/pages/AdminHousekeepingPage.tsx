@@ -16,9 +16,17 @@
  * "Báo cáo vấn đề → Buồng phòng": the findings read Branch → Room → inspection
  * (one table per branch, rooms in order), the housekeeping workdays sit below
  * them ("Ca buồng phòng"), and the same period exports as PDF or Excel.
+ *
+ * "Các công việc trong ngày" closes the page: one row per housekeeping work
+ * item of a day, over the reader's branches. Quản lý lễ tân (and the Admin) may
+ * "Giao lại" an item that is inspected and waiting for cleaning to another
+ * housekeeper of its branch; the server checks the role, branch and state.
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { ROOM_WORK_KEY, roomWorkApi, type RoomTask } from '../api/roomWork';
+import { can } from '../auth/capabilities';
+import { ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
 import { Download, RefreshCw } from 'lucide-react';
 import {
   ROOM_COLLECTION_STATUSES,
@@ -48,7 +56,7 @@ import {
 } from '../components/RoomIssueViews';
 import { Toast } from '../components/Toast';
 import { branchOptionLabel } from '../lib/branchTone';
-import { formatDateTime, hcmToday } from '../lib/format';
+import { formatDate, formatDateTime, hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 
 const selectClass =
@@ -258,6 +266,8 @@ export function AdminHousekeepingPage() {
         </>
       )}
 
+      <WorkOrdersPanel branchId={branchId === '' ? undefined : branchId} onToast={setToast} />
+
       {collecting ? (
         <CollectionDialog
           issue={collecting}
@@ -303,3 +313,66 @@ const SEGMENT_COLUMNS: DataColumn<{ day: WorkShift; seg: WorkSegment }>[] = [
     render: (r) => r.seg.byType.map((t) => `${t.label}: ${t.count}`).join(' · ') || '—',
   },
 ];
+
+/**
+ * "CÁC CÔNG VIỆC TRONG NGÀY" for the supervisors — the day's housekeeping work
+ * items of their branches (the page's branch, when one is chosen), and "Giao
+ * lại" for an item waiting for cleaning.
+ */
+function WorkOrdersPanel({ branchId, onToast }: { branchId?: number; onToast: (message: string) => void }) {
+  const today = hcmToday();
+  const role = useAuth().user?.role;
+  const [date, setDate] = useState(today);
+  const [reassigning, setReassigning] = useState<RoomTask | null>(null);
+  const orders = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'work-orders', date, branchId ?? null],
+    queryFn: () => roomWorkApi.workOrders({ date, branchId }),
+    refetchInterval: 30_000,
+  });
+  const staff = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'work-orders', 'staff', reassigning?.branchId ?? null],
+    queryFn: () => roomWorkApi.workOrderStaff(reassigning!.branchId),
+    enabled: reassigning !== null,
+  });
+  return (
+    <section className="mt-6 space-y-3" aria-labelledby="hk-work-orders-title" data-testid="supervisor-work-orders">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h2 id="hk-work-orders-title" className="text-lg font-bold text-slate-900">
+          Các công việc trong ngày {formatDate(date)}
+        </h2>
+        <label className="text-sm font-medium text-slate-700">
+          Ngày
+          <input
+            type="date"
+            className="ml-2 min-h-[2.5rem] rounded-xl border border-line-strong bg-white px-3 py-1.5 text-sm"
+            value={date}
+            max={today}
+            onChange={(e) => e.target.value && setDate(e.target.value)}
+            data-testid="work-orders-date"
+          />
+        </label>
+      </div>
+      <WorkOrderTable
+        tasks={orders.data?.tasks ?? []}
+        isLoading={orders.isLoading}
+        isError={orders.isError}
+        error={orders.error}
+        onRetry={() => void orders.refetch()}
+        onReassign={setReassigning}
+        canReassign={can(role, 'housekeeping.reassignAwaitingCleaning')}
+        showBranch={branchId === undefined}
+      />
+      {reassigning && staff.data ? (
+        <ReassignDialog
+          task={reassigning}
+          staff={staff.data.staff}
+          onClose={() => setReassigning(null)}
+          onDone={(message) => {
+            setReassigning(null);
+            onToast(message);
+          }}
+        />
+      ) : null}
+    </section>
+  );
+}

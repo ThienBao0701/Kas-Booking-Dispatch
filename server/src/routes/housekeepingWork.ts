@@ -18,8 +18,16 @@ import type { HousekeepingActor } from '../housekeeping/roomIssueService';
 import { roomWorkCatalog } from '../housekeeping/roomTaskCatalog';
 import {
   assignTask,
+  beginInspection,
+  claimTasks,
   completeTask,
   createTasks,
+  createWorkItems,
+  listWorkAreas,
+  listWorkOrders,
+  reassignAwaitingCleaning,
+  reassignableStaff,
+  workList,
   getTask,
   inspectTask,
   listStaff,
@@ -52,6 +60,35 @@ const actorOf = (req: Request): HousekeepingActor => {
 
 const issuesSchema = z.object({
   issues: z.array(z.object({ type: z.string(), note: z.string().optional() })).max(50).default([]),
+  // A shared area's inspection is a note, not room findings.
+  note: z.string().max(2000).optional(),
+});
+
+/** "Tạo công việc": shape only — what each kind of area REQUIRES is the service's rule. */
+const workItemsSchema = z.object({
+  branchId: z.number().int().positive().optional(),
+  workDate: isoDay,
+  requestId: z.string().max(64).optional(),
+  items: z
+    .array(
+      z.object({
+        areaKind: z.string().optional(),
+        roomNumber: z.string().max(100).optional(),
+        floor: z.string().max(100).optional(),
+        taskCode: z.string().max(20).optional(),
+        taskName: z.string().max(500).optional(),
+        note: z.string().max(2000).optional(),
+        priority: z.boolean().optional(),
+      }),
+    )
+    .max(50),
+});
+
+const claimSchema = z.object({ taskIds: z.array(z.string().min(1).max(100)).min(1).max(50) });
+
+const reassignSchema = z.object({
+  assigneeUserId: z.number().int().positive(),
+  reason: z.string().max(1000).optional(),
 });
 
 async function scopeLabel(actor: HousekeepingActor, branchId?: number): Promise<string> {
@@ -214,7 +251,73 @@ export function createHousekeepingWorkRouter(): Router {
     })().catch(next);
   });
 
+  /* ------------------------- work items: the manager ------------------------ */
+
+  // "Chọn khu vực": the branch's floors and rooms, from its own catalog.
+  router.get('/housekeeping/manager/areas', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ branchId: branchQuery }).parse(req.query);
+      res.json({ areas: await listWorkAreas(actorOf(req), { branchId: q.branchId }) });
+    })().catch(next);
+  });
+
+  // "Tạo công việc": one or many items, saved together, each its own row.
+  router.post('/housekeeping/manager/work-items', ...gate, (req, res, next) => {
+    (async () => {
+      const input = workItemsSchema.parse(req.body ?? {});
+      const result = await createWorkItems(actorOf(req), input, getClock());
+      res.status(result.duplicate ? 200 : 201).json(result);
+    })().catch(next);
+  });
+
+  /* ------------- "Các công việc trong ngày" and "Giao lại" (supervisors) ------------- */
+
+  router.get('/housekeeping/work-orders', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ date: isoDay, branchId: branchQuery }).parse(req.query);
+      res.json({ tasks: await listWorkOrders(actorOf(req), { workDate: q.date, branchId: q.branchId }) });
+    })().catch(next);
+  });
+
+  router.get('/housekeeping/work-orders/staff', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ branchId: z.coerce.number().int().positive() }).parse(req.query);
+      res.json({ staff: await reassignableStaff(actorOf(req), { branchId: q.branchId }) });
+    })().catch(next);
+  });
+
+  // "Giao lại" an item inspected and waiting for cleaning — to another housekeeper of its branch.
+  router.post('/housekeeping/work-orders/:id/reassign', ...gate, (req, res, next) => {
+    (async () => {
+      const input = reassignSchema.parse(req.body ?? {});
+      res.json({ task: await reassignAwaitingCleaning(actorOf(req), req.params.id!, input, getClock()) });
+    })().catch(next);
+  });
+
   /* ------------------------------- the worker ----------------------------- */
+
+  // The items of the branch the open shift established: the housekeeper's and the unclaimed.
+  router.get('/housekeeping/work/items', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ date: isoDay }).parse(req.query);
+      res.json(await workList(actorOf(req), q.date));
+    })().catch(next);
+  });
+
+  // "Nhận": exactly the selected items, all or none.
+  router.post('/housekeeping/work/claim', ...gate, (req, res, next) => {
+    (async () => {
+      const input = claimSchema.parse(req.body ?? {});
+      res.json({ tasks: await claimTasks(actorOf(req), input, getClock()) });
+    })().catch(next);
+  });
+
+  // "Kiểm tra": the inspection begins — "Đang kiểm tra".
+  router.post('/housekeeping/work/tasks/:id/begin-inspection', ...gate, (req, res, next) => {
+    (async () => {
+      res.json({ task: await beginInspection(actorOf(req), req.params.id!, getClock()) });
+    })().catch(next);
+  });
 
   router.get('/housekeeping/work', ...gate, (req, res, next) => {
     (async () => {
@@ -237,8 +340,8 @@ export function createHousekeepingWorkRouter(): Router {
 
   router.post('/housekeeping/work/tasks/:id/inspect', ...gate, (req, res, next) => {
     (async () => {
-      const { issues } = issuesSchema.parse(req.body ?? {});
-      res.status(201).json({ task: await inspectTask(actorOf(req), req.params.id!, { issues }, getClock()) });
+      const { issues, note } = issuesSchema.parse(req.body ?? {});
+      res.status(201).json({ task: await inspectTask(actorOf(req), req.params.id!, { issues, note }, getClock()) });
     })().catch(next);
   });
 

@@ -26,3 +26,24 @@ export function createLoginRateLimiter(): RequestHandler {
     },
   });
 }
+
+/**
+ * "Vào ca" by address — bounded per ACCOUNT (the session's user, not the IP), so
+ * an authenticated housekeeper cannot try address after address to learn which
+ * hotels exist. Only the REFUSED attempts count: opening the shift is not a
+ * guess. Generous enough for real typing mistakes; a fresh instance per app,
+ * like the login limiter.
+ */
+export function createWorkplaceRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 30,
+    skipSuccessfulRequests: true,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `workplace:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã nhập địa chỉ quá nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}

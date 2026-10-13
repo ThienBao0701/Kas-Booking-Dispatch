@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/auth';
+import { createWorkplaceRateLimiter } from '../middleware/rateLimit';
 import { getClock } from '../lib/clock';
 import { hcmRange } from '../booking/recreationReport';
 import {
@@ -58,6 +59,11 @@ const shiftBranchSchema = z.object({
   staffName: z.string().trim().max(100).optional(),
 });
 
+/** "Vào ca": the hotel's address as typed — resolved by the service, never echoed back. */
+const shiftStartSchema = shiftBranchSchema.extend({
+  address: z.string().max(500).optional(),
+});
+
 const shiftListSchema = z.object({
   branchId: z.coerce.number().int().positive().optional(),
   from: isoDay.optional(),
@@ -84,6 +90,8 @@ const listSchema = z
 
 export function createHousekeepingRouter(): Router {
   const router = Router();
+  // One per app: an account's "Vào ca" address attempts are counted (see rateLimit.ts).
+  const workplaceLimiter = createWorkplaceRateLimiter();
   router.use(
     '/housekeeping',
     requireAuth,
@@ -171,9 +179,9 @@ export function createHousekeepingRouter(): Router {
     })().catch(next);
   });
 
-  router.post('/housekeeping/shift/start', requireRole('HOUSEKEEPING'), (req, res, next) => {
+  router.post('/housekeeping/shift/start', requireRole('HOUSEKEEPING'), workplaceLimiter, (req, res, next) => {
     (async () => {
-      const body = shiftBranchSchema.parse(req.body ?? {});
+      const body = shiftStartSchema.parse(req.body ?? {});
       res.status(201).json({ shift: await startShift(actorOf(req), body, getClock()) });
     })().catch(next);
   });

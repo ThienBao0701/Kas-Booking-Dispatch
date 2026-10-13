@@ -127,6 +127,12 @@ enum RoomTaskEventType {
   REVIEWED
   /// "Bắt đầu dọn" — the cleaner's explicit start; `startedAt` is this instant.
   STARTED
+  /// "Nhận" — a housekeeper accepted the item on its open shift.
+  ACCEPTED
+  /// "Kiểm tra" — the inspection was begun ("Đang kiểm tra").
+  INSPECTION_STARTED
+  /// A "Nhận" refused because someone else accepted the item first.
+  CLAIM_REJECTED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -612,6 +618,8 @@ model User {
   issuesReported           HotelIssue[]                  @relation("IssueReportedBy")
   issuesAccepted           HotelIssue[]                  @relation("IssueAcceptedBy")
   issuesCompleted          HotelIssue[]                  @relation("IssueCompletedBy")
+  issuesConfirmed          HotelIssue[]                  @relation("IssueCompletionConfirmedBy")
+  shiftSessionsBackfilled  ReceptionShiftSession[]       @relation("ShiftSessionBackfilledBy")
   shiftSessions            ReceptionShiftSession[]       @relation("ShiftSessionUser")
   branchChanges            BranchChangeLog[]
   identityEvents           BranchPlatformIdentityEvent[]
@@ -1903,10 +1911,21 @@ model HotelIssue {
   technicianName         String?
   technicianPhone        String?
 
-  /// The TECHNICAL user who completed it (IN_PROGRESS → COMPLETED).
+  /// The TECHNICAL user who completed it (IN_PROGRESS → AWAITING_INSPECTION).
   completedByUserId       Int?
   completedByNameSnapshot String?
   completedAt             DateTime?
+
+  /// "XÁC NHẬN HOÀN THÀNH" — the manager who confirmed the finished repair, and
+  /// when. A technician's "Hoàn thành" only moves the incident to
+  /// AWAITING_INSPECTION ("Đã hoàn thành chờ quản lý xác nhận"); it is COMPLETED
+  /// only once one of Admin, Tổng quản lý / Quản lý lễ tân or Quản lý / Tổng
+  /// quản lý kỹ thuật confirms it. Null on every incident closed before the
+  /// confirmation step existed — never back-filled ("Không có dữ liệu").
+  completionConfirmedByUserId       Int?
+  completionConfirmedByNameSnapshot String?
+  completionConfirmedByRole         UserRole?
+  completionConfirmedAt             DateTime?
 
   /// THE CURRENT ASSIGNMENT — which Bộ phận kỹ thuật account this incident is
   /// given to. A technician sees ONLY incidents assigned to them (plus their own
@@ -2008,6 +2027,7 @@ model HotelIssue {
   /// The repair, stage by stage, oldest first when read.
   stages             TechnicalRepairStage[]   @relation("IssueRepairStages")
   voidedBy           User?                    @relation("IssueVoidedBy", fields: [voidedByUserId], references: [id])
+  confirmedBy        User?                    @relation("IssueCompletionConfirmedBy", fields: [completionConfirmedByUserId], references: [id])
 
   @@index([assignedTechnicianUserId, status])
   @@index([branchId, roomNumber])
@@ -2316,11 +2336,28 @@ model ReceptionShiftSession {
   /// every change to it is an `OPENING_CASH` row in `ReceptionReportAudit`.
   openingCashSetAt DateTime?
 
+  /// "THÊM CA" — a shift the receptionist worked but never checked in to, added
+  /// afterwards from "Nhập bù báo cáo" so its missed records have a shift to go
+  /// on. Created CLOSED at its nominal window, so it never puts anyone "on
+  /// shift" and never touches a roster; `userId`/`receptionistName` are the
+  /// receptionist who worked it, `backfilledBy…` the manager who added it.
+  /// Null on every session opened by a real check-in.
+  backfilledByUserId       Int?
+  backfilledByNameSnapshot String?
+  backfilledByRole         UserRole?
+  backfilledAt             DateTime?
+  backfillReason           String?
+  /// "branchId:businessDate:shiftType:userId" — set only on a backfilled
+  /// session, so the same missing shift cannot be added twice, even by two
+  /// managers at the same moment.
+  backfillKey              String?   @unique
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   branch                 Branch                       @relation(fields: [branchId], references: [id])
   user                   User                         @relation("ShiftSessionUser", fields: [userId], references: [id])
+  backfilledBy           User?                        @relation("ShiftSessionBackfilledBy", fields: [backfilledByUserId], references: [id])
   /// Every order created during this shift.
   proofs                 BookingCreationProof[]       @relation("ProofShiftSession")
   /// Incidents reported during this shift, and questions raised during it.
@@ -2663,6 +2700,10 @@ enum ReceptionReportAuditAction {
   /// "Nhập bù" — a reception manager recorded, after the fact, a record the
   /// receptionist missed on that shift. `reason` is the required late-entry reason.
   LATE_ENTRY
+  /// "Thêm ca" — a manager added a shift the receptionist worked but never
+  /// checked in to, so its missed records can be entered on it. Carries the
+  /// session (`shiftSessionId`) and no `reportId`; `reason` is required.
+  SHIFT_BACKFILL
 }
 
 /// ONE ENTRY IN THE RECEPTION OPERATIONAL JOURNAL — "Báo cáo vấn đề".
@@ -3448,6 +3489,33 @@ model HousekeepingRoomTask {
   /// FAILED with "Yêu cầu dọn lại": the next cycle was opened.
   recleanRequested       Boolean           @default(false)
 
+  /// WORK ITEMS ("Tạo công việc"). One place can carry several independent
+  /// items the same day — OC and a separate "Khác" for room 502 — each its own
+  /// row, accepted, inspected and cleaned on its own. `itemKey` tells them
+  /// apart: "" on every row created before work items existed (one item per
+  /// room, exactly as before), a fresh key per new item; a re-clean cycle keeps
+  /// its item's key. `roomNumber` holds the room, or for a shared area the
+  /// place as people say it ("Hành lang - Tầng 5").
+  itemKey             String               @default("")
+  areaKind            HousekeepingAreaKind @default(ROOM)
+  /// The catalog floor of the place — for a room only when its floor is known
+  /// for certain (see `roomFloor`); null otherwise, never guessed.
+  floor               String?
+  /// "Tên công việc" typed by the manager; null on a room item named by its code.
+  taskName            String?
+  /// The items saved together in one "Tạo công việc", and each one's place in
+  /// it — unique together, so a repeated submission cannot create them twice.
+  groupId             String?
+  groupIndex          Int?
+  /// "Nhận": when the housekeeper accepted the item (a manager's assignment
+  /// has none). "Kiểm tra": when its inspection was begun — "Đang kiểm tra".
+  acceptedAt          DateTime?
+  inspectionStartedAt DateTime?
+  /// When the inspection was saved, and — for a shared area, which has no room
+  /// inspection record — what the housekeeper noted.
+  inspectedAt         DateTime?
+  inspectionNote      String?
+
   branch       Branch                      @relation(fields: [branchId], references: [id])
   assignee     User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
   inspection   RoomInspection?             @relation(fields: [inspectionId], references: [id])
@@ -3460,10 +3528,22 @@ model HousekeepingRoomTask {
   recleanTask  HousekeepingRoomTask?       @relation("RoomTaskReclean")
   events       HousekeepingRoomTaskEvent[]
 
-  @@unique([branchId, workDate, roomNumber, cycleNumber])
+  @@unique([branchId, workDate, roomNumber, itemKey, cycleNumber])
+  @@unique([groupId, groupIndex])
   @@index([branchId, workDate])
   @@index([assigneeUserId, workDate])
   @@index([workDate])
+}
+
+/// Where a work item is: a room, or a shared area of a floor.
+enum HousekeepingAreaKind {
+  ROOM
+  /// "Hành lang".
+  HALLWAY
+  /// "Cầu thang".
+  STAIRCASE
+  /// "Khác" — any other place; its note says where and what.
+  OTHER
 }
 
 /// Everything that happened to a room work item, oldest first — assignment and

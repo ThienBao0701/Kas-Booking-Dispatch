@@ -5,9 +5,12 @@
  *   1. "Xóa" (VoidDialog, delete mode): a danger confirmation that needs a reason.
  *   2. "Sửa bản ghi": a Quản lý lễ tân correcting the desk's record must give a
  *      reason; the Admin keeps it optional.
- *   3. "Lịch sử xóa": who created, who deleted (with the role), when and why.
+ *   3. "Lịch sử chỉnh sửa": two separate sections — the corrections (field by
+ *      field, old → new, who and when) and "Lịch sử xóa" (who created, who
+ *      deleted with the role, when and why); neither counted as the other.
  *   4. "Nhập bù": branch → date → finished shift → category → reason, and only
  *      then the form, which posts to the late-entry endpoint with the shift.
+ *      "Thêm ca" adds a shift nobody checked in to, then selects it.
  *   5. "Giao việc" / "Thuê ngoài" / "Hoàn thành thuê ngoài": required notes,
  *      phone and company checks, and the required repair cost (0 allowed).
  *
@@ -25,7 +28,7 @@ import type { Issue } from '../api/issues';
 import type { OperationalReport } from '../api/receptionReports';
 import { ADMIN_USER, installApiMock } from '../test/utils';
 import { RecordEditDialog, VoidDialog } from './RecordDialogs';
-import { DeletedHistoryDialog, LateEntryDialog } from './ReportManagementDialogs';
+import { LateEntryDialog, ReportHistoryDialog } from './ReportManagementDialogs';
 import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog, IssueDelegationChain } from './TechnicalDispatchDialogs';
 import { phoneProblem } from '../lib/contractorPhone';
 
@@ -150,10 +153,101 @@ describe('Sửa bản ghi — the edit reason', () => {
   });
 });
 
-describe('Lịch sử xóa', () => {
-  it('lists each deleted record with its creator, original shift, and who deleted it in what role', async () => {
+const LATE = {
+  enteredBy: { id: 20, name: 'Quản lý Lan' },
+  enteredByRole: 'RECEPTION_MANAGER',
+  enteredByRoleLabel: 'Quản lý lễ tân',
+  reason: 'Lễ tân quên ghi khoản thu P302',
+  enteredAt: '2026-10-06T02:00:00.000Z',
+};
+
+const EDIT_ROW = (id: string, field: string, oldValue: string, newValue: string) => ({
+  id,
+  action: 'EDIT',
+  field,
+  oldValue,
+  newValue,
+  reason: 'Sai số tiền',
+  actor: { id: 20, name: 'Quản lý Lan' },
+  actorRole: 'RECEPTION_MANAGER',
+  actorRoleLabel: 'Quản lý lễ tân',
+  shiftType: null,
+  createdAt: '2026-10-05T06:00:00.000Z',
+  report: {
+    id: 'p1',
+    category: 'PAYMENT',
+    categoryLabel: 'Thu tiền',
+    summary: 'Khách Minh · 500.000 ₫',
+    branch: { branchNumber: 1, address: '05 Trương Định' },
+    shiftDate: '2026-10-05',
+    shiftName: 'Ca A',
+    createdByName: 'Nguyễn A',
+    lateEntry: LATE,
+    voided: false,
+  },
+});
+
+describe('Lịch sử chỉnh sửa', () => {
+  it('opens on the corrections: one save, every changed field old → new, who and when — and a backfilled record says so', async () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
+      'GET /api/reception/reports/edits?from=2026-10-05&to=2026-10-05&branchId=11': () => ({
+        status: 200,
+        body: {
+          edits: [EDIT_ROW('a1', 'amount', '500000', '450000'), EDIT_ROW('a2', 'ezCode', 'EZ1', 'EZ2')],
+          truncated: false,
+        },
+      }),
+    });
+    wrap(
+      <ReportHistoryDialog
+        period={{ from: '2026-10-05', to: '2026-10-05' }}
+        branchId={11}
+        labelOf={() => 'Thu tiền'}
+        onClose={() => undefined}
+      />,
+    );
+    expect(screen.getByRole('tab', { name: /Lịch sử chỉnh sửa/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /Lịch sử xóa/ })).toHaveAttribute('aria-selected', 'false');
+    // Two fields of ONE save read as one entry.
+    const row = await screen.findByTestId('edit-p1-a1');
+    expect(screen.getAllByTestId(/^edit-p1-/)).toHaveLength(1);
+    expect(within(row).getByTestId('edit-change-a1')).toHaveTextContent('Tổng tiền thu: 500000 → 450000');
+    expect(within(row).getByTestId('edit-change-a2')).toHaveTextContent('Mã EZ: EZ1 → EZ2');
+    expect(row).toHaveTextContent('Sửa bởi Quản lý Lan (Quản lý lễ tân)');
+    expect(row).toHaveTextContent('Sai số tiền');
+    expect(row).toHaveTextContent('05/10/2026 · Ca A');
+    expect(row).toHaveTextContent('Người tạo: Nguyễn A');
+    // "NHẬP BÙ": entered by the manager, for the receptionist.
+    expect(row).toHaveTextContent(/Nhập bù/i);
+    expect(within(row).getByTitle(/Người nhập bù: Quản lý Lan \(Quản lý lễ tân\) · Nhập bù cho: Nguyễn A/)).toBeInTheDocument();
+    // An edit is never shown as a deletion.
+    expect(row).not.toHaveTextContent('Xóa bởi');
+  });
+
+  it('narrows both sections by category, sending it to the server', async () => {
+    const fetchMock = installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
+      'GET /api/reception/reports/edits?branchId=11': () => ({ status: 200, body: { edits: [], truncated: false } }),
+      'GET /api/reception/reports/edits?branchId=11&category=PAYMENT': () => ({
+        status: 200,
+        body: { edits: [EDIT_ROW('a1', 'amount', '1', '2')], truncated: false },
+      }),
+    });
+    wrap(<ReportHistoryDialog branchId={11} labelOf={(c) => c} onClose={() => undefined} />);
+    expect(await screen.findByText('Không có lần chỉnh sửa nào')).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByTestId('history-category'), 'PAYMENT');
+    expect(await screen.findByTestId('edit-p1-a1')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toContain('/api/reception/reports/edits?branchId=11&category=PAYMENT');
+  });
+
+  it('keeps "Lịch sử xóa" as its own section: each deleted record with its creator, original shift, and who deleted it in what role', async () => {
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
+      'GET /api/reception/reports/edits?from=2026-10-05&to=2026-10-05&branchId=11': () => ({
+        status: 200,
+        body: { edits: [], truncated: false },
+      }),
       'GET /api/reception/reports/deleted?from=2026-10-05&to=2026-10-05&branchId=11': () => ({
         status: 200,
         body: {
@@ -172,14 +266,17 @@ describe('Lịch sử xóa', () => {
       }),
     });
     wrap(
-      <DeletedHistoryDialog
+      <ReportHistoryDialog
         period={{ from: '2026-10-05', to: '2026-10-05' }}
         branchId={11}
         labelOf={() => 'Vấn đề khách yêu cầu'}
         onClose={() => undefined}
       />,
     );
+    await userEvent.click(screen.getByTestId('history-tab-deleted'));
     const row = await screen.findByTestId('deleted-g1');
+    // The corrections section is not mixed in.
+    expect(screen.queryByTestId('edit-history')).not.toBeInTheDocument();
     expect(row).toHaveTextContent('05/10/2026 · Ca A');
     expect(row).toHaveTextContent('Người tạo: Nguyễn A');
     expect(row).toHaveTextContent('Xóa bởi Quản lý Lan (Quản lý lễ tân)');
@@ -251,6 +348,166 @@ describe('Nhập bù', () => {
     // The branch comes from the shift, never from the client.
     expect(sent[0]).not.toHaveProperty('branchId');
     expect(onCreated.mock.calls[0]![0]).toContain('Nguyễn A');
+  });
+});
+
+const SESSION_A = {
+  id: 'sA',
+  branchId: 11,
+  businessDate: '2026-10-05',
+  shiftType: 'A',
+  shiftName: 'Ca A',
+  shiftWindow: '06:00 – 14:00',
+  receptionist: { id: 2, name: 'Nguyễn A' },
+  startedAt: '2026-10-04T23:00:00.000Z',
+  closedAt: '2026-10-05T07:00:00.000Z',
+  backfill: {
+    backfilledByName: 'Quản lý Lan',
+    backfilledByRole: 'RECEPTION_MANAGER',
+    backfilledByRoleLabel: 'Quản lý lễ tân',
+    backfilledAt: '2026-10-06T02:00:00.000Z',
+    reason: 'Quên vào ca A',
+  },
+};
+const SESSION_B = { ...SESSION_A, id: 'sB', shiftType: 'B', shiftName: 'Ca B', shiftWindow: '14:00 – 22:00', backfill: null };
+const SHIFT_OPTIONS = {
+  shifts: [
+    { code: 'A', name: 'Ca A', startLocalTime: '06:00', endLocalTime: '14:00', crossesMidnight: false, graceMinutes: 10 },
+    { code: 'B', name: 'Ca B', startLocalTime: '14:00', endLocalTime: '22:00', crossesMidnight: false, graceMinutes: 10 },
+    { code: 'C', name: 'Ca C', startLocalTime: '22:00', endLocalTime: '06:00', crossesMidnight: true, graceMinutes: 10 },
+  ],
+};
+
+describe('Nhập bù — Thêm ca', () => {
+  async function openOnDate() {
+    await userEvent.selectOptions(screen.getByTestId('late-branch'), '11');
+    await userEvent.type(screen.getByTestId('late-date'), '2026-10-05');
+  }
+
+  it('offers the existing shifts and adds nothing when they are all there', async () => {
+    const posted = vi.fn();
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTION_MANAGER } }),
+      'GET /api/reception/reports/late-entry/sessions?branchId=11&date=2026-10-05': () => ({
+        status: 200,
+        body: { sessions: [{ ...SESSION_A, backfill: null }, SESSION_B] },
+      }),
+      'POST /api/reception/reports/late-entry/sessions': () => {
+        posted();
+        return { status: 201, body: {} };
+      },
+    });
+    wrap(<LateEntryDialog branches={[BRANCH]} labelOf={(c) => c} onClose={() => undefined} onCreated={() => undefined} />);
+    await openOnDate();
+    expect(await screen.findByTestId('late-session-sA')).toBeInTheDocument();
+    expect(screen.getByTestId('late-session-sB')).toBeInTheDocument();
+    // "Thêm ca" is offered, but nothing is created unless it is used.
+    expect(screen.getByTestId('late-add-shift')).toHaveTextContent('Thêm ca');
+    expect(posted).not.toHaveBeenCalled();
+  });
+
+  it('adds the missing Ca A for the chosen receptionist, selects it, and the summary names who enters it for whom', async () => {
+    const sent: Record<string, unknown>[] = [];
+    let added = false;
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTION_MANAGER } }),
+      'GET /api/reception/shifts/options': () => ({ status: 200, body: SHIFT_OPTIONS }),
+      'GET /api/reception/reports/late-entry/receptionists?branchId=11': () => ({
+        status: 200,
+        body: { receptionists: [{ id: 2, fullName: 'Nguyễn A' }] },
+      }),
+      'GET /api/reception/reports/late-entry/sessions?branchId=11&date=2026-10-05': () => ({
+        status: 200,
+        body: { sessions: added ? [SESSION_A, SESSION_B] : [SESSION_B] },
+      }),
+      'POST /api/reception/reports/late-entry/sessions': (init) => {
+        sent.push(body(init));
+        added = true;
+        return { status: 201, body: { session: SESSION_A } };
+      },
+    });
+    wrap(<LateEntryDialog branches={[BRANCH]} labelOf={(c) => c} onClose={() => undefined} onCreated={() => undefined} />);
+    await openOnDate();
+    expect(await screen.findByTestId('late-session-sB')).toBeInTheDocument();
+    expect(screen.queryByTestId('late-session-sA')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('late-add-shift'));
+    await userEvent.selectOptions(await screen.findByTestId('late-add-shift-type'), 'A');
+    expect(screen.getByTestId('late-add-shift-window')).toHaveTextContent('06:00 ngày 05/10/2026 đến 14:00');
+    await screen.findByRole('option', { name: 'Nguyễn A' });
+    await userEvent.selectOptions(screen.getByTestId('late-add-shift-receptionist'), '2');
+    // The reason is required before anything is sent.
+    expect(screen.getByTestId('late-add-shift-submit')).toBeDisabled();
+    await userEvent.type(screen.getByTestId('late-add-shift-reason'), 'Quên vào ca A');
+    await userEvent.click(screen.getByTestId('late-add-shift-submit'));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toEqual({ branchId: 11, date: '2026-10-05', shiftType: 'A', receptionistUserId: 2, reason: 'Quên vào ca A' });
+    // Selected at once, marked as a backfilled shift, and the normal flow continues.
+    expect(await screen.findByTestId('late-session-sA')).toBeChecked();
+    expect(screen.getByTestId('late-session-backfill-sA')).toHaveTextContent(/Ca thêm bù/i);
+    await userEvent.click(screen.getByTestId('late-category-GUEST_REQUEST'));
+    await userEvent.type(screen.getByTestId('late-reason'), 'Quên ghi yêu cầu');
+    const summary = await screen.findByTestId('late-summary');
+    expect(summary).toHaveTextContent('Người nhập bù: Quản lý Lan');
+    expect(summary).toHaveTextContent('Nhập bù cho: Nguyễn A');
+    expect(summary).toHaveTextContent('Ca gốc: Ca A, 05/10/2026');
+  });
+
+  it('when an equivalent shift was just added elsewhere, selects that one instead of a duplicate', async () => {
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTION_MANAGER } }),
+      'GET /api/reception/shifts/options': () => ({ status: 200, body: SHIFT_OPTIONS }),
+      'GET /api/reception/reports/late-entry/receptionists?branchId=11': () => ({
+        status: 200,
+        body: { receptionists: [{ id: 2, fullName: 'Nguyễn A' }] },
+      }),
+      // By the time the refusal arrives, the other manager's shift is listed.
+      'GET /api/reception/reports/late-entry/sessions?branchId=11&date=2026-10-05': () => ({
+        status: 200,
+        body: { sessions: [SESSION_A] },
+      }),
+      'POST /api/reception/reports/late-entry/sessions': () => ({
+        status: 409,
+        body: { error: { code: 'CONFLICT', message: 'Ca A ngày này của lễ tân đã có — chọn ca đó để nhập bù.', details: { shiftSessionId: 'sA' } } },
+      }),
+    });
+    wrap(<LateEntryDialog branches={[BRANCH]} labelOf={(c) => c} onClose={() => undefined} onCreated={() => undefined} />);
+    await openOnDate();
+    await userEvent.click(await screen.findByTestId('late-add-shift'));
+    await userEvent.selectOptions(await screen.findByTestId('late-add-shift-type'), 'A');
+    await screen.findByRole('option', { name: 'Nguyễn A' });
+    await userEvent.selectOptions(screen.getByTestId('late-add-shift-receptionist'), '2');
+    await userEvent.type(screen.getByTestId('late-add-shift-reason'), 'Quên vào ca A');
+    await userEvent.click(screen.getByTestId('late-add-shift-submit'));
+    expect(await screen.findByTestId('late-session-sA')).toBeChecked();
+  });
+
+  it('shows the server refusal for an invalid receptionist and keeps the form open', async () => {
+    installApiMock({
+      'GET /api/auth/me': () => ({ status: 200, body: { user: RECEPTION_MANAGER } }),
+      'GET /api/reception/shifts/options': () => ({ status: 200, body: SHIFT_OPTIONS }),
+      'GET /api/reception/reports/late-entry/receptionists?branchId=11': () => ({
+        status: 200,
+        body: { receptionists: [{ id: 2, fullName: 'Nguyễn A' }] },
+      }),
+      'GET /api/reception/reports/late-entry/sessions?branchId=11&date=2026-10-05': () => ({ status: 200, body: { sessions: [] } }),
+      'POST /api/reception/reports/late-entry/sessions': () => ({
+        status: 422,
+        body: { error: { code: 'VALIDATION_ERROR', message: 'Lễ tân không thuộc chi nhánh này hoặc không còn hoạt động.' } },
+      }),
+    });
+    wrap(<LateEntryDialog branches={[BRANCH]} labelOf={(c) => c} onClose={() => undefined} onCreated={() => undefined} />);
+    await openOnDate();
+    expect(await screen.findByTestId('late-no-session')).toHaveTextContent('Thêm ca');
+    await userEvent.click(screen.getByTestId('late-add-shift'));
+    await userEvent.selectOptions(await screen.findByTestId('late-add-shift-type'), 'B');
+    await screen.findByRole('option', { name: 'Nguyễn A' });
+    await userEvent.selectOptions(screen.getByTestId('late-add-shift-receptionist'), '2');
+    await userEvent.type(screen.getByTestId('late-add-shift-reason'), 'Quên vào ca B');
+    await userEvent.click(screen.getByTestId('late-add-shift-submit'));
+    expect(await screen.findByText('Lễ tân không thuộc chi nhánh này hoặc không còn hoạt động.')).toBeInTheDocument();
+    expect(screen.getByTestId('late-add-shift-form')).toBeInTheDocument();
   });
 });
 

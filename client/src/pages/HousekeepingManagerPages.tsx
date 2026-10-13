@@ -18,7 +18,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, BedDouble, ClipboardCheck, Download, FileSpreadsheet, FileText, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { ArrowRight, BedDouble, ClipboardCheck, Download, FileSpreadsheet, FileText, Plus, Users, Wallet, type LucideIcon } from 'lucide-react';
 import {
   ROOM_WORK_KEY,
   formatMinutes,
@@ -35,7 +35,6 @@ import type { RoomCollectionStatus } from '../api/housekeeping';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, type Branch } from '../auth/types';
-import { useBranchRooms } from '../hooks/useBranchRooms';
 import { Button } from '../components/Button';
 import { DataTable, type DataColumn } from '../components/DataTable';
 import { EmptyState } from '../components/EmptyState';
@@ -44,6 +43,8 @@ import { Modal } from '../components/Modal';
 import { QueryState } from '../components/PageState';
 import { BranchPicker, ReportFilterBar } from '../components/ReportFilter';
 import { RoomTaskDetail } from '../components/RoomTaskDetail';
+import { CreateWorkDialog, ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
+import { can } from '../auth/capabilities';
 import { Toast } from '../components/Toast';
 import {
   Badge,
@@ -53,7 +54,6 @@ import {
   ManagerLegend,
   ManagerRoomBoard,
   Metric,
-  PickChip,
   PriorityBadge,
   ProgressBar,
   RateBar,
@@ -679,17 +679,13 @@ function useBranchStaff(branchId: number | undefined) {
 export function HkRoomBoardPage() {
   const [date, setDate] = useState(hcmToday());
   const scope = useScope(false);
-  const queryClient = useQueryClient();
   const [open, setOpen] = useState<RoomTask | null>(null);
   const [passing, setPassing] = useState<RoomTask | null>(null);
   const [failing, setFailing] = useState<RoomTask | null>(null);
-  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
-  const [code, setCode] = useState('');
-  const [priority, setPriority] = useState(false);
-  const [note, setNote] = useState('');
-  const [assignee, setAssignee] = useState<number | ''>('');
-  const [typed, setTyped] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [reassigning, setReassigning] = useState<RoomTask | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const { user } = useAuth();
   const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
   const staff = useBranchStaff(scope.branchId);
   const tasks = useQuery({
@@ -698,35 +694,8 @@ export function HkRoomBoardPage() {
     enabled: scope.branchId !== undefined,
     refetchInterval: 30_000,
   });
-  const { rooms } = useBranchRooms(scope.branchId ?? null);
   const live = tasks.data?.tasks ?? [];
   const b = splitBoard(live);
-  // A room is taken while it has an OPEN cycle; a reviewed room can be added again.
-  const onBoard = new Set([...b.active, ...b.awaiting].map((t) => t.roomNumber));
-  const free = (rooms ?? []).filter((r) => !onBoard.has(r));
-  const chosen = rooms ? [...picked] : typed.split(/[\s,;]+/).filter(Boolean);
-  const effectiveCode = code || catalog.data?.statusCodes[0] || '';
-
-  const create = useMutation({
-    mutationFn: () =>
-      roomWorkApi.createTasks({
-        branchId: scope.branchId,
-        workDate: date,
-        roomNumbers: chosen,
-        statusCode: effectiveCode,
-        priority,
-        note: note.trim() || undefined,
-        assigneeUserId: assignee === '' ? null : assignee,
-      }),
-    onSuccess: async (r) => {
-      setPicked(new Set());
-      setTyped('');
-      setNote('');
-      setPriority(false);
-      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
-      setToast(r.skipped.length ? `Đã thêm ${r.created} phòng; ${r.skipped.join(', ')} đã có trên bảng.` : `Đã thêm ${r.created} phòng vào bảng.`);
-    },
-  });
 
   return (
     <div>
@@ -739,6 +708,12 @@ export function HkRoomBoardPage() {
           <>
             <DateField date={date} onDate={setDate} />
             {scope.picker}
+            {scope.branchId !== undefined ? (
+              <Button onClick={() => setCreating(true)} data-testid="work-create-open" className="self-end shadow-sm">
+                <Plus className="h-4 w-4" aria-hidden="true" />
+                Tạo công việc
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -756,111 +731,53 @@ export function HkRoomBoardPage() {
             <Metric label="Đạt" value={b.passed} tone="green" />
             <Metric label="Ưu tiên" value={b.priority} tone="red" />
           </div>
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
-            <div className="min-w-0 space-y-5">
-              <HkSection title="Phòng đang thực hiện" testId="board-active" aside={<ManagerLegend />}>
-                <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
-                  {live.length === 0 ? (
-                    <p className="py-6 text-center text-sm text-slate-500">Chưa có phòng nào trên bảng ngày này — thêm phòng ở khung “Thêm phòng vào bảng”.</p>
-                  ) : b.active.length === 0 ? (
-                    <p className="py-4 text-center text-sm text-slate-500">Không có phòng đang thực hiện.</p>
-                  ) : (
-                    <ManagerRoomBoard tasks={b.active} codes={catalog.data?.statusCodes ?? []} onSelect={setOpen} />
-                  )}
-                </QueryState>
-              </HkSection>
-              <HkSection
-                title="Phòng chờ đánh giá"
-                testId="board-review"
-                accent
-                aside={<Badge tone={b.awaiting.length > 0 ? 'amber' : 'gray'}>{b.awaiting.length} phòng</Badge>}
-              >
-                {b.awaiting.length === 0 ? (
-                  <p className="py-2 text-sm text-slate-500">Chưa có phòng chờ đánh giá. Phòng nhân viên bấm “Hoàn thành” sẽ hiện ở đây.</p>
+          <div className="min-w-0 space-y-5">
+            <HkSection title="Phòng đang thực hiện" testId="board-active" aside={<ManagerLegend />}>
+              <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
+                {live.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-slate-500">Chưa có công việc nào ngày này — bấm “+ Tạo công việc”.</p>
+                ) : b.active.length === 0 ? (
+                  <p className="py-4 text-center text-sm text-slate-500">Không có phòng đang thực hiện.</p>
                 ) : (
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-3">
-                    {b.awaiting.map((t) => (
-                      <ReviewCard
-                        key={t.id}
-                        task={t}
-                        finishedAt={hhmm(t.completedAt)}
-                        duration={formatMinutes(t.durationSeconds)}
-                        onOpen={() => setOpen(t)}
-                        onPass={() => setPassing(t)}
-                        onFail={() => setFailing(t)}
-                      />
-                    ))}
-                  </div>
+                  <ManagerRoomBoard tasks={b.active} codes={catalog.data?.statusCodes ?? []} onSelect={setOpen} />
                 )}
-              </HkSection>
-            </div>
-            <HkSection title="Thêm phòng vào bảng" testId="board-setup" bodyClassName="space-y-4 p-4">
-              {rooms ? (
-                <div>
-                  <p className="mb-1.5 flex items-baseline justify-between gap-2 text-sm font-medium text-slate-700">
-                    Chọn phòng
-                    <span className="text-xs font-normal text-slate-500">
-                      {picked.size > 0 ? `Đã chọn ${picked.size}` : `${free.length} phòng có thể thêm`}
-                    </span>
-                  </p>
-                  <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto" data-testid="free-rooms">
-                    {free.length === 0 ? <p className="text-sm text-slate-500">Mọi phòng đã có trên bảng.</p> : null}
-                    {free.map((r) => (
-                      <PickChip
-                        key={r}
-                        room={r}
-                        selected={picked.has(r)}
-                        onToggle={() =>
-                          setPicked((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(r)) next.delete(r);
-                            else next.add(r);
-                            return next;
-                          })
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
+              </QueryState>
+            </HkSection>
+            <HkSection
+              title="Phòng chờ đánh giá"
+              testId="board-review"
+              accent
+              aside={<Badge tone={b.awaiting.length > 0 ? 'amber' : 'gray'}>{b.awaiting.length} phòng</Badge>}
+            >
+              {b.awaiting.length === 0 ? (
+                <p className="py-2 text-sm text-slate-500">Chưa có phòng chờ đánh giá. Phòng nhân viên bấm “Hoàn thành” sẽ hiện ở đây.</p>
               ) : (
-                <label className={LABEL}>
-                  Số phòng (cách nhau bởi dấu phẩy)
-                  <input className={FIELD} value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="101, 102" data-testid="typed-rooms" />
-                </label>
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-3">
+                  {b.awaiting.map((t) => (
+                    <ReviewCard
+                      key={t.id}
+                      task={t}
+                      finishedAt={hhmm(t.completedAt)}
+                      duration={formatMinutes(t.durationSeconds)}
+                      onOpen={() => setOpen(t)}
+                      onPass={() => setPassing(t)}
+                      onFail={() => setFailing(t)}
+                    />
+                  ))}
+                </div>
               )}
-              <label className={LABEL}>
-                Tình trạng phòng
-                <select className={FIELD} value={effectiveCode} onChange={(e) => setCode(e.target.value)} data-testid="setup-code">
-                  {(catalog.data?.statusCodes ?? []).map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className={LABEL}>
-                Người dọn
-                <select className={FIELD} value={assignee} onChange={(e) => setAssignee(e.target.value === '' ? '' : Number(e.target.value))} data-testid="setup-assignee">
-                  <option value="">— Giao sau —</option>
-                  {(staff.data?.staff ?? []).map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.fullName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                <input type="checkbox" checked={priority} onChange={(e) => setPriority(e.target.checked)} className="h-5 w-5 accent-red-600" data-testid="setup-priority" />
-                Ưu tiên — cần dọn trước
-              </label>
-              <label className={LABEL}>
-                Ghi chú / chỉ dẫn
-                <textarea className={FIELD} rows={2} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ví dụ: dọn trước 14:00" data-testid="setup-note" />
-              </label>
-              {create.isError ? <ErrorAlert>{toUserMessage(create.error)}</ErrorAlert> : null}
-              <Button className="w-full" disabled={chosen.length === 0 || !effectiveCode} loading={create.isPending} onClick={() => create.mutate()} data-testid="setup-submit">
-                Thêm {chosen.length || ''} phòng
-              </Button>
+            </HkSection>
+            <HkSection title="Các công việc trong ngày" testId="board-work-orders">
+              <WorkOrderTable
+                tasks={live}
+                isLoading={tasks.isLoading}
+                isError={tasks.isError}
+                error={tasks.error}
+                onRetry={() => void tasks.refetch()}
+                onOpen={setOpen}
+                onReassign={setReassigning}
+                canReassign={can(user?.role, 'housekeeping.reassignAwaitingCleaning')}
+              />
             </HkSection>
           </div>
         </div>
@@ -872,6 +789,28 @@ export function HkRoomBoardPage() {
           onClose={() => setOpen(null)}
           onChanged={(msg) => {
             setOpen(null);
+            setToast(msg);
+          }}
+        />
+      ) : null}
+      {creating && scope.branchId !== undefined ? (
+        <CreateWorkDialog
+          branchId={scope.branchId}
+          date={date}
+          onClose={() => setCreating(false)}
+          onCreated={(msg) => {
+            setCreating(false);
+            setToast(msg);
+          }}
+        />
+      ) : null}
+      {reassigning ? (
+        <ReassignDialog
+          task={reassigning}
+          staff={staff.data?.staff ?? []}
+          onClose={() => setReassigning(null)}
+          onDone={(msg) => {
+            setReassigning(null);
             setToast(msg);
           }}
         />

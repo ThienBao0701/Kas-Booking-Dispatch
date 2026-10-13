@@ -19,10 +19,12 @@
  *
  * HOW IT HANDLES A NARROW SCREEN
  *
- * NOT by shrinking the type. Columns marked `secondary` drop out below `md` and
- * reappear inside a per-row detail panel behind a chevron, so the columns that
- * identify a row — who, what, how much — stay visible on a phone and the rest is
- * one tap away. Horizontal scrolling is the last resort, not the first.
+ * NOT by shrinking the type. Each column has a PRIORITY: the breakpoint below
+ * which it leaves the row (`hideBelow`; `secondary` is the same as `md`) and
+ * reappears in a per-row detail panel behind a chevron. The columns that
+ * identify a row — who, what, how much — never leave; a laptop drops the
+ * least-needed ones first, a phone drops every secondary one, and each is one
+ * tap away. Horizontal scrolling is the last resort, not the first.
  */
 import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
@@ -43,9 +45,59 @@ export interface DataColumn<T> {
    * are primary; a note, an internal code or a second timestamp is not.
    */
   secondary?: boolean;
+  /**
+   * A LOWER priority than `secondary`: the column leaves the row below this
+   * breakpoint (`lg` 1024px, `xl` 1280px, `2xl` 1536px, `3xl` 1720px) and is read in the
+   * detail panel instead — so a dense table fits a 1366px laptop without a
+   * sideways scroll, and a 1920px screen still shows every column. Overrides
+   * `secondary` when both are given.
+   */
+  hideBelow?: ColumnBreakpoint;
+  /**
+   * The caller's own detail panel (`renderDetail`) already shows this value, so
+   * when the column leaves the row it is not listed a second time. A column
+   * hidden by `hideBelow` WITHOUT this is listed in the panel, so nothing that
+   * leaves the row ever becomes unreachable.
+   */
+  coveredByDetail?: boolean;
   /** e.g. `w-[1%] whitespace-nowrap` to keep a narrow column narrow. */
   className?: string;
   render: (row: T, index: number) => ReactNode;
+}
+
+export type ColumnBreakpoint = 'md' | 'lg' | 'xl' | '2xl' | '3xl';
+
+const BREAKPOINT_ORDER: ColumnBreakpoint[] = ['md', 'lg', 'xl', '2xl', '3xl'];
+
+/* Literal class names, so Tailwind's scanner keeps every one of them. */
+const CELL_SHOWN_FROM: Record<ColumnBreakpoint, string> = {
+  md: 'hidden md:table-cell',
+  lg: 'hidden lg:table-cell',
+  xl: 'hidden xl:table-cell',
+  '2xl': 'hidden 2xl:table-cell',
+  '3xl': 'hidden 3xl:table-cell',
+};
+const HIDDEN_FROM: Record<ColumnBreakpoint, string> = {
+  md: 'md:hidden',
+  lg: 'lg:hidden',
+  xl: 'xl:hidden',
+  '2xl': '2xl:hidden',
+  '3xl': '3xl:hidden',
+};
+
+/** Below which width a column leaves the row — none for a primary column. */
+function columnBreakpoint<T>(c: Pick<DataColumn<T>, 'secondary' | 'hideBelow'>): ColumnBreakpoint | null {
+  return c.hideBelow ?? (c.secondary ? 'md' : null);
+}
+
+/** The widest breakpoint any column uses — the chevron is needed below it. */
+function widestBreakpoint<T>(columns: DataColumn<T>[]): ColumnBreakpoint | null {
+  let widest = -1;
+  for (const c of columns) {
+    const bp = columnBreakpoint(c);
+    if (bp) widest = Math.max(widest, BREAKPOINT_ORDER.indexOf(bp));
+  }
+  return widest < 0 ? null : BREAKPOINT_ORDER[widest]!;
 }
 
 interface DataTableProps<T> {
@@ -142,11 +194,16 @@ export function DataTable<T>({
       else next.add(key);
       return next;
     });
-  const secondary = columns.filter((c) => c.secondary);
+  const secondary = columns.filter((c) => columnBreakpoint(c) !== null);
   // A chevron column is pointless when nothing is ever hidden behind it.
   const expandable = secondary.length > 0 || renderDetail !== undefined;
-  /* Hidden above `md` unless the caller asked for it at every width. */
-  const toggleHidden = detailToggle === 'always' ? '' : 'md:hidden';
+  /*
+    Hidden from the widest breakpoint any column leaves at — there everything is
+    on screen and there is nothing left to reveal — unless the caller asked for
+    it at every width.
+  */
+  const widest = widestBreakpoint(columns);
+  const toggleHidden = detailToggle === 'always' || !widest ? '' : HIDDEN_FROM[widest];
   // The Admin detail panel is the full record, so the mobile-only <dl> of
   // hidden columns underneath it would be the same fields a second time.
   const detailReplacesSecondary = detailToggle === 'always' && renderDetail !== undefined;
@@ -218,9 +275,9 @@ export function DataTable<T>({
                   <th
                     key={c.key}
                     scope="col"
-                    className={`${cellX} ${headCellClass} ${c.align === 'right' ? 'text-right' : 'text-left'} ${
-                      c.secondary ? 'hidden md:table-cell' : ''
-                    } ${c.className ?? ''}`}
+                    className={`${cellX} ${headCellClass} ${c.align === 'right' ? 'text-right' : 'text-left'} ${cellShownFrom(c)} ${
+                      c.className ?? ''
+                    }`}
                   >
                     {c.header}
                   </th>
@@ -369,9 +426,9 @@ function FragmentRow<T>({
         {columns.map((c) => (
           <td
             key={c.key}
-            className={`${cellX} py-2.5 align-top ${c.align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${
-              c.secondary ? 'hidden md:table-cell' : ''
-            } ${c.className ?? ''}`}
+            className={`${cellX} py-2.5 align-top ${c.align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${cellShownFrom(c)} ${
+              c.className ?? ''
+            }`}
           >
             {c.render(row, index)}
           </td>
@@ -416,10 +473,17 @@ function FragmentRow<T>({
   );
 }
 
+/** A column's cell classes for its priority: always shown, or shown from its breakpoint. */
+function cellShownFrom<T>(c: DataColumn<T>): string {
+  const bp = columnBreakpoint(c);
+  return bp ? CELL_SHOWN_FROM[bp] : '';
+}
+
 /**
- * The columns that dropped out on a phone, listed under the row. A caller whose
- * detail IS the whole record (detailToggle 'always') would otherwise print every
- * hidden column twice on a phone: once here and once inside its own panel.
+ * The columns that dropped out at this width, listed under the row — each only
+ * below its own breakpoint, so nothing is printed twice. A caller whose detail
+ * IS the whole record (detailToggle 'always') would otherwise print every
+ * hidden column twice: once here and once inside its own panel.
  */
 function renderSecondary<T>(
   secondary: DataColumn<T>[],
@@ -427,11 +491,17 @@ function renderSecondary<T>(
   row: T,
   index: number,
 ): ReactNode {
-  if (secondary.length === 0 || detailReplacesSecondary) return null;
+  // A full-record panel replaces the phone list — except for a column that left
+  // the row by priority and that the record does not show itself.
+  const listed = detailReplacesSecondary
+    ? secondary.filter((c) => c.hideBelow !== undefined && !c.coveredByDetail)
+    : secondary;
+  if (listed.length === 0) return null;
+  const widest = widestBreakpoint(listed);
   return (
-    <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2 md:hidden">
-      {secondary.map((c) => (
-        <div key={c.key}>
+    <dl className={`grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 ${widest ? HIDDEN_FROM[widest] : ''}`}>
+      {listed.map((c) => (
+        <div key={c.key} className={HIDDEN_FROM[columnBreakpoint(c)!]}>
           <dt className="text-xs uppercase tracking-wide text-slate-400">{c.header}</dt>
           <dd className="text-sm text-slate-800">{c.render(row, index)}</dd>
         </div>

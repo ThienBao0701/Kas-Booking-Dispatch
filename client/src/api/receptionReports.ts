@@ -51,7 +51,7 @@ export interface ReportOptions {
 
 export interface ReportAudit {
   id: string;
-  action: 'EDIT' | 'VOID' | 'OPENING_CASH';
+  action: 'EDIT' | 'VOID' | 'OPENING_CASH' | 'LATE_ENTRY' | 'SHIFT_BACKFILL';
   field: string | null;
   oldValue: string | null;
   newValue: string | null;
@@ -232,6 +232,8 @@ export interface OperationalReport {
   voidedByRoleLabel?: string | null;
   /** "Nhập bù": entered after its shift by a manager, for the receptionist in `createdBy`. */
   lateEntry?: LateEntryInfo | null;
+  /** The record's shift was added afterwards with "Thêm ca". Absent on older servers. */
+  shiftBackfill?: ShiftBackfillInfo | null;
   payment: PaymentDetail | null;
   guestRequest: GuestRequestDetail | null;
   facility: FacilityIssueDetail | null;
@@ -251,6 +253,36 @@ export interface LateEntryInfo {
   enteredAt: string;
 }
 
+/**
+ * One audited correction — ONE changed field, old → new — with the record it
+ * belongs to. "Lịch sử chỉnh sửa" groups the fields one save changed together.
+ */
+export interface ReportEditEvent extends ReportAudit {
+  actorRole?: string | null;
+  actorRoleLabel?: string | null;
+  report: {
+    id: string;
+    category: ReportCategory;
+    categoryLabel: string;
+    summary: string;
+    branch: { branchNumber: number; address: string } | null;
+    shiftDate: string;
+    shiftName: string | null;
+    createdByName: string;
+    lateEntry?: LateEntryInfo | null;
+    voided: boolean;
+  };
+}
+
+/** A shift added afterwards with "Thêm ca" — by whom, when and why. */
+export interface ShiftBackfillInfo {
+  backfilledByName: string;
+  backfilledByRole: string | null;
+  backfilledByRoleLabel: string | null;
+  backfilledAt: string;
+  reason: string | null;
+}
+
 /** A finished shift a "Nhập bù" can go to, with the receptionist who worked it. */
 export interface LateEntrySession {
   id: string;
@@ -262,6 +294,8 @@ export interface LateEntrySession {
   receptionist: { id: number | null; name: string };
   startedAt: string;
   closedAt: string;
+  /** "Ca thêm bù": set only on a shift added with "Thêm ca". Absent on older servers. */
+  backfill?: ShiftBackfillInfo | null;
 }
 
 /**
@@ -440,9 +474,28 @@ export const reportsApi = {
   deleted: (params: { from?: string; to?: string; branchId?: number; category?: ReportCategory } = {}) =>
     api.get<{ reports: OperationalReport[] }>(`/reception/reports/deleted${query(params)}`),
 
+  /** "Lịch sử chỉnh sửa" — every audited correction the reader may see, newest first. */
+  edits: (params: { from?: string; to?: string; branchId?: number; category?: ReportCategory } = {}) =>
+    api.get<{ edits: ReportEditEvent[]; truncated: boolean }>(`/reception/reports/edits${query(params)}`),
+
   /** "Nhập bù" — the finished shifts of one business date at one branch. */
   lateEntrySessions: (branchId: number, date: string) =>
     api.get<{ sessions: LateEntrySession[] }>(`/reception/reports/late-entry/sessions${query({ branchId, date })}`),
+
+  /** "Thêm ca" — the branch's active receptionists, the only people a missing shift can name. */
+  lateEntryReceptionists: (branchId: number) =>
+    api.get<{ receptionists: { id: number; fullName: string }[] }>(
+      `/reception/reports/late-entry/receptionists${query({ branchId })}`,
+    ),
+
+  /** "Thêm ca" — a shift the receptionist worked but never checked in to; returns it as the list shows it. */
+  addLateEntrySession: (input: {
+    branchId: number;
+    date: string;
+    shiftType: ShiftType;
+    receptionistUserId: number;
+    reason: string;
+  }) => api.post<{ session: LateEntrySession }>('/reception/reports/late-entry/sessions', input),
 
   /** "Nhập bù" — a record on its original shift, with the required reason. */
   lateEntry: (input: NewReportInput & { shiftSessionId: string; reason: string }) =>

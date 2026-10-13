@@ -28,6 +28,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { addressOf, workplaceOf } from './helpers/workplace';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -82,7 +83,7 @@ beforeEach(async () => {
     [hk1b, cn1],
     [hk2, cn2],
   ] as const) {
-    const res = await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan' });
+    const res = await agent.post('/api/housekeeping/shift/start').send({ branchId, staffName: 'Chị Lan', address: await addressOf(branchId) });
     expect(res.status).toBe(201);
   }
 });
@@ -387,7 +388,7 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     const me = (await hk1.get('/api/auth/me')).body.user;
     expect(me.branch.id).toBe(cn1);
     expect((await shift()).body.shift.current.branch.id).toBe(cn1);
-    expect((await hk1.post('/api/housekeeping/shift/start').send({})).status).toBe(409);
+    expect((await hk1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) })).status).toBe(409);
     // Another branch is refused outright — the branch is never the worker's to choose.
     expect((await hk1.post('/api/housekeeping/shift/start').send({ branchId: cn2 })).status).toBe(403);
 
@@ -401,7 +402,7 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
 
   it('"Vào ca" names no branch: the account’s is used', async () => {
     await hk1.post('/api/housekeeping/shift/end').send({});
-    const started = await hk1.post('/api/housekeeping/shift/start').send({});
+    const started = await hk1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) });
     expect(started.status).toBe(201);
     expect(started.body.shift.current.branch.id).toBe(cn1);
     expect(started.body.shift.current.staffName).toBe('Buồng Một');
@@ -479,7 +480,7 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     expect((await agent.get('/api/branches')).body.branches).toEqual([]);
 
     expect((await admin.put(`/api/admin/users/${lone.id}`).send({ branchId: cn2 })).status).toBe(200);
-    const started = await agent.post('/api/housekeeping/shift/start').send({});
+    const started = await agent.post('/api/housekeeping/shift/start').send({ address: await workplaceOf(agent) });
     expect(started.status).toBe(201);
     expect(started.body.shift.current.branch.id).toBe(cn2);
 

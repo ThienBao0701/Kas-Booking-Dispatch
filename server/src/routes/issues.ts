@@ -202,8 +202,8 @@ const causeSchema = z.object({
 });
 
 /**
- * "Nghiệm thu". The note is optional here and required by the SERVICE when the
- * verdict is a fail — one rule, in the domain, whoever calls it.
+ * "Xác nhận hoàn thành" (PASSED) or "Không đạt" (FAILED). The note is optional
+ * here and required by the SERVICE on a fail — one rule, in the domain.
  */
 const inspectSchema = z.object({
   result: z.enum(['PASSED', 'FAILED']),
@@ -223,8 +223,11 @@ function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
 /** Only Bộ phận kỹ thuật works the queue. Admin monitors, and is refused here. */
 const requireTechnical = requireRole('TECHNICAL');
 
-/** Only Quản lý kỹ thuật judges a repair — not the technician who made it. */
-const requireInspector = requireRole('TECHNICAL_MANAGER');
+/**
+ * "Xác nhận hoàn thành": Admin, Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng
+ * quản lý kỹ thuật — never the technician who made the repair.
+ */
+const requireInspector = requireCapability('technical.confirmCompletion');
 
 /**
  * Who REPORTS an incident: Reception (own branch) and the Admin (any branch) —
@@ -648,9 +651,10 @@ export function createIssuesRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/issues/:id/inspect — Quản lý kỹ thuật judges the repair:
-  // AWAITING_INSPECTION → COMPLETED (đạt) or → NEW (không đạt, sửa lại).
-  // `requireInspector` refuses every other role; the service re-checks it.
+  // POST /api/issues/:id/inspect — a manager decides on a finished repair:
+  // AWAITING_INSPECTION → COMPLETED ("Xác nhận hoàn thành") or → NEW (không đạt,
+  // sửa lại). `requireInspector` refuses every other role; the service re-checks
+  // it, plus the branch scope and that nobody confirms their own work.
   router.post('/issues/:id/inspect', requireAuth, requirePasswordChanged, requireInspector, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;

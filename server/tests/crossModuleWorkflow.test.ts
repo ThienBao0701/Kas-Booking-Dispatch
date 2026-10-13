@@ -356,7 +356,8 @@ describe('C. "Nhập bù" — a missed record on its original shift', () => {
     expect(payments.rowCount).toBe(2);
     const staff = cellUnder(payments, 'Nhân viên');
     expect(staff).toContain('Lan');
-    expect(staff).toContain('Nhập bù: Quản lý CN1 - Quản lý lễ tân');
+    // Who entered it and for whom, in the wording every surface uses.
+    expect(staff).toContain('NHẬP BÙ · Người nhập bù: Quản lý CN1 (Quản lý lễ tân) · Nhập bù cho: Lan');
     expect(staff).toContain('Lễ tân quên ghi khoản thu');
     // …and the 8th's has nothing.
     const wb8 = await workbook(admin, `/api/admin/reports/operational.xlsx?from=2026-10-08&to=2026-10-08&branchId=${cn1}`);
@@ -467,7 +468,7 @@ describe('C. "Nhập bù" — a missed record on its original shift', () => {
     expect((await technical('2026-10-08')).branches[0]!.technical).toEqual([]);
     // The technical XLSX of the 7th names the late entry.
     const wb = await workbook(admin, `/api/admin/reports/operational.xlsx?from=2026-10-07&to=2026-10-07&branchId=${cn1}&section=TECHNICAL`);
-    expect(cellUnder(wb.getWorksheet('Kỹ thuật')!, 'Nhập bù')).toContain('Quản lý CN1 - Quản lý lễ tân');
+    expect(cellUnder(wb.getWorksheet('Kỹ thuật')!, 'Nhập bù')).toContain('Người nhập bù: Quản lý CN1 (Quản lý lễ tân)');
 
     // The Admin's incident report (screen, summary and PDF read the same rule).
     const report7 = await admin.get(`/api/admin/reports/incidents?from=2026-10-07&to=2026-10-07&branchId=${cn1}`);

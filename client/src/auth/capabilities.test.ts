@@ -29,4 +29,18 @@ describe('the shared capability table', () => {
     expect(can('RECEPTION_MANAGER', 'technical.viewContractor')).toBe(false);
     expect(can(null, 'reports.deletionHistory')).toBe(false);
   });
+
+  it('lets exactly the five management roles confirm a finished repair — never the technician', () => {
+    for (const role of ['ADMIN', 'RECEPTION_GENERAL_MANAGER', 'RECEPTION_MANAGER', 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'] as const) {
+      expect(can(role, 'technical.confirmCompletion'), role).toBe(true);
+    }
+    for (const role of ['TECHNICAL', 'RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER', 'BOOKING_DEPARTMENT'] as const) {
+      expect(can(role, 'technical.confirmCompletion'), role).toBe(false);
+    }
+  });
+
+  it('shows "Lịch sử chỉnh sửa" to the same readers as "Lịch sử xóa"', () => {
+    expect([...CAPABILITIES['reports.editHistory']].sort()).toEqual([...CAPABILITIES['reports.deletionHistory']].sort());
+    expect(can('TECHNICAL', 'reports.editHistory')).toBe(false);
+  });
 });

@@ -3,8 +3,10 @@
  *
  *   RECEPTION        báo sự cố (Khu vực, Sự cố, Nguyên nhân — optional)
  *   TECHNICAL        Tiếp nhận → sửa → Hoàn thành (cause, result)
- *   TECHNICAL_MANAGER  Nghiệm thu: đạt → closed; không đạt → back to the queue,
- *                    and the next Tiếp nhận opens a new attempt
+ *   A MANAGER        Xác nhận hoàn thành → closed; không đạt → back to the
+ *                    queue, and the next Tiếp nhận opens a new attempt. Any one
+ *                    of Admin, Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng
+ *                    quản lý kỹ thuật (capability `technical.confirmCompletion`)
  *
  * Kept apart from `issueService` on purpose: the summary counters, the
  * handover's pending-work list and the exports all need the vocabulary, and
@@ -12,33 +14,24 @@
  * dependencies) to learn what "Cần sửa lại" means.
  */
 import type { InspectionResult, IssueStatus, Prisma } from '@prisma/client';
-import { env } from '../config/env';
 
 /* ------------------------------------------------------------------ *
- * Inspection: implemented, and DORMANT until switched on
+ * Confirmation: always part of the workflow
  * ------------------------------------------------------------------ */
 
-let inspectionOverride: boolean | null = null;
-
 /**
- * TESTS ONLY — lets the inspection suite exercise the dormant workflow without
- * a process-wide environment change. `null` returns to the configured value.
- */
-export function setInspectionEnabledForTests(value: boolean | null): void {
-  inspectionOverride = value;
-}
-
-/**
- * WHETHER "NGHIỆM THU" IS PART OF THE ACTIVE WORKFLOW.
+ * WHETHER "XÁC NHẬN HOÀN THÀNH" IS PART OF THE WORKFLOW — it always is.
  *
- * Off by default (`TECHNICAL_INSPECTION_ENABLED`). While off, the operational
- * workflow is the one the hotel uses today — Tiếp nhận → sửa → Hoàn thành or
- * Không sửa được — and a technician's "Hoàn thành" CLOSES the incident. The
- * inspection code, columns and tests stay in place for the day it is switched
- * on; nothing here deletes or rewrites what was recorded while it was tried.
+ * A technician's "Hoàn thành" moves the incident to AWAITING_INSPECTION
+ * ("Đã hoàn thành chờ quản lý xác nhận"), never to COMPLETED: the incident is
+ * finally completed only when a manager confirms it, so the person who did the
+ * work never signs it off. This used to be the dormant "Nghiệm thu" behind
+ * `TECHNICAL_INSPECTION_ENABLED`; the flag is retired, and the function stays
+ * as the single place every queue, counter and export asks — and what the API
+ * tells a client (`inspectionEnabled`), so an older client still shows it.
  */
 export function inspectionEnabled(): boolean {
-  return inspectionOverride ?? env.TECHNICAL_INSPECTION_ENABLED;
+  return true;
 }
 
 export const INSPECTION_RESULT_LABELS: Record<InspectionResult, string> = {
@@ -53,10 +46,10 @@ export const INSPECTION_RESULT_LABELS: Record<InspectionResult, string> = {
  *   REWORK                NEW after an attempt (a failed       "Cần sửa lại"
  *                         inspection or a "Không sửa được")
  *   IN_PROGRESS           a technician is on it                "Đang sửa"
- *   AWAITING_INSPECTION   the technician finished; the         "Chờ nghiệm thu"
- *                         Technical Manager has not judged it
- *   COMPLETED             inspection passed (or completed      "Đã hoàn thành"
- *                         before inspection existed)
+ *   AWAITING_INSPECTION   the technician finished; no manager  "Chờ quản lý xác nhận"
+ *                         has confirmed it yet
+ *   COMPLETED             a manager confirmed it (or it was    "Đã hoàn thành"
+ *                         closed before confirmation existed)
  *
  * REWORK IS NOT A STATUS COLUMN. It is NEW in the database — the incident is
  * back in the queue for anyone to pick up — and it is told apart by its
@@ -68,26 +61,26 @@ export const ISSUE_STAGE_LABELS: Record<IssueStage, string> = {
   WAITING: 'Chờ kỹ thuật',
   REWORK: 'Cần sửa lại',
   IN_PROGRESS: 'Đang sửa',
-  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  AWAITING_INSPECTION: 'Chờ quản lý xác nhận',
   COMPLETED: 'Đã hoàn thành',
 };
 
 /**
- * "Nghiệm thu", for the incident as a whole.
+ * "Xác nhận hoàn thành", for the incident as a whole.
  *
- *   PENDING   nothing has been judged yet (or the work is still going on)
- *   PASSED    the last inspection passed — the incident is closed
- *   FAILED    the last inspection failed and the work is being redone
- *   NO_DATA   completed before inspection existed: there is no record, and
+ *   PENDING   nothing has been confirmed yet (or the work is still going on)
+ *   PASSED    a manager confirmed it — the incident is closed
+ *   FAILED    a manager sent it back and the work is being redone
+ *   NO_DATA   closed before confirmation existed: there is no record, and
  *             none is invented
  */
 export type InspectionState = 'PENDING' | 'PASSED' | 'FAILED' | 'NO_DATA';
 
 export const INSPECTION_STATE_LABELS: Record<InspectionState, string> = {
-  PENDING: 'Chưa nghiệm thu',
-  PASSED: 'Đạt',
+  PENDING: 'Chờ quản lý xác nhận',
+  PASSED: 'Đã xác nhận',
   FAILED: 'Không đạt',
-  NO_DATA: 'Chưa có dữ liệu',
+  NO_DATA: 'Không có dữ liệu',
 };
 
 /**
@@ -134,6 +127,8 @@ export interface LifecycleInput {
   cause: string | null;
   /** The current assignment's technician — the only record on legacy rows. */
   technicianName: string | null;
+  /** When a manager confirmed the finished repair; null before confirmation existed. */
+  completionConfirmedAt?: Date | null;
   attempts: {
     attemptNumber: number;
     cause: string | null;
@@ -158,7 +153,7 @@ export function issueLifecycle(issue: LifecycleInput) {
 
   const inspectionState: InspectionState =
     issue.status === 'COMPLETED'
-      ? last?.inspectionResult === 'PASSED'
+      ? issue.completionConfirmedAt || last?.inspectionResult === 'PASSED'
         ? 'PASSED'
         : 'NO_DATA'
       : issue.status === 'AWAITING_INSPECTION'

@@ -265,6 +265,16 @@ const EDIT_FIELD_LABELS: Record<string, string> = {
   locationDetail: 'Vị trí cụ thể',
   category: 'Loại sự cố',
   severity: 'Mức độ',
+  // "Xác nhận hoàn thành" / "Không đạt": the status change a manager made.
+  status: 'Trạng thái',
+};
+
+/** A status as the audit trail reads it — "Đã hoàn thành chờ quản lý xác nhận". */
+const STATUS_EDIT_LABELS: Record<IssueStatus, string> = {
+  NEW: 'Cần sửa lại',
+  IN_PROGRESS: 'Đang sửa',
+  AWAITING_INSPECTION: 'Đã hoàn thành chờ quản lý xác nhận',
+  COMPLETED: 'Đã hoàn thành',
 };
 
 /** An enum-valued column's old/new value, as a person reads it. */
@@ -276,6 +286,7 @@ function editValueLabel(field: string, value: string | null): string | null {
   }
   if (field === 'category') return ISSUE_CATEGORY_LABELS[value as IssueCategory] ?? value;
   if (field === 'severity') return SEVERITY_LABELS[value as IssueSeverity] ?? value;
+  if (field === 'status') return STATUS_EDIT_LABELS[value as IssueStatus] ?? value;
   return value;
 }
 
@@ -506,6 +517,19 @@ export function serializeIssue(issue: IssueDetail, now: Date = getClock().now(),
     completedBy: actorView(issue.completedBy),
     completedByName: issue.completedByNameSnapshot ?? issue.completedBy?.fullName ?? null,
     completedAt: issue.completedAt ? issue.completedAt.toISOString() : null,
+    /**
+     * "Xác nhận hoàn thành": the manager who confirmed the finished repair, and
+     * when. Null while it waits for confirmation, and on incidents closed before
+     * the confirmation step existed (screens say "Không có dữ liệu").
+     */
+    completionConfirmation: issue.completionConfirmedAt
+      ? {
+          confirmedBy: { id: issue.completionConfirmedByUserId, name: issue.completionConfirmedByNameSnapshot ?? '' },
+          role: issue.completionConfirmedByRole,
+          roleLabel: issue.completionConfirmedByRole ? roleLabel(issue.completionConfirmedByRole) : null,
+          confirmedAt: issue.completionConfirmedAt.toISOString(),
+        }
+      : null,
 
     /** Which shift reported it, when the reporter was on one. */
     shiftType: issue.shiftType,
@@ -675,7 +699,7 @@ export const ASSIGNMENT_STATE_LABELS: Record<AssignmentState, string> = {
   IN_PROGRESS: 'Đang sửa',
   EXTERNAL_IN_PROGRESS: 'Kĩ thuật bên ngoài đang sửa',
   AWAITING_REASSIGNMENT: 'Không sửa được — chờ giao lại',
-  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  AWAITING_INSPECTION: 'Đã hoàn thành — chờ quản lý xác nhận',
   COMPLETED: 'Đã hoàn thành',
 };
 
@@ -743,16 +767,14 @@ export function assertTechnicalActor(actor: Actor): void {
 }
 
 /**
- * The ONLY role that may judge a repair — "Quản lý kỹ thuật".
+ * WHO MAY CONFIRM A FINISHED REPAIR — `technical.confirmCompletion`: Admin,
+ * Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng quản lý kỹ thuật.
  *
- * Not the technician (nobody signs off their own work), and not the Admin, who
- * monitors every incident but does not stand in the room to check the door
- * closes. Enforced here as well as on the route, so no other path reaches it.
+ * Never the technician (nobody signs off their own work). Enforced here as well
+ * as on the route, so no other path reaches it.
  */
 export function assertInspector(actor: Actor): void {
-  if (actor.role !== 'TECHNICAL_MANAGER') {
-    throw ApiError.forbidden('Chỉ quản lý kỹ thuật mới nghiệm thu được sự cố.');
-  }
+  assertCan(actor.role, 'technical.confirmCompletion', 'Bạn không có quyền xác nhận hoàn thành sự cố.');
 }
 
 /** Trimmed text, or null when nothing but whitespace was sent. */
@@ -1805,6 +1827,11 @@ export async function completeExternal(
         completedAt: now,
         reportVerdict: verdict.reportVerdict,
         incorrectReason: verdict.incorrectReason,
+        // The responsible manager accepting outside work IS the confirmation.
+        completionConfirmedByUserId: actor.id,
+        completionConfirmedByNameSnapshot: actor.fullName,
+        completionConfirmedByRole: actor.role,
+        completionConfirmedAt: now,
       },
     });
     if (count === 0) throw ApiError.conflict('Sự cố vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
@@ -1937,7 +1964,7 @@ export async function acceptIssue(
 /** Why a transition found the incident somewhere other than where it expected. */
 function finishedMessage(status: IssueStatus): string | null {
   if (status === 'COMPLETED') return 'Sự cố này đã hoàn thành trước đó.';
-  if (status === 'AWAITING_INSPECTION') return 'Sự cố này đã hoàn thành, đang chờ nghiệm thu.';
+  if (status === 'AWAITING_INSPECTION') return 'Sự cố này đã hoàn thành, đang chờ quản lý xác nhận.';
   return null;
 }
 
@@ -1948,9 +1975,8 @@ export interface CompleteIssueInput {
    */
   cause?: string | null;
   /**
-   * "Kết quả sửa chữa" — what was done. Required while inspection is active (it
-   * is what gets inspected); optional while it is dormant, when "Hoàn thành" is
-   * the single press it has always been. With "Đúng" this is "Cách xử lý (nếu có)".
+   * "Kết quả sửa chữa" — what was done. Optional, as it always was: with "Đúng"
+   * this is "Cách xử lý (nếu có)", and the manager confirming the repair reads it.
    */
   result?: string | null;
   /** "Đúng" / "Sai" — required, the rule every "Hoàn thành" shares. */
@@ -1964,8 +1990,10 @@ export interface CompleteIssueInput {
  *
  * Reachable ONLY from IN_PROGRESS, which is what guarantees a finished repair
  * always names the technician who did the work. The server stamps the moment —
- * the timer stops here, not when the manager gets round to inspecting it — and
- * the incident is NOT closed: it waits for "Quản lý kỹ thuật" to pass it.
+ * the timer stops here, not when a manager gets round to confirming it — and
+ * the incident is NOT closed: it is "Đã hoàn thành chờ quản lý xác nhận" until a
+ * manager confirms it (`inspectIssue`). A "Sai" verdict waits for that
+ * confirmation too, so no technician can close an incident by themselves.
  */
 export async function completeIssue(
   id: string,
@@ -1976,14 +2004,12 @@ export async function completeIssue(
   assertTechnicalActor(actor);
 
   /*
-    "ĐÚNG" OR "SAI" FIRST — the shared rule. "Sai" closes the incident with its
-    reason (there is no repair to inspect); "Đúng" carries "Cách xử lý (nếu có)"
-    as the repair result, required only while inspection is active.
+    "ĐÚNG" OR "SAI" FIRST — the shared rule. "Sai" carries its reason; "Đúng"
+    carries "Cách xử lý (nếu có)" as the repair result.
   */
   const verdict = parseCompletionVerdict({ verdict: input.verdict, resolution: input.result, incorrectReason: input.incorrectReason });
   const incorrect = verdict.reportVerdict === 'INCORRECT';
   const result = incorrect ? `Báo cáo sai: ${verdict.incorrectReason}` : verdict.resolution;
-  if (!result && inspectionEnabled()) throw ApiError.validation('Vui lòng nhập kết quả sửa chữa.');
   const cause = optionalText(input.cause);
 
   const issue = await loadIssue(id);
@@ -1991,27 +2017,18 @@ export async function completeIssue(
   const now = clock.now();
 
   /*
-    A VERDICT NEEDS A REPAIR RECORD TO BE STAMPED ON.
-
-    Normally there is one: the attempt "Tiếp nhận" opened, or — for an incident
-    accepted before attempts existed — the one its own acceptance columns
-    describe. An incident left IN_PROGRESS by the old workflow with NO acceptance
-    time on file has neither, and cannot get one without inventing when the
-    repair began. Sending it to "Chờ nghiệm thu" would strand it there for good:
-    inspection would have nothing to judge, and no other transition accepts that
-    status. So it closes as it did before inspection existed, and its inspection
-    reads "Chưa có dữ liệu" — true, and not invented.
+    EVERY FINISH WAITS FOR A MANAGER. The confirmation is recorded on the
+    incident itself (`completionConfirmed…`), so it does not need a repair
+    attempt to be stamped on — an incident left IN_PROGRESS by the old workflow
+    with no acceptance on file waits for confirmation like any other, instead of
+    closing on the technician's word.
   */
-  const inspectable =
-    !incorrect &&
-    inspectionEnabled() &&
-    (issue.attempts.some((a) => a.outcomeAt === null) || issue.acceptedAt !== null);
 
   await prisma.$transaction(async (tx) => {
     const { count } = await tx.hotelIssue.updateMany({
       where: { id, status: 'IN_PROGRESS' },
       data: {
-        status: inspectable ? 'AWAITING_INSPECTION' : 'COMPLETED',
+        status: 'AWAITING_INSPECTION',
         completedByUserId: actor.id,
         completedByNameSnapshot: actor.fullName,
         completedAt: now,
@@ -2031,8 +2048,8 @@ export async function completeIssue(
   });
 
   const updated = await loadIssue(id);
-  if (inspectable) await notifyInspectors(updated);
-  else await notifyReporterStatus(updated, 'COMPLETED');
+  // The reporter hears "hoàn thành" only once a manager confirms it.
+  await notifyInspectors(updated);
   return updated;
 }
 
@@ -2189,26 +2206,35 @@ export async function updateRepairCause(
 
 export interface InspectIssueInput {
   result: InspectionResult;
-  /** Optional on a pass; REQUIRED on a fail — it is the rework instruction. */
+  /** Optional on a confirmation; REQUIRED when sending it back — it is the rework instruction. */
   note?: string | null;
 }
 
 /**
- * AWAITING_INSPECTION → COMPLETED ("Nghiệm thu đạt")
- *                     → NEW       ("Không đạt / Yêu cầu sửa lại").
+ * "XÁC NHẬN HOÀN THÀNH" — a manager's decision on a finished repair.
  *
- * THE VERDICT IS STAMPED ON THE ATTEMPT IT JUDGES, and that attempt is otherwise
- * left exactly as the technician closed it: its outcome, cause and result stay
- * what they were. A failed inspection does not rewrite the repair — it records
- * that the repair was not good enough, and why.
+ *   PASSED  AWAITING_INSPECTION → COMPLETED. The incident is finally completed,
+ *           and only now: it leaves "Đã hoàn thành chờ quản lý xác nhận" and
+ *           enters every completed list, counter and export.
+ *   FAILED  AWAITING_INSPECTION → NEW ("Không đạt / Yêu cầu sửa lại"), with the
+ *           required reason, like "Không sửa được": the current-assignment
+ *           columns are cleared and the next "Tiếp nhận" opens a NEW attempt, so
+ *           the first repair, its verdict and the second repair stay separate.
  *
- * A FAIL SENDS THE INCIDENT BACK TO THE QUEUE, like "Không sửa được": NEW, with
- * the current-assignment columns cleared. The next "Tiếp nhận" then opens a NEW
- * attempt (Lần 2), so the first repair, its inspection and the second repair are
- * three separate, permanent facts rather than one row edited three times.
+ * WHO: any ONE of Admin, Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng quản lý
+ * kỹ thuật (`technical.confirmCompletion`), within the branches it sees — and
+ * never the person who completed the repair, so the work is always signed off
+ * by somebody else.
+ *
+ * WHAT IS RECORDED: the confirmer, its role and the server time on the incident
+ * (`completionConfirmed…`, PASSED only); the verdict on the attempt it judges,
+ * when there is one, left otherwise exactly as the technician closed it; and a
+ * `HotelIssueEdit` row for the status change (before → after), the incident's
+ * existing audit trail.
  *
  * Both outcomes are conditional writes on AWAITING_INSPECTION, so two managers
- * judging the same repair at once produce one verdict and one 409.
+ * pressing at once produce one decision and one 409, and a second press of the
+ * same button changes nothing.
  */
 export async function inspectIssue(
   id: string,
@@ -2217,47 +2243,56 @@ export async function inspectIssue(
   clock: Clock = getClock(),
 ): Promise<IssueDetail> {
   assertInspector(actor);
-  if (!inspectionEnabled()) {
-    // Dormant: the code is here for the day it is switched on, and until then
-    // no verdict may change an incident's state.
-    throw ApiError.forbidden('Chức năng nghiệm thu chưa được kích hoạt.');
-  }
 
   const note = optionalText(input.note);
   if (input.result === 'FAILED' && !note) {
     throw ApiError.validation('Vui lòng nhập lý do không đạt.');
   }
+  if (note && note.length > 2000) throw ApiError.validation('Nội dung quá dài.');
 
   const issue = await loadIssue(id);
+  await assertVisible(issue, actor);
+  if (issue.status !== 'AWAITING_INSPECTION') {
+    throw ApiError.conflict(
+      issue.status === 'COMPLETED'
+        ? 'Sự cố này đã được xác nhận hoàn thành trước đó.'
+        : 'Sự cố này chưa ở trạng thái chờ quản lý xác nhận.',
+      { status: issue.status },
+    );
+  }
+  if (issue.completedByUserId !== null && issue.completedByUserId === actor.id) {
+    throw ApiError.forbidden('Không thể tự xác nhận công việc do chính bạn hoàn thành.');
+  }
   const now = clock.now();
+  const passed = input.result === 'PASSED';
 
   await prisma.$transaction(async (tx) => {
     // The incident first, then the attempt — the lock order every other
     // transition uses, so no pair of them can deadlock.
     const { count } = await tx.hotelIssue.updateMany({
-      where: { id, status: 'AWAITING_INSPECTION' },
-      data:
-        input.result === 'PASSED'
-          ? { status: 'COMPLETED' }
-          : {
-              status: 'NEW',
-              acceptedByUserId: null,
-              acceptedByNameSnapshot: null,
-              acceptedAt: null,
-              technicianName: null,
-              technicianPhone: null,
-              completedByUserId: null,
-              completedByNameSnapshot: null,
-              completedAt: null,
-            },
+      where: { id, ...LIVE_ISSUE, status: 'AWAITING_INSPECTION' },
+      data: passed
+        ? {
+            status: 'COMPLETED',
+            completionConfirmedByUserId: actor.id,
+            completionConfirmedByNameSnapshot: actor.fullName,
+            completionConfirmedByRole: actor.role,
+            completionConfirmedAt: now,
+          }
+        : {
+            status: 'NEW',
+            acceptedByUserId: null,
+            acceptedByNameSnapshot: null,
+            acceptedAt: null,
+            technicianName: null,
+            technicianPhone: null,
+            completedByUserId: null,
+            completedByNameSnapshot: null,
+            completedAt: null,
+          },
     });
     if (count === 0) {
-      throw ApiError.conflict(
-        issue.status === 'COMPLETED'
-          ? 'Sự cố này đã được nghiệm thu trước đó.'
-          : 'Sự cố này chưa ở trạng thái chờ nghiệm thu.',
-        { status: issue.status },
-      );
+      throw ApiError.conflict('Sự cố này vừa được xác nhận ở nơi khác. Vui lòng tải lại.');
     }
 
     const judged = await tx.technicalRepairAttempt.findFirst({
@@ -2265,27 +2300,35 @@ export async function inspectIssue(
       orderBy: { attemptNumber: 'desc' },
       select: { id: true },
     });
-    const stamped = judged
-      ? await tx.technicalRepairAttempt.updateMany({
-          where: { id: judged.id, inspectionResult: null },
-          data: {
-            inspectionResult: input.result,
-            inspectedByUserId: actor.id,
-            inspectedByNameSnapshot: actor.fullName,
-            inspectedAt: now,
-            inspectionNote: note,
-          },
-        })
-      : { count: 0 };
-    // Rolls the status change back with it: a verdict with nothing to attach
-    // to is not recorded as if it had been.
-    if (stamped.count === 0) {
-      throw ApiError.conflict('Không tìm thấy lần sửa chờ nghiệm thu.', { status: issue.status });
+    if (judged) {
+      await tx.technicalRepairAttempt.updateMany({
+        where: { id: judged.id, inspectionResult: null },
+        data: {
+          inspectionResult: input.result,
+          inspectedByUserId: actor.id,
+          inspectedByNameSnapshot: actor.fullName,
+          inspectedAt: now,
+          inspectionNote: note,
+        },
+      });
     }
+
+    // The status change, before → after, in the incident's own audit trail.
+    await tx.hotelIssueEdit.create({
+      data: {
+        issueId: id,
+        field: 'status',
+        oldValue: 'AWAITING_INSPECTION',
+        newValue: passed ? 'COMPLETED' : 'NEW',
+        actorUserId: actor.id,
+        actorNameSnapshot: actor.fullName,
+        createdAt: now,
+      },
+    });
   });
 
   const updated = await loadIssue(id);
-  if (input.result === 'PASSED') {
+  if (passed) {
     await notifyReporterStatus(updated, 'COMPLETED');
   } else {
     await notifyTechniciansRework(updated, note!);
@@ -2560,16 +2603,26 @@ async function notifyReporterStatus(issue: IssueDetail, status: IssueStatus): Pr
  * passes inspection, and a "hoàn thành" that is later failed would be a promise
  * the hotel took back.
  */
+/**
+ * "Đã hoàn thành chờ quản lý xác nhận" — told to the managers who supervise the
+ * incident's branch (ticked on their account). Admin and Tổng quản lý lễ tân see
+ * every branch's queue on screen and are not paged for each repair.
+ */
 async function notifyInspectors(issue: IssueDetail): Promise<void> {
   const managers = await prisma.user.findMany({
-    where: { role: 'TECHNICAL_MANAGER', active: true },
+    where: {
+      role: { in: ['TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER', 'RECEPTION_MANAGER'] },
+      active: true,
+      branchAssignments: { some: { branchId: issue.branchId } },
+      ...(issue.completedByUserId !== null ? { id: { not: issue.completedByUserId } } : {}),
+    },
     select: { id: true },
   });
   if (managers.length === 0) return;
   await prisma.notification.createMany({
     data: managers.map((m) => ({
       userId: m.id,
-      title: 'Sự cố chờ nghiệm thu',
+      title: 'Sự cố chờ quản lý xác nhận',
       body: `${describeLocation(issue)} — ${issue.branch.address}`,
     })),
   });

@@ -3,6 +3,9 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      // A wide desktop (1720px+): the densest Admin tables show their last,
+      // least-needed columns only here (see DataTable `hideBelow`).
+      screens: { '3xl': '1720px' },
       colors: {
         // Primary brand blue used across buttons, links and focus rings.
         brand: {

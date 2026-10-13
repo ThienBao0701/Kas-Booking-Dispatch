@@ -19,6 +19,7 @@ import { HANDOFF_PDF_COLUMNS, handoffLines } from './operationalPdf';
 import { dispatchChainText, repairCostOf, type TechnicalIssueView } from './technicalDispatch';
 import { INSPECTION_RESULT_LABELS, issueLifecycle } from '../issue/issueLifecycle';
 import { hcmDateTime, periodLabel, rankedTotals } from './format';
+import { lateEntryLines } from '../reception/lateEntryText';
 import {
   addPageNumbers,
   assertFitsLandscape,
@@ -35,7 +36,7 @@ export const INCIDENT_REPORT_TITLE = 'KAS – BÁO CÁO SỰ CỐ KHÁCH SẠN';
 export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
   NEW: 'Sự cố khách sạn',
   IN_PROGRESS: 'Đang sửa',
-  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  AWAITING_INSPECTION: 'Chờ quản lý xác nhận',
   COMPLETED: 'Đã hoàn thành',
 };
 
@@ -110,8 +111,8 @@ const INSPECTION_COLUMNS: Column<InspectionLine>[] = assertFitsLandscape('incide
   { header: 'Người sửa', width: 72, value: (l) => l.technicianName },
   { header: 'Nguyên nhân', width: 110, value: (l) => l.cause },
   { header: 'Kết quả sửa chữa', width: 118, value: (l) => l.result },
-  { header: 'Nghiệm thu', width: 56, value: (l) => l.verdict },
-  { header: 'Người nghiệm thu', width: 72, value: (l) => l.inspector },
+  { header: 'Xác nhận', width: 56, value: (l) => l.verdict },
+  { header: 'Người xác nhận', width: 72, value: (l) => l.inspector },
   { header: 'Thời gian', width: 66, value: (l) => hcmDateTime(l.inspectedAt) },
   { header: 'Ghi chú / Lý do', width: 96, value: (l) => l.note },
 ]);
@@ -232,7 +233,7 @@ export const DISPATCH_SUMMARY_COLUMNS: Column<TechnicalIssueView>[] = assertFits
       [
         `${i.reporterName ?? '—'} · ${hcmDateTime(new Date(i.createdAt))}`,
         i.shiftType ? shiftDefinition(i.shiftType).name : null,
-        i.lateEntry ? `Nhập bù: ${i.lateEntry.enteredBy.name}` : null,
+        ...(i.lateEntry ? lateEntryLines(i.lateEntry, i.reporterName) : []),
       ]
         .filter(Boolean)
         .join('\n'),
@@ -353,11 +354,11 @@ export async function buildIncidentReportPdf(input: IncidentReportInput): Promis
   */
   doc.text(`Lượt không sửa được: ${input.summary.cannotRepairAttempts}`);
   if (input.summary.inspectionEnabled) {
-    doc.text(`Lượt nghiệm thu không đạt: ${input.summary.failedInspections}`);
+    doc.text(`Lượt xác nhận không đạt: ${input.summary.failedInspections}`);
   }
   doc.text(`Sự cố cần sửa lại: ${input.summary.needsReworkIssues}`);
   if (input.summary.inspectionEnabled) {
-    doc.text(`Chờ nghiệm thu: ${input.summary.awaitingInspectionCount}`);
+    doc.text(`Đã hoàn thành chờ quản lý xác nhận: ${input.summary.awaitingInspectionCount}`);
   }
   doc.text(`Chưa hoàn thành trên toàn hệ thống: ${input.summary.outstandingTotal}`);
 

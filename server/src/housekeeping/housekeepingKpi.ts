@@ -245,7 +245,7 @@ export async function staffDetail(
         OR: [{ assigneeUserId: userId }, { cleanedByUserId: userId }, { inspection: { is: { createdByUserId: userId } } }],
       },
       include: TASK_INCLUDE,
-      orderBy: [{ workDate: 'desc' }, { roomNumber: 'asc' }],
+      orderBy: [{ workDate: 'desc' }, { roomNumber: 'asc' }, { cycleNumber: 'asc' }, { createdAt: 'asc' }],
     }),
     inspectionsFor({ ...branchWhere, createdByUserId: userId, createdAt: { gte: start, lt: end } }, client),
     listShifts(actor, { from: start, to: end, branchId: filter.branchId }, client),

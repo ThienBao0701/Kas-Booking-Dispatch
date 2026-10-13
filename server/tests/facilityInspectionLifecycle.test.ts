@@ -1,21 +1,24 @@
 /**
- * Facility issue lifecycle v2 — cause, repair result and "Nghiệm thu".
+ * Facility issue lifecycle v2 — cause, repair result and "Xác nhận hoàn thành"
+ * (formerly the dormant "Nghiệm thu"; always part of the workflow now).
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
  *   1. Reception may report with or without a cause, and what it reported is
  *      never overwritten — a technician's determination lives on their attempt.
  *   2. "Hoàn thành" is NOT "Đã hoàn thành". The technician's finish stops the
- *      timer and waits for Quản lý kỹ thuật; only a passed inspection closes it.
+ *      timer and waits for a manager; only a confirmation closes it.
  *   3. A failed inspection needs a reason, leaves the judged attempt exactly as
  *      it was, and sends the incident back so the next "Tiếp nhận" opens a NEW
  *      attempt — Lần 1, its verdict, and Lần 2 are separate, permanent facts.
  *   4. Every timestamp is the server's. Nothing the client sends becomes one.
- *   5. Only Quản lý kỹ thuật inspects, and Quản lý kỹ thuật does nothing else
- *      of the technician's. The API is the control, so the API is what is tested.
- *   6. Work completed before inspection existed reads "Chưa có dữ liệu" — no
+ *   5. A manager confirms (Admin, Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng
+ *      quản lý kỹ thuật — see adminWorkflowUpgrade.test.ts for each role), never
+ *      the technician or Reception, and Quản lý kỹ thuật does nothing else of
+ *      the technician's. The API is the control, so the API is what is tested.
+ *   6. Work completed before confirmation existed reads "Không có dữ liệu" — no
  *      verdict is invented for it.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
@@ -29,7 +32,6 @@ import {
 } from './helpers/auth';
 import { getClock, resetClock, setClock } from '../src/lib/clock';
 import { serveAllBranches, userIdOf } from './helpers/issues';
-import { setInspectionEnabledForTests } from '../src/issue/issueLifecycle';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -55,10 +57,6 @@ let managerId = 0;
 let admin: Agent;
 
 beforeAll(async () => {
-  // Inspection is DORMANT by default; this suite exercises the implementation
-  // that is kept for the day it is switched on. The dormant default has its own
-  // block at the end of the file.
-  setInspectionEnabledForTests(true);
   await resetAll();
   await seedBranches(testPrisma);
   cn1 = (await testPrisma.branch.findUniqueOrThrow({ where: { code: 'TRUONG_DINH_05' } })).id;
@@ -121,7 +119,6 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  setInspectionEnabledForTests(null);
   resetClock();
   await testPrisma.$disconnect();
 });
@@ -306,15 +303,13 @@ describe('the technician repairs', () => {
     expect(res.status).toBe(409);
   });
 
-  it('needs a result to finish — whitespace is not a result', async () => {
+  it('takes the result as optional — whitespace is no result — and still waits for a manager', async () => {
     const id = await report();
     await accept(tech, id);
-    for (const body of [{}, { result: '   ' }]) {
-      const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', ...body });
-      expect(res.status).toBe(422);
-    }
-    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
-    expect(stored.status).toBe('IN_PROGRESS');
+    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: '   ' });
+    expect(res.status).toBe(200);
+    expect(res.body.issue.status).toBe('AWAITING_INSPECTION');
+    expect(res.body.issue.attempts[0].result).toBeNull();
   });
 
   it('finishing stops the timer, records the result, and waits for inspection', async () => {
@@ -330,9 +325,9 @@ describe('the technician repairs', () => {
     expect(done).toMatchObject({
       status: 'AWAITING_INSPECTION',
       stage: 'AWAITING_INSPECTION',
-      stageLabel: 'Chờ nghiệm thu',
+      stageLabel: 'Chờ quản lý xác nhận',
       inspectionState: 'PENDING',
-      inspectionLabel: 'Chưa nghiệm thu',
+      inspectionLabel: 'Chờ quản lý xác nhận',
       completedAt: hcm('2026-09-25', '11:10').toISOString(),
       durationLabel: '40 phút',
       cause: 'Thiếu gas',
@@ -347,9 +342,9 @@ describe('the technician repairs', () => {
       inspection: null,
     });
 
-    // Quản lý kỹ thuật is told; the reporter is not told "hoàn thành" yet.
+    // The branch's Quản lý kỹ thuật is told; the reporter is not told "hoàn thành" yet.
     const managerNotes = await testPrisma.notification.findMany({ where: { userId: managerId } });
-    expect(managerNotes.map((n) => n.title)).toContain('Sự cố chờ nghiệm thu');
+    expect(managerNotes.map((n) => n.title)).toContain('Sự cố chờ quản lý xác nhận');
     const reporterNotes = await testPrisma.notification.findMany({ where: { userId: letan1Id } });
     expect(reporterNotes.map((n) => n.title)).not.toContain('Sự cố đã hoàn thành');
   });
@@ -378,9 +373,14 @@ describe('"Nghiệm thu đạt"', () => {
       status: 'COMPLETED',
       stageLabel: 'Đã hoàn thành',
       inspectionState: 'PASSED',
-      inspectionLabel: 'Đạt',
-      // The repair's completion time is the technician's, not the inspection's.
+      inspectionLabel: 'Đã xác nhận',
+      // The repair's completion time is the technician's, not the confirmation's.
       completedAt: hcm('2026-09-25', '11:10').toISOString(),
+      completionConfirmation: {
+        confirmedBy: { id: managerId, name: 'Quản lý Hùng' },
+        role: 'TECHNICAL_MANAGER',
+        confirmedAt: hcm('2026-09-25', '11:30').toISOString(),
+      },
     });
     expect(res.body.issue.attempts[0].inspection).toEqual({
       result: 'PASSED',
@@ -411,7 +411,7 @@ describe('"Nghiệm thu đạt"', () => {
     const res = await letan1.get(`/api/issues/${id}`);
     expect(res.body.issue).toMatchObject({
       stageLabel: 'Đã hoàn thành',
-      inspectionLabel: 'Đạt',
+      inspectionLabel: 'Đã xác nhận',
       repairerName: 'Bảo',
       cause: 'Thiếu gas',
     });
@@ -604,7 +604,11 @@ describe('"Không đạt / Yêu cầu sửa lại"', () => {
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe('NEW');
     expect(res.body.issue.attempts).toHaveLength(1);
-    expect(res.body.issue.edits).toEqual([expect.objectContaining({ field: 'description', newValue: 'Đổi mô tả' })]);
+    // The trail holds the manager's status change, then Reception's correction.
+    expect(res.body.issue.edits).toEqual([
+      expect.objectContaining({ field: 'status', fieldLabel: 'Trạng thái', oldValue: 'Đã hoàn thành chờ quản lý xác nhận', newValue: 'Cần sửa lại' }),
+      expect.objectContaining({ field: 'description', newValue: 'Đổi mô tả' }),
+    ]);
   });
 
   it('refuses to correct a report whose repair is finished and awaiting inspection', async () => {
@@ -620,10 +624,10 @@ describe('"Không đạt / Yêu cầu sửa lại"', () => {
 /* Who may do what                                                     */
 /* ================================================================== */
 
-describe('only Quản lý kỹ thuật inspects', () => {
-  it('refuses Reception, the technician and the Admin', async () => {
+describe('only a manager confirms', () => {
+  it('refuses Reception and the technician who did the work', async () => {
     const id = await awaitingInspection();
-    for (const agent of [letan1, tech, admin]) {
+    for (const agent of [letan1, tech]) {
       const pass = await agent.post(`/api/issues/${id}/inspect`).send({ result: 'PASSED' });
       expect(pass.status).toBe(403);
       const fail = await agent.post(`/api/issues/${id}/inspect`).send({ result: 'FAILED', note: 'x' });
@@ -736,8 +740,9 @@ describe('historical incidents', () => {
     expect(res.body.issue).toMatchObject({
       stageLabel: 'Đã hoàn thành',
       inspectionState: 'NO_DATA',
-      inspectionLabel: 'Chưa có dữ liệu',
+      inspectionLabel: 'Không có dữ liệu',
       repairerName: 'Cũ',
+      completionConfirmation: null,
     });
     expect(res.body.issue.attempts[0].inspection).toBeNull();
 
@@ -793,25 +798,25 @@ async function legacyInProgress(columns: Record<string, unknown>): Promise<strin
 
 describe('incidents accepted before repair attempts existed', () => {
   /**
-   * NEVER STRANDED. With no acceptance time on file there is no repair record a
-   * verdict could be stamped on, so "Hoàn thành" closes it as it did before
-   * inspection existed — instead of parking it in "Chờ nghiệm thu", where
-   * inspection would 409 and no transition could ever move it again.
+   * NEVER STRANDED, AND NEVER CLOSED ON THE TECHNICIAN'S WORD. With no
+   * acceptance time on file there is no repair record a verdict could be
+   * stamped on — but the confirmation lives on the incident itself, so it waits
+   * for a manager like any other finish, and the manager can close it.
    */
-  it('with no acceptance on file, "Hoàn thành" closes it rather than leaving it uninspectable', async () => {
+  it('with no acceptance on file, "Hoàn thành" still waits for a manager, who can confirm it', async () => {
     const id = await legacyInProgress({ acceptedAt: null, technicianName: null });
     const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT', result: 'Đã sửa' });
     expect(res.status).toBe(200);
-    expect(res.body.issue).toMatchObject({
-      status: 'COMPLETED',
-      inspectionState: 'NO_DATA',
-      inspectionLabel: 'Chưa có dữ liệu',
-    });
+    expect(res.body.issue).toMatchObject({ status: 'AWAITING_INSPECTION', inspectionState: 'PENDING' });
     // Nothing invented for it…
     expect(res.body.issue.attempts).toHaveLength(0);
-    // …and it is not waiting for anybody.
     const counts = await manager.get('/api/issues/counts');
-    expect(counts.body.counts.awaitingInspectionCount).toBe(0);
+    expect(counts.body.counts.awaitingInspectionCount).toBe(1);
+    // …and the confirmation needs no attempt to be recorded.
+    const confirmed = await inspect(id, { result: 'PASSED' });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.issue).toMatchObject({ status: 'COMPLETED', inspectionState: 'PASSED' });
+    expect(confirmed.body.issue.completionConfirmation.confirmedBy.id).toBe(managerId);
   });
 
   it('with an acceptance on file, the attempt is rebuilt from it and inspection works', async () => {
@@ -885,7 +890,7 @@ describe('only Reception and the Admin report or rewrite an incident', () => {
   });
 });
 
-describe('the Excel export states only the verdict its "Nghiệm thu" column describes', () => {
+describe('the Excel export states only the verdict its "Xác nhận hoàn thành" column describes', () => {
   async function facilitySheetRow(issueId: string) {
     const xlsx = await admin
       .get('/api/admin/reports/operational.xlsx?from=2026-09-25&to=2026-09-25')
@@ -910,9 +915,9 @@ describe('the Excel export states only the verdict its "Nghiệm thu" column des
       if (String(row.getCell(col('Mã sự cố')).value ?? '') === issueId) {
         const cell = (h: string) => String(row.getCell(col(h)).value ?? '');
         return {
-          inspection: cell('Nghiệm thu'),
-          inspector: cell('Người nghiệm thu'),
-          note: cell('Ghi chú nghiệm thu'),
+          inspection: cell('Xác nhận hoàn thành'),
+          inspector: cell('Người xác nhận'),
+          note: cell('Ghi chú xác nhận'),
         };
       }
     }
@@ -938,92 +943,25 @@ describe('the Excel export states only the verdict its "Nghiệm thu" column des
     await complete(tech2, id, { result: 'Đã hàn ống' });
 
     // Repair 2 waits: no verdict is stated, so none is shown beside it.
-    expect(await facilitySheetRow(id)).toEqual({ inspection: 'Chưa nghiệm thu', inspector: '', note: '' });
+    expect(await facilitySheetRow(id)).toEqual({ inspection: 'Chờ quản lý xác nhận', inspector: '', note: '' });
 
     await inspect(id, { result: 'PASSED', note: 'OK' });
-    expect(await facilitySheetRow(id)).toEqual({ inspection: 'Đạt', inspector: 'Quản lý Hùng', note: 'OK' });
+    expect(await facilitySheetRow(id)).toEqual({ inspection: 'Đã xác nhận', inspector: 'Quản lý Hùng', note: 'OK' });
   });
 });
 
 /* ================================================================== */
-/* The DEFAULT: inspection implemented but dormant                     */
+/* The confirmation step cannot be switched off                        */
 /* ================================================================== */
 
-describe('while inspection is dormant (the operational default)', () => {
-  beforeEach(() => setInspectionEnabledForTests(false));
-  afterEach(() => setInspectionEnabledForTests(true));
-
-  it('"Hoàn thành" closes the incident, as it always has — no result required, no inspection', async () => {
-    const id = await report();
-    at('10:30');
-    await accept(tech, id);
-    at('11:10');
-    const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
-    expect(res.status).toBe(200);
-    expect(res.body.issue).toMatchObject({
-      status: 'COMPLETED',
-      stageLabel: 'Đã hoàn thành',
-      inspectionEnabled: false,
-      completedAt: hcm('2026-09-25', '11:10').toISOString(),
-    });
-    // The reporter hears it is done; nobody is asked to inspect it.
-    const reporter = await testPrisma.notification.findMany({ where: { userId: letan1Id } });
-    expect(reporter.map((n) => n.title)).toContain('Sự cố đã hoàn thành');
-    const managers = await testPrisma.notification.findMany({ where: { userId: managerId } });
-    expect(managers.map((n) => n.title)).not.toContain('Sự cố chờ nghiệm thu');
-  });
-
-  it('"Không sửa được" still sends it back to the queue', async () => {
-    const id = await report();
-    await accept(tech, id);
-    const res = await tech.post(`/api/issues/${id}/cannot-repair`).send({ reason: 'Không có linh kiện' });
-    expect(res.status).toBe(200);
-    expect(res.body.issue).toMatchObject({ status: 'NEW', stageLabel: 'Cần sửa lại' });
-  });
-
-  it('refuses every inspection, so no verdict can change an incident', async () => {
-    const id = await report();
-    await accept(tech, id);
-    await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
-    for (const body of [{ result: 'PASSED' }, { result: 'FAILED', note: 'x' }]) {
-      const res = await inspect(id, body);
-      expect(res.status).toBe(403);
-      expect(res.body.error.message).toContain('chưa được kích hoạt');
-    }
-    expect(await testPrisma.technicalRepairAttempt.count({ where: { inspectionResult: { not: null } } })).toBe(0);
-  });
-
-  it('has no "Chờ nghiệm thu" queue — even with a row stored as awaiting inspection', async () => {
-    // A row the old workflow left behind, so an empty queue proves the filter,
-    // not an empty table.
-    const id = await report();
-    await accept(tech, id);
-    await testPrisma.hotelIssue.update({
-      where: { id },
-      data: { status: 'AWAITING_INSPECTION', completedAt: hcm('2026-09-25', '10:40'), completedByUserId: techId },
-    });
-
-    const counts = await tech.get('/api/issues/counts');
-    expect(counts.body.counts).toMatchObject({ awaitingInspectionCount: 0, inspectionEnabled: false });
-    const queue = await tech.get('/api/issues?stage=AWAITING_INSPECTION');
-    expect(queue.status).toBe(200);
-    expect(queue.body.issues).toHaveLength(0);
-    // Switched on, the same row IS the queue — the filter, not the data, decides.
-    setInspectionEnabledForTests(true);
-    try {
-      const live = await tech.get('/api/issues?stage=AWAITING_INSPECTION');
-      expect(live.body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
-    } finally {
-      setInspectionEnabledForTests(false);
-    }
-  });
-
+describe('a repair finished during the old inspection trial', () => {
   /**
-   * A repair finished while the inspection workflow was being tried stays in
-   * the database as AWAITING_INSPECTION — nothing rewrites it — and READS as
-   * what it is under the active workflow: finished.
+   * Stored as AWAITING_INSPECTION and never judged: it was not finally
+   * completed by anybody, so it waits for a manager like any other — counted
+   * as outstanding, on the confirmation queue, and never as completed. Nothing
+   * rewrites the row to get it there.
    */
-  it('reads a repair finished during the inspection trial as finished, without rewriting it', async () => {
+  it('waits on the confirmation queue instead of reading as finished', async () => {
     const id = await report();
     await accept(tech, id);
     await testPrisma.hotelIssue.update({
@@ -1032,15 +970,13 @@ describe('while inspection is dormant (the operational default)', () => {
     });
 
     const res = await letan1.get(`/api/issues/${id}`);
-    expect(res.body.issue).toMatchObject({ status: 'AWAITING_INSPECTION', stage: 'COMPLETED', stageLabel: 'Đã hoàn thành' });
+    expect(res.body.issue).toMatchObject({ status: 'AWAITING_INSPECTION', stage: 'AWAITING_INSPECTION', inspectionEnabled: true });
     const counts = await tech.get('/api/issues/counts');
-    expect(counts.body.counts).toMatchObject({ completedCount: 1, awaitingInspectionCount: 0 });
-    const summary = await admin.get('/api/issues/summary');
-    expect(summary.body.summary.totalUnresolved).toBe(0);
-    const done = await tech.get('/api/issues?stage=COMPLETED');
-    expect(done.body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
+    expect(counts.body.counts).toMatchObject({ awaitingInspectionCount: 1, completedCount: 0, inspectionEnabled: true });
+    expect((await tech.get('/api/issues?stage=COMPLETED')).body.issues).toHaveLength(0);
+    expect((await manager.get('/api/issues?stage=AWAITING_INSPECTION')).body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
 
-    const stored = await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } });
-    expect(stored.status).toBe('AWAITING_INSPECTION');
+    expect((await inspect(id, { result: 'PASSED' })).status).toBe(200);
+    expect((await tech.get('/api/issues?stage=COMPLETED')).body.issues.map((i: { id: string }) => i.id)).toEqual([id]);
   });
 });

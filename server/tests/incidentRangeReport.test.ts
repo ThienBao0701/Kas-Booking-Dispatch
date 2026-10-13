@@ -17,7 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -168,6 +168,7 @@ describe('date, branch and status compose in the database', () => {
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, done);
   });
 
   it('narrows to one branch inside the period', async () => {
@@ -215,6 +216,7 @@ describe('the outstanding view ignores the period, deliberately', () => {
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, done);
 
     // Scoped to today, the fortnight-old one is invisible…
     const scoped = await admin.get('/api/issues?from=2026-09-17&to=2026-09-17&pageSize=100');
@@ -253,6 +255,7 @@ describe('the range summary', () => {
     await assignTo(admin, done, tech);
     await tech.post(`/api/issues/${done}/accept`).send({ technicianName: 'Bao', technicianPhone: '0369852177' });
     await tech.post(`/api/issues/${done}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, done);
 
     const res = await admin.get('/api/admin/reports/incidents/summary?from=2026-09-17&to=2026-09-17');
     expect(res.status).toBe(200);

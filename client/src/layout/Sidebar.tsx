@@ -253,7 +253,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         ])}
       </nav>
 
-      {user?.branch ? (
+      {/* Bộ phận buồng phòng names its hotel at "Vào ca"; the shift strip shows it then. */}
+      {user?.branch && user.role !== 'HOUSEKEEPING' ? (
         <div className="border-t border-slate-200 px-5 py-4">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Chi nhánh</p>
           <p className="mt-1 text-sm font-medium text-slate-700">{user.branch.hotelName}</p>

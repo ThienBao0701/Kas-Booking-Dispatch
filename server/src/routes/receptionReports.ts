@@ -24,14 +24,18 @@ import type { UserWithBranch } from '../auth/serialize';
 import {
   completeReport,
   countByCategory,
+  createBackfillShift,
   createLateReport,
   createReport,
+  lateEntryReceptionists,
   lateEntrySessions,
   listActiveJournal,
   listArchivedJournal,
   listDeletedReports,
+  listEditHistory,
   listReports,
   serializeReport,
+  serializeReportAudit,
   updateReport,
   voidReport,
 } from '../reception/reportService';
@@ -226,6 +230,24 @@ const deletedSchema = z
 const lateSessionsSchema = z.object({
   branchId: z.coerce.number().int().positive(),
   date: isoDay,
+});
+
+/** "Thêm ca": the branch whose receptionists may be named. */
+const lateReceptionistsSchema = z.object({
+  branchId: z.coerce.number().int().positive(),
+});
+
+/**
+ * "Thêm ca": a shift the receptionist worked but never checked in to. Its
+ * window comes from the shift definition and the date — never from the body —
+ * and who adds it is the session's.
+ */
+const backfillShiftSchema = z.object({
+  branchId: z.coerce.number().int().positive(),
+  date: isoDay,
+  shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4'], { message: 'Vui lòng chọn ca.' }),
+  receptionistUserId: z.coerce.number().int().positive({ message: 'Vui lòng chọn lễ tân.' }),
+  reason: text(1000).min(1, 'Vui lòng nhập lý do thêm ca.'),
 });
 
 /** "Nhập bù": the original shift and the required reason, beside the category's own form. */
@@ -493,6 +515,104 @@ export function createReceptionReportsRouter(): Router {
         const now = getClock().now();
         const reports = await listDeletedReports(actor(user), { branchId: q.branchId, category: q.category, period });
         res.json({ reports: reports.map((r) => serializeReport(r, now)) });
+      })().catch(next);
+    },
+  );
+
+  /*
+    GET /api/reception/reports/edits — "Lịch sử chỉnh sửa": every audited
+    correction of the reader's records (one row per changed field, old → new),
+    newest first, each with the record it belongs to. Deletions stay in
+    "Lịch sử xóa"; nothing here is reconstructed for records never audited.
+  */
+  router.get(
+    '/reception/reports/edits',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.editHistory'),
+    (req, res, next) => {
+      (async () => {
+        const user = req.currentUser!;
+        const q = deletedSchema.parse(req.query);
+        const period =
+          q.from && q.to
+            ? await resolveReportPeriod(branchScopeOf(actor(user)), { from: q.from, to: q.to, branchId: q.branchId })
+            : null;
+        const now = getClock().now();
+        const { audits, reports, truncated } = await listEditHistory(actor(user), {
+          branchId: q.branchId,
+          category: q.category,
+          period,
+        });
+        const byId = new Map(reports.map((r) => [r.id, serializeReport(r, now)]));
+        res.json({
+          edits: audits.flatMap((a) => {
+            const r = a.reportId ? byId.get(a.reportId) : undefined;
+            if (!r) return [];
+            return [
+              {
+                ...serializeReportAudit(a),
+                report: {
+                  id: r.id,
+                  category: r.category,
+                  categoryLabel: r.categoryLabel,
+                  summary: r.summary,
+                  branch: r.branch,
+                  shiftDate: r.shiftDate,
+                  shiftName: r.shiftName,
+                  createdByName: r.createdByName,
+                  lateEntry: r.lateEntry,
+                  voided: r.voided,
+                },
+              },
+            ];
+          }),
+          truncated,
+        });
+      })().catch(next);
+    },
+  );
+
+  // GET /api/reception/reports/late-entry/receptionists — whom a "Thêm ca" may name.
+  router.get(
+    '/reception/reports/late-entry/receptionists',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.lateEntry'),
+    (req, res, next) => {
+      (async () => {
+        const q = lateReceptionistsSchema.parse(req.query);
+        res.json({ receptionists: await lateEntryReceptionists(actor(req.currentUser!), { branchId: q.branchId }) });
+      })().catch(next);
+    },
+  );
+
+  /*
+    POST /api/reception/reports/late-entry/sessions — "Thêm ca": the shift a
+    receptionist worked but never checked in to, added closed at its nominal
+    window so its missed records can be entered with "Nhập bù". Responds with
+    the shift exactly as the "Nhập bù" list shows it.
+  */
+  router.post(
+    '/reception/reports/late-entry/sessions',
+    requireAuth,
+    requirePasswordChanged,
+    requireCapability('reports.lateEntry'),
+    (req, res, next) => {
+      (async () => {
+        const input = backfillShiftSchema.parse(req.body ?? {});
+        const session = await createBackfillShift(
+          {
+            branchId: input.branchId,
+            businessDate: input.date,
+            shiftType: input.shiftType,
+            receptionistUserId: input.receptionistUserId,
+            reason: input.reason,
+          },
+          actor(req.currentUser!),
+          getClock(),
+        );
+        res.status(201).json({ session });
       })().catch(next);
     },
   );

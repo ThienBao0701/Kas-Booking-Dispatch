@@ -22,12 +22,14 @@ A capability never widens scope, and scope never grants an action.
 | `reports.delete` | ADMIN, RECEPTION_MANAGER, RECEPTION_GENERAL_MANAGER | `POST /reception/reports/:id/void` (`requireCapability`) + `voidReport` scope |
 | `reports.voidOwnShiftEntry` | RECEPTIONIST | same route; the desk's "Hủy" — only a record the receptionist entered itself on its still-open shift (`voidReport`) |
 | `reports.deletionHistory` | RECEPTIONIST + the three supervisors | `GET /reception/reports/deleted` (scoped list) |
-| `reports.lateEntry` | the three supervisors | `GET /reception/reports/late-entry/sessions`, `POST /reception/reports/late-entry`, `POST /issues/late-entry` (a facility incident and its journal entry, one transaction) |
+| `reports.editHistory` | RECEPTIONIST + the three supervisors | `GET /reception/reports/edits` ("Lịch sử chỉnh sửa": the scoped EDIT audit rows, one per changed field) |
+| `reports.lateEntry` | the three supervisors | `GET /reception/reports/late-entry/sessions`, `POST /reception/reports/late-entry`, `POST /issues/late-entry` (a facility incident and its journal entry, one transaction); "Thêm ca": `GET /reception/reports/late-entry/receptionists`, `POST /reception/reports/late-entry/sessions` (`createBackfillShift`: branch scope, an active receptionist of the branch, a finished shift, no duplicate — unique `backfillKey`) |
 | `reports.editRequiresReason` | RECEPTION_MANAGER, RECEPTION_GENERAL_MANAGER | `updateReport` (a reason is required when the record was created by a receptionist) |
 | `technical.dispatchToManager` | TECHNICAL_GENERAL_MANAGER | `dispatchToManager` |
 | `technical.assignTechnician` | supervisors, TECHNICAL_MANAGER, TECHNICAL_GENERAL_MANAGER | `requireAssigner` on the `/issues/:id/assign*` routes; `assignIssues` also requires the technician to serve the incident's branch (its `UserBranchAssignment` rows, ticked by the Admin) |
 | `technical.dispatchExternal` | TECHNICAL_MANAGER | `dispatchExternal` |
 | `technical.completeExternal` | TECHNICAL_MANAGER (the one who hired), TECHNICAL_GENERAL_MANAGER | `completeExternal` |
+| `technical.confirmCompletion` | ADMIN, RECEPTION_MANAGER, RECEPTION_GENERAL_MANAGER, TECHNICAL_MANAGER, TECHNICAL_GENERAL_MANAGER | `POST /issues/:id/inspect` (`requireCapability`) + `inspectIssue`: branch visibility, AWAITING_INSPECTION only, never the user who completed the repair |
 | `technical.viewContractor` | ADMIN, TECHNICAL_MANAGER, TECHNICAL_GENERAL_MANAGER | `serializeIssue` / `serializeDispatch` (phone, specialty, company masked otherwise) |
 | `housekeeping.startCleaning` | HOUSEKEEPING (the assignee) | `startTask` |
 

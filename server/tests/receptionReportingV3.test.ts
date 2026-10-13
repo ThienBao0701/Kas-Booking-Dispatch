@@ -24,7 +24,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -460,6 +460,7 @@ describe('the completion archive, narrowed by BUSINESS date — the day of the s
       await assignTo(admin, id, tech);
       await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
       expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+      await confirmCompletion(admin, id);
     }
     at('2026-09-26', '12:00');
     const day = async (from: string, to: string) =>
@@ -488,6 +489,7 @@ describe('the completion archive, narrowed by BUSINESS date — the day of the s
     await tech.post(`/api/issues/${recent}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
     expect((await tech.post(`/api/issues/${recent}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    await confirmCompletion(admin, recent);
 
     const inRange = () => letanA.get('/api/issues?scope=archive&from=2026-09-25&to=2026-09-25&pageSize=100');
     at('2026-09-25', '20:59'); // under 12 hours after the 09:00 report
@@ -515,6 +517,7 @@ describe('the 12-hour completion archive (III, the incidents)', () => {
     await tech.post(`/api/issues/${finished}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' });
     at('2026-09-25', '11:00');
     expect((await tech.post(`/api/issues/${finished}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    await confirmCompletion(admin, finished);
 
     at('2026-09-25', '21:59');
     expect(await issueIds(letanA, 'active')).toEqual(expect.arrayContaining([finished, open]));
@@ -703,6 +706,7 @@ describe('Technical "Đã hoàn thành" by completion date', () => {
     await assignTo(admin, id, tech);
     expect((await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900' })).status).toBe(200);
     expect((await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    await confirmCompletion(admin, id);
   }
   const done = async (q: string) => {
     const res = await tech.get(`/api/issues?stage=COMPLETED&pageSize=100&${q}`);

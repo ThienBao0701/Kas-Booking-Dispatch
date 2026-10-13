@@ -29,6 +29,7 @@
 import { SeverityBadge } from './Severity';
 import type { ReactNode } from 'react';
 import { SourceTag } from './SourceTag';
+import { LateEntryBadge } from './LateEntry';
 import type {
   OperationalReport,
   ReportCategory,
@@ -108,19 +109,14 @@ const stt = (): DataColumn<OperationalReport> => ({
 const staff = (header = 'Nhân viên'): DataColumn<OperationalReport> => ({
   key: 'staff',
   header,
-  className: 'whitespace-nowrap',
+  // The name stays whole; its badges (Admin tạo, NHẬP BÙ) wrap under it on a narrow screen.
+  className: 'min-w-[9rem]',
   render: (r) => (
     <>
       {r.createdByName}
       <SourceTag label={r.sourceLabel} />
       {r.lateEntry ? (
-        <span
-          data-testid={`late-entry-${r.id}`}
-          title={`Nhập bù lúc ${formatDateTime(r.lateEntry.enteredAt)}${r.lateEntry.reason ? ` — ${r.lateEntry.reason}` : ''}`}
-          className="ml-1.5 inline-flex items-center whitespace-nowrap rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 align-middle text-[11px] font-semibold text-amber-900"
-        >
-          Nhập bù · {r.lateEntry.enteredBy.name}
-        </span>
+        <LateEntryBadge lateEntry={r.lateEntry} forName={r.createdByName} testId={`late-entry-${r.id}`} />
       ) : null}
     </>
   ),
@@ -258,12 +254,12 @@ export function AdminPaymentTable({ rows, title, grouped, onEdit, onDelete, ...s
     {
       key: 'guest',
       header: 'Tên khách',
-      // The table scrolls at its narrowest; a name should not break mid-name to save 20px.
+      // A long name wraps between words rather than pushing the money off screen.
       className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.payment?.guestName),
     },
-    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.ezCode) },
-    { key: 'source', header: 'Nguồn', secondary: true, render: (r) => text(r.payment?.source) },
+    { key: 'ez', header: 'Mã EZ', hideBelow: '2xl', coveredByDetail: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.ezCode) },
+    { key: 'source', header: 'Nguồn', hideBelow: '2xl', coveredByDetail: true, render: (r) => text(r.payment?.source) },
     /*
       THE MONEY IS ITS ALLOCATIONS: one transaction, its amount under each
       method that paid it — 500.000 Tiền mặt and 500.000 Thu CK on ONE row. The
@@ -276,9 +272,9 @@ export function AdminPaymentTable({ rows, title, grouped, onEdit, onDelete, ...s
     { key: 'receivable', header: 'Công nợ', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.receivable) },
     { key: 'expense', header: 'Chi', align: 'right', secondary: true, className: 'whitespace-nowrap', render: (r) => money(r.payment?.expense) },
     // "Ghi chú" — typed at the till, so it reads beside the money.
-    { key: 'note', header: 'Ghi chú', secondary: true, className: 'min-w-[8rem] max-w-[16rem]', render: (r) => clamped(r.payment?.note) },
+    { key: 'note', header: 'Ghi chú', hideBelow: '3xl', coveredByDetail: true, className: 'min-w-[8rem] max-w-[16rem]', render: (r) => clamped(r.payment?.note) },
     // Reception no longer asks for a room; older rows carry one.
-    { key: 'room', header: 'Phòng', secondary: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.roomNumber) },
+    { key: 'room', header: 'Phòng', hideBelow: '3xl', coveredByDetail: true, className: 'whitespace-nowrap', render: (r) => text(r.payment?.roomNumber) },
     when('createdAt', 'Thời gian', (r) => r.createdAt),
     status(),
   ];
@@ -435,7 +431,7 @@ export function AdminGuestRequestTable({ rows, title, grouped, onEdit, onDelete,
       className: 'whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
     },
-    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.guestRequest?.ezCode) },
+    { key: 'ez', header: 'Mã EZ', hideBelow: '2xl', coveredByDetail: true, className: 'whitespace-nowrap', render: (r) => text(r.guestRequest?.ezCode) },
     {
       key: 'content',
       header: 'Nội dung',
@@ -450,13 +446,16 @@ export function AdminGuestRequestTable({ rows, title, grouped, onEdit, onDelete,
       header: 'Thời gian hoàn thành',
       // A shift with nothing completed yet shows only "—" here; without a floor
       // the header then wraps a word per line and doubles the row's height.
+      hideBelow: '2xl',
+      coveredByDetail: true,
       className: 'min-w-[7rem]',
       render: (r) => completionCell(r.guestRequest),
     },
     {
       key: 'resolution',
       header: 'Cách xử lý (nếu có)',
-      secondary: true,
+      hideBelow: '3xl',
+      coveredByDetail: true,
       className: 'min-w-[9rem] max-w-[18rem]',
       render: (r) => handling(r.guestRequest ? completionText(r.guestRequest) : null),
     },
@@ -508,7 +507,7 @@ export function AdminServiceQualityTable({ rows, title, grouped, onEdit, onDelet
       className: 'whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
     },
-    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.complaint?.ezCode) },
+    { key: 'ez', header: 'Mã EZ', hideBelow: '2xl', coveredByDetail: true, className: 'whitespace-nowrap', render: (r) => text(r.complaint?.ezCode) },
     {
       key: 'description',
       header: 'Mô tả',
@@ -528,7 +527,8 @@ export function AdminServiceQualityTable({ rows, title, grouped, onEdit, onDelet
     {
       key: 'resolution',
       header: 'Hướng xử lý (nếu có)',
-      secondary: true,
+      hideBelow: '3xl',
+      coveredByDetail: true,
       className: 'min-w-[9rem] max-w-[18rem]',
       render: (r) => handling(r.complaint ? completionText(r.complaint) : null),
     },
@@ -660,14 +660,14 @@ export function AdminRoomServiceTable({
       className: 'min-w-[7rem] font-medium text-slate-800',
       render: (r) => text(r.roomService?.guestName),
     },
-    { key: 'ez', header: 'Mã EZ', className: 'whitespace-nowrap', render: (r) => text(r.roomService?.ezCode) },
+    { key: 'ez', header: 'Mã EZ', hideBelow: '2xl' as const, coveredByDetail: true, className: 'whitespace-nowrap', render: (r) => text(r.roomService?.ezCode) },
     ...(needs.roomClass
-      ? [{ key: 'roomClass', header: 'Hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.roomClass) }]
+      ? [{ key: 'roomClass', header: 'Hạng phòng', className: 'min-w-[7rem]', render: (r: OperationalReport) => text(r.roomService?.roomClass) }]
       : []),
     ...(needs.upgrade
       ? [
-          { key: 'from', header: 'Từ hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.fromRoomClass) },
-          { key: 'to', header: 'Tới hạng phòng', className: 'whitespace-nowrap', render: (r: OperationalReport) => text(r.roomService?.toRoomClass) },
+          { key: 'from', header: 'Từ hạng phòng', className: 'min-w-[7rem]', render: (r: OperationalReport) => text(r.roomService?.fromRoomClass) },
+          { key: 'to', header: 'Tới hạng phòng', className: 'min-w-[7rem]', render: (r: OperationalReport) => text(r.roomService?.toRoomClass) },
         ]
       : []),
     ...(needs.nights
@@ -716,7 +716,8 @@ export function AdminRoomServiceTable({
           {
             key: 'note',
             header: 'Ghi chú',
-            secondary: true,
+            hideBelow: '3xl' as const,
+            coveredByDetail: true,
             className: 'max-w-[18rem]',
             render: (r: OperationalReport) => clamped(r.roomService?.note),
           },

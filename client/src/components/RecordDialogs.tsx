@@ -94,7 +94,7 @@ export function VoidDialog({
       <div className="space-y-3">
         <p className="text-sm text-slate-600">
           {deleting
-            ? 'Bản ghi sẽ rời khỏi danh sách, số liệu và tổng tiền. Người tạo, ca và ngày gốc vẫn được giữ; bản ghi cùng lý do, người xóa và thời điểm xóa xem lại được trong "Lịch sử xóa".'
+            ? 'Bản ghi sẽ rời khỏi danh sách, số liệu và tổng tiền. Người tạo, ca và ngày gốc vẫn được giữ; bản ghi cùng lý do, người xóa và thời điểm xóa xem lại được trong "Lịch sử chỉnh sửa → Lịch sử xóa".'
             : 'Bản ghi sẽ không còn được tính vào tổng, nhưng vẫn được lưu lại đầy đủ cùng lý do và người thực hiện. Hệ thống không xóa dữ liệu.'}
         </p>
         <label className="block text-sm font-medium text-slate-700">

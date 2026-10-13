@@ -28,6 +28,7 @@ import { shiftDefinition } from '../shift/shiftTypes';
 import { OPEN_SHIFT_WARNING } from '../reception/businessDate';
 import { inspectionEnabled } from '../issue/issueLifecycle';
 import { hcmDateTime, hcmDayLabel } from './format';
+import { lateEntryLines } from '../reception/lateEntryText';
 
 /** Vietnamese thousands separators over a real number. */
 const VND_FORMAT = '#,##0 "₫"';
@@ -62,8 +63,7 @@ function voidState(row: SerializedReport): string {
 function creator(row: SerializedReport): string {
   const who = row.sourceLabel ? `${row.createdByName} (${row.sourceLabel})` : row.createdByName;
   if (!row.lateEntry) return who;
-  const by = `${row.lateEntry.enteredBy.name}${row.lateEntry.enteredByRoleLabel ? ` - ${row.lateEntry.enteredByRoleLabel}` : ''}`;
-  return `${who}\nNhập bù: ${by} · ${when(row.lateEntry.enteredAt)}${row.lateEntry.reason ? ` · ${row.lateEntry.reason}` : ''}`;
+  return [who, ...lateEntryLines(row.lateEntry, row.createdByName)].join('\n');
 }
 
 function when(iso: string | null): string {
@@ -286,14 +286,14 @@ export async function buildOperationalReportWorkbook(
     { header: 'Người xử lý', key: 'technician', width: 20 },
     { header: 'SĐT kỹ thuật', key: 'phone', width: 16 },
     { header: 'Thời gian hoàn thành', key: 'completedAt', width: 20 },
-    // "Nghiệm thu" only while it is part of the workflow. Dormant, the file has
-    // no such columns — the values stay on the attempts, not in the export.
+    // "Xác nhận hoàn thành": who confirmed the finished repair, when, and why a
+    // repair was sent back. (Only the test-only legacy workflow omits them.)
     ...(inspectionEnabled()
       ? [
-          { header: 'Nghiệm thu', key: 'inspection', width: 16 },
-          { header: 'Người nghiệm thu', key: 'inspector', width: 20 },
-          { header: 'Thời gian nghiệm thu', key: 'inspectedAt', width: 20 },
-          { header: 'Ghi chú nghiệm thu', key: 'inspectionNote', width: 36 },
+          { header: 'Xác nhận hoàn thành', key: 'inspection', width: 22 },
+          { header: 'Người xác nhận', key: 'inspector', width: 24 },
+          { header: 'Thời gian xác nhận', key: 'inspectedAt', width: 20 },
+          { header: 'Ghi chú xác nhận', key: 'inspectionNote', width: 36 },
         ]
       : []),
     { header: 'Số lần sửa', key: 'attempts', width: 12 },
@@ -357,8 +357,14 @@ export async function buildOperationalReportWorkbook(
         phone: issue?.technicianPhone ?? '',
         completedAt: issue?.completedAt ? when(issue.completedAt) : '',
         inspection: issue?.inspectionLabel ?? '',
-        inspector: judged?.inspection?.inspectedByName ?? '',
-        inspectedAt: judged?.inspection?.inspectedAt ? when(judged.inspection.inspectedAt) : '',
+        // The confirmer is on the incident itself; an attempt's verdict names
+        // the same person. Never inferred for incidents closed before either.
+        inspector: judged?.inspection?.inspectedByName ?? issue?.completionConfirmation?.confirmedBy.name ?? '',
+        inspectedAt: judged?.inspection?.inspectedAt
+          ? when(judged.inspection.inspectedAt)
+          : issue?.completionConfirmation
+            ? when(issue.completionConfirmation.confirmedAt)
+            : '',
         inspectionNote: judged?.inspection?.note ?? '',
         attempts: issue?.attempts.length ?? 0,
         cannotRepair: issue?.cannotRepairCount ?? 0,
@@ -739,9 +745,7 @@ async function technicalWorkbook(wb: ExcelJS.Workbook, data: OperationalReportDa
         contractorContact: contractorContactOf(i),
         // The persisted cost of every completed outside job, never a typed-in total.
         repairCost: repairCostOf(i),
-        lateEntry: i.lateEntry
-          ? `${i.lateEntry.enteredBy.name}${i.lateEntry.enteredByRoleLabel ? ` - ${i.lateEntry.enteredByRoleLabel}` : ''} · ${when(i.lateEntry.enteredAt)}${i.lateEntry.reason ? ` · ${i.lateEntry.reason}` : ''}`
-          : '',
+        lateEntry: i.lateEntry ? lateEntryLines(i.lateEntry, i.reporterName).join('\n') : '',
       });
       for (const e of handoffEvents(i)) {
         handoffs.addRow({

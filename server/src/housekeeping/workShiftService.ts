@@ -19,6 +19,13 @@ import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
 import { isReceptionSupervisor, scopedBranchFilter } from '../auth/branchScope';
 import { ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
+import {
+  MAX_ADDRESS_CHARS,
+  WORKPLACE_AMBIGUOUS,
+  WORKPLACE_NOT_FOUND,
+  WORKPLACE_REQUIRED,
+  resolveWorkplace,
+} from './workplaceAddress';
 
 export interface ShiftActor {
   id: number;
@@ -132,15 +139,31 @@ export async function currentShift(actor: ShiftActor, client: PrismaClient = def
   return row ? serializeShift(row) : null;
 }
 
-/** "Vào ca": the workday, at the account's branch. One open workday per account. */
+/**
+ * "Vào ca": the workday, at the account's branch. One open workday per account.
+ *
+ * THE HOUSEKEEPER NAMES THE HOTEL BY ITS ADDRESS (`address`), typed — no list
+ * is ever offered — and the shift opens only once that address resolves to the
+ * account's own branch (`resolveWorkplace`): there is no branch-less or pending
+ * session. An input that fits several hotels, none, or another branch than the
+ * account's is refused without naming any branch. The address is not stored.
+ */
 export async function startShift(
   actor: ShiftActor,
-  input: { branchId?: unknown; staffName?: unknown },
+  input: { branchId?: unknown; staffName?: unknown; address?: unknown },
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
   assertHousekeeping(actor);
-  const branchId = await activeBranch(accountBranch(actor, input.branchId), client);
+  const home = accountBranch(actor, input.branchId);
+  const typed = typeof input.address === 'string' ? input.address : '';
+  if (!typed.trim()) throw ApiError.validation(WORKPLACE_REQUIRED);
+  if (typed.length > MAX_ADDRESS_CHARS) throw ApiError.validation(WORKPLACE_NOT_FOUND);
+  const candidates = await client.branch.findMany({ where: { active: true }, select: { id: true, address: true } });
+  const resolved = resolveWorkplace(typed, candidates, home);
+  if (resolved.status === 'AMBIGUOUS') throw ApiError.validation(WORKPLACE_AMBIGUOUS);
+  if (resolved.status === 'NONE') throw ApiError.validation(WORKPLACE_NOT_FOUND);
+  const branchId = await activeBranch(resolved.branchId, client);
   // THE PERSON IS THE ACCOUNT: nobody types their own name any more.
   const staffName = cleanerName(input.staffName === undefined || input.staffName === '' ? actor.fullName : input.staffName);
   if (await openSession(actor.id, client)) throw ApiError.conflict('Bạn đang trong ca. Hãy đổi chi nhánh hoặc kết thúc ca.');

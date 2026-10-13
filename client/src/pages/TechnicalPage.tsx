@@ -7,12 +7,13 @@
  * "Đang sửa" and the stage is kept on its timeline. Quản lý kỹ thuật no longer
  * works here: its screen is "Quản lý sự cố kỹ thuật" (/app/reports/technical).
  *
- * INSPECTION IS DORMANT until the server's `TECHNICAL_INSPECTION_ENABLED` is
- * switched on; until then there is no "Chờ nghiệm thu" queue.
+ * "Đã xử lý xong" does NOT close the incident: it goes to "Chờ quản lý xác
+ * nhận" until a manager (Admin, Tổng quản lý / Quản lý lễ tân, Quản lý / Tổng
+ * quản lý kỹ thuật) confirms it — the technician sees it waiting there.
  *
  * WHY ONE ROUTE PER QUEUE AND NOT ONE PAGE WITH A FILTER
  *
- * "Sự cố khách sạn", "Cần sửa lại", "Đang sửa", "Chờ nghiệm thu" and "Đã hoàn
+ * "Sự cố khách sạn", "Cần sửa lại", "Đang sửa", "Chờ quản lý xác nhận" and "Đã hoàn
  * thành" are the stages of the incident lifecycle, not saved searches. Giving
  * each its own URL means a technician can keep "Đang sửa" open on a second
  * screen, and it makes the tab they are on part of the address rather than
@@ -89,7 +90,7 @@ const QUEUES = {
   rework: {
     stage: 'REWORK' as IssueStage,
     title: 'Cần sửa lại',
-    description: 'Sự cố được giao lại sau lần nghiệm thu không đạt hoặc chưa sửa được.',
+    description: 'Sự cố được giao lại sau lần quản lý xác nhận không đạt hoặc chưa sửa được.',
     dormantDescription: 'Sự cố được giao lại sau lần chưa sửa được.',
     count: 'reworkCount' as keyof TechnicalCounts,
   },
@@ -101,14 +102,14 @@ const QUEUES = {
   },
   'awaiting-inspection': {
     stage: 'AWAITING_INSPECTION' as IssueStage,
-    title: 'Chờ nghiệm thu',
-    description: 'Kỹ thuật đã sửa xong, chờ quản lý kỹ thuật nghiệm thu.',
+    title: 'Chờ quản lý xác nhận',
+    description: 'Kỹ thuật đã sửa xong, chờ quản lý xác nhận hoàn thành.',
     count: 'awaitingInspectionCount' as keyof TechnicalCounts,
   },
   completed: {
     stage: 'COMPLETED' as IssueStage,
     title: 'Đã hoàn thành',
-    description: 'Sự cố đã nghiệm thu đạt, và lịch sử sự cố đã xử lý xong.',
+    description: 'Sự cố đã được quản lý xác nhận hoàn thành, và lịch sử sự cố đã xử lý xong.',
     dormantDescription: 'Sự cố kỹ thuật đã sửa xong, và lịch sử sự cố đã xử lý.',
     count: 'completedCount' as keyof TechnicalCounts,
   },
@@ -159,7 +160,6 @@ export function TechnicalPage() {
   const doneHalf = onCompleted && !doneFiltered && (doneRange.from !== '' || doneRange.to !== '');
   const [accepting, setAccepting] = useState<Issue | null>(null);
   const [failing, setFailing] = useState<Issue | null>(null);
-  const [completing, setCompleting] = useState<Issue | null>(null);
   const [causing, setCausing] = useState<Issue | null>(null);
   const [reporting, setReporting] = useState<Issue | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -173,10 +173,9 @@ export function TechnicalPage() {
   });
 
   /*
-    INSPECTION IS DORMANT unless the server says otherwise. While it is, the
-    workflow is the operational one — Tiếp nhận → sửa → Hoàn thành or Không sửa
-    được — with no "Chờ nghiệm thu" queue, and Quản lý kỹ thuật has nothing to
-    act on. The server enforces the same; this only keeps the screen honest.
+    "CHỜ QUẢN LÝ XÁC NHẬN" exists whenever the server says the confirmation step
+    is part of the workflow (it always is now; an older server says otherwise,
+    and then the queue is not offered).
   */
   const inspectionOn = counts.data?.counts.inspectionEnabled ?? false;
 
@@ -399,13 +398,12 @@ export function TechnicalPage() {
                             {isTechnician && issue.status === 'IN_PROGRESS' ? (
                               <>
                                 {/*
-                                  "Hoàn thành" asks "Tình trạng vấn đề" — finished, or
-                                  one stage of several. With inspection on, it is the
-                                  result form Quản lý kỹ thuật inspects. "Không sửa
-                                  được" always needs its reason.
+                                  "Hoàn thành" asks "Tình trạng vấn đề" — finished (then
+                                  it waits for a manager's confirmation), or one stage of
+                                  several. "Không sửa được" always needs its reason.
                                 */}
                                 <Button
-                                  onClick={() => (issue.inspectionEnabled ? setCompleting(issue) : setReporting(issue))}
+                                  onClick={() => setReporting(issue)}
                                   data-testid={`complete-${issue.id}`}
                                 >
                                   <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
@@ -476,23 +474,17 @@ export function TechnicalPage() {
           }}
         />
       ) : null}
-      {completing ? (
-        <CompleteModal
-          issue={completing}
-          onClose={() => setCompleting(null)}
-          onDone={() => {
-            setCompleting(null);
-            setToast('Đã hoàn thành — chờ quản lý kỹ thuật nghiệm thu.');
-          }}
-        />
-      ) : null}
       {reporting ? (
         <StageStatusModal
           issue={reporting}
           onClose={() => setReporting(null)}
           onDone={(finished) => {
             setReporting(null);
-            setToast(finished ? 'Đã hoàn thành sự cố.' : 'Đã ghi nhận giai đoạn — sự cố vẫn đang sửa.');
+            setToast(
+              finished
+                ? 'Đã hoàn thành — sự cố chờ quản lý xác nhận.'
+                : 'Đã ghi nhận giai đoạn — sự cố vẫn đang sửa.',
+            );
           }}
         />
       ) : null}
@@ -570,86 +562,6 @@ function CauseModal({ issue, onClose, onDone }: { issue: Issue; onClose: () => v
           />
         </label>
         {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
-      </div>
-    </Modal>
-  );
-}
-
-/**
- * "Hoàn thành" — the technician's finish, NOT the incident's.
- *
- * The result is required: it is what Quản lý kỹ thuật inspects. The cause is
- * pre-filled with the one on file and may be corrected; left empty, the cause
- * already recorded stands. The server stamps the time — the timer stops here.
- */
-function CompleteModal({ issue, onClose, onDone }: { issue: Issue; onClose: () => void; onDone: () => void }) {
-  const queryClient = useQueryClient();
-  const [cause, setCause] = useState(issue.cause ?? '');
-  const [verdict, setVerdict] = useState<VerdictValue>(EMPTY_VERDICT);
-  const result = verdict.resolution;
-  const complete = useMutation({
-    mutationFn: () =>
-      issuesApi.complete(issue.id, {
-        verdict: verdict.verdict ?? 'CORRECT',
-        ...(verdict.verdict === 'INCORRECT' ? { incorrectReason: verdict.reason.trim() } : { result: result.trim() }),
-        // Sent only when the technician CHANGED it: the prefill is the cause on
-        // file (Reception's, or an earlier attempt's), and echoing it back would
-        // record it as this technician's own finding.
-        ...(cause.trim() && cause.trim() !== (issue.cause ?? '') ? { cause: cause.trim() } : {}),
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['issues'] });
-      onDone();
-    },
-  });
-  return (
-    <Modal
-      open
-      title="Hoàn thành sửa chữa"
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Hủy
-          </Button>
-          <Button
-            onClick={() => complete.mutate()}
-            // "Đúng" needs the result (it is what gets inspected); "Sai" its reason.
-            disabled={!verdictReady(verdict) || (verdict.verdict === 'CORRECT' && !result.trim())}
-            loading={complete.isPending}
-            data-testid="complete-confirm"
-          >
-            Xác nhận hoàn thành
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <IssueSummary issue={issue} />
-        <p className="text-sm text-slate-600">
-          Sau khi xác nhận, sự cố chuyển sang “Chờ nghiệm thu” để quản lý kỹ thuật kiểm tra. Thời
-          gian hoàn thành do hệ thống ghi nhận.
-        </p>
-        <label className="block text-sm font-medium text-slate-700">
-          Nguyên nhân{' '}
-          <span className="font-normal text-slate-500">(để trống nếu giữ nguyên)</span>
-          <textarea
-            className={FIELD}
-            rows={2}
-            maxLength={1000}
-            value={cause}
-            onChange={(e) => setCause(e.target.value)}
-            placeholder="Ví dụ: Thiếu gas"
-            data-testid="complete-cause"
-          />
-        </label>
-        <CompletionVerdictFields
-          value={verdict}
-          onChange={setVerdict}
-          resolutionLabel="Kết quả sửa chữa *"
-          resolutionPlaceholder="Ví dụ: Đã nạp gas, máy lạnh chạy ổn định"
-        />
-        {complete.isError ? <ErrorAlert>{toUserMessage(complete.error)}</ErrorAlert> : null}
       </div>
     </Modal>
   );
@@ -737,7 +649,13 @@ function StageStatusModal({
         <IssueStageTimeline issue={issue} />
         <fieldset className="space-y-2">
           <legend className="mb-1 text-sm font-medium text-slate-700">Giai đoạn {stage} — tình trạng hiện tại</legend>
-          {option('done', 'Đã xử lý xong', 'Sự cố được hoàn thành.')}
+          {option(
+            'done',
+            'Đã xử lý xong',
+            issue.inspectionEnabled
+              ? 'Sự cố chuyển sang “Đã hoàn thành chờ quản lý xác nhận”; chỉ hoàn tất khi quản lý xác nhận.'
+              : 'Sự cố được hoàn thành.',
+          )}
           {option('follow', 'Đang trong quá trình theo dõi thêm', 'Ghi nhận giai đoạn này; sự cố vẫn ở trạng thái “Đang sửa”.')}
         </fieldset>
         {state === 'done' ? (

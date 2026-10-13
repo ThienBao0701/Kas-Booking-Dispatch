@@ -1,8 +1,8 @@
 /**
  * THE MANAGER CONSOLE'S OWN PIECES — "Quản lý buồng phòng" only.
  *
- * The worker's screens keep `RoomBoard` / `RoomChip` exactly as accepted; the
- * manager reads the same data at a desk, so it gets its own presentation:
+ * The worker works a task list (one row per work item); the manager reads the
+ * same data at a desk, so it gets its own presentation:
  *
  *   HkHeader         module · Chi nhánh · Ngày nghiệp vụ, then the page title
  *   HkSection        one framed block, in the KAS table shell's weights
@@ -343,23 +343,6 @@ export function ManagerRoomBoard({ tasks, codes, onSelect }: { tasks: RoomTask[]
         );
       })}
     </div>
-  );
-}
-
-/** A room not yet on the board, to pick for "Thêm phòng". */
-export function PickChip({ room, selected, onToggle }: { room: string; selected: boolean; onToggle: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-pressed={selected}
-      data-testid={`room-chip-${room}`}
-      className={`min-h-[2.5rem] min-w-[3.5rem] rounded-lg border px-2.5 text-sm font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 ${
-        selected ? 'border-brand-600 bg-brand-600 text-white' : 'border-line-strong bg-white text-slate-800 hover:bg-slate-50'
-      }`}
-    >
-      {room}
-    </button>
   );
 }
 

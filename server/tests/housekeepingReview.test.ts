@@ -19,6 +19,7 @@ import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { workplaceOf } from './helpers/workplace';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -96,7 +97,7 @@ async function boardTasks(agent: Agent = manager1) {
 }
 
 async function onShift(agent: Agent) {
-  const res = await agent.post('/api/housekeeping/shift/start').send({});
+  const res = await agent.post('/api/housekeeping/shift/start').send({ address: await workplaceOf(agent) });
   expect([201, 409]).toContain(res.status);
 }
 

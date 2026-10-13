@@ -35,7 +35,7 @@ export type IssueStatus = 'NEW' | 'IN_PROGRESS' | 'AWAITING_INSPECTION' | 'COMPL
  */
 export type IssueStage = 'WAITING' | 'REWORK' | 'IN_PROGRESS' | 'AWAITING_INSPECTION' | 'COMPLETED';
 
-/** "Nghiệm thu" for the incident. NO_DATA: finished before inspection existed. */
+/** "Xác nhận hoàn thành" for the incident. NO_DATA: closed before confirmation existed. */
 export type InspectionState = 'PENDING' | 'PASSED' | 'FAILED' | 'NO_DATA';
 
 export type InspectionResult = 'PASSED' | 'FAILED';
@@ -111,7 +111,7 @@ export const ISSUE_AREA_SUBTYPE_LABEL: Record<IssueAreaSubtype, string> = Object
 export const ISSUE_STATUS_LABEL: Record<IssueStatus, string> = {
   NEW: 'Sự cố khách sạn',
   IN_PROGRESS: 'Đang sửa',
-  AWAITING_INSPECTION: 'Chờ nghiệm thu',
+  AWAITING_INSPECTION: 'Chờ quản lý xác nhận',
   COMPLETED: 'Đã hoàn thành',
 };
 
@@ -215,8 +215,8 @@ export interface Issue {
   photoUrl: string | null;
   status: IssueStatus;
   /**
-   * Whether "Nghiệm thu" is part of the active workflow. Implemented, and
-   * DORMANT until switched on: while false, no screen shows anything about it.
+   * Whether "Xác nhận hoàn thành" is part of the workflow — always true now (a
+   * technician's "Hoàn thành" waits for a manager); false only on older servers.
    */
   inspectionEnabled: boolean;
   stage: IssueStage;
@@ -238,6 +238,17 @@ export interface Issue {
   completedBy: Actor | null;
   completedByName: string | null;
   completedAt: string | null;
+  /**
+   * "Xác nhận hoàn thành": the manager who confirmed the finished repair. Null
+   * while it waits, and on incidents closed before confirmation existed.
+   * Absent on older servers.
+   */
+  completionConfirmation?: {
+    confirmedBy: { id: number | null; name: string };
+    role: string | null;
+    roleLabel: string | null;
+    confirmedAt: string;
+  } | null;
   /** Which shift reported it, when the reporter was on one. */
   shiftType: string | null;
   shiftReceptionistName: string | null;
@@ -777,7 +788,11 @@ export const issuesApi = {
   updateCause: (id: string, input: { cause: string }) =>
     api.post<{ issue: Issue }>(`/issues/${id}/cause`, input),
 
-  /** "Nghiệm thu" — Quản lý kỹ thuật only. A fail needs its reason. */
+  /**
+   * "Xác nhận hoàn thành" (PASSED) or "Không đạt" (FAILED, the reason required)
+   * on a repair a technician finished — Admin, Tổng quản lý / Quản lý lễ tân,
+   * Quản lý / Tổng quản lý kỹ thuật (`technical.confirmCompletion`).
+   */
   inspect: (id: string, input: { result: InspectionResult; note?: string }) =>
     api.post<{ issue: Issue }>(`/issues/${id}/inspect`, input),
 

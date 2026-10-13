@@ -41,6 +41,7 @@ import {
 } from '../reception/reportTypes';
 import { MAX_VND } from '../reception/reportService';
 import { hcmDateTime, periodLabel } from './format';
+import { lateEntryLines } from '../reception/lateEntryText';
 import { dispatchChainText, handoffEvents, repairCostOf, type HandoffEvent } from './technicalDispatch';
 import {
   FONT_BOLD,
@@ -152,8 +153,9 @@ function withVoid(row: SerializedReport, text: string | null | undefined): strin
  */
 function creator(r: SerializedReport): string {
   const who = r.sourceLabel ? `${r.createdByName}\n(${r.sourceLabel})` : r.createdByName;
-  // "Nhập bù": the record stays on its original shift; this names who typed it later.
-  return r.lateEntry ? `${who}\n(Nhập bù: ${r.lateEntry.enteredBy.name})` : who;
+  // "Nhập bù": the record stays on its original shift; this names who typed it
+  // later and for whom — the same words as the XLSX and the screen.
+  return r.lateEntry ? [who, ...lateEntryLines(r.lateEntry, r.createdByName)].join('\n') : who;
 }
 
 /* --------------------------- I. Thu tiền thanh toán --------------------------- */
@@ -263,7 +265,7 @@ function issueStatus(r: SerializedReport): string {
   // A waiting incident says where the ASSIGNMENT stands: nobody yet, given to
   // someone, or back after "Không sửa được" waiting to be given again.
   const base = issue.status === 'NEW' ? issue.assignmentStateLabel : issue.stageLabel;
-  const lines = [judged ? `${base}\nNghiệm thu: ${issue.inspectionLabel}` : base];
+  const lines = [judged ? `${base}\nXác nhận: ${issue.inspectionLabel}` : base];
   if (issue.repeatOf) lines.push('Báo lại sau lần hoàn thành trước');
   return lines.join('\n');
 }
@@ -495,7 +497,7 @@ type TechnicalRow = BranchOperationalReport['technical'][number];
 function reporterCell(i: TechnicalRow): string {
   const lines = [`${i.reporterName ?? '—'} · ${hcmDateTime(new Date(i.createdAt))}`];
   if (i.shiftType) lines.push(shiftDefinition(i.shiftType).name);
-  if (i.lateEntry) lines.push(`Nhập bù: ${i.lateEntry.enteredBy.name}`);
+  if (i.lateEntry) lines.push(...lateEntryLines(i.lateEntry, i.reporterName));
   return lines.join('\n');
 }
 

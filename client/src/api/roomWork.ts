@@ -71,6 +71,17 @@ export interface TaskEvent {
   createdAt: string;
 }
 
+/** Where a work item is: a room, or a shared area of a floor. */
+export type WorkAreaKind = 'ROOM' | 'HALLWAY' | 'STAIRCASE' | 'OTHER';
+
+/**
+ * Where a work item stands — the order the work goes in. Computed by the server
+ * (`workAreas.workPhase`) from the record, so every screen says the same.
+ */
+export type WorkPhase = 'UNCLAIMED' | 'ACCEPTED' | 'INSPECTING' | 'AWAITING_CLEANING' | 'CLEANING' | 'COMPLETED' | 'VOIDED';
+
+export const WORK_PHASE_ORDER: WorkPhase[] = ['UNCLAIMED', 'ACCEPTED', 'INSPECTING', 'AWAITING_CLEANING', 'CLEANING', 'COMPLETED'];
+
 export interface RoomTask {
   id: string;
   branchId: number;
@@ -80,6 +91,23 @@ export interface RoomTask {
   statusCode: string;
   priority: boolean;
   note: string | null;
+  /* The work item (absent on an older server). */
+  itemKey?: string;
+  areaKind?: WorkAreaKind;
+  areaKindLabel?: string;
+  floor?: string | null;
+  /** "Khu vực": "Phòng - 502", "Hành lang - Tầng 5". */
+  areaLabel?: string;
+  taskName?: string | null;
+  /** "Việc cần làm": "OC", "Dọn lối đi". */
+  taskLabel?: string;
+  groupId?: string | null;
+  phase?: WorkPhase;
+  phaseLabel?: string;
+  acceptedAt?: string | null;
+  inspectionStartedAt?: string | null;
+  inspectedAt?: string | null;
+  inspectionNote?: string | null;
   assignee: { id: number; name: string } | null;
   state: RoomWorkState;
   stateLabel: string;
@@ -119,6 +147,29 @@ export interface RoomTask {
   } | null;
   /** The re-clean this cycle's "Không đạt" opened. */
   nextCycleId: string | null;
+}
+
+/** "Chọn khu vực": the branch's floors and rooms, from its own catalog. */
+export interface WorkAreas {
+  branchId: number;
+  hasRoomCatalog: boolean;
+  hasFloorCatalog: boolean;
+  floors: { floor: string; label: string; rooms: string[] }[];
+  /** Rooms no floor can be read for — listed, never hidden. */
+  unplacedRooms: string[];
+  unplacedLabel: string;
+  sharedAreas: { kind: Exclude<WorkAreaKind, 'ROOM'>; label: string }[];
+  roomTaskCodes: { code: string; label: string }[];
+}
+
+export interface WorkItemInput {
+  areaKind: WorkAreaKind;
+  roomNumber?: string;
+  floor?: string;
+  taskCode?: string;
+  taskName?: string;
+  note?: string;
+  priority?: boolean;
 }
 
 export interface ReviewInput {
@@ -234,6 +285,19 @@ export const roomWorkApi = {
     api.post<{ task: RoomTask; reclean: RoomTask | null }>(`/housekeeping/manager/tasks/${id}/review`, input),
   /** Every cleaning cycle of the room that business day, in order. */
   history: (id: string) => api.get<{ cycles: RoomTask[] }>(`/housekeeping/manager/tasks/${id}/history`),
+  /** "Chọn khu vực". */
+  areas: (p: { branchId?: number }) => api.get<{ areas: WorkAreas }>(`/housekeeping/manager/areas${query({ ...p })}`),
+  /** "Tạo công việc": one or many items; `requestId` makes a repeat harmless. */
+  createWorkItems: (input: { branchId?: number; workDate: string; requestId: string; items: WorkItemInput[] }) =>
+    api.post<{ created: number; duplicate: boolean; tasks: RoomTask[] }>('/housekeeping/manager/work-items', input),
+  /** "Các công việc trong ngày" for the reception managers (their branches). */
+  workOrders: (p: { date: string; branchId?: number }) =>
+    api.get<{ tasks: RoomTask[] }>(`/housekeeping/work-orders${query({ ...p })}`),
+  workOrderStaff: (branchId: number) =>
+    api.get<{ staff: { id: number; fullName: string }[] }>(`/housekeeping/work-orders/staff?branchId=${branchId}`),
+  /** "Giao lại" an item inspected and waiting for cleaning. */
+  reassign: (id: string, input: { assigneeUserId: number; reason?: string }) =>
+    api.post<{ task: RoomTask }>(`/housekeeping/work-orders/${id}/reassign`, input),
   voidTask: (id: string, reason?: string) =>
     api.post<{ voided: true }>(`/housekeeping/manager/tasks/${id}/void`, reason ? { reason } : {}),
   /** The branch's own Buồng phòng accounts (the Admin without a branch: all of them). */
@@ -257,10 +321,16 @@ export const roomWorkApi = {
 
   /* The worker */
   myTasks: (date: string) => api.get<{ tasks: RoomTask[] }>(`/housekeeping/work?date=${date}`),
+  /** The items of the open shift's branch: one's own and the unclaimed. `working` false: no shift yet. */
+  workItems: (date: string) => api.get<{ working: boolean; tasks: RoomTask[] }>(`/housekeeping/work/items?date=${date}`),
+  /** "Nhận": exactly these items, all or none. */
+  claim: (taskIds: string[]) => api.post<{ tasks: RoomTask[] }>('/housekeeping/work/claim', { taskIds }),
+  /** "Kiểm tra": the inspection begins. */
+  beginInspection: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/begin-inspection`, {}),
   task: (id: string) => api.get<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}`),
   open: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/open`, {}),
-  inspect: (id: string, issues: { type: RoomIssueType; note?: string }[]) =>
-    api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, { issues }),
+  inspect: (id: string, issues: { type: RoomIssueType; note?: string }[], note?: string) =>
+    api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, note ? { issues, note } : { issues }),
   /** "Bắt đầu dọn" — the one action that starts the cleaning time. */
   start: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/start`, {}),
   saveCleaning: (id: string, form: CleaningForm) => api.put<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/cleaning`, form),

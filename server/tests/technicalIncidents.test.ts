@@ -25,7 +25,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
-import { assignTo } from './helpers/issues';
+import { assignTo, confirmCompletion } from './helpers/issues';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -285,10 +285,10 @@ describe('Bộ phận kỹ thuật works what it is given, in every branch', () 
       newCount: 2,
       reworkCount: 0,
       inProgressCount: 0,
-      // Inspection is dormant: there is no such queue in the active workflow.
+      // The confirmation queue is part of the workflow; nothing waits in it yet.
       awaitingInspectionCount: 0,
       completedCount: 0,
-      inspectionEnabled: false,
+      inspectionEnabled: true,
     });
   });
 
@@ -341,7 +341,8 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     const res = await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
     expect(res.status).toBe(200);
     expect(res.body.issue).toMatchObject({
-      status: 'COMPLETED',
+      // Finished by the technician; "Đã hoàn thành" once a manager confirms it.
+      status: 'AWAITING_INSPECTION',
       completedByName: 'Kỹ thuật viên trực',
       // The technician who did the work is still named on the completed record.
       technicianName: 'Trần Văn B',
@@ -399,6 +400,7 @@ describe('NEW → IN_PROGRESS → COMPLETED', () => {
     await assignTo(admin, id, tech);
     await tech.post(`/api/issues/${id}/accept`).send({ technicianName: 'Trần Văn B', technicianPhone: '0901234567' });
     await tech.post(`/api/issues/${id}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, id);
 
     const stored = await testPrisma.hotelIssue.findUnique({ where: { id } });
     expect(stored).not.toBeNull();

@@ -31,6 +31,7 @@ import {
   countReports,
   listReports,
   serializeReport,
+  serializeShiftBackfill,
   type ReportActor,
   type SerializedReport,
 } from './reportService';
@@ -74,6 +75,8 @@ export interface OfficialShift {
   shiftName: string;
   shiftWindow: string;
   receptionistName: string;
+  /** "Ca thêm bù": added afterwards with "Thêm ca" — who added it, when and why. */
+  backfill: ReturnType<typeof serializeShiftBackfill>;
   cash: CashSummary;
 }
 
@@ -229,6 +232,7 @@ export async function branchOperationalReport(
       shiftName: shiftDefinition(s.shiftType).name,
       shiftWindow: shiftWindowLabel(s.shiftType),
       receptionistName: s.receptionistName,
+      backfill: serializeShiftBackfill(s),
       cash: shiftCash.get(s.id)!,
     })),
     openShifts: openShiftNotices(sessions),

@@ -3,7 +3,6 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, RECEPTIONIST_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
-import { hcmToday } from '../lib/format';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -76,7 +75,6 @@ function listBody(issues: unknown[]) {
   return { status: 200, body: { issues, pagination: { page: 1, pageSize: 100, total: issues.length, totalPages: 1 } } };
 }
 
-const TODAY = hcmToday();
 
 /**
  * The shell and "Báo cáo vấn đề" around the incident category. The old
@@ -101,8 +99,8 @@ function adminRoutes(issues: unknown[]) {
     'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
     'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
     'GET /api/admin/branches': () => ({ status: 200, body: { branches: [{ ...BRANCH, branchNumber: 1, active: true }] } }),
-    // Every branch, today — where the old "Sự cố khách sạn" address lands.
-    [`GET /api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`]: () => listBody(issues),
+    // Every branch, everything still open — where the old "Sự cố khách sạn" address lands.
+    'GET /api/issues?pageSize=100&outstanding=true': () => listBody(issues),
   };
 }
 
@@ -229,12 +227,12 @@ describe('incidents — admin, in "Sự cố cơ sở vật chất đang xử l�
     expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
     expect(badge('d', 'Đã hoàn thành')).toMatch(/green/);
     expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
-    expect(within(table).queryByText('Chờ nghiệm thu')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Chờ quản lý xác nhận')).not.toBeInTheDocument();
     expect(within(table).queryByTestId('issue-inspection')).not.toBeInTheDocument();
-    expect(within(table).queryByRole('columnheader', { name: 'Nghiệm thu' })).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Xác nhận' })).not.toBeInTheDocument();
   });
 
-  it('with inspection switched on, adds "Chờ nghiệm thu" and the inspection beside every stage', async () => {
+  it('with the confirmation step, adds "Chờ quản lý xác nhận" and the confirmation beside every stage', async () => {
     installApiMock(
       adminRoutes([
         issue({ id: 'a', status: 'NEW', inspectionEnabled: true }),
@@ -255,14 +253,14 @@ describe('incidents — admin, in "Sự cố cơ sở vật chất đang xử l�
     expect(badge('a', 'Chờ kỹ thuật')).toMatch(/amber/);
     expect(badge('b', 'Đang sửa')).toMatch(/blue/);
     expect(badge('c', 'Đã hoàn thành')).toMatch(/green/);
-    expect(badge('d', 'Chờ nghiệm thu')).toMatch(/violet/);
+    expect(badge('d', 'Chờ quản lý xác nhận')).toMatch(/violet/);
     expect(badge('e', 'Cần sửa lại')).toMatch(/rose/);
-    // "Nghiệm thu" is its own labelled badge, never folded into the stage.
+    // "Xác nhận" is its own labelled badge, never folded into the stage.
     expect(within(within(table).getByTestId('row-c')).getByTestId('issue-inspection')).toHaveTextContent(
-      'Nghiệm thu: Chưa có dữ liệu',
+      'Xác nhận: Không có dữ liệu',
     );
     expect(within(within(table).getByTestId('row-d')).getByTestId('issue-inspection')).toHaveTextContent(
-      'Nghiệm thu: Chưa nghiệm thu',
+      'Xác nhận: Chờ quản lý xác nhận',
     );
   });
 });

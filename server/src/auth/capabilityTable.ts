@@ -27,6 +27,11 @@ export const CAPABILITY_TABLE = {
   'reports.voidOwnShiftEntry': ['RECEPTIONIST'],
   /** "Lịch sử xóa" — the deleted records of the reader's branches. */
   'reports.deletionHistory': ['RECEPTIONIST', ...RECEPTION_SUPERVISORS],
+  /**
+   * "Lịch sử chỉnh sửa" — every audited correction (one row per changed field)
+   * of the reader's branches. The same readers as each record's own trail.
+   */
+  'reports.editHistory': ['RECEPTIONIST', ...RECEPTION_SUPERVISORS],
   /** "Nhập bù" — a record the receptionist missed, entered on its original shift. */
   'reports.lateEntry': [...RECEPTION_SUPERVISORS],
   /** A correction made for a receptionist must say why ("Lý do sửa" required). */
@@ -40,9 +45,19 @@ export const CAPABILITY_TABLE = {
   'technical.dispatchExternal': ['TECHNICAL_MANAGER'],
   /** Complete an outside contractor's work and record its cost. */
   'technical.completeExternal': ['TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'],
+  /**
+   * "Xác nhận hoàn thành" — confirm (or send back) a repair a technician has
+   * finished. Never the technician: nobody signs off their own work.
+   */
+  'technical.confirmCompletion': [...RECEPTION_SUPERVISORS, 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'],
   /** Read an outside contractor's phone, specialty and company. */
   'technical.viewContractor': ['ADMIN', 'TECHNICAL_MANAGER', 'TECHNICAL_GENERAL_MANAGER'],
 
+  /**
+   * "Giao lại" a work item that is inspected and waiting for cleaning ("Chờ dọn
+   * phòng") — the Admin, Quản lý buồng phòng and Quản lý lễ tân, within their branches.
+   */
+  'housekeeping.reassignAwaitingCleaning': ['ADMIN', 'HOUSEKEEPING_MANAGER', 'RECEPTION_MANAGER'],
   /** "Bắt đầu dọn" — only the housekeeper the room is given to. */
   'housekeeping.startCleaning': ['HOUSEKEEPING'],
 } as const;

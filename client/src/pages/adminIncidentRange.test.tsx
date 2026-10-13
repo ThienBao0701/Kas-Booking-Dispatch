@@ -4,14 +4,14 @@
  * address lands.
  *
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
- *   1. The period is the PAGE's period — today by default, like every other
- *      category — and what it leaves out is never silent: the summary counts
+ *   1. The period is ONE "Khoảng ngày" — no "Hôm nay", no "Ngày cụ thể" — today
+ *      by default, and what it leaves out is never silent: the summary counts
  *      what is still open outside it, and every branch's unresolved total is
  *      on screen.
  *   2. The narrowing reaches the SERVER. Filtering a loaded page would only ever
  *      narrow the page that happened to load.
- *   3. "Tồn đọng hiện tại" and a date range are mutually exclusive, and the
- *      screen says which one is in force.
+ *   3. The two lists are states, never a date range: "Còn tồn đọng (mọi ngày
+ *      báo)" and "Đã hoàn thành chờ quản lý xác nhận".
  *   4. "Lượt không sửa được" and "Cần xử lý lại" are shown as two numbers,
  *      because they are two numbers.
  *   5. The export starts from the period already on screen.
@@ -149,17 +149,29 @@ async function openIncidents() {
 }
 
 describe('the incident period controls', () => {
-  it('asks the server for the page’s period — today — by default', async () => {
+  it('offers only "Khoảng ngày" — no "Hôm nay", no "Ngày cụ thể"', async () => {
+    installMocks();
+    await openIncidents();
+    const filter = await screen.findByTestId('admin-filters');
+    expect(within(filter).queryByTestId('period-TODAY')).not.toBeInTheDocument();
+    expect(within(filter).queryByTestId('period-DAY')).not.toBeInTheDocument();
+    expect(within(filter).queryByText('Hôm nay')).not.toBeInTheDocument();
+    expect(within(filter).queryByText('Ngày cụ thể')).not.toBeInTheDocument();
+    expect(within(filter).getByText('Khoảng ngày')).toBeInTheDocument();
+    expect(within(filter).getByTestId('period-range')).toBeInTheDocument();
+  });
+
+  it('opens on everything still open, and asks the summary for the page’s period — today — by default', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
     await openIncidents();
 
-    await waitFor(() =>
-      expect(seen).toContain(`/api/issues?from=${TODAY}&to=${TODAY}&pageSize=100`),
-    );
+    await waitFor(() => expect(seen).toContain('/api/issues?pageSize=100&outstanding=true'));
+    await waitFor(() => expect(seen.some((u) => u.startsWith(`/api/admin/reports/incidents/summary?from=${TODAY}&to=${TODAY}`))).toBe(true));
+    expect(screen.getByTestId('admin-incident-view-outstanding')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('sends the chosen period to the SERVER', async () => {
+  it('sends the chosen range to the SERVER — and never puts a date on the lists', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
     await openIncidents();
@@ -167,25 +179,25 @@ describe('the incident period controls', () => {
     await pickRange(WEEK_FROM, TODAY);
 
     await waitFor(() =>
-      expect(seen).toContain(`/api/issues?from=${WEEK_FROM}&to=${TODAY}&pageSize=100`),
+      expect(seen.some((u) => u.startsWith(`/api/admin/reports/incidents/summary?from=${WEEK_FROM}&to=${TODAY}`))).toBe(true),
     );
+    expect(seen.filter((u) => u.startsWith('/api/issues?')).every((u) => !u.includes('from='))).toBe(true);
   });
 
-  it('sends the outstanding flag, and drops the period when it is chosen', async () => {
+  it('"Đã hoàn thành chờ quản lý xác nhận" asks for the repairs awaiting confirmation, with no period', async () => {
     const seen: string[] = [];
     installMocks((u) => seen.push(u));
     const user = userEvent.setup();
     await openIncidents();
 
+    expect(screen.queryByTestId('admin-incident-view-period')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sự cố báo trong kỳ')).not.toBeInTheDocument();
+    expect(screen.queryByText('Chưa giao kỹ thuật')).not.toBeInTheDocument();
     seen.length = 0;
-    await user.click(screen.getByTestId('admin-incident-view-outstanding'));
+    await user.click(screen.getByTestId('admin-incident-view-awaiting'));
 
-    await waitFor(() => expect(seen.some((u) => u.includes('outstanding=true'))).toBe(true));
-    // The two are mutually exclusive on the server — "tồn đọng" IS a status set,
-    // so combining them would silently answer a different question.
-    const outstandingCalls = seen.filter((u) => u.includes('outstanding=true'));
-    expect(outstandingCalls.every((u) => !u.includes('from='))).toBe(true);
-    expect(screen.getByTestId('admin-incident-table')).toHaveTextContent('Còn tồn đọng (mọi ngày báo)');
+    await waitFor(() => expect(seen).toContain('/api/issues?stage=AWAITING_INSPECTION&pageSize=100'));
+    expect(screen.getByTestId('admin-incident-table')).toHaveTextContent('Đã hoàn thành chờ quản lý xác nhận');
   });
 });
 
@@ -207,12 +219,12 @@ describe('the period summary', () => {
     expect(cell('Tổng sự cố phát sinh')).toContain('7');
     expect(cell('Lượt không sửa được')).toContain('4');
     expect(cell('Cần sửa lại')).toContain('1');
-    // Inspection is dormant: neither of its figures is part of the summary.
-    expect(within(summary).queryByText('Nghiệm thu không đạt')).not.toBeInTheDocument();
-    expect(within(summary).queryByText('Chờ nghiệm thu')).not.toBeInTheDocument();
+    // An older server without the confirmation step: neither of its figures is shown.
+    expect(within(summary).queryByText('Xác nhận không đạt')).not.toBeInTheDocument();
+    expect(within(summary).queryByText('Chờ quản lý xác nhận')).not.toBeInTheDocument();
   });
 
-  it('with inspection switched on, counts failed inspections and those awaiting one', async () => {
+  it('with the confirmation step, counts repairs sent back and those awaiting confirmation', async () => {
     installMocks(undefined, [issue({ inspectionEnabled: true })], INSPECTION_SUMMARY);
     await openIncidents();
 
@@ -220,8 +232,8 @@ describe('the period summary', () => {
     const cell = (label: string) =>
       within(summary).getByText(label).parentElement!.textContent ?? '';
     // A failed inspection is counted as the event it is, beside the others.
-    expect(cell('Nghiệm thu không đạt')).toContain('2');
-    expect(cell('Chờ nghiệm thu')).toContain('3');
+    expect(cell('Xác nhận không đạt')).toContain('2');
+    expect(cell('Chờ quản lý xác nhận')).toContain('3');
   });
 
   /** The period hides nothing silently: what is still open elsewhere is counted. */
@@ -234,14 +246,14 @@ describe('the period summary', () => {
     expect(within(summary).getByText('9')).toBeInTheDocument();
   });
 
-  it('steps aside for the outstanding view, which has no period', async () => {
+  it('stays above both lists — the period is the summary’s, the lists are states', async () => {
     installMocks();
     const user = userEvent.setup();
     await openIncidents();
 
     await screen.findByTestId('incident-range-summary');
-    await user.click(screen.getByTestId('admin-incident-view-outstanding'));
-    await waitFor(() => expect(screen.queryByTestId('incident-range-summary')).not.toBeInTheDocument());
+    await user.click(screen.getByTestId('admin-incident-view-awaiting'));
+    expect(screen.getByTestId('incident-range-summary')).toBeInTheDocument();
   });
 
   it('does not add a second table to the page', async () => {
@@ -331,9 +343,9 @@ describe('the incident table', () => {
     const table = await openIncidents();
 
     const row = await within(table).findByTestId('row-i1');
-    expect(within(table).getByRole('columnheader', { name: 'Nghiệm thu' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: 'Xác nhận' })).toBeInTheDocument();
     expect(within(row).getByTestId('issue-stage')).toHaveTextContent('Đang sửa');
-    expect(within(row).getByTestId('issue-inspection')).toHaveTextContent('Nghiệm thu: Không đạt');
+    expect(within(row).getByTestId('issue-inspection')).toHaveTextContent('Xác nhận: Không đạt');
     expect(within(row).getByText('Quản lý Hùng')).toBeInTheDocument();
     expect(within(row).getByText('Minh')).toBeInTheDocument();
 
@@ -364,7 +376,7 @@ describe('the incident table', () => {
     const table = await openIncidents();
 
     const row = await within(table).findByTestId('row-i1');
-    expect(within(table).queryByRole('columnheader', { name: 'Nghiệm thu' })).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Xác nhận' })).not.toBeInTheDocument();
     expect(within(row).getByTestId('issue-stage')).toHaveTextContent('Đang sửa');
     expect(within(row).queryByTestId('issue-inspection')).not.toBeInTheDocument();
     expect(within(row).getByText('Minh')).toBeInTheDocument();
@@ -438,13 +450,13 @@ describe('the export', () => {
     expect(contents).not.toHaveTextContent(/nghiệm thu/i);
   });
 
-  it('with inspection switched on, says the file carries the inspection results', async () => {
+  it('with the confirmation step, says the file carries the confirmation results', async () => {
     installMocks(undefined, [issue({ inspectionEnabled: true })], INSPECTION_SUMMARY);
     const user = userEvent.setup();
     await openIncidents();
     await screen.findByTestId('incident-range-summary');
 
     await user.click(screen.getByRole('button', { name: /Xuất báo cáo/ }));
-    expect(await screen.findByTestId('incident-export-contents')).toHaveTextContent('và kết quả nghiệm thu.');
+    expect(await screen.findByTestId('incident-export-contents')).toHaveTextContent('và kết quả xác nhận hoàn thành.');
   });
 });

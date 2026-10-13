@@ -41,6 +41,7 @@ export function ReportFilterBar({
   branchCounts,
   allowAll = true,
   showShifts = true,
+  rangeOnly = false,
   testId = 'report-filter',
 }: {
   value: ReportFilterValue;
@@ -54,6 +55,12 @@ export function ReportFilterBar({
   allowAll?: boolean;
   /** The "Ca" choices — off where the data has no reception shift (housekeeping). */
   showShifts?: boolean;
+  /**
+   * "Khoảng ngày" only — no "Hôm nay", no "Ngày cụ thể". For a screen whose
+   * lists are states, not days (the incident monitor), where one range is the
+   * only period that means anything. The caller keeps `value.mode` at RANGE.
+   */
+  rangeOnly?: boolean;
   testId?: string;
 }) {
   const period = reportPeriod(value, today);
@@ -82,25 +89,29 @@ export function ReportFilterBar({
     >
       <div className="flex flex-wrap items-start justify-between gap-x-8 gap-y-3">
         <div className="min-w-0">
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Chọn nhanh</p>
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            {rangeOnly ? 'Khoảng ngày' : 'Chọn nhanh'}
+          </p>
           <div className="flex flex-wrap items-center gap-2">
-            <div role="group" aria-label="Chọn nhanh" className="inline-flex overflow-hidden rounded-xl border border-line-strong bg-white">
-              {MODES.map((m, i) => (
-                <button
-                  key={m.key}
-                  type="button"
-                  aria-pressed={value.mode === m.key}
-                  data-testid={`period-${m.key}`}
-                  onClick={() => onChange({ ...value, mode: m.key, shiftType: '' })}
-                  className={`min-h-[2.75rem] px-3.5 text-sm transition-colors focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
-                    i > 0 ? 'border-l border-line-strong' : ''
-                  } ${value.mode === m.key ? 'bg-brand-50 font-semibold text-brand-700' : 'font-medium text-slate-600 hover:bg-slate-50'}`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            {value.mode === 'DAY' ? (
+            {rangeOnly ? null : (
+              <div role="group" aria-label="Chọn nhanh" className="inline-flex overflow-hidden rounded-xl border border-line-strong bg-white">
+                {MODES.map((m, i) => (
+                  <button
+                    key={m.key}
+                    type="button"
+                    aria-pressed={value.mode === m.key}
+                    data-testid={`period-${m.key}`}
+                    onClick={() => onChange({ ...value, mode: m.key, shiftType: '' })}
+                    className={`min-h-[2.75rem] px-3.5 text-sm transition-colors focus-visible:relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
+                      i > 0 ? 'border-l border-line-strong' : ''
+                    } ${value.mode === m.key ? 'bg-brand-50 font-semibold text-brand-700' : 'font-medium text-slate-600 hover:bg-slate-50'}`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {value.mode === 'DAY' && !rangeOnly ? (
               <input
                 type="date"
                 aria-label="Ngày cụ thể"
@@ -111,7 +122,7 @@ export function ReportFilterBar({
                 className={CONTROL}
               />
             ) : null}
-            {value.mode === 'RANGE' ? (
+            {value.mode === 'RANGE' || rangeOnly ? (
               <DateRangePicker
                 value={value.range}
                 max={today}

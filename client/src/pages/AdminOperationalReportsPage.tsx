@@ -44,8 +44,10 @@ import { branchesApi } from '../api/bookings';
 import { shiftsApi } from '../api/shifts';
 import { SupervisorCreateDialog } from '../components/SupervisorCreateDialog';
 import { AssignTechnicianDialog } from '../components/AssignTechnicianDialog';
+import { ConfirmCompletionDialog } from '../components/ConfirmCompletionDialog';
+import { mayConfirmCompletion } from '../lib/completionConfirmation';
 import { RecordEditDialog, VoidDialog } from '../components/RecordDialogs';
-import { DeletedHistoryDialog, LateEntryDialog } from '../components/ReportManagementDialogs';
+import { LateEntryDialog, ReportHistoryDialog } from '../components/ReportManagementDialogs';
 import { can } from '../auth/capabilities';
 import { RowAction } from '../components/DataTable';
 import { Toast } from '../components/Toast';
@@ -83,7 +85,7 @@ import {
 import { RoomServiceTotals } from '../components/OperationalTables';
 import { ReportSection, ReportSubsection } from '../components/ReportSection';
 import { formatVnd } from '../lib/money';
-import { formatDate, formatViWeekdayDate, hcmToday } from '../lib/format';
+import { formatDate, formatDateTime, formatViWeekdayDate, hcmToday } from '../lib/format';
 import { ROOM_SERVICE_FALLBACK_LABELS, ROOM_SERVICE_ORDER } from '../lib/roomServiceFields';
 import {
   CATEGORY_FALLBACK_LABELS,
@@ -136,6 +138,19 @@ export function AdminOperationalReportsPage() {
   useEffect(() => {
     if (category && filter.branch === null) setFilter((f) => ({ ...f, branch: 'ALL' }));
   }, [category, filter.branch]);
+  /*
+    THE INCIDENT MONITOR READS ONE RANGE. Its lists are states with no report
+    date, and its period summary is a range, so "Hôm nay" and "Ngày cụ thể" are
+    not offered there; the period already chosen carries over as that range.
+  */
+  const rangeOnly = category === 'FACILITY_ISSUE';
+  useEffect(() => {
+    if (!rangeOnly || filter.mode === 'RANGE') return;
+    setFilter((f) => {
+      const carried = reportPeriod(f, today) ?? { from: today, to: today };
+      return { ...f, mode: 'RANGE', range: carried, shiftType: '' };
+    });
+  }, [rangeOnly, filter.mode, today]);
   const period = reportPeriod(filter, today);
   const range: DateRangeValue = period ?? { from: '', to: '' };
   /*
@@ -154,7 +169,7 @@ export function AdminOperationalReportsPage() {
   const [editing, setEditing] = useState<OperationalReport | null>(null);
   /** "Xóa": the record about to be withdrawn, after a confirmation with its reason. */
   const [deleting, setDeleting] = useState<OperationalReport | null>(null);
-  /** "Lịch sử xóa" and "Nhập bù". */
+  /** "Lịch sử chỉnh sửa" (edits and deletions) and "Nhập bù". */
   const [historyOpen, setHistoryOpen] = useState(false);
   const [lateOpen, setLateOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -259,10 +274,10 @@ export function AdminOperationalReportsPage() {
           </p>
         </div>
         <div className="ml-auto flex flex-wrap gap-2">
-          {can(user?.role, 'reports.deletionHistory') ? (
-            <Button variant="secondary" onClick={() => setHistoryOpen(true)} data-testid="deleted-history-open" className="shadow-sm">
+          {can(user?.role, 'reports.editHistory') || can(user?.role, 'reports.deletionHistory') ? (
+            <Button variant="secondary" onClick={() => setHistoryOpen(true)} data-testid="report-history-open" className="shadow-sm">
               <History className="h-4 w-4" aria-hidden="true" />
-              Lịch sử xóa
+              Lịch sử chỉnh sửa
             </Button>
           ) : null}
           {can(user?.role, 'reports.lateEntry') ? (
@@ -308,6 +323,9 @@ export function AdminOperationalReportsPage() {
           today={today}
           branches={branches.data?.branches ?? []}
           branchCounts={unresolvedByBranch}
+          rangeOnly={rangeOnly}
+          // The incident lists are states, not shifts: no "Ca" there either.
+          showShifts={!rangeOnly}
           testId="admin-filters"
         />
         {levelled ? (
@@ -373,7 +391,6 @@ export function AdminOperationalReportsPage() {
             <AdminIncidentView
               branchId={filters.branchId}
               range={range}
-              shiftType={filters.shiftType}
               severity={severity}
               isAdmin={isAdmin}
               onToast={setToast}
@@ -456,17 +473,18 @@ export function AdminOperationalReportsPage() {
           onClose={() => setDeleting(null)}
           onVoided={async () => {
             setDeleting(null);
-            setToast('Đã xóa bản ghi. Bản ghi được lưu trong "Lịch sử xóa".');
+            setToast('Đã xóa bản ghi. Bản ghi được lưu trong "Lịch sử chỉnh sửa → Lịch sử xóa".');
             await refreshAll();
           }}
         />
       ) : null}
 
       {historyOpen ? (
-        <DeletedHistoryDialog
+        <ReportHistoryDialog
           period={rangeValid ? range : null}
           branchId={filters.branchId}
           labelOf={label}
+          initialCategory={category}
           onClose={() => setHistoryOpen(false)}
         />
       ) : null}
@@ -783,6 +801,18 @@ function ShiftSummary({
   return (
     <span className="flex flex-wrap items-center justify-start gap-x-2 gap-y-1 text-xs text-slate-600 sm:justify-end">
       <span data-testid={`shift-counts-${group.key}`}>{parts.join(' · ')}</span>
+      {/* A shift nobody checked in to, added afterwards for its missed records. */}
+      {group.backfill ? (
+        <span
+          data-testid={`shift-backfill-${group.key}`}
+          title={`Thêm bởi ${group.backfill.backfilledByName}${
+            group.backfill.backfilledByRoleLabel ? ` (${group.backfill.backfilledByRoleLabel})` : ''
+          } lúc ${formatDateTime(group.backfill.backfilledAt)}${group.backfill.reason ? ` — ${group.backfill.reason}` : ''}`}
+          className="rounded-full bg-amber-50 px-2 py-0.5 font-bold uppercase text-amber-900 ring-1 ring-inset ring-amber-400"
+        >
+          Ca thêm bù · {group.backfill.backfilledByName}
+        </span>
+      ) : null}
       {group.closed ? null : (
         <span
           data-testid={`shift-open-${group.key}`}
@@ -878,50 +908,54 @@ function OpenShiftWarning({ notices, warning }: { notices: OpenShiftNotice[]; wa
 }
 
 /**
- * "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ", for the Admin: the incidents themselves.
+ * "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ", for the Admin and the reception managers:
+ * the incidents themselves.
  *
- * This is where the old "Sự cố khách sạn" screen went. It reads the SAME
- * `HotelIssue` rows through the SAME `/api/issues` the technical department
- * works from — scoped to the page's branch and period, by the incident's own
- * report date — plus the period's counts and, when asked, every incident still
- * open whatever day it was reported. Nothing here is a second incident system.
+ * It reads the SAME `HotelIssue` rows through the SAME `/api/issues` the
+ * technical department works from. Two lists, both states with no report date:
+ *
+ *   Còn tồn đọng (mọi ngày báo)              everything not finally completed,
+ *                                            whatever day it was reported;
+ *   Đã hoàn thành chờ quản lý xác nhận       repairs a technician finished that
+ *                                            no manager has confirmed yet — the
+ *                                            confirmation queue (AWAITING_INSPECTION).
+ *
+ * The page's period still drives the Admin's period summary above them. Nothing
+ * here is a second incident system.
  */
 function AdminIncidentView({
   branchId,
   range,
-  shiftType,
   severity,
   isAdmin,
   onToast,
 }: {
   branchId?: number;
+  /** The period of the Admin's incident summary. */
   range: DateRangeValue;
-  /** The shared filter's "Ca" — the incidents reported on that shift. */
-  shiftType?: string;
   /** "Mức độ" — one level, filtered by the server. */
   severity?: Severity;
   /** The period summary is the Admin's incident report; the managers do without it. */
   isAdmin: boolean;
   onToast: (message: string) => void;
 }) {
-  /** Every incident of the period · everything still open · only what nobody holds. */
-  const [view, setView] = useState<'period' | 'outstanding' | 'unassigned'>('period');
+  /** Everything still open · the repairs waiting for a manager's confirmation. */
+  const [view, setView] = useState<'outstanding' | 'awaiting'>('outstanding');
   const outstanding = view === 'outstanding';
+  const { user } = useAuth();
+  const [confirming, setConfirming] = useState<Issue | null>(null);
   const [assigning, setAssigning] = useState<Issue | null>(null);
   const [editingIssue, setEditingIssue] = useState<Issue | null>(null);
   const [returning, setReturning] = useState<Issue | null>(null);
   const [deleting, setDeleting] = useState<Issue | null>(null);
   const list = useQuery({
-    queryKey: ['issues', { admin: true, branchId, range, view, shiftType, severity }],
+    queryKey: ['issues', { admin: true, branchId, view, severity }],
     queryFn: () =>
       issuesApi.list({
         branchId,
-        // "Tồn đọng" and "Chưa giao" are states with no date: the server refuses a date with them.
-        from: view === 'period' ? range.from : undefined,
-        to: view === 'period' ? range.to : undefined,
-        shiftType: view === 'period' ? shiftType : undefined,
+        // Both lists are states with no date: the server refuses a date with them.
         outstanding: outstanding || undefined,
-        assignment: view === 'unassigned' ? 'UNASSIGNED' : undefined,
+        stage: view === 'awaiting' ? 'AWAITING_INSPECTION' : undefined,
         severity,
         pageSize: 100,
       }),
@@ -931,16 +965,14 @@ function AdminIncidentView({
   const total = list.data?.pagination.total ?? 0;
 
   const VIEWS = [
-    ['period', 'Sự cố báo trong kỳ'],
     ['outstanding', 'Còn tồn đọng (mọi ngày báo)'],
-    ['unassigned', 'Chưa giao kỹ thuật'],
+    ['awaiting', 'Đã hoàn thành chờ quản lý xác nhận'],
   ] as const;
 
   return (
     <div className="space-y-3" data-testid="admin-incident-view">
-      {view === 'period' && isAdmin ? (
-        <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} />
-      ) : null}
+      {/* The period ("Khoảng ngày") is the Admin's incident report for those days. */}
+      {isAdmin ? <IncidentRangeSummary from={range.from} to={range.to} branchId={branchId ?? null} /> : null}
       <div
         role="group"
         aria-label="Phạm vi sự cố"
@@ -974,14 +1006,18 @@ function AdminIncidentView({
         onRetry={() => void list.refetch()}
         emptyTitle="Không có sự cố"
         emptyMessage={
-          view === 'unassigned'
-            ? 'Mọi sự cố đang chờ đều đã được giao kỹ thuật.'
-            : outstanding
-              ? 'Không còn sự cố nào chưa xử lý.'
-              : 'Không có sự cố nào được báo trong kỳ đang xem.'
+          outstanding ? 'Không còn sự cố nào chưa xử lý.' : 'Không có sự cố nào đang chờ quản lý xác nhận hoàn thành.'
         }
         actions={(issue) =>
-          issue.status === 'NEW' || issue.status === 'IN_PROGRESS' ? (
+          issue.status === 'AWAITING_INSPECTION' ? (
+            mayConfirmCompletion(issue, user?.role, user?.id) ? (
+              <RowAction onClick={() => setConfirming(issue)} testId={`confirm-completion-${issue.id}`}>
+                Xác nhận hoàn thành
+              </RowAction>
+            ) : (
+              <span className="text-xs text-slate-500">Chờ quản lý khác xác nhận</span>
+            )
+          ) : issue.status === 'NEW' || issue.status === 'IN_PROGRESS' ? (
             <div className="flex flex-wrap justify-end gap-1.5">
               {issue.status === 'NEW' ? (
                 <RowAction onClick={() => setAssigning(issue)} testId={`assign-${issue.id}`}>
@@ -1005,6 +1041,17 @@ function AdminIncidentView({
           )
         }
       />
+      {confirming ? (
+        <ConfirmCompletionDialog
+          issue={confirming}
+          onClose={() => setConfirming(null)}
+          onDone={(message) => {
+            setConfirming(null);
+            void list.refetch();
+            onToast(message);
+          }}
+        />
+      ) : null}
       {assigning ? (
         <AssignTechnicianDialog
           issue={assigning}

@@ -13,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetIssueData, testPrisma } from './helpers/db';
-import { assignTo, serveAllBranches } from './helpers/issues';
+import { assignTo, confirmCompletion, serveAllBranches } from './helpers/issues';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -110,6 +110,7 @@ describe('with incidents', () => {
     await tech.post(`/api/issues/${a}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
     setClock({ now: () => hcm('2026-09-20', '09:30') });
     await tech.post(`/api/issues/${a}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, a);
 
     const s = await stats();
     expect(s.totals).toMatchObject({ total: 3, newCount: 2, inProgressCount: 0, completedCount: 1 });
@@ -166,6 +167,7 @@ describe('a technician reads their own work', () => {
     await assignTo(admin, mine, tech);
     await tech.post(`/api/issues/${mine}/accept`).send({ technicianName: 'Bảo', technicianPhone: '0900000000' });
     await tech.post(`/api/issues/${mine}/complete`).send({ verdict: 'CORRECT' });
+    await confirmCompletion(admin, mine);
 
     const s = await stats(tech);
     expect(s.totals).toMatchObject({ total: 1, completedCount: 1 });

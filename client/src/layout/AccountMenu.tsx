@@ -20,6 +20,8 @@ export function AccountMenu() {
   if (!user) return null;
 
   const roleLabel = ROLE_LABEL[user.role];
+  // Bộ phận buồng phòng names its hotel at "Vào ca" (by address); it is not shown before that.
+  const hideBranch = user.role === 'HOUSEKEEPING';
 
   const onLogout = async () => {
     setOpen(false);
@@ -44,7 +46,7 @@ export function AccountMenu() {
           <p className="text-sm font-medium text-slate-800">{user.fullName}</p>
           <p className="text-xs text-slate-500">
             {roleLabel}
-            {user.branch ? ` · ${user.branch.hotelName}` : ''}
+            {user.branch && !hideBranch ? ` · ${user.branch.hotelName}` : ''}
           </p>
         </div>
         <ChevronDown className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -65,7 +67,7 @@ export function AccountMenu() {
               <p className="text-sm font-medium text-slate-800">{user.fullName}</p>
               <p className="text-xs text-slate-500">@{user.username}</p>
               <p className="mt-1 text-xs text-slate-500">{roleLabel}</p>
-              {user.branch ? (
+              {user.branch && !hideBranch ? (
                 <p className="text-xs text-slate-500">Chi nhánh: {user.branch.hotelName}</p>
               ) : null}
             </div>

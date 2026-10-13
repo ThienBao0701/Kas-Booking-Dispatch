@@ -48,8 +48,17 @@ export function AppShell() {
           the server, never held in React state.
         */}
         <ShiftGate />
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
-          <div className="mx-auto max-w-5xl">
+        {/*
+          THE WORKSPACE IS THE WHOLE WIDTH BETWEEN THE SIDEBAR AND THE EDGE.
+
+          It used to be capped at max-w-5xl (1024px) for every page, which left a
+          third of a 1920px screen empty beside tables that then had to scroll
+          sideways to show their last columns. The cap is now only a guard for
+          very wide monitors; `min-w-0` lets a wide table's own scroll box shrink
+          instead of pushing the page wider than the window.
+        */}
+        <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-6 xl:px-8">
+          <div className="mx-auto w-full min-w-0 max-w-[120rem]" data-testid="app-workspace">
             <Outlet />
           </div>
         </main>
