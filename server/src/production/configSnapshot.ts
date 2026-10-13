@@ -44,7 +44,10 @@ export const PUBLIC_KEYS: readonly string[] = [
   'LOG_LEVEL',
   'SESSION_COOKIE_SECURE',
   'ENABLE_DEV_TEST_TOOLS',
-  'APP_RELEASE_REF',
+  // APP_RELEASE_REF is deliberately NOT here: it is free text an operator
+  // fills in, and nothing guarantees it holds only a tag or a commit. The
+  // backup manifest states the deployed release on its own; the snapshot
+  // records the key by name, like every other unlisted one.
   'TZ',
   // Tuning values. Numbers and booleans that change how the app behaves and
   // grant access to nothing — an operator rebuilding a machine needs these back

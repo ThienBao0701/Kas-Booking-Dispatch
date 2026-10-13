@@ -102,6 +102,14 @@ describe('the allow-list', () => {
     }
   });
 
+  it('withholds APP_RELEASE_REF — free text, recorded by name only', () => {
+    expect(PUBLIC_KEYS).not.toContain('APP_RELEASE_REF');
+    expect(isPublicKey('APP_RELEASE_REF')).toBe(false);
+    const snapshot = buildConfigSnapshot('APP_RELEASE_REF=https://user:tok3n@example.com/repo#abc\n', NOW);
+    expect(snapshot.entries).toEqual([{ key: 'APP_RELEASE_REF', value: REDACTED, redacted: true }]);
+    expect(JSON.stringify(snapshot)).not.toContain('tok3n');
+  });
+
   it('answers for keys on and off the list', () => {
     expect(isPublicKey('PORT')).toBe(true);
     expect(isPublicKey('SESSION_SECRET')).toBe(false);

@@ -33,10 +33,15 @@ export async function checkDatabase(): Promise<boolean> {
  */
 export async function checkMigrationsApplied(): Promise<boolean | null> {
   try {
+    // A failed attempt that was resolved (`migrate resolve --rolled-back`) and
+    // then applied again stays in the ledger as its own row with rolled_back_at
+    // set; it is history, not a pending migration. Only an attempt that neither
+    // finished nor was resolved blocks readiness — what `migrate deploy` itself
+    // would refuse to run past.
     const rows = await prisma.$queryRaw<{ pending: bigint }[]>`
       SELECT count(*)::bigint AS pending
       FROM "_prisma_migrations"
-      WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL
+      WHERE "finished_at" IS NULL AND "rolled_back_at" IS NULL
     `;
     const applied = await prisma.$queryRaw<{ total: bigint }[]>`
       SELECT count(*)::bigint AS total
