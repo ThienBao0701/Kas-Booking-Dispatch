@@ -42,13 +42,29 @@ async function loadSessionUser(req: Request): Promise<SessionUser | null> {
     return { ...rest, managedBranchIds: branchAssignments.map((a) => a.branchId) };
   }
   /*
-    BỘ PHẬN BUỒNG PHÒNG WORKS AT THE ONE BRANCH THE ADMIN GAVE THE ACCOUNT —
-    `branchId`, exactly like a receptionist's. "Vào ca" opens the shift there;
-    every branch check downstream (the room catalog, room work, inspections)
-    reads it from here, never from the request. An account with no branch yet
-    has none, and its work is refused until the Admin assigns one.
+    BỘ PHẬN BUỒNG PHÒNG HAS NO PERMANENT BRANCH. Where it works is the hotel it
+    named at "Vào ca" — the OPEN segment of its open workday — read here on every
+    request, so every branch check downstream (room work, inspections, the room
+    catalog, deliveries, notifications) follows the shift and is enforced on the
+    server. Not on shift: no branch, and no branch-scoped work. Any `branchId`
+    an older account still carries is history and is not used.
   */
-  return rest;
+  return withShiftBranch(rest);
+}
+
+/**
+ * A Bộ phận buồng phòng account as every request sees it: its branch is the
+ * one of its open shift, or none. Other roles are returned unchanged. Shared
+ * with the sign-in response, so the account's old permanent branch is never
+ * shown there either.
+ */
+export async function withShiftBranch<T extends UserWithBranch>(user: T): Promise<T> {
+  if (user.role !== 'HOUSEKEEPING') return user;
+  const segment = await prisma.housekeepingWorkSegment.findFirst({
+    where: { endedAt: null, session: { userId: user.id, endedAt: null } },
+    include: { branch: true },
+  });
+  return { ...user, branchId: segment?.branchId ?? null, branch: segment?.branch ?? null };
 }
 
 /**

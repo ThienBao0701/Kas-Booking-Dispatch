@@ -14,7 +14,7 @@ import {
 import { serializeUser } from '../auth/serialize';
 import { auditAdminOverrideLogin, matchAdminOverride } from '../auth/adminOverride';
 import { SESSION_COOKIE_NAME } from '../auth/session';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, withShiftBranch } from '../middleware/auth';
 import { createLoginRateLimiter } from '../middleware/rateLimit';
 
 const loginSchema = z.object({
@@ -111,7 +111,7 @@ export function createAuthRouter(): Router {
           });
 
       res.json({
-        user: serializeUser(updated),
+        user: serializeUser(await withShiftBranch(updated)),
         mustChangePassword: updated.mustChangePassword,
       });
     })().catch(next);

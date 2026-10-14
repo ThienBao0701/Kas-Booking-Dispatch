@@ -92,10 +92,19 @@ export function serializeShift(row: SessionRow) {
 
 export type SerializedShift = ReturnType<typeof serializeShift>;
 
+/**
+ * Who works a housekeeping shift: Bộ phận buồng phòng, and the Quản lý buồng
+ * phòng when it does the room work itself — always at its OWN assigned branch.
+ */
 function assertHousekeeping(actor: ShiftActor): void {
-  if (actor.role !== 'HOUSEKEEPING') {
+  if (actor.role !== 'HOUSEKEEPING' && actor.role !== 'HOUSEKEEPING_MANAGER') {
     throw ApiError.forbidden('Chỉ bộ phận buồng phòng mới vào ca buồng phòng.');
   }
+}
+
+/** The address lookup is a housekeeper's: a manager's branch is already its assigned one. */
+function assertHousekeeper(actor: ShiftActor): void {
+  if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới tra địa chỉ khách sạn.');
 }
 
 function cleanerName(raw: unknown): string {
@@ -105,12 +114,13 @@ function cleanerName(raw: unknown): string {
   return name;
 }
 
-export const NO_BRANCH_MESSAGE = 'Tài khoản chưa được gán chi nhánh. Vui lòng liên hệ Admin.';
+export const NO_BRANCH_MESSAGE = 'Bạn cần "Vào ca" tại khách sạn đang làm việc trước.';
 
 /**
- * THE BRANCH IS THE ACCOUNT'S — set by the Admin, read from the session, never
- * chosen by the worker. A request that names another branch is refused; an
- * account with no branch yet cannot work at all.
+ * THE BRANCH IS THE SHIFT'S — the hotel named at "Vào ca", which
+ * `middleware/auth.ts` puts on the session's user for every request. A request
+ * that names another branch is refused; an account not on shift has no branch
+ * and cannot do branch work at all.
  */
 export function accountBranch(actor: { branchId: number | null }, requested?: unknown): number {
   if (actor.branchId === null) throw ApiError.forbidden(NO_BRANCH_MESSAGE);
@@ -139,14 +149,50 @@ export async function currentShift(actor: ShiftActor, client: PrismaClient = def
   return row ? serializeShift(row) : null;
 }
 
+/** The one active branch the typed address identifies — or the neutral refusal. */
+async function resolveTyped(raw: unknown, client: PrismaClient): Promise<{ id: number; address: string }> {
+  const typed = typeof raw === 'string' ? raw : '';
+  if (!typed.trim()) throw ApiError.validation(WORKPLACE_REQUIRED);
+  if (typed.length > MAX_ADDRESS_CHARS) throw ApiError.validation(WORKPLACE_NOT_FOUND);
+  const candidates = await client.branch.findMany({ where: { active: true }, select: { id: true, address: true } });
+  const resolved = resolveWorkplace(typed, candidates);
+  if (resolved.status === 'AMBIGUOUS') throw ApiError.validation(WORKPLACE_AMBIGUOUS);
+  if (resolved.status === 'NONE') throw ApiError.validation(WORKPLACE_NOT_FOUND);
+  return candidates.find((c) => c.id === resolved.branchId)!;
+}
+
 /**
- * "Vào ca": the workday, at the account's branch. One open workday per account.
+ * "Vào ca" — step one: what the typed start of an address identifies. ONLY the
+ * single branch it uniquely fits is named back (its address and number), so the
+ * housekeeper can confirm it; too little or several fits is one generic "nhập
+ * thêm", nothing a refusal ever names. Never a list, never a count.
+ */
+export async function lookupWorkplace(actor: ShiftActor, input: { address?: unknown }, client: PrismaClient = defaultPrisma) {
+  assertHousekeeper(actor);
+  const typed = typeof input.address === 'string' ? input.address : '';
+  if (!typed.trim()) return { status: 'AMBIGUOUS' as const, message: WORKPLACE_AMBIGUOUS };
+  try {
+    const branch = await resolveTyped(typed, client);
+    const row = await client.branch.findUniqueOrThrow({ where: { id: branch.id }, select: { address: true, branchNumber: true } });
+    return { status: 'RESOLVED' as const, branch: { address: row.address, branchNumber: row.branchNumber } };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 422) {
+      return { status: error.message === WORKPLACE_NOT_FOUND ? ('NONE' as const) : ('AMBIGUOUS' as const), message: error.message };
+    }
+    throw error;
+  }
+}
+
+/**
+ * "Vào ca": the workday, at the hotel the housekeeper named. One open workday
+ * per account.
  *
  * THE HOUSEKEEPER NAMES THE HOTEL BY ITS ADDRESS (`address`), typed — no list
- * is ever offered — and the shift opens only once that address resolves to the
- * account's own branch (`resolveWorkplace`): there is no branch-less or pending
- * session. An input that fits several hotels, none, or another branch than the
- * account's is refused without naming any branch. The address is not stored.
+ * is ever offered — and the shift opens at the ONE active branch that address
+ * identifies (`resolveWorkplace`), resolved again here on the server: nothing
+ * the browser sends picks the branch. Bộ phận buồng phòng has no permanent
+ * branch; this shift's is the branch of all its work until "Kết thúc ca". The
+ * address itself is not stored.
  */
 export async function startShift(
   actor: ShiftActor,
@@ -155,18 +201,15 @@ export async function startShift(
   client: PrismaClient = defaultPrisma,
 ) {
   assertHousekeeping(actor);
-  const home = accountBranch(actor, input.branchId);
-  const typed = typeof input.address === 'string' ? input.address : '';
-  if (!typed.trim()) throw ApiError.validation(WORKPLACE_REQUIRED);
-  if (typed.length > MAX_ADDRESS_CHARS) throw ApiError.validation(WORKPLACE_NOT_FOUND);
-  const candidates = await client.branch.findMany({ where: { active: true }, select: { id: true, address: true } });
-  const resolved = resolveWorkplace(typed, candidates, home);
-  if (resolved.status === 'AMBIGUOUS') throw ApiError.validation(WORKPLACE_AMBIGUOUS);
-  if (resolved.status === 'NONE') throw ApiError.validation(WORKPLACE_NOT_FOUND);
-  const branchId = await activeBranch(resolved.branchId, client);
+  // A Quản lý buồng phòng works where it manages — the Admin's assignment, never
+  // an address or a branch the request names. A housekeeper names the hotel.
+  const branchId =
+    actor.role === 'HOUSEKEEPING_MANAGER'
+      ? await activeBranch(accountBranch(actor), client)
+      : await activeBranch((await resolveTyped(input.address, client)).id, client);
   // THE PERSON IS THE ACCOUNT: nobody types their own name any more.
   const staffName = cleanerName(input.staffName === undefined || input.staffName === '' ? actor.fullName : input.staffName);
-  if (await openSession(actor.id, client)) throw ApiError.conflict('Bạn đang trong ca. Hãy đổi chi nhánh hoặc kết thúc ca.');
+  if (await openSession(actor.id, client)) throw ApiError.conflict('Bạn đang trong ca. Hãy "Kết thúc ca" trước khi vào ca ở khách sạn khác.');
   const now = clock.now();
   try {
     const row = await client.housekeepingWorkSession.create({
@@ -182,33 +225,13 @@ export async function startShift(
 }
 
 /**
- * "Đổi chi nhánh": the open segment ends now, kept as history; the next one opens
- * at the new branch. Only ever TO the account's branch — the way back for a shift
- * opened before the Admin assigned it; any other branch is refused.
+ * "Đổi chi nhánh" by a branch id is no longer offered: a branch is named only by
+ * its address at "Vào ca". To work at another hotel: "Kết thúc ca", then "Vào
+ * ca" there. Kept as a refusal so an older client gets an answer, not a 404.
  */
-export async function switchShiftBranch(
-  actor: ShiftActor,
-  input: { branchId?: unknown; staffName?: unknown },
-  clock: Clock = getClock(),
-  client: PrismaClient = defaultPrisma,
-) {
+export async function switchShiftBranch(actor: ShiftActor): Promise<never> {
   assertHousekeeping(actor);
-  const branchId = await activeBranch(accountBranch(actor, input.branchId ?? actor.branchId), client);
-  const session = await openSession(actor.id, client);
-  if (!session) throw ApiError.conflict('Bạn chưa vào ca.');
-  const open = session.segments.find((s) => s.endedAt === null);
-  if (open && open.branchId === branchId) throw ApiError.validation('Bạn đang làm ở chi nhánh này.');
-  const staffName =
-    input.staffName !== undefined && input.staffName !== '' ? cleanerName(input.staffName) : (open?.staffName ?? cleanerName(actor.fullName));
-  const now = clock.now();
-  await client.$transaction(async (tx) => {
-    if (open) {
-      const { count } = await tx.housekeepingWorkSegment.updateMany({ where: { id: open.id, endedAt: null }, data: { endedAt: now } });
-      if (count === 0) throw ApiError.conflict('Ca vừa được cập nhật ở nơi khác. Vui lòng tải lại.');
-    }
-    await tx.housekeepingWorkSegment.create({ data: { sessionId: session.id, branchId, staffName, startedAt: now } });
-  });
-  return serializeShift((await openSession(actor.id, client))!);
+  throw ApiError.conflict('Muốn làm ở khách sạn khác: "Kết thúc ca" rồi "Vào ca" bằng địa chỉ khách sạn đó.');
 }
 
 /** "Kết thúc ca": the open segment and the workday end now. Returns the day's summary. */

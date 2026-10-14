@@ -314,7 +314,6 @@ function EditUserModal({
             value={branchId ? [branchId] : []}
             onChange={(ids) => setBranchId(ids[0] ?? 0)}
             single
-            title={user.role === 'HOUSEKEEPING' ? 'Chi nhánh' : undefined}
           />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />
@@ -346,6 +345,9 @@ function TechnicianBranches({ branches, value, onChange }: { branches: Branch[];
 /** What a role without a branch field works on — said, not left blank. */
 function scopeNote(role: UserRole): string {
   if (role === 'RECEPTION_GENERAL_MANAGER') return 'Tổng quản lý lễ tân xem và quản lý hoạt động lễ tân của tất cả chi nhánh.';
+  if (role === 'HOUSEKEEPING') {
+    return 'Nhân viên buồng phòng không gắn cố định với chi nhánh: mỗi ca, nhân viên nhập địa chỉ khách sạn khi "Vào ca". Chi nhánh được gán cho Quản lý buồng phòng.';
+  }
   return 'Tài khoản bộ phận làm việc trên tất cả chi nhánh, không thuộc chi nhánh nào.';
 }
 
@@ -434,9 +436,10 @@ function DepartmentTable({
               Cần gán chi nhánh
             </span>
           )
-        ) : u.role === 'HOUSEKEEPING' && !u.branch ? (
-          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" data-testid={`needs-branch-${u.id}`}>
-            Cần gán chi nhánh
+        ) : u.role === 'HOUSEKEEPING' ? (
+          // No permanent branch — whatever an older account still carries is not used.
+          <span className="text-slate-500" data-testid={`shift-branch-${u.id}`}>
+            Chọn khi vào ca
           </span>
         ) : (
           u.branch?.address ?? <span className="text-slate-400">Tất cả chi nhánh</span>
@@ -647,7 +650,6 @@ function CreateUserModal({
             value={form.branchId ? [form.branchId] : []}
             onChange={(ids) => setForm({ ...form, branchId: ids[0] ?? 0 })}
             single
-            title={form.role === 'HOUSEKEEPING' ? 'Chi nhánh' : undefined}
           />
         ) : needsBranchSet ? (
           <BranchChecklist branches={branches} value={branchSet} onChange={setBranchSet} />

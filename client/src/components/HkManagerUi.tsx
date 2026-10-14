@@ -10,7 +10,6 @@
  *   StateBadge       chưa bắt đầu (gray) · đang dọn (blue) · hoàn thành (green)
  *   PriorityBadge    ưu tiên (red)
  *   ProgressBar      the three states as one bar
- *   ManagerRoomBoard the day's rooms, one group per code (OUT / OC / VC)
  *   ReviewCard       a finished room waiting for "Đạt" / "Không đạt"
  *
  * Colour carries meaning only: status, priority, action.
@@ -233,116 +232,6 @@ export function RateBar({ rate }: { rate: number }) {
       </span>
       <span className="tabular-nums">{rate}%</span>
     </span>
-  );
-}
-
-/* ------------------------------------------------------------------ *
- * The manager's room board
- * ------------------------------------------------------------------ */
-
-const TILE: Record<RoomWorkState, string> = {
-  NOT_STARTED: 'border-slate-300 bg-slate-50 hover:bg-slate-100',
-  INSPECTED: 'border-amber-400 bg-amber-50 hover:bg-amber-100',
-  IN_PROGRESS: 'border-blue-400 bg-blue-50 hover:bg-blue-100',
-  COMPLETED: 'border-green-500 bg-green-50/60 hover:bg-green-50',
-};
-
-const STATE_TEXT: Record<RoomWorkState, string> = {
-  NOT_STARTED: 'text-slate-600',
-  INSPECTED: 'text-amber-800',
-  IN_PROGRESS: 'text-blue-700',
-  COMPLETED: 'text-green-700',
-};
-
-export function ManagerLegend() {
-  return (
-    <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600" data-testid="room-legend">
-      <Badge tone="gray">Chưa bắt đầu</Badge>
-      <Badge tone="amber">Đã kiểm tra</Badge>
-      <Badge tone="blue">Đang dọn</Badge>
-      <Badge tone="red">Cần dọn lại</Badge>
-      <PriorityBadge />
-    </p>
-  );
-}
-
-function RoomTile({ task, onClick }: { task: RoomTask; onClick?: () => void }) {
-  const who = task.assignee?.name ?? null;
-  // "Cần dọn lại": a re-clean cycle — red until its cleaning starts.
-  const reclean = task.reclean !== null && task.state !== 'COMPLETED';
-  const stateLabel = reclean && task.state === 'NOT_STARTED' ? 'Cần dọn lại' : task.stateLabel;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-testid={`room-chip-${task.roomNumber}`}
-      data-state={task.state}
-      data-reclean={reclean || undefined}
-      aria-label={`Phòng ${task.roomNumber} · ${stateLabel} · ${who ?? 'Chưa giao'}${task.priority ? ' · Ưu tiên' : ''}`}
-      className={`relative flex min-h-[5.5rem] flex-col items-start justify-between rounded-lg border-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-1 ${
-        reclean && task.state === 'NOT_STARTED' ? 'border-red-400 bg-red-50 hover:bg-red-100' : TILE[task.state]
-      }`}
-    >
-      <span className="flex w-full items-start justify-between gap-1">
-        <span
-          className={`text-xl font-bold leading-tight tabular-nums text-slate-900 ${
-            task.state === 'COMPLETED' ? 'border-b-[3px] border-green-600' : 'border-b-[3px] border-transparent'
-          }`}
-        >
-          {task.roomNumber}
-        </span>
-        {task.priority ? (
-          <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-red-600 text-white" aria-hidden="true">
-            <Flag className="h-3 w-3" />
-          </span>
-        ) : null}
-      </span>
-      <span className={`w-full truncate text-xs ${who ? 'font-medium text-slate-700' : 'italic text-amber-700'}`}>{who ?? 'Chưa giao'}</span>
-      <span className="flex flex-wrap items-center gap-1">
-        <span className={`text-[11px] font-semibold uppercase tracking-wide ${reclean && task.state === 'NOT_STARTED' ? 'text-red-700' : STATE_TEXT[task.state]}`}>
-          {stateLabel}
-        </span>
-        {reclean && task.state === 'IN_PROGRESS' ? (
-          <span className="rounded bg-red-600 px-1 text-[10px] font-bold uppercase text-white">Dọn lại</span>
-        ) : null}
-      </span>
-    </button>
-  );
-}
-
-/** One group per code, in the catalog's order (an unknown code keeps a group of its own). */
-export function ManagerRoomBoard({ tasks, codes, onSelect }: { tasks: RoomTask[]; codes: readonly string[]; onSelect?: (task: RoomTask) => void }) {
-  const order = [...codes, ...[...new Set(tasks.map((t) => t.statusCode))].filter((c) => !codes.includes(c))];
-  const groups = order
-    .map((code) => ({
-      code,
-      tasks: tasks
-        .filter((t) => t.statusCode === code)
-        .sort((a, b) => Number(b.priority) - Number(a.priority) || a.roomNumber.localeCompare(b.roomNumber, 'vi', { numeric: true })),
-    }))
-    .filter((g) => g.tasks.length > 0);
-  return (
-    <div className="space-y-4" data-testid="room-board">
-      {groups.map((g) => {
-        const count = (s: RoomWorkState) => g.tasks.filter((t) => t.state === s).length;
-        return (
-          <section key={g.code} data-testid={`room-row-${g.code}`} className="rounded-lg border border-line-subtle p-3">
-            <header className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-              <CodeTag code={g.code} />
-              <span className="text-sm font-semibold text-slate-800">{g.tasks.length} phòng</span>
-              <span className="text-xs text-slate-500">
-                {count('NOT_STARTED')} chưa bắt đầu · {count('IN_PROGRESS')} đang dọn · {count('COMPLETED')} hoàn thành
-              </span>
-            </header>
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-2">
-              {g.tasks.map((task) => (
-                <RoomTile key={task.id} task={task} onClick={onSelect ? () => onSelect(task) : undefined} />
-              ))}
-            </div>
-          </section>
-        );
-      })}
-    </div>
   );
 }
 

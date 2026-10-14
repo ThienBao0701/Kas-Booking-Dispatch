@@ -133,6 +133,10 @@ enum RoomTaskEventType {
   INSPECTION_STARTED
   /// A "Nhận" refused because someone else accepted the item first.
   CLAIM_REJECTED
+  /// "Không cần dọn": asked (with the reason), then approved or rejected.
+  NO_CLEAN_REQUESTED
+  NO_CLEAN_APPROVED
+  NO_CLEAN_REJECTED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -674,6 +678,8 @@ model User {
   roomTasksReviewed        HousekeepingRoomTask[]        @relation("RoomTaskReviewedBy")
   roomTaskEvents           HousekeepingRoomTaskEvent[]   @relation("RoomTaskEventActor")
   housekeepingSessions     HousekeepingWorkSession[]     @relation("HousekeepingSessionUser")
+  workGroupsAssigned       HousekeepingWorkGroup[]       @relation("WorkGroupAssignee")
+  workGroupsCreated        HousekeepingWorkGroup[]       @relation("WorkGroupCreatedBy")
   confidentialReportsSent  ConfidentialReport[]          @relation("ConfidentialReportSender")
   confidentialReportsIn    ConfidentialReportRecipient[] @relation("ConfidentialReportRecipientUser")
   pushSubscriptions        PushSubscription[]
@@ -797,6 +803,7 @@ model Branch {
   managerAssignments      UserBranchAssignment[]        @relation("UserBranchAssignmentBranch")
   housekeepingSegments    HousekeepingWorkSegment[]
   housekeepingRoomTasks   HousekeepingRoomTask[]
+  housekeepingWorkGroups  HousekeepingWorkGroup[]
   confidentialReports     ConfidentialReport[]
   issueDispatches         HotelIssueDispatch[]
 }
@@ -3516,6 +3523,29 @@ model HousekeepingRoomTask {
   inspectedAt         DateTime?
   inspectionNote      String?
 
+  /// The WORK GROUP ("Công việc 1, 2, …") this item belongs to. Null on every
+  /// item created before work groups existed — those are shown, and worked, on
+  /// their own exactly as before.
+  workGroupId                    String?
+  /// "Việc cần làm" ticked for the place: at most one of OUT / OC / VC, and/or
+  /// OTHER ("Khác", whose note says what). Empty on older rows, which carry
+  /// their one code in `statusCode`. `statusCode` stays the room's code for the
+  /// day (OUT / OC / VC), or OTHER when only "Khác" was ticked.
+  taskCodes                      String[]                   @default([])
+  /// "Không cần dọn": the housekeeper's request (reason required) and the
+  /// manager's decision. APPROVED takes the item out of the active work by a
+  /// soft removal (`voidedAt`, the reason kept); REJECTED returns it to work.
+  /// Nothing is erased; every step is also an event.
+  noCleanStatus                  HousekeepingNoCleanStatus?
+  noCleanReason                  String?
+  noCleanRequestedAt             DateTime?
+  noCleanRequestedByUserId       Int?
+  noCleanRequestedByNameSnapshot String?
+  noCleanDecidedAt               DateTime?
+  noCleanDecidedByUserId         Int?
+  noCleanDecidedByNameSnapshot   String?
+  noCleanDecisionNote            String?
+
   branch       Branch                      @relation(fields: [branchId], references: [id])
   assignee     User?                       @relation("RoomTaskAssignee", fields: [assigneeUserId], references: [id])
   inspection   RoomInspection?             @relation(fields: [inspectionId], references: [id])
@@ -3527,12 +3557,56 @@ model HousekeepingRoomTask {
   previousTask HousekeepingRoomTask?       @relation("RoomTaskReclean", fields: [previousTaskId], references: [id])
   recleanTask  HousekeepingRoomTask?       @relation("RoomTaskReclean")
   events       HousekeepingRoomTaskEvent[]
+  workGroup    HousekeepingWorkGroup?      @relation(fields: [workGroupId], references: [id])
 
   @@unique([branchId, workDate, roomNumber, itemKey, cycleNumber])
   @@unique([groupId, groupIndex])
   @@index([branchId, workDate])
   @@index([assigneeUserId, workDate])
   @@index([workDate])
+  @@index([workGroupId])
+}
+
+/// A WORK GROUP — "Công việc 1", "Công việc 2", … of one branch and business
+/// day, in creation order: one or more rooms / areas given out and accepted
+/// TOGETHER. The number is unique per branch and day and never reused, so a
+/// removed group does not renumber the others. Each room / area stays its own
+/// HousekeepingRoomTask (its own state, inspection, cleaning and history).
+model HousekeepingWorkGroup {
+  id                    String    @id @default(cuid())
+  branchId              Int
+  /// "YYYY-MM-DD", Asia/Ho_Chi_Minh — the board's business date.
+  workDate              String
+  number                Int
+  /// "Tên công việc" — optional, for the group as a whole.
+  name                  String?
+  /// The form's submission id: a repeated submission finds the group saved.
+  requestId             String?   @unique
+  /// Who works the group — the housekeeper who accepted it ("Nhận"), or the
+  /// one the manager gave it to. Null: "Chưa giao".
+  assigneeUserId        Int?
+  assigneeNameSnapshot  String?
+  acceptedAt            DateTime?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdAt             DateTime
+  updatedAt             DateTime  @updatedAt
+
+  branch    Branch                 @relation(fields: [branchId], references: [id])
+  assignee  User?                  @relation("WorkGroupAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  createdBy User                   @relation("WorkGroupCreatedBy", fields: [createdByUserId], references: [id])
+  tasks     HousekeepingRoomTask[]
+
+  @@unique([branchId, workDate, number])
+  @@index([branchId, workDate])
+  @@index([assigneeUserId, workDate])
+}
+
+/// "Không cần dọn" — the housekeeper asked; the manager decides.
+enum HousekeepingNoCleanStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 /// Where a work item is: a room, or a shared area of a floor.
@@ -3544,6 +3618,8 @@ enum HousekeepingAreaKind {
   STAIRCASE
   /// "Khác" — any other place; its note says where and what.
   OTHER
+  /// "Rooftop" — only at the branches whose catalog has one.
+  ROOFTOP
 }
 
 /// Everything that happened to a room work item, oldest first — assignment and

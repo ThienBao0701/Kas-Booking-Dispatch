@@ -208,25 +208,56 @@ const CATALOG = {
   maxQuantity: 999,
 };
 
-describe('Bộ phận buồng phòng — "Vào ca" and the day’s work items', () => {
+describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups', () => {
+  const GROUPS = `GET /api/housekeeping/work/groups?date=${hcmToday()}`;
   const ITEMS = `GET /api/housekeeping/work/items?date=${hcmToday()}`;
+  const HISTORY = `GET /api/housekeeping/work/history?date=${hcmToday()}`;
   const item = (id: string, over: Record<string, unknown> = {}) =>
-    roomTask(id, { assignee: null, phase: 'UNCLAIMED', phaseLabel: 'Chưa tiếp nhận', areaKind: 'ROOM', ...over });
-  const LIST = [
-    item('w1', { roomNumber: '502', areaLabel: 'Phòng - 502', statusCode: 'OC', taskLabel: 'OC', priority: true }),
-    item('w2', { roomNumber: '502', areaLabel: 'Phòng - 502', statusCode: 'OTHER', taskLabel: 'Khác', note: 'Thay rèm cửa sổ' }),
-    item('w3', { roomNumber: 'Hành lang - Tầng 5', areaKind: 'HALLWAY', areaLabel: 'Hành lang - Tầng 5', taskLabel: 'Hút bụi thảm', note: 'Thảm trước 502' }),
-    item('w4', { roomNumber: '301', areaLabel: 'Phòng - 301', taskLabel: 'OUT', assignee: { id: 6, name: 'Buồng phòng Một' }, phase: 'ACCEPTED', phaseLabel: 'Đã tiếp nhận / Chờ kiểm tra' }),
-  ];
+    roomTask(id, { assignee: null, phase: 'UNCLAIMED', phaseLabel: 'Chưa giao', areaKind: 'ROOM', taskCodes: ['OUT'], ...over });
+  const group = (id: string, number: number, items: unknown[], over: Record<string, unknown> = {}) => ({
+    id,
+    branchId: 1,
+    branch: BRANCH,
+    workDate: hcmToday(),
+    number,
+    title: `Công việc ${number}`,
+    name: null,
+    assignee: null,
+    acceptedAt: null,
+    status: { code: 'UNASSIGNED', label: 'Chưa giao' },
+    floors: ['Tầng 1'],
+    counts: { items: items.length, completed: 0, noCleanPending: 0 },
+    items,
+    createdByName: 'Quản lý',
+    createdAt: '2026-10-05T01:00:00.000Z',
+    ...over,
+  });
+  const G1 = group('g1', 1, [
+    item('w1', { roomNumber: '101', floor: '1', taskCodes: ['OUT'], priority: true }),
+    item('w2', { roomNumber: 'Hành lang - Tầng 1', areaKind: 'HALLWAY', areaKindLabel: 'Hành lang', floor: '1', taskCodes: ['OTHER'], note: 'Lau sàn' }),
+  ], { name: 'Tầng 1 buổi sáng' });
+  const MINE = { id: 6, name: 'Buồng phòng Một' };
+  const G2 = group('g2', 2, [item('w4', { roomNumber: '301', floor: '3', taskCodes: ['OC', 'OTHER'], note: 'Thay rèm', assignee: MINE, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+    assignee: MINE,
+    status: { code: 'ACCEPTED', label: 'Đã nhận' },
+    floors: ['Tầng 3'],
+  });
+  const G3 = group('g3', 3, [item('w5', { roomNumber: '201', floor: '2', assignee: { id: 9, name: 'Chị Hoa' }, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+    assignee: { id: 9, name: 'Chị Hoa' },
+    status: { code: 'ACCEPTED', label: 'Đã nhận' },
+  });
+  const EMPTY_HISTORY = { workDate: hcmToday(), items: [], totals: { completed: 0, noClean: 0 }, shifts: [] };
   const routes = (extra: Record<string, Handler> = {}) =>
     shell(HOUSEKEEPING_USER, {
       'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: workShift() } }),
       'GET /api/housekeeping/catalog': () => ({ status: 200, body: CATALOG }),
-      [ITEMS]: () => ({ status: 200, body: { working: true, tasks: LIST } }),
+      [GROUPS]: () => ({ status: 200, body: { working: true, groups: [G1, G2, G3] } }),
+      [ITEMS]: () => ({ status: 200, body: { working: true, tasks: [] } }),
+      [HISTORY]: () => ({ status: 200, body: EMPTY_HISTORY }),
       ...extra,
     });
 
-  it('lands on the work list: the shift’s branch in view, its two menu entries, one row per item', async () => {
+  it('lands on the numbered work groups: who holds each, and the next step on one’s own rooms', async () => {
     installApiMock(routes());
     renderApp('/app');
     const current = await screen.findByTestId('shift-current');
@@ -235,25 +266,48 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work items', 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng', 'KPI & Thu tiền']);
 
-    const list = await screen.findByTestId('work-items');
-    // Two items of one room are two rows.
-    expect(within(list).getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))).toEqual(['work-item-w1', 'work-item-w2', 'work-item-w3', 'work-item-w4']);
-    expect(screen.getByTestId('work-item-w2')).toHaveTextContent('Phòng - 502');
-    expect(screen.getByTestId('work-item-w2')).toHaveTextContent('Hướng dẫn: Thay rèm cửa sổ');
-    expect(screen.getByTestId('work-item-w3')).toHaveTextContent('Hành lang - Tầng 5');
-    expect(screen.getByTestId('phase-w1')).toHaveTextContent('Chưa tiếp nhận');
-    // Free items: a checkbox and "Nhận"; the housekeeper's own: the next step.
-    expect(screen.getByTestId('work-claim-w1')).toBeInTheDocument();
-    expect(screen.queryByTestId('work-claim-w4')).not.toBeInTheDocument();
-    expect(screen.getByTestId('work-step-w4')).toHaveTextContent('Kiểm tra');
-    expect(screen.getByTestId('claim-selected')).toBeDisabled();
+    const list = await screen.findByTestId('worker-groups');
+    expect(within(list).getAllByRole('article').map((a) => a.getAttribute('data-testid'))).toEqual(['group-card-1', 'group-card-2', 'group-card-3']);
+    const one = screen.getByTestId('group-card-1');
+    expect(one).toHaveTextContent('Công việc 1 — Tầng 1 buổi sáng');
+    expect(one).toHaveTextContent('Người thực hiện: Chưa giao');
+    // Both places of Tầng 1 sit side by side in that floor's one row.
+    const floor1 = within(one).getByTestId('group-floor-1-0');
+    expect(within(floor1).getByRole('heading')).toHaveTextContent('Tầng 1');
+    expect(within(within(floor1).getByTestId('group-floor-row-1-0')).getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))).toEqual(['group-item-w1', 'group-item-w2']);
+    expect(within(one).getByTestId('group-item-w1')).toHaveTextContent('Phòng 101');
+    expect(within(one).getByTestId('group-item-w2')).toHaveTextContent('Hành lang');
+    expect(within(one).getByTestId('group-accept-1')).toHaveTextContent('Nhận công việc');
+    // Nobody works a room of a group they have not accepted.
+    expect(within(one).queryByTestId('work-step-w1')).not.toBeInTheDocument();
+
+    const two = screen.getByTestId('group-card-2');
+    expect(within(two).getByTestId('group-mine-2')).toHaveTextContent('Công việc của bạn');
+    expect(within(two).getByTestId('work-step-w4')).toHaveTextContent('Kiểm tra');
+    expect(within(two).getByTestId('no-clean-open-w4')).toBeInTheDocument();
+    expect(within(two).getByTestId('group-item-w4')).toHaveTextContent('OC');
+    expect(within(two).getByTestId('group-item-w4')).toHaveTextContent('Khác');
+
+    // A colleague's group: who has it — and nothing to press.
+    const three = screen.getByTestId('group-card-3');
+    expect(within(three).getByTestId('group-taken-3')).toHaveTextContent('Chị Hoa đang làm');
+    expect(within(three).queryByTestId('group-accept-3')).not.toBeInTheDocument();
+    expect(within(three).queryByTestId('work-step-w5')).not.toBeInTheDocument();
   });
 
-  it('asks for the hotel’s address at "Vào ca" — no branch shown, prefilled or offered — and sends what was typed', async () => {
+  it('names only the one hotel the typed address identifies — "17", never 13 Bùi Thị Xuân — and opens the shift', async () => {
     const posted: Record<string, unknown>[] = [];
+    const looked: string[] = [];
     const fetchMock = installApiMock(
       routes({
         'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
+        'POST /api/housekeeping/shift/lookup': (init) => {
+          const { address } = JSON.parse(String(init.body)) as { address: string };
+          looked.push(address);
+          return address === '17'
+            ? { status: 200, body: { status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình', branchNumber: 4 } } }
+            : { status: 200, body: { status: 'AMBIGUOUS', message: 'Nhập thêm số nhà hoặc tên đường để xác định khách sạn.' } };
+        },
         'POST /api/housekeeping/shift/start': (init) => {
           posted.push(JSON.parse(String(init.body)));
           return { status: 201, body: { shift: workShift() } };
@@ -262,114 +316,154 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work items', 
     );
     renderApp('/app/inspections');
     const start = await screen.findByTestId('shift-start');
-    // Nothing names the account's hotel before the shift: not the form, not the menu, not the account.
+    // Nothing names a hotel before the shift, and there is no list to pick from.
     expect(document.body).not.toHaveTextContent('05 Trương Định');
-    expect(document.body).not.toHaveTextContent('Saigon Hotel');
-    expect(within(start).queryByTestId('shift-branch')).not.toBeInTheDocument();
     expect(within(start).queryByRole('combobox')).not.toBeInTheDocument();
     expect(within(start).queryByRole('listbox')).not.toBeInTheDocument();
     const address = within(start).getByTestId('shift-address');
     expect(address).toHaveValue('');
     expect(address).toHaveAttribute('autocomplete', 'off');
-    expect(address).not.toHaveAttribute('list');
     expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
-    // No work list before the shift.
-    expect(screen.queryByTestId('work-items')).not.toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/housekeeping/work'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/housekeeping/work/groups'))).toBe(false);
 
-    await userEvent.type(address, '  05 truong dinh ');
+    await userEvent.type(address, '1');
+    expect(await within(start).findByTestId('shift-lookup-hint')).toHaveTextContent('Nhập thêm số nhà');
+    expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
+    await userEvent.type(address, '7');
+    const match = await within(start).findByTestId('shift-lookup-match');
+    expect(match).toHaveTextContent('Chi nhánh 4 — 170-172-174 Nguyễn Thái Bình');
+    expect(document.body).not.toHaveTextContent('13 Bùi Thị Xuân');
     await userEvent.click(within(start).getByTestId('shift-start-submit'));
-    await waitFor(() => expect(posted).toEqual([{ address: '05 truong dinh' }]));
+    await waitFor(() => expect(posted).toEqual([{ address: '17' }]));
+    expect(looked.at(-1)).toBe('17');
   });
 
-  it('shows the server’s neutral answer when the address cannot be matched, and clears it on typing', async () => {
+  it('offers "Vào ca" to an account with no branch — the shift decides where it works', async () => {
     installApiMock(
       routes({
+        'GET /api/auth/me': () => ({ status: 200, body: { user: { ...HOUSEKEEPING_USER, branch: null } } }),
         'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
-        'POST /api/housekeeping/shift/start': () => ({
-          status: 422,
-          body: { error: { code: 'VALIDATION_ERROR', message: 'Nhập thêm thông tin địa chỉ để xác định nơi làm việc.' } },
-        }),
       }),
     );
     renderApp('/app/inspections');
-    const start = await screen.findByTestId('shift-start');
-    await userEvent.type(within(start).getByTestId('shift-address'), '1');
-    await userEvent.click(within(start).getByTestId('shift-start-submit'));
-    expect(await within(start).findByText('Nhập thêm thông tin địa chỉ để xác định nơi làm việc.')).toBeInTheDocument();
-    await userEvent.type(within(start).getByTestId('shift-address'), '7');
-    expect(within(start).queryByText('Nhập thêm thông tin địa chỉ để xác định nơi làm việc.')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('shift-start')).toBeInTheDocument();
+    expect(screen.queryByText('Tài khoản chưa được gán chi nhánh')).not.toBeInTheDocument();
   });
 
-  it('"Nhận" confirms exactly the selected items, by name and count, and sends only those', async () => {
-    const claimed: unknown[] = [];
+  it('"Nhận công việc" confirms the whole group, every place in it, and takes it', async () => {
+    const accepted: string[] = [];
     installApiMock(
       routes({
-        'POST /api/housekeeping/work/claim': (init) => {
-          claimed.push(JSON.parse(String(init.body)));
-          return { status: 200, body: { tasks: [LIST[0], LIST[2]] } };
+        'POST /api/housekeeping/work/groups/g1/accept': () => {
+          accepted.push('g1');
+          return { status: 200, body: { group: { ...G1, assignee: MINE, status: { code: 'ACCEPTED', label: 'Đã nhận' } } } };
         },
       }),
     );
     renderApp('/app/inspections');
-    await userEvent.click(await screen.findByTestId('work-select-w1'));
-    await userEvent.click(screen.getByTestId('work-select-w3'));
-    expect(screen.getByTestId('claim-selected')).toHaveTextContent('Nhận 2 công việc đã chọn');
-    await userEvent.click(screen.getByTestId('claim-selected'));
-    const dialog = await screen.findByTestId('claim-dialog');
-    expect(dialog).toHaveTextContent('Bạn sắp nhận 2 công việc');
-    expect(within(within(dialog).getByTestId('claim-list')).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      'Phòng - 502 · OC',
-      'Hành lang - Tầng 5 · Hút bụi thảm',
+    await userEvent.click(await screen.findByTestId('group-accept-1'));
+    const dialog = await screen.findByTestId('group-accept-dialog');
+    expect(dialog).toHaveTextContent('Công việc 1 — Tầng 1 buổi sáng gồm 2 phòng / khu vực');
+    expect(within(within(dialog).getByTestId('group-accept-list')).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Tầng 1 · Phòng 101 · OUT',
+      'Tầng 1 · Hành lang · Khác',
     ]);
-    // Nothing is sent before the confirmation.
-    expect(claimed).toEqual([]);
-    await userEvent.click(screen.getByTestId('claim-confirm'));
-    await waitFor(() => expect(claimed).toEqual([{ taskIds: ['w1', 'w3'] }]));
-    expect(await screen.findByTestId('claim-done')).toHaveTextContent('Đã nhận 2 công việc');
+    expect(accepted).toEqual([]);
+    await userEvent.click(screen.getByTestId('group-accept-confirm'));
+    await waitFor(() => expect(accepted).toEqual(['g1']));
+    expect(await screen.findByTestId('accept-done')).toHaveTextContent('Đã nhận Công việc 1');
   });
 
-  it('says so when somebody else was faster, and reloads the list', async () => {
+  it('says who was faster when the group is already taken, and reloads the list', async () => {
     let listed = 0;
     installApiMock(
       routes({
-        [ITEMS]: () => {
+        [GROUPS]: () => {
           listed += 1;
-          return { status: 200, body: { working: true, tasks: LIST } };
+          return { status: 200, body: { working: true, groups: [G1, G2, G3] } };
         },
-        'POST /api/housekeeping/work/claim': () => ({
+        'POST /api/housekeeping/work/groups/g1/accept': () => ({
           status: 409,
-          body: { error: { code: 'CONFLICT', message: 'Không nhận được: Phòng - 502 · OC — công việc vừa được người khác nhận.', details: { taskIds: ['w1'] } } },
+          body: { error: { code: 'CONFLICT', message: 'Công việc 1 đã có người nhận: Chị Hoa.' } },
         }),
       }),
     );
     renderApp('/app/inspections');
-    await userEvent.click(await screen.findByTestId('work-claim-w1'));
-    const dialog = await screen.findByTestId('claim-dialog');
-    expect(within(dialog).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Phòng - 502 · OC']);
+    await userEvent.click(await screen.findByTestId('group-accept-1'));
+    const dialog = await screen.findByTestId('group-accept-dialog');
     const before = listed;
-    await userEvent.click(screen.getByTestId('claim-confirm'));
-    expect(await within(dialog).findByText(/vừa được người khác nhận/)).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('group-accept-confirm'));
+    expect(await within(dialog).findByText('Công việc 1 đã có người nhận: Chị Hoa.')).toBeInTheDocument();
     await waitFor(() => expect(listed).toBeGreaterThan(before));
   });
 
-  it('"Kiểm tra" begins the inspection of the housekeeper’s own item and opens it', async () => {
+  it('"Không cần dọn" needs a reason, and sends it for the manager to decide', async () => {
+    const asked: unknown[] = [];
+    installApiMock(
+      routes({
+        'POST /api/housekeeping/work/tasks/w4/no-clean': (init) => {
+          asked.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { task: { ...(G2.items[0] as Record<string, unknown>), phase: 'NO_CLEAN_PENDING' } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections');
+    await userEvent.click(await screen.findByTestId('no-clean-open-w4'));
+    const dialog = await screen.findByTestId('no-clean-dialog');
+    expect(dialog).toHaveTextContent('Tầng 3 · Phòng 301');
+    const send = screen.getByTestId('no-clean-send');
+    expect(send).toBeDisabled();
+    await userEvent.type(within(dialog).getByTestId('no-clean-reason'), '   ');
+    expect(send).toBeDisabled();
+    await userEvent.type(within(dialog).getByTestId('no-clean-reason'), 'Khách không muốn dọn');
+    await userEvent.click(send);
+    await waitFor(() => expect(asked).toEqual([{ reason: 'Khách không muốn dọn' }]));
+    expect(await screen.findByTestId('accept-done')).toHaveTextContent('Chờ quản lý duyệt');
+  });
+
+  it('"Kiểm tra" begins the inspection of one’s own room and opens it', async () => {
     const begun: string[] = [];
-    const accepted = LIST[3]!;
+    const own = G2.items[0] as Record<string, unknown>;
     installApiMock(
       routes({
         'POST /api/housekeeping/work/tasks/w4/begin-inspection': () => {
           begun.push('w4');
-          return { status: 200, body: { task: { ...accepted, phase: 'INSPECTING' } } };
+          return { status: 200, body: { task: { ...own, phase: 'INSPECTING' } } };
         },
-        'GET /api/housekeeping/work/tasks/w4': () => ({ status: 200, body: { task: { ...accepted, phase: 'INSPECTING' } } }),
-        'POST /api/housekeeping/work/tasks/w4/open': () => ({ status: 200, body: { task: { ...accepted, phase: 'INSPECTING' } } }),
+        'GET /api/housekeeping/work/tasks/w4': () => ({ status: 200, body: { task: { ...own, phase: 'INSPECTING' } } }),
+        'POST /api/housekeeping/work/tasks/w4/open': () => ({ status: 200, body: { task: { ...own, phase: 'INSPECTING' } } }),
       }),
     );
     renderApp('/app/inspections');
     await userEvent.click(await screen.findByTestId('work-step-w4'));
     await waitFor(() => expect(begun).toEqual(['w4']));
     expect(await screen.findByRole('heading', { name: 'PHÒNG 301' })).toBeInTheDocument();
+  });
+
+  it('shows the day’s own finished work, with its times and the "Không cần dọn" answered', async () => {
+    installApiMock(
+      routes({
+        [HISTORY]: () => ({
+          status: 200,
+          body: {
+            workDate: hcmToday(),
+            totals: { completed: 1, noClean: 1 },
+            shifts: [{ id: 'sh1', user: { id: 6, fullName: 'Buồng phòng Một' }, startedAt: '2026-09-19T01:00:00.000Z', endedAt: null, segments: [{ id: 'sg1', branch: BRANCH, staffName: 'x', startedAt: '2026-09-19T01:00:00.000Z', endedAt: null }] }],
+            items: [
+              roomTask('h1', { roomNumber: '101', floor: '1', state: 'COMPLETED', phase: 'COMPLETED', phaseLabel: 'Hoàn thành', cleanedBy: MINE, startedAt: '2026-09-19T02:00:00.000Z', completedAt: '2026-09-19T02:30:00.000Z', durationSeconds: 1800, workGroup: { id: 'g1', number: 1, name: null } }),
+              roomTask('h2', { roomNumber: '102', floor: '1', voided: true, phase: 'NO_CLEAN', phaseLabel: 'Không cần dọn', noClean: { status: 'APPROVED', reason: 'Khách từ chối', requestedAt: null, requestedByName: 'Buồng phòng Một', decidedAt: null, decidedByName: 'Quản lý', decisionNote: null } }),
+            ],
+          },
+        }),
+      }),
+    );
+    renderApp('/app/inspections');
+    const history = await screen.findByTestId('work-history');
+    expect(await within(history).findByTestId('work-history-totals')).toHaveTextContent('Đã dọn xong: 1 · Không cần dọn (đã duyệt): 1');
+    expect(within(history).getByTestId('history-item-h1')).toHaveTextContent('Công việc 1 · Tầng 1 · Phòng 101');
+    expect(within(history).getByTestId('history-item-h1')).toHaveTextContent('30 phút');
+    expect(within(history).getByTestId('history-item-h2')).toHaveTextContent('Không cần dọn — đã duyệt bởi Quản lý · Lý do: Khách từ chối');
+    expect(within(history).getByTestId('work-history-shifts')).toHaveTextContent('Chi nhánh 1');
   });
 
   it('offers no "Đổi chi nhánh" on shift — only "Kết thúc ca"', async () => {
@@ -379,18 +473,6 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work items', 
     expect(within(current).queryByTestId('shift-switch')).not.toBeInTheDocument();
     expect(within(current).queryByRole('button', { name: /Đổi chi nhánh/ })).not.toBeInTheDocument();
     expect(within(current).getByTestId('shift-end')).toBeInTheDocument();
-  });
-
-  it('tells an account with no branch to ask the Admin — no "Vào ca"', async () => {
-    installApiMock(
-      routes({
-        'GET /api/auth/me': () => ({ status: 200, body: { user: { ...HOUSEKEEPING_USER, branch: null } } }),
-        'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }),
-      }),
-    );
-    renderApp('/app/inspections');
-    expect(await screen.findByText('Tài khoản chưa được gán chi nhánh')).toBeInTheDocument();
-    expect(screen.queryByTestId('shift-start')).not.toBeInTheDocument();
   });
 
   it('"Kết thúc ca" shows the day’s summary', async () => {
@@ -422,6 +504,8 @@ describe('Bộ phận buồng phòng — a re-clean sent back by the manager', (
           status: 200,
           body: { working: true, tasks: [roomTask('t1', { roomNumber: '101', phase: 'ACCEPTED' }), RECLEAN] },
         }),
+        [`GET /api/housekeeping/work/groups?date=${hcmToday()}`]: () => ({ status: 200, body: { working: true, groups: [] } }),
+        [`GET /api/housekeeping/work/history?date=${hcmToday()}`]: () => ({ status: 200, body: { workDate: hcmToday(), items: [], totals: { completed: 0, noClean: 0 }, shifts: [] } }),
         'POST /api/housekeeping/work/tasks/t9/begin-inspection': () => ({ status: 200, body: { task: RECLEAN } }),
         'GET /api/housekeeping/work/tasks/t9': () => ({ status: 200, body: { task: RECLEAN } }),
         'POST /api/housekeeping/work/tasks/t9/open': () => ({ status: 200, body: { task: RECLEAN } }),

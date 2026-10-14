@@ -1,41 +1,42 @@
 /**
- * "TẠO CÔNG VIỆC", "VÀO CA" BY ADDRESS, "NHẬN", AND "GIAO LẠI" — the
- * housekeeping work order rules, each pinned at the API:
+ * HOUSEKEEPING WORK GROUPS — "Công việc 1, 2, …" — and the shift that decides
+ * where a housekeeper works. Each rule pinned at the API:
  *
- *   1. "Chọn khu vực" is the branch's own inventory: its floors and rooms, the
- *      rooms whose floor cannot be read under "Phòng chưa xác định tầng", and
- *      the shared areas.
- *   2. One submission saves one row PER ITEM; a shared area and "Khác" need
- *      their note; a repeated submission creates nothing twice.
- *   3. "Vào ca" takes a typed address. The answer never names a branch that is
- *      not the account's: too little is "nhập thêm", another hotel's address
- *      and nonsense get the SAME refusal; the attempts are bounded.
- *   4. Before "Vào ca" there is no list. After it, "Nhận" takes exactly the
- *      selected items, all or none, never two owners; it starts nothing.
- *   5. "Kiểm tra" → "Chờ dọn phòng" → "Dọn phòng" → "Hoàn thành", per item.
- *   6. "Giao lại" in "Chờ dọn phòng": Admin, Quản lý buồng phòng and Quản lý lễ
- *      tân, in their branches, to a housekeeper of the item's branch — never
- *      once the cleaning has begun; kept in the item's history.
+ *   A. Branches: the Admin gives a branch to the Quản lý buồng phòng only; a
+ *      Bộ phận buồng phòng account has none — its branch is its open shift's.
+ *   B. "Vào ca" by address: only the ONE hotel the typed text identifies is
+ *      named back; too little or several is a generic "nhập thêm"; the server
+ *      resolves it again at "Vào ca"; the shift's branch scopes every request.
+ *   C. Floors from the catalog: Chi nhánh 4's Suite rooms 001–003 on their own
+ *      Suite floors, its 2xx–8xx rooms on "Tầng 2" … "Tầng 8"; Rooftop only at
+ *      Chi nhánh 2, 3 and 4.
+ *   D. One group, many places, each with its own codes, note and priority —
+ *      saved in one transaction; invalid groups save nothing; numbers are per
+ *      branch and day and never reused.
+ *   E. "Chỉnh sửa": rename, add, edit one place, take one out (soft, with its
+ *      history), give the whole group — never one room of it.
+ *   F. "Nhận công việc": the WHOLE group, by one housekeeper on shift there;
+ *      a second (even at the same moment) is refused and sees who has it.
+ *   G. "Không cần dọn": a reason, then the manager of the branch decides;
+ *      approval takes the place out of the work without erasing anything.
+ *   H. The supervisors' table and "Giao lại" in "Chờ dọn phòng".
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import request from 'supertest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { BRANCHES } from '../src/db/branches';
 import { resetAll, resetHousekeepingData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
-import { addressOf } from './helpers/workplace';
+import { addressOf, startShiftAt } from './helpers/workplace';
 import { UNPLACED_LABEL, workAreasFor } from '../src/housekeeping/workAreas';
-import {
-  WORKPLACE_AMBIGUOUS,
-  WORKPLACE_NOT_FOUND,
-  WORKPLACE_REQUIRED,
-  normalizeAddress,
-  resolveWorkplace,
-} from '../src/housekeeping/workplaceAddress';
-import request from 'supertest';
+import { catalogFloor } from '../src/room/branchRooms';
+import { WORKPLACE_AMBIGUOUS, WORKPLACE_NOT_FOUND, normalizeAddress, resolveWorkplace } from '../src/housekeeping/workplaceAddress';
 
 const app = createApp();
+// A second app — its own login limiter — for the accounts a test signs in on its own.
+const app2 = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
 const hcm = (day: string, hhmm: string) => new Date(Date.parse(`${day}T${hhmm}:00.000Z`) - 7 * 60 * 60 * 1000);
 const PASSWORD = 'Matkhau123';
@@ -43,9 +44,11 @@ const DAY = '2026-10-07';
 
 let cn1 = 0;
 let cn2 = 0;
+let cn4 = 0;
 let admin: Agent;
 let letan1: Agent;
 let manager1: Agent;
+let manager2: Agent;
 let receptionManager: Agent;
 let general: Agent;
 let tech: Agent;
@@ -64,31 +67,45 @@ type Task = {
   areaLabel: string;
   floor: string | null;
   statusCode: string;
-  taskName: string | null;
-  taskLabel: string;
+  taskCodes: string[];
   note: string | null;
+  priority: boolean;
   state: string;
   phase: string;
+  voided: boolean;
   assignee: { id: number; name: string } | null;
-  acceptedAt: string | null;
-  inspectionStartedAt: string | null;
-  inspectedAt: string | null;
-  inspectionNote: string | null;
-  startedAt: string | null;
+  workGroup: { id: string; number: number; name: string | null } | null;
+  noClean: { status: string; reason: string | null; requestedByName: string | null; decidedByName: string | null } | null;
+  inspection: unknown;
+  events: { type: string }[];
+};
+type Group = {
+  id: string;
+  number: number;
+  title: string;
+  name: string | null;
+  branchId: number;
+  assignee: { id: number; name: string } | null;
+  status: { code: string; label: string };
+  floors: string[];
+  counts: { items: number; completed: number; noCleanPending: number };
+  items: Task[];
 };
 
 beforeAll(async () => {
   await resetAll();
   await seedBranches(testPrisma);
-  cn1 = (await testPrisma.branch.findUniqueOrThrow({ where: { code: 'TRUONG_DINH_05' } })).id;
-  cn2 = (await testPrisma.branch.findUniqueOrThrow({ where: { code: 'LY_TU_TRONG_260' } })).id;
+  const id = async (code: string) => (await testPrisma.branch.findUniqueOrThrow({ where: { code } })).id;
+  cn1 = await id('TRUONG_DINH_05');
+  cn2 = await id('LY_TU_TRONG_260');
+  cn4 = await id('NGUYEN_THAI_BINH_170');
   await createAdmin({ mustChangePassword: false });
   admin = (await loginAgent(app, 'admin', ADMIN_PASSWORD)).agent;
   await createReceptionist(cn1, { username: 'letan1', mustChangePassword: false });
   letan1 = (await loginAgent(app, 'letan1', RECEPTIONIST_PASSWORD)).agent;
-
   for (const [username, role, body] of [
     ['qlbp1', 'HOUSEKEEPING_MANAGER', { branchId: cn1 }],
+    ['qlbp2', 'HOUSEKEEPING_MANAGER', { branchId: cn2 }],
     ['quanly1', 'RECEPTION_MANAGER', { branchIds: [cn1] }],
   ] as const) {
     const res = await admin.post('/api/admin/users').send({ username, fullName: `QL ${username}`, temporaryPassword: PASSWORD, role, ...body });
@@ -96,15 +113,16 @@ beforeAll(async () => {
     await testPrisma.user.update({ where: { id: res.body.user.id }, data: { mustChangePassword: false } });
   }
   manager1 = (await loginAgent(app, 'qlbp1', PASSWORD)).agent;
+  manager2 = (await loginAgent(app, 'qlbp2', PASSWORD)).agent;
   receptionManager = (await loginAgent(app, 'quanly1', PASSWORD)).agent;
   await createUser({ username: 'tongql', password: PASSWORD, fullName: 'Tổng quản lý', role: 'RECEPTION_GENERAL_MANAGER' });
   general = (await loginAgent(app, 'tongql', PASSWORD)).agent;
   await createUser({ username: 'kythuat', password: PASSWORD, fullName: 'Kỹ thuật', role: 'TECHNICAL' });
   tech = (await loginAgent(app, 'kythuat', PASSWORD)).agent;
-
-  lanId = (await createUser({ username: 'lan', password: PASSWORD, fullName: 'Chị Lan', role: 'HOUSEKEEPING', branchId: cn1 })).id;
-  hoaId = (await createUser({ username: 'hoa', password: PASSWORD, fullName: 'Chị Hoa', role: 'HOUSEKEEPING', branchId: cn1 })).id;
-  maiId = (await createUser({ username: 'mai', password: PASSWORD, fullName: 'Chị Mai', role: 'HOUSEKEEPING', branchId: cn2 })).id;
+  // Housekeepers have NO branch — "Vào ca" decides where they work.
+  lanId = (await createUser({ username: 'lan', password: PASSWORD, fullName: 'Chị Lan', role: 'HOUSEKEEPING' })).id;
+  hoaId = (await createUser({ username: 'hoa', password: PASSWORD, fullName: 'Chị Hoa', role: 'HOUSEKEEPING' })).id;
+  maiId = (await createUser({ username: 'mai', password: PASSWORD, fullName: 'Chị Mai', role: 'HOUSEKEEPING' })).id;
   lan = (await loginAgent(app, 'lan', PASSWORD)).agent;
   hoa = (await loginAgent(app, 'hoa', PASSWORD)).agent;
   mai = (await loginAgent(app, 'mai', PASSWORD)).agent;
@@ -112,6 +130,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetHousekeepingData();
+  await testPrisma.housekeepingWorkGroup.deleteMany();
   await resetShiftData();
   await testPrisma.notification.deleteMany();
   setClock({ now: () => hcm(DAY, '08:00') });
@@ -119,456 +138,541 @@ beforeEach(async () => {
 
 afterAll(async () => {
   resetClock();
+  await testPrisma.housekeepingWorkGroup.deleteMany();
   await resetAll();
 });
 
-const create = (items: Record<string, unknown>[], extra: Record<string, unknown> = {}, agent: Agent = manager1) =>
-  agent.post('/api/housekeeping/manager/work-items').send({ workDate: DAY, items, ...extra });
+const createGroup = (items: Record<string, unknown>[], extra: Record<string, unknown> = {}, agent: Agent = manager1) =>
+  agent.post('/api/housekeeping/manager/work-groups').send({ workDate: DAY, items, ...extra });
 
-async function created(items: Record<string, unknown>[], extra: Record<string, unknown> = {}, agent: Agent = manager1): Promise<Task[]> {
-  const res = await create(items, extra, agent);
-  expect(res.status).toBe(201);
-  return res.body.tasks as Task[];
+async function group(items: Record<string, unknown>[], extra: Record<string, unknown> = {}, agent: Agent = manager1): Promise<Group> {
+  const res = await createGroup(items, extra, agent);
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  return res.body.group as Group;
 }
 
-async function onShift(agent: Agent, branchId: number) {
-  const res = await agent.post('/api/housekeeping/shift/start').send({ address: await addressOf(branchId) });
-  expect(res.status).toBe(201);
-}
-
-const workItems = async (agent: Agent) => (await agent.get(`/api/housekeeping/work/items?date=${DAY}`)).body as { working: boolean; tasks: Task[] };
-const claim = (agent: Agent, taskIds: string[]) => agent.post('/api/housekeeping/work/claim').send({ taskIds });
+const room = (roomNumber: string, taskCodes: string[], extra: Record<string, unknown> = {}) => ({ areaKind: 'ROOM', roomNumber, taskCodes, ...extra });
+const workerGroups = async (agent: Agent) => (await agent.get(`/api/housekeeping/work/groups?date=${DAY}`)).body as { working: boolean; groups: Group[] };
+const accept = (agent: Agent, id: string) => agent.post(`/api/housekeeping/work/groups/${id}/accept`).send({});
 const url = (id: string) => `/api/housekeeping/work/tasks/${id}`;
+const task = (id: string) => testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id } });
 const eventsOf = (taskId: string) => testPrisma.housekeepingRoomTaskEvent.findMany({ where: { taskId }, orderBy: { createdAt: 'asc' } });
+const lookup = (agent: Agent, address: string) => agent.post('/api/housekeeping/shift/lookup').send({ address });
 
-const ROOM_502 = { areaKind: 'ROOM', roomNumber: '502', taskCode: 'OC' };
-const HALL_5 = { areaKind: 'HALLWAY', floor: '5', taskName: 'Hút bụi thảm', note: 'Thảm trước phòng 502' };
-
-/** A room item taken by `agent` and inspected: "Chờ dọn phòng". */
-async function awaitingCleaning(agent: Agent = lan, room = '502'): Promise<Task> {
-  const [task] = await created([{ areaKind: 'ROOM', roomNumber: room, taskCode: 'OUT' }]);
-  await onShift(agent, cn1);
-  expect((await claim(agent, [task!.id])).status).toBe(200);
-  const inspected = await agent.post(`${url(task!.id)}/inspect`).send({ issues: [] });
-  expect(inspected.status).toBe(201);
-  expect(inspected.body.task.phase).toBe('AWAITING_CLEANING');
-  return inspected.body.task as Task;
-}
-
-describe('1. "Chọn khu vực" — the branch’s own inventory', () => {
-  it('groups rooms by the floor read from the number, only when that floor exists', () => {
-    const cn1Areas = workAreasFor('TRUONG_DINH_05');
-    expect(cn1Areas.floors.map((f) => f.floor)).toEqual(['1', '2', '3', '4', '5', '6', '7']);
-    expect(cn1Areas.floors.find((f) => f.floor === '5')!.rooms.sort()).toEqual(['501', '502']);
-    expect(cn1Areas.floors[0]!.label).toBe('Tầng 1');
-    expect(cn1Areas.unplacedRooms).toEqual([]);
-    expect(cn1Areas.sharedAreas.map((a) => a.kind)).toEqual(['HALLWAY', 'STAIRCASE', 'OTHER']);
-    expect(cn1Areas.roomTaskCodes.map((c) => c.code)).toEqual(['OUT', 'OC', 'VC', 'OTHER']);
-
-    // "001" has no floor 0: it is listed, not guessed.
-    const cn5 = workAreasFor('LE_THANH_TON_278');
-    expect(cn5.unplacedRooms).toEqual(['001']);
-    expect(cn5.unplacedLabel).toBe(UNPLACED_LABEL);
-    // Chi nhánh 4's floors name their building: no room is placed by a guess.
-    const cn4 = workAreasFor('NGUYEN_THAI_BINH_170');
-    expect(cn4.floors.map((f) => f.label)).toContain('Tầng 2 (Khu Suite)');
-    expect(cn4.floors.every((f) => f.rooms.length === 0)).toBe(true);
-    expect(cn4.unplacedRooms).toContain('502');
-    // A branch with no catalog says so.
-    expect(workAreasFor('NO_SUCH_BRANCH')).toMatchObject({ hasRoomCatalog: false, hasFloorCatalog: false, floors: [], unplacedRooms: [] });
+describe('A. branches — the manager has one, the housekeeper has its shift', () => {
+  it('creates a housekeeping account with no branch, and refuses one', async () => {
+    const base = { fullName: 'Buồng mới', temporaryPassword: PASSWORD, role: 'HOUSEKEEPING' };
+    const ok = await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.user.branch).toBeNull();
+    expect((await admin.post('/api/admin/users').send({ ...base, username: 'buong_x', branchId: cn1 })).status).toBe(422);
+    expect((await admin.put(`/api/admin/users/${ok.body.user.id}`).send({ branchId: cn1 })).status).toBe(422);
+    await testPrisma.user.delete({ where: { id: ok.body.user.id } });
   });
 
-  it('serves the manager its branch only, the Admin any, and nobody else', async () => {
-    const own = await manager1.get('/api/housekeeping/manager/areas');
-    expect(own.status).toBe(200);
-    expect(own.body.areas.branchId).toBe(cn1);
-    expect((await manager1.get(`/api/housekeeping/manager/areas?branchId=${cn2}`)).status).toBe(403);
-    const other = await admin.get(`/api/housekeeping/manager/areas?branchId=${cn2}`);
-    expect(other.status).toBe(200);
-    expect(other.body.areas.floors).toHaveLength(8);
-    expect((await lan.get('/api/housekeeping/manager/areas')).status).toBe(403);
-    expect((await letan1.get('/api/housekeeping/manager/areas')).status).toBe(403);
+  it('keeps the Quản lý buồng phòng to exactly one branch, which the Admin can move', async () => {
+    const base = { fullName: 'QL', temporaryPassword: PASSWORD, role: 'HOUSEKEEPING_MANAGER' };
+    expect((await admin.post('/api/admin/users').send({ ...base, username: 'qlbp_x' })).status).toBe(422);
+    const ok = await admin.post('/api/admin/users').send({ ...base, username: 'qlbp_y', branchId: cn1 });
+    expect(ok.status).toBe(201);
+    const moved = await admin.put(`/api/admin/users/${ok.body.user.id}`).send({ branchId: cn2 });
+    expect(moved.status).toBe(200);
+    expect(moved.body.user.branch.id).toBe(cn2);
+    await testPrisma.user.delete({ where: { id: ok.body.user.id } });
+  });
+
+  it('ignores a permanent branch an older account still carries: off shift there is none', async () => {
+    const old = await createUser({ username: 'buong_cu', password: PASSWORD, fullName: 'Buồng cũ', role: 'HOUSEKEEPING', branchId: cn1 });
+    const agent = (await loginAgent(app2, 'buong_cu', PASSWORD)).agent;
+    expect((await agent.get('/api/auth/me')).body.user.branch).toBeNull();
+    expect(await workerGroups(agent)).toEqual({ working: false, groups: [] });
+    expect((await agent.post('/api/housekeeping/inspections').send({ roomNumber: '101', issues: [] })).status).toBe(403);
+    // It can work at any hotel it names — here Chi nhánh 2, not its old branch.
+    await startShiftAt(agent, cn2);
+    expect((await agent.get('/api/auth/me')).body.user.branch.id).toBe(cn2);
+    await agent.post('/api/housekeeping/shift/end').send({});
+    await testPrisma.housekeepingWorkSegment.deleteMany({ where: { session: { userId: old.id } } });
+    await testPrisma.housekeepingWorkSession.deleteMany({ where: { userId: old.id } });
+    await testPrisma.user.delete({ where: { id: old.id } });
   });
 });
 
-describe('2. "Tạo công việc" — one row per item', () => {
-  it('saves one item', async () => {
-    const [task, ...rest] = await created([{ ...ROOM_502, priority: true, note: 'Khách về sớm' }]);
-    expect(rest).toEqual([]);
-    expect(task).toMatchObject({
-      branchId: cn1,
-      roomNumber: '502',
-      areaKind: 'ROOM',
-      areaLabel: 'Phòng - 502',
-      floor: '5',
-      statusCode: 'OC',
-      phase: 'UNCLAIMED',
-      assignee: null,
-      note: 'Khách về sớm',
-    });
-    const events = await eventsOf(task!.id);
-    expect(events.map((e) => e.type)).toEqual(['CREATED']);
+describe('B. "Vào ca" by address — one hotel named back, never a list', () => {
+  const branches = BRANCHES.map((b, i) => ({ id: i + 1, address: b.address }));
+  const idOf = (code: string) => BRANCHES.findIndex((b) => b.code === code) + 1;
+
+  it('resolves a typed start to the one branch it fits, ignoring case, accents and leading zeros', () => {
+    expect(normalizeAddress('05 Trương Định')).toBe('5 truong dinh');
+    expect(resolveWorkplace('1', branches)).toEqual({ status: 'AMBIGUOUS' });
+    expect(resolveWorkplace('17', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('NGUYEN_THAI_BINH_170') });
+    expect(resolveWorkplace('13', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('BUI_THI_XUAN_13') });
+    expect(resolveWorkplace('5', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('TRUONG_DINH_05') });
+    expect(resolveWorkplace('Bùi Thị Xuân', branches)).toEqual({ status: 'AMBIGUOUS' });
+    expect(resolveWorkplace('uyen thai', branches)).toEqual({ status: 'NONE' });
+    expect(resolveWorkplace('x', branches)).toEqual({ status: 'AMBIGUOUS' });
+    // Every branch is reachable by its own address, and only it.
+    for (const b of branches) expect(resolveWorkplace(b.address, branches)).toEqual({ status: 'RESOLVED', branchId: b.id });
   });
 
-  it('saves several items of one submission, each its own row — two of one room included', async () => {
-    const tasks = await created([
-      ROOM_502,
-      { areaKind: 'ROOM', roomNumber: '502', taskCode: 'OTHER', note: 'Thay rèm cửa sổ' },
-      HALL_5,
-      { areaKind: 'STAIRCASE', floor: '3', taskName: 'Lau tay vịn', note: 'Từ tầng 3 xuống tầng 2' },
-      { areaKind: 'OTHER', taskName: 'Dọn sân thượng', note: 'Sân thượng, gom rác' },
-    ]);
-    expect(tasks.map((t) => [t.areaLabel, t.taskLabel])).toEqual([
-      ['Phòng - 502', 'OC'],
-      ['Phòng - 502', 'Khác'],
-      ['Hành lang - Tầng 5', 'Hút bụi thảm'],
-      ['Cầu thang - Tầng 3', 'Lau tay vịn'],
-      ['Khác', 'Dọn sân thượng'],
-    ].map(([a, l]) => [a, expect.stringContaining(l!)]));
-    expect(new Set(tasks.map((t) => t.id)).size).toBe(5);
-    expect(await testPrisma.housekeepingRoomTask.count({ where: { branchId: cn1, workDate: DAY } })).toBe(5);
-    expect(tasks[2]).toMatchObject({ areaKind: 'HALLWAY', floor: '5', note: 'Thảm trước phòng 502' });
-  });
-
-  it('requires the note of a shared area and of "Khác", and refuses what the branch does not have', async () => {
-    for (const [item, message] of [
-      [{ areaKind: 'HALLWAY', floor: '5', taskName: 'Hút bụi' }, 'cần ghi chú'],
-      [{ areaKind: 'STAIRCASE', floor: '2', taskName: 'Lau', note: '   ' }, 'cần ghi chú'],
-      [{ areaKind: 'OTHER', taskName: 'Dọn kho' }, 'cần ghi chú'],
-      [{ areaKind: 'ROOM', roomNumber: '502', taskCode: 'OTHER' }, 'cần ghi chú'],
-      [{ areaKind: 'HALLWAY', taskName: 'Hút bụi', note: 'x' }, 'chọn tầng'],
-      [{ areaKind: 'HALLWAY', floor: '9', taskName: 'Hút bụi', note: 'x' }, 'Tầng 9 không thuộc'],
-      [{ areaKind: 'HALLWAY', floor: '5', note: 'x' }, 'tên công việc'],
-      [{ areaKind: 'ROOM', roomNumber: '999', taskCode: 'OC' }, 'không thuộc chi nhánh'],
-      [{ areaKind: 'ROOM', roomNumber: '502' }, 'việc cần làm'],
-      [{ areaKind: 'ROOM' }, 'chọn phòng'],
-      [{ areaKind: 'ROOF', note: 'x' }, 'khu vực không hợp lệ'],
-    ] as const) {
-      const res = await create([ROOM_502, item]);
-      expect(res.status, JSON.stringify(item)).toBe(422);
-      // The catalog's own refusals name the room or floor; the rest name the item.
-      if (!message.includes('không thuộc')) expect(res.body.error.message).toContain('Công việc 2');
-      expect(res.body.error.message).toContain(message);
-    }
-    // Nothing of a refused submission is saved — not even its valid item.
-    expect(await testPrisma.housekeepingRoomTask.count()).toBe(0);
-    expect((await create([])).status).toBe(422);
-  });
-
-  it('creates nothing twice: the same submission again, or the same room code while open', async () => {
-    const requestId = 'f3b8c2a0-1111-4222-8333-944445555666';
-    const first = await create([ROOM_502, HALL_5], { requestId });
-    expect(first.status).toBe(201);
-    expect(first.body.created).toBe(2);
-    const again = await create([ROOM_502, HALL_5], { requestId });
-    expect(again.status).toBe(200);
-    expect(again.body).toMatchObject({ created: 0, duplicate: true });
-    expect(again.body.tasks.map((t: Task) => t.id)).toEqual(first.body.tasks.map((t: Task) => t.id));
-    // A double click racing itself saves one group.
-    const raceId = 'a1b2c3d4-0000-4000-8000-000000000001';
-    const [r1, r2] = await Promise.all([create([HALL_5], { requestId: raceId }), create([HALL_5], { requestId: raceId })]);
-    expect([r1.status, r2.status].sort()).toEqual([200, 201]);
-    expect(await testPrisma.housekeepingRoomTask.count({ where: { groupId: raceId } })).toBe(1);
-
-    const twice = await create([ROOM_502]);
-    expect(twice.status).toBe(409);
-    expect(twice.body.error.message).toContain('Phòng 502 · OC');
-    const sameSubmission = await create([{ areaKind: 'ROOM', roomNumber: '301', taskCode: 'VC' }, { areaKind: 'ROOM', roomNumber: '301', taskCode: 'VC' }]);
-    expect(sameSubmission.status).toBe(422);
-  });
-
-  it('is the manager’s at its branch and the Admin’s anywhere — nobody else’s', async () => {
-    expect((await create([ROOM_502], { branchId: cn2 })).status).toBe(403);
-    expect((await create([{ areaKind: 'ROOM', roomNumber: '802', taskCode: 'VC' }], { branchId: cn2 }, admin)).status).toBe(201);
-    for (const agent of [lan, letan1, receptionManager, tech]) {
-      expect((await create([ROOM_502], {}, agent)).status).toBe(403);
-    }
-  });
-});
-
-describe('3. "Vào ca" names the hotel by its address — and learns nothing else', () => {
-  it('resolves an address by word-start, without case, diacritics or punctuation', () => {
-    const branches = BRANCHES.map((b, i) => ({ id: i + 1, address: b.address }));
-    const id = (code: string) => BRANCHES.findIndex((b) => b.code === code) + 1;
-    const ntb = id('NGUYEN_THAI_BINH_170');
-    expect(normalizeAddress('170-172-174 Nguyễn Thái Bình')).toBe('170 172 174 nguyen thai binh');
-    expect(resolveWorkplace('1', branches, ntb)).toEqual({ status: 'AMBIGUOUS' });
-    expect(resolveWorkplace('Bùi Thị Xuân', branches, id('BUI_THI_XUAN_13'))).toEqual({ status: 'AMBIGUOUS' });
-    expect(resolveWorkplace('17', branches, ntb)).toEqual({ status: 'RESOLVED', branchId: ntb });
-    expect(resolveWorkplace('NGUYEN THAI', branches, ntb)).toEqual({ status: 'RESOLVED', branchId: ntb });
-    expect(resolveWorkplace('uyen thai', branches, ntb)).toEqual({ status: 'NONE' });
-    // One fit that is not the account's hotel reads exactly like no fit.
-    expect(resolveWorkplace('13 Bùi Thị Xuân', branches, ntb)).toEqual({ status: 'NONE' });
-  });
-
-  it('opens the shift at the account’s branch from its own address, however it is typed', async () => {
-    for (const typed of ['05 Trương Định', 'truong dinh', 'TRƯƠNG ĐỊNH', '05, truong-dinh']) {
-      const res = await lan.post('/api/housekeeping/shift/start').send({ address: typed });
-      expect(res.status, typed).toBe(201);
-      expect(res.body.shift.current.branch.id).toBe(cn1);
-      await lan.post('/api/housekeeping/shift/end').send({});
-      await resetShiftData();
-    }
-  });
-
-  it('answers too little, another hotel and nonsense without naming any branch', async () => {
-    const start = (body: Record<string, unknown>) => lan.post('/api/housekeeping/shift/start').send(body);
-    const missing = await start({});
-    expect(missing.status).toBe(422);
-    expect(missing.body.error.message).toBe(WORKPLACE_REQUIRED);
-    const short = await start({ address: '1' });
-    expect(short.status).toBe(422);
-    expect(short.body.error.message).toBe(WORKPLACE_AMBIGUOUS);
-    expect((await start({ address: 'Lê Thánh Tôn' })).body.error.message).toBe(WORKPLACE_AMBIGUOUS);
-
-    const elsewhere = await start({ address: '260 Lý Tự Trọng' });
-    const nonsense = await start({ address: 'không có đâu cả' });
-    expect(elsewhere.status).toBe(422);
-    expect(nonsense.status).toBe(422);
-    expect(elsewhere.body.error).toEqual(nonsense.body.error);
-    expect(elsewhere.body.error.message).toBe(WORKPLACE_NOT_FOUND);
-
-    // No answer carries an address, a branch name or an id of any branch.
-    const everything = JSON.stringify([missing.body, short.body, elsewhere.body, nonsense.body]);
-    for (const b of BRANCHES) {
+  it('names back only the matched hotel — "17" shows 170-172-174 and never 13 Bùi Thị Xuân', async () => {
+    const one = await lookup(lan, '1');
+    expect(one.status).toBe(200);
+    expect(one.body).toEqual({ status: 'AMBIGUOUS', message: WORKPLACE_AMBIGUOUS });
+    const seventeen = await lookup(lan, '17');
+    expect(seventeen.body).toEqual({ status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình', branchNumber: 4 } });
+    const nothing = await lookup(lan, 'không có đâu');
+    expect(nothing.body).toEqual({ status: 'NONE', message: WORKPLACE_NOT_FOUND });
+    // No answer carries another branch: not an address, not a code, not a count.
+    const everything = JSON.stringify([one.body, seventeen.body, nothing.body]);
+    for (const b of BRANCHES.filter((x) => x.code !== 'NGUYEN_THAI_BINH_170')) {
       expect(everything).not.toContain(b.address);
       expect(everything).not.toContain(b.code);
     }
-    expect(everything).not.toMatch(/"branch(es|Id)?"/);
-    // Nothing was opened, and the typed text is stored nowhere.
-    expect(await testPrisma.housekeepingWorkSession.count()).toBe(0);
+    expect(everything).not.toMatch(/"(id|branchId|branches|count)"/);
   });
 
-  it('never lets the request pick the branch, and needs a signed-in housekeeper', async () => {
-    const own = await addressOf(cn1);
-    expect((await lan.post('/api/housekeeping/shift/start').send({ branchId: cn2, address: own })).status).toBe(403);
-    expect((await lan.post('/api/housekeeping/shift/start').send({ branchId: cn2, address: await addressOf(cn2) })).status).toBe(403);
-    expect((await request(app).post('/api/housekeeping/shift/start').send({ address: own })).status).toBe(401);
-    expect((await letan1.post('/api/housekeeping/shift/start').send({ address: own })).status).toBe(403);
-    expect((await manager1.post('/api/housekeeping/shift/start').send({ address: own })).status).toBe(403);
+  it('opens the shift at the hotel the address names — the shift decides every branch check', async () => {
+    const started = await lan.post('/api/housekeeping/shift/start').send({ address: '17' });
+    expect(started.status).toBe(201);
+    expect(started.body.shift.current.branch.id).toBe(cn4);
+    expect((await lan.get('/api/auth/me')).body.user.branch.id).toBe(cn4);
+    expect((await lan.get('/api/branches')).body.branches.map((b: { id: number }) => b.id)).toEqual([cn4]);
+    // A branch id sent by the browser picks nothing.
+    await lan.post('/api/housekeeping/shift/end').send({});
+    const sneaky = await lan.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn2), branchId: cn1 });
+    expect(sneaky.status).toBe(201);
+    expect(sneaky.body.shift.current.branch.id).toBe(cn2);
+    // To work elsewhere: "Kết thúc ca", then "Vào ca" there.
+    expect((await lan.post('/api/housekeeping/shift/switch').send({ branchId: cn1 })).status).toBe(409);
+    expect((await lan.post('/api/housekeeping/shift/start').send({ address: '5' })).status).toBe(409);
+    await lan.post('/api/housekeeping/shift/end').send({});
+    expect((await lan.get('/api/auth/me')).body.user.branch).toBeNull();
+    expect((await lan.post('/api/housekeeping/shift/start').send({ address: '1' })).body.error.message).toBe(WORKPLACE_AMBIGUOUS);
   });
 
-  it('bounds the attempts of one account', async () => {
-    await createUser({ username: 'thu', password: PASSWORD, fullName: 'Chị Thu', role: 'HOUSEKEEPING', branchId: cn1 });
-    const thu = (await loginAgent(app, 'thu', PASSWORD)).agent;
-    for (let i = 0; i < 30; i += 1) {
-      expect((await thu.post('/api/housekeeping/shift/start').send({ address: `đường số ${i} xa lắm` })).status).toBe(422);
-    }
-    const blocked = await thu.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) });
+  it('needs a signed-in housekeeper, and bounds the lookups of one account', async () => {
+    expect((await request(app).post('/api/housekeeping/shift/lookup').send({ address: '17' })).status).toBe(401);
+    for (const agent of [letan1, manager1, admin]) expect((await lookup(agent, '17')).status).toBe(403);
+    await createUser({ username: 'thu', password: PASSWORD, fullName: 'Chị Thu', role: 'HOUSEKEEPING' });
+    const thu = (await loginAgent(app2, 'thu', PASSWORD)).agent;
+    for (let i = 0; i < 40; i += 1) expect((await lookup(thu, `${i}`)).status).toBe(200);
+    const blocked = await lookup(thu, '17');
     expect(blocked.status).toBe(429);
     expect(blocked.body.error.code).toBe('RATE_LIMITED');
-    // Another account is counted on its own.
-    await onShift(hoa, cn1);
+    expect((await lookup(hoa, '17')).status).toBe(200);
     await testPrisma.user.delete({ where: { username: 'thu' } });
   });
 });
 
-describe('4. the housekeeper’s list and "Nhận"', () => {
-  it('shows nothing before "Vào ca"; then one row per item of the shift’s branch', async () => {
-    const tasks = await created([ROOM_502, { areaKind: 'ROOM', roomNumber: '502', taskCode: 'OTHER', note: 'Thay rèm' }, HALL_5]);
-    await created([{ areaKind: 'ROOM', roomNumber: '502', taskCode: 'OC' }], { branchId: cn2 }, admin);
-    expect(await workItems(lan)).toEqual({ working: false, tasks: [] });
-    await onShift(lan, cn1);
-    const list = await workItems(lan);
-    expect(list.working).toBe(true);
-    expect(list.tasks.map((t) => t.id).sort()).toEqual(tasks.map((t) => t.id).sort());
-    expect(list.tasks.every((t) => t.phase === 'UNCLAIMED' && t.branchId === cn1)).toBe(true);
-    expect((await manager1.get(`/api/housekeeping/work/items?date=${DAY}`)).status).toBe(403);
+describe('C. floors and areas — from the catalog', () => {
+  it('puts Chi nhánh 4\'s Suite rooms on the Suite floors and its 2xx–8xx rooms on Tầng 2–8', () => {
+    const cnb4 = workAreasFor('NGUYEN_THAI_BINH_170');
+    const floor = (value: string) => cnb4.floors.find((f) => f.floor === value);
+    expect(floor('1 (Khu Suite)')).toMatchObject({ label: 'Tầng 1 (Khu Suite)', rooms: ['001'] });
+    expect(floor('2 (Khu Suite)')!.rooms).toEqual(['002']);
+    expect(floor('3 (Khu Suite)')!.rooms).toEqual(['003']);
+    expect(floor('2')).toMatchObject({ label: 'Tầng 2', rooms: ['201', '202', '203', '204', '205', '206'] });
+    expect(floor('3')!.rooms).toEqual(['301', '302', '303', '304', '305', '306']);
+    expect(floor('8')!.rooms).toEqual(['801', '802', '803', '804', '805', '806']);
+    // Suite 002 is never mixed into the main building's Tầng 2.
+    expect(floor('2')!.rooms).not.toContain('002');
+    expect(cnb4.unplacedRooms).toEqual([]);
+    expect(cnb4.floors.map((f) => f.label).join()).not.toContain('Tòa bên cạnh');
+    // Older rows' floor values are read as the plain floor.
+    expect(catalogFloor('NGUYEN_THAI_BINH_170', '5 (Tòa bên cạnh)')).toBe('5');
   });
 
-  it('takes exactly the selected items — one item of a room leaves its sibling free', async () => {
-    const [oc, other, hall] = await created([ROOM_502, { areaKind: 'ROOM', roomNumber: '502', taskCode: 'OTHER', note: 'Thay rèm' }, HALL_5]);
-    await onShift(lan, cn1);
-    await onShift(hoa, cn1);
-    const taken = await claim(lan, [oc!.id, hall!.id]);
-    expect(taken.status).toBe(200);
-    expect(taken.body.tasks.map((t: Task) => t.id).sort()).toEqual([oc!.id, hall!.id].sort());
-    for (const t of taken.body.tasks as Task[]) {
-      expect(t).toMatchObject({ phase: 'ACCEPTED', assignee: { id: lanId, name: 'Chị Lan' }, state: 'NOT_STARTED', startedAt: null, inspectionStartedAt: null });
-      expect(t.acceptedAt).not.toBeNull();
-    }
-    const sibling = await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: other!.id } });
-    expect(sibling.assigneeUserId).toBeNull();
-    // Hoa sees the free sibling, not Lan's items.
-    expect((await workItems(hoa)).tasks.map((t) => t.id)).toEqual([other!.id]);
-    expect((await eventsOf(oc!.id)).map((e) => e.type)).toEqual(['CREATED', 'ACCEPTED']);
-    // Accepting started nothing.
-    expect(await testPrisma.housekeepingWorkSegment.count({ where: { session: { userId: lanId } } })).toBe(1);
+  it('places regular rooms by number everywhere, and lists only what cannot be placed', () => {
+    const td = workAreasFor('TRUONG_DINH_05');
+    expect(td.floors.find((f) => f.floor === '1')!.rooms).toEqual(['101', '102', '103']);
+    expect(td.floors.find((f) => f.floor === '3')!.rooms).toEqual(['301', '302']);
+    expect(td.unplacedRooms).toEqual([]);
+    expect(workAreasFor('LY_TU_TRONG_260').floors.find((f) => f.floor === '8')!.rooms).toEqual(['801', '802']);
+    // A ground-floor "001" with no floor 0 elsewhere: listed, not guessed.
+    const cn5 = workAreasFor('LE_THANH_TON_278');
+    expect(cn5.unplacedRooms).toEqual(['001']);
+    expect(cn5.unplacedLabel).toBe(UNPLACED_LABEL);
   });
 
-  it('never gives one item two owners: the second claim is refused whole and recorded', async () => {
-    const [a, b] = await created([ROOM_502, HALL_5]);
-    await onShift(lan, cn1);
-    await onShift(hoa, cn1);
-    const [r1, r2] = await Promise.all([claim(lan, [a!.id]), claim(hoa, [a!.id])]);
-    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
-    const loser = r1.status === 409 ? r1 : r2;
-    const loserId = r1.status === 409 ? lanId : hoaId;
-    expect(loser.body.error.details.taskIds).toEqual([a!.id]);
-    expect(loser.body.error.message).toContain('Phòng - 502');
-
-    // All or nothing: a free item claimed together with a taken one stays free.
-    const winner = r1.status === 200 ? lan : hoa;
-    const other = winner === lan ? hoa : lan;
-    const mixed = await claim(other, [b!.id, a!.id]);
-    expect(mixed.status).toBe(409);
-    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: b!.id } })).assigneeUserId).toBeNull();
-    const rejected = (await eventsOf(a!.id)).filter((e) => e.type === 'CLAIM_REJECTED');
-    expect(rejected.length).toBeGreaterThanOrEqual(2);
-    expect(rejected[0]!.actorUserId).toBe(loserId);
-    expect(await testPrisma.housekeepingRoomTaskEvent.count({ where: { taskId: a!.id, type: 'ACCEPTED' } })).toBe(1);
-  });
-
-  it('refuses a claim off shift, of another branch’s item, or by anyone but a housekeeper', async () => {
-    const [mine] = await created([ROOM_502]);
-    const [theirs] = await created([{ areaKind: 'ROOM', roomNumber: '802', taskCode: 'VC' }], { branchId: cn2 }, admin);
-    expect((await claim(lan, [mine!.id])).status).toBe(409);
-    await onShift(lan, cn1);
-    expect((await claim(lan, [theirs!.id])).status).toBe(404);
-    expect((await claim(lan, ['no-such-id'])).status).toBe(404);
-    expect((await claim(lan, [])).status).toBe(422);
-    await onShift(mai, cn2);
-    expect((await claim(mai, [mine!.id])).status).toBe(404);
-    expect((await claim(manager1, [mine!.id])).status).toBe(403);
-    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: mine!.id } })).assigneeUserId).toBeNull();
+  it('offers a Rooftop at Chi nhánh 2, 3 and 4 only', () => {
+    const rooftop = Object.fromEntries(BRANCHES.map((b) => [b.code, workAreasFor(b.code).hasRooftop]));
+    expect(rooftop).toEqual({
+      TRUONG_DINH_05: false,
+      LY_TU_TRONG_260: true,
+      NGUYEN_TRAI_47A: true,
+      NGUYEN_THAI_BINH_170: true,
+      LE_THANH_TON_278: false,
+      BUI_THI_XUAN_40: false,
+      BUI_THI_XUAN_13: false,
+      LE_THANH_TON_191: false,
+    });
   });
 });
 
-describe('5. "Kiểm tra" → "Chờ dọn phòng" → "Dọn phòng" → "Hoàn thành"', () => {
-  it('walks a room item through its stages, each kept in its history', async () => {
-    const [oc, sibling] = await created([ROOM_502, { areaKind: 'ROOM', roomNumber: '502', taskCode: 'OTHER', note: 'Thay rèm' }]);
-    await onShift(lan, cn1);
-    expect((await claim(lan, [oc!.id, sibling!.id])).status).toBe(200);
-    // Cleaning cannot begin before the inspection is saved.
-    expect((await lan.post(`${url(oc!.id)}/start`)).status).toBe(409);
-
-    setClock({ now: () => hcm(DAY, '08:10') });
-    const begun = await lan.post(`${url(oc!.id)}/begin-inspection`);
-    expect(begun.status).toBe(200);
-    expect(begun.body.task.phase).toBe('INSPECTING');
-    expect((await lan.post(`${url(oc!.id)}/begin-inspection`)).status).toBe(200);
-    expect((await hoa.post(`${url(oc!.id)}/begin-inspection`)).status).toBe(403);
-
-    setClock({ now: () => hcm(DAY, '08:15') });
-    const inspected = await lan.post(`${url(oc!.id)}/inspect`).send({ issues: [] });
-    expect(inspected.status).toBe(201);
-    expect(inspected.body.task).toMatchObject({ phase: 'AWAITING_CLEANING', startedAt: null, inspectedAt: hcm(DAY, '08:15').toISOString() });
-    expect((await lan.post(`${url(oc!.id)}/begin-inspection`)).status).toBe(409);
-
-    setClock({ now: () => hcm(DAY, '08:20') });
-    const started = await lan.post(`${url(oc!.id)}/start`);
-    expect(started.status).toBe(200);
-    expect(started.body.task.phase).toBe('CLEANING');
-    setClock({ now: () => hcm(DAY, '08:50') });
-    const done = await lan.post(`${url(oc!.id)}/complete`).send({});
-    expect(done.status).toBe(200);
-    expect(done.body.task.phase).toBe('COMPLETED');
-
-    // The sibling item of the same room has not moved.
-    const other = await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: sibling!.id } });
-    expect(other).toMatchObject({ state: 'NOT_STARTED', inspectionStartedAt: null, startedAt: null });
-    expect((await eventsOf(oc!.id)).map((e) => e.type)).toEqual(
-      expect.arrayContaining(['CREATED', 'ACCEPTED', 'INSPECTION_STARTED', 'INSPECTED', 'STARTED', 'COMPLETED']),
+describe('D. "Tạo công việc" — one group, many places, each its own', () => {
+  it('saves one group with independent codes, notes and priorities, numbered per branch and day', async () => {
+    const g = await group(
+      [
+        room('101', ['OUT'], { note: 'Khách về sớm', priority: true }),
+        room('102', ['OC', 'OTHER'], { note: 'Thay rèm' }),
+        { areaKind: 'HALLWAY', floor: '1', note: 'Lau sàn hành lang' },
+      ],
+      { name: 'Tầng 1 buổi sáng' },
     );
-    // A completed item leaves the list; the sibling stays.
-    expect((await workItems(lan)).tasks.map((t) => t.id)).toEqual([sibling!.id]);
+    expect(g).toMatchObject({ number: 1, title: 'Công việc 1', name: 'Tầng 1 buổi sáng', branchId: cn1, assignee: null, status: { code: 'UNASSIGNED' } });
+    expect(g.floors).toEqual(['Tầng 1']);
+    expect(g.items.map((t) => [t.roomNumber, t.floor, t.taskCodes, t.statusCode, t.note, t.priority])).toEqual([
+      ['101', '1', ['OUT'], 'OUT', 'Khách về sớm', true],
+      ['102', '1', ['OC', 'OTHER'], 'OC', 'Thay rèm', false],
+      ['Hành lang - Tầng 1', '1', ['OTHER'], 'OTHER', 'Lau sàn hành lang', false],
+    ]);
+    expect(g.items.every((t) => t.workGroup?.number === 1 && t.phase === 'UNCLAIMED')).toBe(true);
+    expect((await group([room('201', ['VC'])])).number).toBe(2);
+    expect((await group([room('801', ['OUT'])], { branchId: cn2 }, admin)).number).toBe(1);
   });
 
-  it('inspects a shared area with a note, not room findings', async () => {
-    const [hall] = await created([HALL_5]);
-    await onShift(lan, cn1);
-    expect((await claim(lan, [hall!.id])).status).toBe(200);
-    expect((await lan.post(`${url(hall!.id)}/inspect`).send({ issues: [{ type: 'SMOKING' }] })).status).toBe(422);
-    const saved = await lan.post(`${url(hall!.id)}/inspect`).send({ issues: [], note: 'Thảm bẩn trước 502' });
-    expect(saved.status).toBe(201);
-    expect(saved.body.task).toMatchObject({ phase: 'AWAITING_CLEANING', inspectionNote: 'Thảm bẩn trước 502' });
-    expect(await testPrisma.roomInspection.count()).toBe(0);
-    expect((await lan.post(`${url(hall!.id)}/start`)).status).toBe(200);
+  it('refuses an empty or invalid group, and saves nothing of it', async () => {
+    for (const [items, message] of [
+      [[], 'ít nhất một'],
+      [[room('101', [])], 'việc cần làm'],
+      [[room('101', ['OUT', 'OC'])], 'chỉ chọn một'],
+      [[room('101', ['OTHER'])], '"Khác" cần ghi chú'],
+      [[room('101', ['OUT']), { areaKind: 'HALLWAY', floor: '1' }], 'cần ghi chú'],
+      [[{ areaKind: 'ROOFTOP', note: 'Quét' }], 'không có Rooftop'],
+      [[room('101', ['OUT']), room('101', ['OC'])], 'hai lần'],
+      [[room('999', ['OUT'])], 'không thuộc chi nhánh'],
+    ] as const) {
+      const res = await createGroup(items as unknown as Record<string, unknown>[]);
+      expect(res.status, JSON.stringify(items)).toBe(422);
+      expect(res.body.error.message).toContain(message);
+    }
+    expect(await testPrisma.housekeepingWorkGroup.count()).toBe(0);
+    expect(await testPrisma.housekeepingRoomTask.count()).toBe(0);
+  });
+
+  it('keeps a room in one open group a day, saves a Rooftop where there is one, and never twice', async () => {
+    await group([room('101', ['OUT'])]);
+    const again = await createGroup([room('102', ['OC']), room('101', ['VC'])]);
+    expect(again.status).toBe(409);
+    expect(again.body.error.message).toContain('Phòng 101 (Công việc 1)');
+    expect(await testPrisma.housekeepingRoomTask.count({ where: { roomNumber: '102' } })).toBe(0);
+
+    const top = await group([{ areaKind: 'ROOFTOP', note: 'Quét lá, dọn bàn ghế' }], { branchId: cn2 }, admin);
+    expect(top.items[0]).toMatchObject({ areaKind: 'ROOFTOP', areaLabel: 'Rooftop', floor: null, note: 'Quét lá, dọn bàn ghế' });
+    expect(top.floors).toEqual(['Rooftop']);
+
+    const requestId = 'f3b8c2a0-1111-4222-8333-944445555666';
+    const first = await createGroup([room('201', ['OC'])], { requestId });
+    const repeat = await createGroup([room('201', ['OC'])], { requestId });
+    expect([first.status, repeat.status]).toEqual([201, 200]);
+    expect(repeat.body).toMatchObject({ duplicate: true, group: { id: first.body.group.id } });
+  });
+
+  it('is the manager\'s at its branch and the Admin\'s anywhere — nobody else\'s', async () => {
+    expect((await createGroup([room('801', ['OUT'])], { branchId: cn2 })).status).toBe(403);
+    for (const agent of [lan, letan1, receptionManager, tech, general]) expect((await createGroup([room('101', ['OUT'])], {}, agent)).status).toBe(403);
   });
 });
 
-describe('6. "Giao lại" while waiting for cleaning', () => {
-  const reassign = (agent: Agent, id: string, body: Record<string, unknown>) => agent.post(`/api/housekeeping/work-orders/${id}/reassign`).send(body);
+describe('E. "Chỉnh sửa" — the group, one place at a time', () => {
+  it('renames, adds, edits one place, and takes one out without touching the catalog or its history', async () => {
+    const g = await group([room('101', ['OUT'], { note: 'A' }), room('102', ['OC'], { note: 'B' })]);
+    const [p101, p102] = g.items;
+    expect((await manager1.patch(`/api/housekeeping/manager/work-groups/${g.id}`).send({ name: 'Sáng' })).body.group.name).toBe('Sáng');
+    const added = await manager1.post(`/api/housekeeping/manager/work-groups/${g.id}/items`).send({ items: [room('103', ['VC'])] });
+    expect(added.status).toBe(201);
+    expect(added.body.group.items.map((t: Task) => t.roomNumber)).toEqual(['101', '102', '103']);
 
-  it('lets the Admin, Quản lý buồng phòng and Quản lý lễ tân hand it to another housekeeper of the branch', async () => {
-    for (const agent of [admin, manager1, receptionManager]) {
-      await resetHousekeepingData();
-      await resetShiftData();
-      const task = await awaitingCleaning(lan);
-      const res = await reassign(agent, task.id, { assigneeUserId: hoaId, reason: 'Chị Lan về sớm' });
-      expect(res.status).toBe(200);
-      expect(res.body.task).toMatchObject({ phase: 'AWAITING_CLEANING', assignee: { id: hoaId, name: 'Chị Hoa' } });
-      const event = (await eventsOf(task.id)).find((e) => e.type === 'ASSIGNED');
-      expect(event!.detail).toMatchObject({ fromId: lanId, fromName: 'Chị Lan', toId: hoaId, toName: 'Chị Hoa', reason: 'Chị Lan về sớm', stage: 'AWAITING_CLEANING' });
-      expect(event!.createdAt).toEqual(hcm(DAY, '08:00'));
-      expect(await testPrisma.notification.count({ where: { userId: hoaId } })).toBeGreaterThan(0);
-    }
-    // The new housekeeper takes it from there.
-    const task = await testPrisma.housekeepingRoomTask.findFirstOrThrow({ where: { assigneeUserId: hoaId } });
-    await onShift(hoa, cn1);
-    expect((await hoa.post(`${url(task.id)}/start`)).status).toBe(200);
-    expect((await lan.post(`${url(task.id)}/start`)).status).toBe(403);
+    // One place's codes and note — the other place is untouched.
+    const edited = await manager1.patch(`/api/housekeeping/manager/tasks/${p101!.id}`).send({ taskCodes: ['VC', 'OTHER'], note: 'Đổi việc' });
+    expect(edited.status).toBe(200);
+    expect(edited.body.task).toMatchObject({ taskCodes: ['VC', 'OTHER'], statusCode: 'VC', note: 'Đổi việc' });
+    expect(await task(p102!.id)).toMatchObject({ note: 'B', statusCode: 'OC' });
+    expect((await manager1.patch(`/api/housekeeping/manager/tasks/${p101!.id}`).send({ taskCodes: ['OUT', 'OC'] })).status).toBe(422);
+
+    // Taking 102 out: a soft removal; the room stays in the catalog.
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p102!.id}/void`).send({ reason: 'Khách ở thêm' })).status).toBe(200);
+    const removed = await task(p102!.id);
+    expect(removed.voidedAt).not.toBeNull();
+    expect(removed.workGroupId).toBe(g.id);
+    // The rename is in each place's history too.
+    expect((await eventsOf(p102!.id)).map((e) => e.type)).toEqual(['CREATED', 'UPDATED', 'VOIDED']);
+    expect(workAreasFor('TRUONG_DINH_05').floors.find((f) => f.floor === '1')!.rooms).toContain('102');
+    const list = (await manager1.get(`/api/housekeeping/manager/work-groups?date=${DAY}`)).body.groups as Group[];
+    expect(list[0]!.counts.items).toBe(2);
+    expect(list[0]!.items.find((t) => t.id === p102!.id)).toMatchObject({ voided: true, phase: 'VOIDED' });
+    // The room can be given out again in another group once taken out.
+    expect((await group([room('102', ['OC'])])).number).toBe(2);
   });
 
-  it('refuses every other role, another branch’s housekeeper, and an item not waiting for cleaning', async () => {
-    const task = await awaitingCleaning(lan);
-    for (const agent of [letan1, general, tech, lan, hoa]) {
-      expect((await reassign(agent, task.id, { assigneeUserId: hoaId })).status).toBe(403);
-    }
-    expect((await reassign(admin, task.id, { assigneeUserId: maiId })).status).toBe(422);
-    expect((await reassign(admin, task.id, { assigneeUserId: lanId })).status).toBe(422);
-    expect((await reassign(admin, task.id, {})).status).toBe(422);
-
-    const [fresh] = await created([HALL_5]);
-    expect((await reassign(admin, fresh!.id, { assigneeUserId: hoaId })).status).toBe(409);
-
-    // Once cleaning has begun the cleaner stays the cleaner.
-    expect((await lan.post(`${url(task.id)}/start`)).status).toBe(200);
-    const midway = await reassign(manager1, task.id, { assigneeUserId: hoaId });
+  it('protects work in hand: a reason once held, never mid-cleaning, never room by room', async () => {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    const [p101, p102] = g.items;
+    await startShiftAt(lan, cn1);
+    expect((await accept(lan, g.id)).status).toBe(200);
+    // A grouped room is given out with its group.
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/assign`).send({ assigneeUserId: hoaId })).status).toBe(409);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p102!.id}/void`).send({})).status).toBe(422);
+    await lan.post(`${url(p101!.id)}/inspect`).send({ issues: [] });
+    await lan.post(`${url(p101!.id)}/start`);
+    const midway = await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/void`).send({ reason: 'x' });
     expect(midway.status).toBe(409);
-    expect(midway.body.error.message).toContain('không thể đổi người thực hiện giữa chừng');
-    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task.id } })).assigneeUserId).toBe(lanId);
+    expect(midway.body.error.message).toContain('đang được dọn');
   });
 
-  it('keeps a reception manager to its branches', async () => {
-    const [far] = await created([{ areaKind: 'ROOM', roomNumber: '802', taskCode: 'VC' }], { branchId: cn2 }, admin);
-    await onShift(mai, cn2);
-    expect((await claim(mai, [far!.id])).status).toBe(200);
-    expect((await mai.post(`${url(far!.id)}/inspect`).send({ issues: [] })).status).toBe(201);
-    expect((await reassign(receptionManager, far!.id, { assigneeUserId: maiId })).status).toBe(403);
-    expect((await receptionManager.get(`/api/housekeeping/work-orders/staff?branchId=${cn2}`)).status).toBe(403);
-    const staff = await receptionManager.get(`/api/housekeeping/work-orders/staff?branchId=${cn1}`);
-    expect(staff.body.staff.map((s: { id: number }) => s.id).sort()).toEqual([lanId, hoaId].sort());
+  it('gives the whole group to a housekeeper who worked at the branch — and only such a one', async () => {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    // Never on shift at Chi nhánh 1: not its staff.
+    expect((await manager1.post(`/api/housekeeping/manager/work-groups/${g.id}/assign`).send({ assigneeUserId: hoaId })).status).toBe(422);
+    await startShiftAt(hoa, cn1);
+    const given = await manager1.post(`/api/housekeeping/manager/work-groups/${g.id}/assign`).send({ assigneeUserId: hoaId });
+    expect(given.status).toBe(200);
+    expect(given.body.group.assignee).toEqual({ id: hoaId, name: 'Chị Hoa' });
+    expect(given.body.group.items.every((t: Task) => t.assignee?.id === hoaId)).toBe(true);
+    const staff = (await manager1.get('/api/housekeeping/manager/staff?branchId=' + cn1)).body.staff.map((s: { id: number }) => s.id);
+    expect(staff).toEqual([hoaId]);
+    expect((await manager2.post(`/api/housekeeping/manager/work-groups/${g.id}/assign`).send({ assigneeUserId: null })).status).toBe(403);
   });
 });
 
-describe('"Các công việc trong ngày" — the supervisors’ table', () => {
-  it('lists each item of the reader’s branches with its stage and person, without money', async () => {
-    const [oc] = await created([ROOM_502, HALL_5]);
-    await created([{ areaKind: 'ROOM', roomNumber: '802', taskCode: 'VC' }], { branchId: cn2 }, admin);
-    await onShift(lan, cn1);
-    await claim(lan, [oc!.id]);
+describe('F. "Nhận công việc" — the whole group, one housekeeper', () => {
+  it('lists the shift branch\'s groups and who holds each; one accept takes every place', async () => {
+    const g1 = await group([room('101', ['OUT']), { areaKind: 'STAIRCASE', floor: '1', note: 'Lau tay vịn' }]);
+    await group([room('801', ['OUT'])], { branchId: cn2 }, admin);
+    expect(await workerGroups(lan)).toEqual({ working: false, groups: [] });
+    await startShiftAt(lan, cn1);
+    await startShiftAt(hoa, cn1);
+    expect((await workerGroups(lan)).groups.map((g) => g.number)).toEqual([1]);
 
-    const rows = async (agent: Agent, query = '') => {
-      const res = await agent.get(`/api/housekeeping/work-orders?date=${DAY}${query}`);
-      expect(res.status).toBe(200);
-      return res.body.tasks as Task[];
-    };
-    const own = await rows(manager1);
-    expect(own.map((t) => [t.areaLabel, t.phase, t.assignee?.name ?? null])).toEqual(
+    const taken = await accept(lan, g1.id);
+    expect(taken.status).toBe(200);
+    expect(taken.body.group).toMatchObject({ assignee: { id: lanId, name: 'Chị Lan' }, status: { code: 'ACCEPTED' } });
+    expect(taken.body.group.items.every((t: Task) => t.assignee?.id === lanId && t.phase === 'ACCEPTED')).toBe(true);
+    // Colleagues see who has it — and cannot take it.
+    const seen = (await workerGroups(hoa)).groups[0]!;
+    expect(seen.assignee).toEqual({ id: lanId, name: 'Chị Lan' });
+    expect(seen.items[0]!.inspection).toBeNull();
+    const second = await accept(hoa, g1.id);
+    expect(second.status).toBe(409);
+    expect(second.body.error.message).toContain('Chị Lan');
+    // No room of it can be claimed alone.
+    expect((await hoa.post('/api/housekeeping/work/claim').send({ taskIds: [g1.items[0]!.id] })).status).toBe(409);
+    expect((await eventsOf(g1.items[0]!.id)).map((e) => e.type)).toEqual(['CREATED', 'ACCEPTED', 'CLAIM_REJECTED']);
+  });
+
+  it('gives a group to exactly one of two housekeepers pressing at the same moment', async () => {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    await startShiftAt(lan, cn1);
+    await startShiftAt(hoa, cn1);
+    const [r1, r2] = await Promise.all([accept(lan, g.id), accept(hoa, g.id)]);
+    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+    const winner = r1.status === 200 ? lanId : hoaId;
+    const rows = await testPrisma.housekeepingRoomTask.findMany({ where: { workGroupId: g.id } });
+    expect(rows.every((r) => r.assigneeUserId === winner)).toBe(true);
+    expect((await testPrisma.housekeepingWorkGroup.findUniqueOrThrow({ where: { id: g.id } })).assigneeUserId).toBe(winner);
+  });
+
+  it('refuses off shift and at another branch', async () => {
+    const g = await group([room('101', ['OUT'])]);
+    expect((await accept(lan, g.id)).status).toBe(409);
+    await startShiftAt(mai, cn2);
+    expect((await accept(mai, g.id)).status).toBe(404);
+    // Not a housekeeping role at all: refused. (A Quản lý buồng phòng off shift: section J.)
+    expect((await accept(letan1, g.id)).status).toBe(403);
+    expect((await accept(manager1, g.id)).status).toBe(409);
+  });
+
+  it('works each room through the usual lifecycle and keeps the day\'s history', async () => {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    const [p101, p102] = g.items;
+    await startShiftAt(lan, cn1);
+    await accept(lan, g.id);
+    expect((await lan.post(`${url(p101!.id)}/start`)).status).toBe(409);
+    setClock({ now: () => hcm(DAY, '08:10') });
+    expect((await lan.post(`${url(p101!.id)}/begin-inspection`)).body.task.phase).toBe('INSPECTING');
+    expect((await lan.post(`${url(p101!.id)}/inspect`).send({ issues: [] })).body.task.phase).toBe('AWAITING_CLEANING');
+    setClock({ now: () => hcm(DAY, '08:20') });
+    expect((await lan.post(`${url(p101!.id)}/start`)).body.task.phase).toBe('CLEANING');
+    setClock({ now: () => hcm(DAY, '08:50') });
+    expect((await lan.post(`${url(p101!.id)}/complete`).send({})).body.task.phase).toBe('COMPLETED');
+    expect((await task(p102!.id)).state).toBe('NOT_STARTED');
+
+    const board = (await manager1.get(`/api/housekeeping/manager/work-groups?date=${DAY}`)).body.groups[0] as Group;
+    expect(board.counts).toMatchObject({ items: 2, completed: 1 });
+    expect(board.status.code).toBe('IN_PROGRESS');
+    const history = (await lan.get(`/api/housekeeping/work/history?date=${DAY}`)).body;
+    expect(history.items.map((t: Task) => t.id)).toEqual([p101!.id]);
+    expect(history.totals).toEqual({ completed: 1, noClean: 0 });
+    expect(history.shifts).toHaveLength(1);
+    expect((await hoa.get(`/api/housekeeping/work/history?date=${DAY}`)).body.items).toEqual([]);
+  });
+});
+
+describe('G. "Không cần dọn" — a reason, then the manager decides', () => {
+  async function accepted() {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    await startShiftAt(lan, cn1);
+    await accept(lan, g.id);
+    return g.items;
+  }
+
+  it('needs the reason and the room\'s own housekeeper, and holds the room while waiting', async () => {
+    const [p101] = await accepted();
+    expect((await lan.post(`${url(p101!.id)}/no-clean`).send({ reason: '   ' })).status).toBe(422);
+    await startShiftAt(hoa, cn1);
+    expect((await hoa.post(`${url(p101!.id)}/no-clean`).send({ reason: 'x' })).status).toBe(403);
+    const asked = await lan.post(`${url(p101!.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' });
+    expect(asked.status).toBe(200);
+    expect(asked.body.task).toMatchObject({ phase: 'NO_CLEAN_PENDING', noClean: { status: 'PENDING', reason: 'Khách không muốn dọn', requestedByName: 'Chị Lan' } });
+    expect((await lan.post(`${url(p101!.id)}/inspect`).send({ issues: [] })).status).toBe(409);
+    const board = (await manager1.get(`/api/housekeeping/manager/work-groups?date=${DAY}`)).body.groups[0] as Group;
+    expect(board.counts.noCleanPending).toBe(1);
+  });
+
+  it('on approval takes the room out of the work, keeping the request, decision and history', async () => {
+    const [p101, p102] = await accepted();
+    await lan.post(`${url(p101!.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' });
+    // Not the other branch's manager.
+    expect((await manager2.post(`/api/housekeeping/manager/tasks/${p101!.id}/no-clean-decision`).send({ approve: true })).status).toBe(403);
+    expect((await lan.post(`/api/housekeeping/manager/tasks/${p101!.id}/no-clean-decision`).send({ approve: true })).status).toBe(403);
+    const ok = await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/no-clean-decision`).send({ approve: true, note: 'Đồng ý' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.task).toMatchObject({ phase: 'NO_CLEAN', voided: true, noClean: { status: 'APPROVED', decidedByName: 'QL qlbp1' } });
+    const row = await task(p101!.id);
+    expect(row.voidReason).toBe('Không cần dọn: Khách không muốn dọn');
+    expect((await eventsOf(p101!.id)).map((e) => e.type)).toEqual(['CREATED', 'ACCEPTED', 'NO_CLEAN_REQUESTED', 'NO_CLEAN_APPROVED']);
+    const mine = (await workerGroups(lan)).groups[0]!;
+    expect(mine.counts.items).toBe(1);
+    expect(mine.items.find((t) => t.id === p101!.id)!.phase).toBe('NO_CLEAN');
+    expect((await task(p102!.id)).voidedAt).toBeNull();
+    expect((await lan.get(`/api/housekeeping/work/history?date=${DAY}`)).body.totals).toEqual({ completed: 0, noClean: 1 });
+    expect(await testPrisma.notification.count({ where: { userId: lanId } })).toBe(1);
+    // Decided once.
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/no-clean-decision`).send({ approve: false })).status).toBe(409);
+  });
+
+  it('on rejection returns the room to work, and the housekeeper goes on', async () => {
+    const [p101] = await accepted();
+    await lan.post(`${url(p101!.id)}/inspect`).send({ issues: [] });
+    await lan.post(`${url(p101!.id)}/no-clean`).send({ reason: 'Khách đang ngủ' });
+    const no = await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/no-clean-decision`).send({ approve: false, note: 'Khách đã đồng ý dọn' });
+    expect(no.body.task).toMatchObject({ phase: 'AWAITING_CLEANING', voided: false, noClean: { status: 'REJECTED' } });
+    expect((await lan.post(`${url(p101!.id)}/start`)).status).toBe(200);
+    // Too late to ask once cleaning has begun.
+    expect((await lan.post(`${url(p101!.id)}/no-clean`).send({ reason: 'x' })).status).toBe(409);
+  });
+});
+
+describe('H. the supervisors\' table and "Giao lại"', () => {
+  it('lists every place with its group, and hands one waiting for cleaning to a branch housekeeper', async () => {
+    const g = await group([room('101', ['OUT']), { areaKind: 'HALLWAY', floor: '1', note: 'Lau' }]);
+    await startShiftAt(lan, cn1);
+    await startShiftAt(hoa, cn1);
+    await accept(lan, g.id);
+    const p101 = g.items[0]!;
+    await lan.post(`${url(p101.id)}/inspect`).send({ issues: [] });
+
+    const rows = (await receptionManager.get(`/api/housekeeping/work-orders?date=${DAY}`)).body.tasks as Task[];
+    expect(rows.map((t) => [t.areaLabel, t.workGroup?.number])).toEqual(
       expect.arrayContaining([
-        ['Phòng - 502', 'ACCEPTED', 'Chị Lan'],
-        ['Hành lang - Tầng 5', 'UNCLAIMED', null],
+        ['Phòng - 101', 1],
+        ['Hành lang - Tầng 1', 1],
       ]),
     );
-    expect(own).toHaveLength(2);
-    expect((await rows(receptionManager)).every((t) => t.branchId === cn1)).toBe(true);
-    expect(await rows(admin)).toHaveLength(3);
-    expect(await rows(admin, `&branchId=${cn2}`)).toHaveLength(1);
-    expect(await rows(general)).toHaveLength(3);
-    expect(JSON.stringify(own)).not.toMatch(/"(amount|collection)"/);
-    expect((await manager1.get(`/api/housekeeping/work-orders?date=${DAY}&branchId=${cn2}`)).status).toBe(403);
     expect((await letan1.get(`/api/housekeeping/work-orders?date=${DAY}`)).status).toBe(403);
-    expect((await lan.get(`/api/housekeeping/work-orders?date=${DAY}`)).status).toBe(403);
+    const staff = (await receptionManager.get(`/api/housekeeping/work-orders/staff?branchId=${cn1}`)).body.staff.map((s: { id: number }) => s.id);
+    expect(staff.sort()).toEqual([lanId, hoaId].sort());
+    expect((await receptionManager.post(`/api/housekeeping/work-orders/${p101.id}/reassign`).send({ assigneeUserId: maiId })).status).toBe(422);
+    const moved = await receptionManager.post(`/api/housekeeping/work-orders/${p101.id}/reassign`).send({ assigneeUserId: hoaId, reason: 'Chị Lan về sớm' });
+    expect(moved.status).toBe(200);
+    expect(moved.body.task.assignee).toEqual({ id: hoaId, name: 'Chị Hoa' });
+    expect((await hoa.post(`${url(p101.id)}/start`)).status).toBe(200);
+  });
+});
+
+describe('I. one group across floors', () => {
+  it('saves rooms and areas of several floors — and the Rooftop — as ONE group, or nothing at all', async () => {
+    const g = await group(
+      [room('101', ['OUT']), { areaKind: 'HALLWAY', floor: '1', note: 'Lau sàn' }, room('201', ['OC']), room('802', ['VC']), { areaKind: 'ROOFTOP', note: 'Quét lá' }],
+      { branchId: cn2, name: 'Tổng vệ sinh buổi sáng' },
+      admin,
+    );
+    expect(g).toMatchObject({ number: 1, name: 'Tổng vệ sinh buổi sáng' });
+    expect(g.floors).toEqual(['Tầng 1', 'Tầng 2', 'Tầng 8', 'Rooftop']);
+    expect(new Set(g.items.map((t) => t.workGroup?.id))).toEqual(new Set([g.id]));
+    expect(await testPrisma.housekeepingWorkGroup.count()).toBe(1);
+    // One bad place on another floor: no group, no place saved.
+    const bad = await createGroup([room('301', ['OUT']), room('401', ['OUT', 'VC'])], { branchId: cn2 }, admin);
+    expect(bad.status).toBe(422);
+    expect(await testPrisma.housekeepingRoomTask.count({ where: { roomNumber: '301' } })).toBe(0);
+    // The same room twice — wherever in the form it was picked — is refused.
+    expect((await createGroup([room('301', ['OUT']), room('301', ['OC'])], { branchId: cn2 }, admin)).status).toBe(422);
+  });
+});
+
+describe('J. the Quản lý buồng phòng takes a group and does the work itself', () => {
+  it('works a shift at its OWN branch only — no address, nothing the request names', async () => {
+    const g = await group([room('101', ['OUT'])]);
+    // Off shift: no work taken.
+    const off = await accept(manager1, g.id);
+    expect(off.status).toBe(409);
+    expect(off.body.error.message).toContain('Vào ca làm việc');
+    const started = await manager1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn2), branchId: cn2 });
+    expect(started.status).toBe(201);
+    expect(started.body.shift.current.branch.id).toBe(cn1);
+    expect((await lookup(manager1, '17')).status).toBe(403);
+    // Another branch's manager, on its own shift, cannot take CN1's group.
+    await manager2.post('/api/housekeeping/shift/start').send({});
+    expect((await accept(manager2, g.id)).status).toBe(404);
+    // Only the managers of housekeeping work a shift.
+    expect((await admin.post('/api/housekeeping/shift/start').send({})).status).toBe(403);
+    expect((await letan1.post('/api/housekeeping/shift/start').send({})).status).toBe(403);
+  });
+
+  it('accepts a free group and takes each room through the usual lifecycle, recorded on its shift', async () => {
+    const g = await group([room('101', ['OUT']), { areaKind: 'HALLWAY', floor: '1', note: 'Lau sàn' }]);
+    const [p101, hallway] = g.items;
+    await manager1.post('/api/housekeeping/shift/start').send({});
+    const taken = await accept(manager1, g.id);
+    expect(taken.status).toBe(200);
+    expect(taken.body.group.assignee).toEqual({ id: (await testPrisma.user.findUniqueOrThrow({ where: { username: 'qlbp1' } })).id, name: 'QL qlbp1' });
+    // Colleagues see who has it and cannot take it.
+    await startShiftAt(lan, cn1);
+    const seen = (await workerGroups(lan)).groups[0]!;
+    expect(seen.assignee?.name).toBe('QL qlbp1');
+    expect((await accept(lan, g.id)).status).toBe(409);
+
+    setClock({ now: () => hcm(DAY, '08:10') });
+    expect((await manager1.post(`${url(p101!.id)}/begin-inspection`)).body.task.phase).toBe('INSPECTING');
+    const inspected = await manager1.post(`${url(p101!.id)}/inspect`).send({ issues: [{ type: 'ODOR' }] });
+    expect(inspected.status).toBe(201);
+    const inspection = await testPrisma.roomInspection.findFirstOrThrow({ where: { roomNumber: '101' } });
+    expect(inspection.branchId).toBe(cn1);
+    expect(inspection.workSegmentId).not.toBeNull();
+    setClock({ now: () => hcm(DAY, '08:20') });
+    expect((await manager1.post(`${url(p101!.id)}/start`)).body.task.phase).toBe('CLEANING');
+    setClock({ now: () => hcm(DAY, '08:45') });
+    const done = await manager1.post(`${url(p101!.id)}/complete`).send({});
+    expect(done.body.task).toMatchObject({ phase: 'COMPLETED', cleanedBy: { name: 'QL qlbp1' } });
+    expect((await manager1.post(`${url(hallway!.id)}/inspect`).send({ issues: [], note: 'Sàn sạch' })).status).toBe(201);
+    // "Không cần dọn" stays the housekeeper's to ask and the manager's to decide.
+    expect((await manager1.post(`${url(hallway!.id)}/no-clean`).send({ reason: 'x' })).status).toBe(403);
+    // Its manager powers are unchanged: it still reviews the room it cleaned.
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/review`).send({ result: 'PASSED' })).status).toBe(200);
+  });
+
+  it('never gives one group to both a manager and a housekeeper pressing at the same moment', async () => {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    await manager1.post('/api/housekeeping/shift/start').send({});
+    await startShiftAt(hoa, cn1);
+    const [r1, r2] = await Promise.all([accept(manager1, g.id), accept(hoa, g.id)]);
+    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+    const owner = (await testPrisma.housekeepingWorkGroup.findUniqueOrThrow({ where: { id: g.id } })).assigneeUserId;
+    const rows = await testPrisma.housekeepingRoomTask.findMany({ where: { workGroupId: g.id } });
+    expect(rows.every((r) => r.assigneeUserId === owner)).toBe(true);
+    // After "Kết thúc ca" the manager takes nothing more.
+    await manager1.post('/api/housekeeping/shift/end').send({});
+    const g2 = await group([room('201', ['VC'])]);
+    expect((await accept(manager1, g2.id)).status).toBe(409);
   });
 });

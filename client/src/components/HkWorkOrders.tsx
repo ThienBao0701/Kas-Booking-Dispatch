@@ -1,9 +1,7 @@
 /**
- * HOUSEKEEPING WORK ITEMS — the manager's side.
+ * HOUSEKEEPING WORK ITEMS — the manager's side, one row per room / area.
+ * (Creating them — work groups — is `HkWorkGroups.tsx`.)
  *
- *   CreateWorkDialog    "+ Tạo công việc": one or many items at once, each its
- *                       own area, job, note and priority ("+ Chọn khu vực" adds
- *                       another), then a review before anything is saved.
  *   WorkOrderTable      "Các công việc trong ngày": ONE ROW PER ITEM — two jobs
  *                       for room 502 are two rows — with Khu vực, Việc cần làm,
  *                       Trạng thái, Người thực hiện, Ghi chú, filters, and the
@@ -14,17 +12,14 @@
  * checks every rule again (required notes, rooms of the branch, who may
  * reassign, the state) — these screens only ask.
  */
-import { useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, Trash2, UserCog } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { UserCog } from 'lucide-react';
 import {
   ROOM_WORK_KEY,
   WORK_PHASE_ORDER,
   roomWorkApi,
   type RoomTask,
-  type WorkAreaKind,
-  type WorkAreas,
-  type WorkItemInput,
   type WorkPhase,
 } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
@@ -33,7 +28,6 @@ import { Button } from './Button';
 import { DataTable, RowAction, type DataColumn } from './DataTable';
 import { ErrorAlert } from './ErrorAlert';
 import { Modal } from './Modal';
-import { QueryState } from './PageState';
 
 const FIELD =
   'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
@@ -46,6 +40,8 @@ const PHASE_TONES: Record<WorkPhase, string> = {
   AWAITING_CLEANING: 'bg-amber-50 text-amber-900 ring-amber-300',
   CLEANING: 'bg-blue-100 text-blue-800 ring-blue-300',
   COMPLETED: 'bg-green-100 text-green-800 ring-green-300',
+  NO_CLEAN_PENDING: 'bg-orange-50 text-orange-900 ring-orange-300',
+  NO_CLEAN: 'bg-slate-100 text-slate-600 ring-slate-300',
   VOIDED: 'bg-rose-50 text-rose-700 ring-rose-300',
 };
 
@@ -64,345 +60,6 @@ export function PhaseBadge({ task }: { task: RoomTask }) {
 
 const areaOf = (t: RoomTask) => t.areaLabel ?? `Phòng - ${t.roomNumber}`;
 const jobOf = (t: RoomTask) => t.taskLabel ?? t.statusCode;
-
-/* ------------------------------------------------------------------ *
- * "+ Tạo công việc"
- * ------------------------------------------------------------------ */
-
-/** One editable section of the form: "where" first (floor, then place), then what. */
-interface Draft {
-  key: number;
-  /** A catalog floor, UNPLACED for "Phòng chưa xác định tầng", '' before a choice. */
-  group: string;
-  /** A room number, or a shared area: HALLWAY / STAIRCASE / OTHER. */
-  place: string;
-  /** Typed when the branch has no room catalog. */
-  typedRoom: string;
-  taskCode: string;
-  taskName: string;
-  note: string;
-  priority: boolean;
-}
-
-const UNPLACED = '__unplaced__';
-const SHARED: readonly string[] = ['HALLWAY', 'STAIRCASE', 'OTHER'];
-const blankDraft = (key: number): Draft => ({ key, group: '', place: '', typedRoom: '', taskCode: '', taskName: '', note: '', priority: false });
-
-function kindOf(d: Draft): WorkAreaKind | null {
-  if (SHARED.includes(d.place)) return d.place as WorkAreaKind;
-  return d.place || d.typedRoom.trim() ? 'ROOM' : null;
-}
-
-/** What the form would send for one section, or why it cannot yet. */
-function checkDraft(d: Draft, areas: WorkAreas): { item: WorkItemInput } | { problem: string } {
-  const kind = kindOf(d);
-  if (!kind) return { problem: 'Chọn khu vực.' };
-  const floor = d.group && d.group !== UNPLACED ? d.group : undefined;
-  if (kind === 'ROOM') {
-    const room = areas.hasRoomCatalog ? d.place : d.typedRoom.trim();
-    if (!room) return { problem: 'Chọn phòng.' };
-    if (!d.taskCode) return { problem: 'Chọn việc cần làm.' };
-    if (d.taskCode === 'OTHER' && !d.note.trim()) return { problem: '"Khác" cần ghi chú nêu rõ việc cần làm.' };
-    return {
-      item: {
-        areaKind: 'ROOM',
-        roomNumber: room,
-        taskCode: d.taskCode,
-        ...(d.taskName.trim() ? { taskName: d.taskName.trim() } : {}),
-        ...(d.note.trim() ? { note: d.note.trim() } : {}),
-        priority: d.priority,
-      },
-    };
-  }
-  if (kind !== 'OTHER' && !floor) return { problem: 'Chọn tầng.' };
-  if (!d.taskName.trim()) return { problem: 'Nhập tên công việc.' };
-  if (!d.note.trim()) return { problem: kind === 'OTHER' ? '"Khác" cần ghi chú nêu rõ vị trí và việc cần làm.' : 'Khu vực chung cần ghi chú / hướng dẫn.' };
-  return { item: { areaKind: kind, ...(floor ? { floor } : {}), taskName: d.taskName.trim(), note: d.note.trim(), priority: d.priority } };
-}
-
-function describeItem(item: WorkItemInput, areas: WorkAreas): string {
-  const kindLabel = areas.sharedAreas.find((s) => s.kind === item.areaKind)?.label;
-  const where = item.areaKind === 'ROOM' ? `Phòng - ${item.roomNumber}` : `${kindLabel}${item.floor ? ` - Tầng ${item.floor}` : ''}`;
-  const code = areas.roomTaskCodes.find((c) => c.code === item.taskCode)?.label;
-  const what = item.areaKind === 'ROOM' ? `${code ?? item.taskCode}${item.taskName ? ` — ${item.taskName}` : ''}` : item.taskName;
-  return `${where} · ${what}`;
-}
-
-function newRequestId(): string {
-  const c = globalThis.crypto as Crypto | undefined;
-  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
-  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-}
-
-export function CreateWorkDialog({
-  branchId,
-  date,
-  onClose,
-  onCreated,
-}: {
-  branchId: number;
-  date: string;
-  onClose: () => void;
-  onCreated: (message: string) => void;
-}) {
-  const queryClient = useQueryClient();
-  const areas = useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'areas', branchId],
-    queryFn: () => roomWorkApi.areas({ branchId }),
-    staleTime: 5 * 60_000,
-  });
-  const nextKey = useRef(2);
-  const [drafts, setDrafts] = useState<Draft[]>([blankDraft(1)]);
-  const [reviewing, setReviewing] = useState(false);
-  // One id per dialog: a double-click, or a retry after a lost response, cannot create twice.
-  const requestId = useRef(newRequestId());
-  const a = areas.data?.areas;
-  const checks = a ? drafts.map((d) => checkDraft(d, a)) : [];
-  const ready = checks.length > 0 && checks.every((c) => 'item' in c);
-
-  const save = useMutation({
-    mutationFn: () =>
-      roomWorkApi.createWorkItems({
-        branchId,
-        workDate: date,
-        requestId: requestId.current,
-        items: checks.map((c) => (c as { item: WorkItemInput }).item),
-      }),
-    onSuccess: async (r) => {
-      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
-      onCreated(r.duplicate ? 'Các công việc này đã được lưu trước đó.' : `Đã tạo ${r.created} công việc.`);
-    },
-  });
-
-  const patch = (key: number, next: Partial<Draft>) => setDrafts((all) => all.map((d) => (d.key === key ? { ...d, ...next } : d)));
-
-  return (
-    <Modal
-      open
-      size="4xl"
-      title={reviewing ? 'Xem lại công việc' : 'Tạo công việc'}
-      onClose={onClose}
-      footer={
-        reviewing ? (
-          <>
-            <Button variant="secondary" onClick={() => setReviewing(false)} disabled={save.isPending}>
-              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-              Sửa lại
-            </Button>
-            <Button onClick={() => save.mutate()} loading={save.isPending} disabled={save.isPending || save.isSuccess} data-testid="work-save">
-              Lưu {drafts.length} công việc
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button variant="secondary" onClick={onClose}>
-              Hủy
-            </Button>
-            <Button onClick={() => setReviewing(true)} disabled={!ready} data-testid="work-review">
-              Xem lại ({drafts.length})
-            </Button>
-          </>
-        )
-      }
-    >
-      <QueryState isLoading={areas.isLoading} isError={areas.isError} error={areas.error} onRetry={() => void areas.refetch()}>
-        {a ? (
-          reviewing ? (
-            <div className="space-y-3" data-testid="work-review-list">
-              <p className="text-sm text-slate-600">Mỗi dòng là một công việc riêng: được nhận, kiểm tra và dọn độc lập.</p>
-              <ol className="divide-y divide-line-subtle rounded-xl border border-line">
-                {checks.map((c, i) => {
-                  const item = (c as { item: WorkItemInput }).item;
-                  return (
-                    <li key={drafts[i]!.key} className="px-3 py-2 text-sm">
-                      <p className="font-semibold text-slate-900">
-                        {i + 1}. {describeItem(item, a)}
-                        {item.priority ? <span className="ml-2 rounded bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white">Ưu tiên</span> : null}
-                      </p>
-                      {item.note ? <p className="mt-0.5 whitespace-pre-wrap text-slate-600">Ghi chú: {item.note}</p> : null}
-                    </li>
-                  );
-                })}
-              </ol>
-              {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {drafts.map((d, i) => (
-                <DraftSection
-                  key={d.key}
-                  index={i}
-                  draft={d}
-                  areas={a}
-                  problem={'problem' in checks[i]! ? (checks[i] as { problem: string }).problem : null}
-                  onChange={(next) => patch(d.key, next)}
-                  onRemove={drafts.length > 1 ? () => setDrafts((all) => all.filter((x) => x.key !== d.key)) : undefined}
-                />
-              ))}
-              <Button
-                variant="secondary"
-                onClick={() => setDrafts((all) => [...all, blankDraft(nextKey.current++)])}
-                disabled={drafts.length >= 50}
-                data-testid="work-add-area"
-              >
-                <Plus className="h-4 w-4" aria-hidden="true" />
-                Chọn khu vực
-              </Button>
-            </div>
-          )
-        ) : null}
-      </QueryState>
-    </Modal>
-  );
-}
-
-function DraftSection({
-  index,
-  draft: d,
-  areas,
-  problem,
-  onChange,
-  onRemove,
-}: {
-  index: number;
-  draft: Draft;
-  areas: WorkAreas;
-  problem: string | null;
-  onChange: (next: Partial<Draft>) => void;
-  onRemove?: () => void;
-}) {
-  const kind = kindOf(d);
-  const groupRooms = d.group === UNPLACED ? areas.unplacedRooms : (areas.floors.find((f) => f.floor === d.group)?.rooms ?? []);
-  const id = (field: string) => `work-${d.key}-${field}`;
-  const noteRequired = kind !== null && (kind !== 'ROOM' || d.taskCode === 'OTHER');
-  return (
-    <fieldset className="rounded-xl border border-line bg-slate-50/60 p-3" data-testid={`work-item-${index}`}>
-      <legend className="flex w-full items-center justify-between gap-2 px-1 text-sm font-semibold text-slate-800">
-        Công việc {index + 1}
-        {onRemove ? (
-          <button
-            type="button"
-            onClick={onRemove}
-            className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-            data-testid={`work-remove-${index}`}
-          >
-            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Bỏ công việc này
-          </button>
-        ) : null}
-      </legend>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {areas.hasRoomCatalog || areas.floors.length > 0 ? (
-          <label className={LABEL} htmlFor={id('group')}>
-            Tầng / nhóm khu vực
-            <select
-              id={id('group')}
-              className={FIELD}
-              value={d.group}
-              onChange={(e) => onChange({ group: e.target.value, place: '', taskCode: '' })}
-              data-testid={`work-group-${index}`}
-            >
-              <option value="">— Chọn tầng —</option>
-              {areas.floors.map((f) => (
-                <option key={f.floor} value={f.floor}>
-                  {f.label}
-                </option>
-              ))}
-              {areas.unplacedRooms.length > 0 ? <option value={UNPLACED}>{areas.unplacedLabel}</option> : null}
-            </select>
-          </label>
-        ) : null}
-        <label className={LABEL} htmlFor={id('place')}>
-          Chọn khu vực
-          <select
-            id={id('place')}
-            className={FIELD}
-            value={d.place}
-            disabled={(areas.hasRoomCatalog || areas.floors.length > 0) && !d.group}
-            onChange={(e) => onChange({ place: e.target.value, taskCode: SHARED.includes(e.target.value) ? 'OTHER' : '' })}
-            data-testid={`work-place-${index}`}
-          >
-            <option value="">— Chọn —</option>
-            {areas.hasRoomCatalog
-              ? groupRooms.map((r) => (
-                  <option key={r} value={r}>
-                    Phòng {r}
-                  </option>
-                ))
-              : null}
-            {!areas.hasRoomCatalog ? <option value="ROOM_TYPED">Phòng (nhập số)</option> : null}
-            {d.group !== UNPLACED
-              ? areas.sharedAreas.map((s) => (
-                  <option key={s.kind} value={s.kind}>
-                    {s.label}
-                  </option>
-                ))
-              : null}
-          </select>
-        </label>
-        {!areas.hasRoomCatalog && d.place === 'ROOM_TYPED' ? (
-          <label className={LABEL} htmlFor={id('room')}>
-            Số phòng
-            <input id={id('room')} className={FIELD} value={d.typedRoom} maxLength={50} onChange={(e) => onChange({ typedRoom: e.target.value })} />
-          </label>
-        ) : null}
-        {kind === 'ROOM' ? (
-          <label className={LABEL} htmlFor={id('code')}>
-            Việc cần làm
-            <select id={id('code')} className={FIELD} value={d.taskCode} onChange={(e) => onChange({ taskCode: e.target.value })} data-testid={`work-code-${index}`}>
-              <option value="">— Chọn —</option>
-              {areas.roomTaskCodes.map((c) => (
-                <option key={c.code} value={c.code}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {kind ? (
-          <label className={LABEL} htmlFor={id('name')}>
-            Tên công việc{kind === 'ROOM' ? ' (không bắt buộc)' : ' *'}
-            <input
-              id={id('name')}
-              className={FIELD}
-              value={d.taskName}
-              maxLength={200}
-              placeholder={kind === 'ROOM' ? 'Ví dụ: Thay khăn' : 'Ví dụ: Dọn lối đi'}
-              onChange={(e) => onChange({ taskName: e.target.value })}
-              data-testid={`work-name-${index}`}
-            />
-          </label>
-        ) : null}
-      </div>
-      {kind ? (
-        <>
-          <label className={`${LABEL} mt-3`} htmlFor={id('note')}>
-            Ghi chú / Hướng dẫn{noteRequired ? ' *' : ' (không bắt buộc)'}
-            <textarea
-              id={id('note')}
-              className={FIELD}
-              rows={2}
-              maxLength={1000}
-              value={d.note}
-              placeholder={kind === 'ROOM' ? 'Ví dụ: Thay khăn theo hướng dẫn' : 'Ví dụ: Dọn khu vực chung trước 10:00'}
-              onChange={(e) => onChange({ note: e.target.value })}
-              data-testid={`work-note-${index}`}
-            />
-          </label>
-          <label className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
-            <input type="checkbox" checked={d.priority} onChange={(e) => onChange({ priority: e.target.checked })} className="h-5 w-5 accent-red-600" />
-            Ưu tiên — cần làm trước
-          </label>
-        </>
-      ) : null}
-      {problem ? (
-        <p className="mt-2 text-xs text-amber-800" data-testid={`work-problem-${index}`}>
-          {problem}
-        </p>
-      ) : null}
-    </fieldset>
-  );
-}
 
 /* ------------------------------------------------------------------ *
  * "Các công việc trong ngày"
@@ -456,6 +113,7 @@ export function WorkOrderTable({
       className: 'min-w-[8rem] font-medium text-slate-900',
       render: (t) => (
         <>
+          {t.workGroup ? <span className="mr-1 text-xs font-semibold text-slate-500">CV {t.workGroup.number} ·</span> : null}
           {areaOf(t)}
           {t.priority ? <span className="ml-1.5 rounded bg-red-600 px-1.5 py-0.5 align-middle text-[11px] font-semibold text-white">Ưu tiên</span> : null}
         </>
@@ -546,12 +204,14 @@ export function WorkOrderTable({
 }
 
 const PHASE_NAMES: Record<WorkPhase, string> = {
-  UNCLAIMED: 'Chưa tiếp nhận',
-  ACCEPTED: 'Đã tiếp nhận / Chờ kiểm tra',
+  UNCLAIMED: 'Chưa giao',
+  ACCEPTED: 'Đã nhận / Chờ kiểm tra',
   INSPECTING: 'Đang kiểm tra',
   AWAITING_CLEANING: 'Chờ dọn phòng',
   CLEANING: 'Đang dọn phòng',
   COMPLETED: 'Hoàn thành',
+  NO_CLEAN_PENDING: 'Chờ duyệt không cần dọn',
+  NO_CLEAN: 'Không cần dọn',
   VOIDED: 'Đã xóa',
 };
 

@@ -28,7 +28,7 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
-import { addressOf, workplaceOf } from './helpers/workplace';
+import { addressOf } from './helpers/workplace';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -381,16 +381,17 @@ describe('voiding', () => {
   });
 });
 
-describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết thúc ca"', () => {
+describe('the housekeeping workday — "Vào ca", "Kết thúc ca"', () => {
   const shift = (agent: Agent = hk1) => agent.get('/api/housekeeping/shift');
 
-  it('opens the shift at the account’s branch, names its cleaner, and refuses a second "Vào ca"', async () => {
+  it('opens the shift at the hotel named, names its cleaner, and refuses a second "Vào ca"', async () => {
     const me = (await hk1.get('/api/auth/me')).body.user;
     expect(me.branch.id).toBe(cn1);
     expect((await shift()).body.shift.current.branch.id).toBe(cn1);
     expect((await hk1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) })).status).toBe(409);
-    // Another branch is refused outright — the branch is never the worker's to choose.
-    expect((await hk1.post('/api/housekeeping/shift/start').send({ branchId: cn2 })).status).toBe(403);
+    // A branch id the browser sends picks nothing — and on shift, nothing opens.
+    expect((await hk1.post('/api/housekeeping/shift/start').send({ branchId: cn2, address: await addressOf(cn2) })).status).toBe(409);
+    expect((await hk1.get('/api/auth/me')).body.user.branch.id).toBe(cn1);
 
     // No name on the inspection: the shift's cleaner is recorded.
     const res = await inspect({ roomNumber: '301', issues: [{ type: 'ODOR' }] });
@@ -400,7 +401,7 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     expect(stored.workSegmentId).not.toBeNull();
   });
 
-  it('"Vào ca" names no branch: the account’s is used', async () => {
+  it('"Vào ca" names no branch id: the address decides', async () => {
     await hk1.post('/api/housekeeping/shift/end').send({});
     const started = await hk1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) });
     expect(started.status).toBe(201);
@@ -408,12 +409,11 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     expect(started.body.shift.current.staffName).toBe('Buồng Một');
   });
 
-  it('never moves to another branch, and keeps the day’s summary at "Kết thúc ca"', async () => {
+  it('moves only by "Kết thúc ca" and "Vào ca" again, and keeps the day’s summary', async () => {
     await inspect({ roomNumber: '301', staffName: 'Chị Lan', issues: [{ type: 'ODOR' }, { type: 'SMOKING' }] });
     setClock({ now: () => hcm('2026-09-19', '14:00') });
-    // "Đổi chi nhánh" cannot take the worker anywhere else — and it is already home.
-    expect((await hk1.post('/api/housekeeping/shift/switch').send({ branchId: cn2 })).status).toBe(403);
-    expect((await hk1.post('/api/housekeeping/shift/switch').send({ branchId: cn1 })).status).toBe(422);
+    // "Đổi chi nhánh" by an id is no longer offered.
+    expect((await hk1.post('/api/housekeeping/shift/switch').send({ branchId: cn2 })).status).toBe(409);
     expect((await hk1.get('/api/auth/me')).body.user.branch.id).toBe(cn1);
     expect((await hk1.get(`/api/branches/${cn2}/rooms`)).status).toBe(403);
     await inspect({ roomNumber: '302', issues: [{ type: 'LOST_ITEM' }] });
@@ -427,10 +427,12 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     expect(day.segments[0]).toMatchObject({ rooms: 2, inspections: 2, issues: 3, staffName: 'Chị Lan' });
     expect(day.totals).toMatchObject({ inspections: 2, issues: 3 });
 
-    // Off shift: the branch is still the account's, but nothing can be inspected.
+    // Off shift: no branch at all, and nothing can be inspected.
     expect((await shift()).body.shift).toBeNull();
-    expect((await hk1.get('/api/auth/me')).body.user.branch.id).toBe(cn1);
-    expect((await inspect({ roomNumber: '301', staffName: 'X', issues: [{ type: 'ODOR' }] })).status).toBe(409);
+    expect((await hk1.get('/api/auth/me')).body.user.branch).toBeNull();
+    const refused = await inspect({ roomNumber: '301', staffName: 'X', issues: [{ type: 'ODOR' }] });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error.message).toContain('Vào ca');
 
     // The Admin reads the workday.
     const all = await admin.get('/api/housekeeping/shifts?from=2026-09-19&to=2026-09-19');
@@ -438,51 +440,43 @@ describe('the housekeeping workday — "Vào ca", "Đổi chi nhánh", "Kết th
     expect(mine.segments).toHaveLength(1);
   });
 
-  it('keeps a shift opened elsewhere as history, refuses work on it, and lets it return home', async () => {
-    // A shift opened at CN2 before the Admin fixed this account at CN1.
+  it('works wherever the open shift is, and keeps each shift — and its records — where they were', async () => {
+    await inspect({ roomNumber: '301', issues: [{ type: 'ODOR' }] });
     await hk1.post('/api/housekeeping/shift/end').send({});
-    const hk1Id = (await testPrisma.user.findUniqueOrThrow({ where: { username: 'buong1' } })).id;
-    const at = hcm('2026-09-19', '10:00');
-    await testPrisma.housekeepingWorkSession.create({
-      data: { userId: hk1Id, startedAt: at, segments: { create: { branchId: cn2, staffName: 'Buồng Một', startedAt: at } } },
-    });
-    expect((await inspect({ roomNumber: '301', issues: [{ type: 'ODOR' }] })).status).toBe(403);
-    // "Đổi chi nhánh" only ever goes home; the CN2 segment stays on record.
     setClock({ now: () => hcm('2026-09-19', '11:00') });
-    const home = await hk1.post('/api/housekeeping/shift/switch').send({});
-    expect(home.status).toBe(200);
-    expect(home.body.shift.segments.map((g: { branch: { id: number } }) => g.branch.id)).toEqual([cn2, cn1]);
-    expect((await inspect({ roomNumber: '301', issues: [{ type: 'ODOR' }] })).status).toBe(201);
+    const elsewhere = await hk1.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn2) });
+    expect(elsewhere.status).toBe(201);
+    expect((await inspect({ roomNumber: '301', issues: [{ type: 'SMOKING' }] })).status).toBe(201);
+    const recorded = await testPrisma.roomInspection.findMany({ where: { roomNumber: '301' }, orderBy: { createdAt: 'asc' }, select: { branchId: true } });
+    expect(recorded.map((r) => r.branchId)).toEqual([cn1, cn2]);
+    // The other branch's room list is now the one it may read.
+    expect((await hk1.get(`/api/branches/${cn2}/rooms`)).status).toBe(200);
+    expect((await hk1.get(`/api/branches/${cn1}/rooms`)).status).toBe(403);
   });
 
-  it('needs exactly one branch on a new account, and the Admin can move it later', async () => {
+  it('creates a housekeeping account with no branch — the Admin never gives it one', async () => {
     const base = { fullName: 'Buồng mới', temporaryPassword: 'TempPass123', role: 'HOUSEKEEPING' };
-    expect((await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi' })).status).toBe(422);
+    expect((await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi', branchId: cn1 })).status).toBe(422);
     expect((await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi', branchIds: [cn1, cn2] })).status).toBe(422);
-    const res = await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi', branchId: cn1 });
+    const res = await admin.post('/api/admin/users').send({ ...base, username: 'buong_moi' });
     expect(res.status).toBe(201);
-    expect(res.body.user.branch.id).toBe(cn1);
-    const moved = await admin.put(`/api/admin/users/${res.body.user.id}`).send({ branchId: cn2 });
-    expect(moved.status).toBe(200);
-    expect(moved.body.user.branch.id).toBe(cn2);
-    const listed = (await admin.get('/api/admin/users')).body.users.find((u: { username: string }) => u.username === 'buong_moi');
-    expect(listed.branch.id).toBe(cn2);
+    expect(res.body.user.branch).toBeNull();
+    expect((await admin.put(`/api/admin/users/${res.body.user.id}`).send({ branchId: cn2 })).status).toBe(422);
     await testPrisma.user.delete({ where: { username: 'buong_moi' } });
   });
 
-  it('refuses all work to an account with no branch, until the Admin assigns one', async () => {
+  it('lets an account with no branch work at the hotel it names', async () => {
     const lone = await createUser({ username: 'buong_le', password: RECEPTIONIST_PASSWORD, fullName: 'Buồng lẻ', role: 'HOUSEKEEPING', branchId: null, mustChangePassword: false });
     const agent = (await loginAgent(app, 'buong_le', RECEPTIONIST_PASSWORD)).agent;
     expect((await agent.get('/api/auth/me')).body.user.branch).toBeNull();
-    expect((await agent.post('/api/housekeeping/shift/start').send({})).status).toBe(403);
-    expect((await agent.post('/api/housekeeping/shift/start').send({ branchId: cn1 })).status).toBe(403);
-    expect((await agent.get('/api/housekeeping/work?date=2026-09-19')).status).toBe(403);
     expect((await agent.get('/api/branches')).body.branches).toEqual([]);
+    expect((await agent.get('/api/housekeeping/work?date=2026-09-19')).status).toBe(403);
+    expect((await agent.post('/api/housekeeping/shift/start').send({})).status).toBe(422);
 
-    expect((await admin.put(`/api/admin/users/${lone.id}`).send({ branchId: cn2 })).status).toBe(200);
-    const started = await agent.post('/api/housekeeping/shift/start').send({ address: await workplaceOf(agent) });
+    const started = await agent.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn2) });
     expect(started.status).toBe(201);
     expect(started.body.shift.current.branch.id).toBe(cn2);
+    expect((await agent.get('/api/branches')).body.branches.map((b: { id: number }) => b.id)).toEqual([cn2]);
 
     await agent.post('/api/housekeeping/shift/end').send({});
     await testPrisma.housekeepingWorkSegment.deleteMany({ where: { session: { userId: lone.id } } });

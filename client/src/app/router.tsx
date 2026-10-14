@@ -50,6 +50,7 @@ import {
 
 /** "Quản lý buồng phòng" — its branch; the Admin, every branch. The server scopes. */
 const HK_MANAGER_ROLES: readonly UserRole[] = ['ADMIN', 'HOUSEKEEPING_MANAGER'];
+const ROOM_WORKER_ROLES: readonly UserRole[] = ['HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'];
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -270,7 +271,8 @@ export function AppRoutes() {
             The server is the boundary; these gates only render a forbidden page.
           */}
           <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
-          <Route path="inspections/room/:id" element={<RequireRole role="HOUSEKEEPING"><HousekeepingRoomPage /></RequireRole>} />
+          {/* A room is worked by its housekeeper — or by the Quản lý buồng phòng who took its group. */}
+          <Route path="inspections/room/:id" element={<RequireRole role={ROOM_WORKER_ROLES}><HousekeepingRoomPage /></RequireRole>} />
           <Route path="my-kpi" element={<RequireRole role="HOUSEKEEPING"><HousekeepingKpiPage /></RequireRole>} />
           {/* "Quản lý buồng phòng": six focused screens. */}
           <Route path="hk" element={<Navigate to="/app/hk/overview" replace />} />

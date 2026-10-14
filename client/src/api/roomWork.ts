@@ -71,16 +71,37 @@ export interface TaskEvent {
   createdAt: string;
 }
 
-/** Where a work item is: a room, or a shared area of a floor. */
-export type WorkAreaKind = 'ROOM' | 'HALLWAY' | 'STAIRCASE' | 'OTHER';
+/** Where a work item is: a room, a shared area of a floor, or the Rooftop. */
+export type WorkAreaKind = 'ROOM' | 'HALLWAY' | 'STAIRCASE' | 'OTHER' | 'ROOFTOP';
 
 /**
  * Where a work item stands — the order the work goes in. Computed by the server
  * (`workAreas.workPhase`) from the record, so every screen says the same.
  */
-export type WorkPhase = 'UNCLAIMED' | 'ACCEPTED' | 'INSPECTING' | 'AWAITING_CLEANING' | 'CLEANING' | 'COMPLETED' | 'VOIDED';
+export type WorkPhase =
+  | 'UNCLAIMED'
+  | 'ACCEPTED'
+  | 'INSPECTING'
+  | 'AWAITING_CLEANING'
+  | 'CLEANING'
+  | 'COMPLETED'
+  | 'NO_CLEAN_PENDING'
+  | 'NO_CLEAN'
+  | 'VOIDED';
 
-export const WORK_PHASE_ORDER: WorkPhase[] = ['UNCLAIMED', 'ACCEPTED', 'INSPECTING', 'AWAITING_CLEANING', 'CLEANING', 'COMPLETED'];
+export const WORK_PHASE_ORDER: WorkPhase[] = [
+  'UNCLAIMED',
+  'ACCEPTED',
+  'INSPECTING',
+  'AWAITING_CLEANING',
+  'CLEANING',
+  'COMPLETED',
+  'NO_CLEAN_PENDING',
+  'NO_CLEAN',
+];
+
+/** "Việc cần làm" of a place: OUT / OC / VC (one at most) and/or "Khác". */
+export type WorkTaskCode = 'OUT' | 'OC' | 'VC' | 'OTHER';
 
 export interface RoomTask {
   id: string;
@@ -102,6 +123,20 @@ export interface RoomTask {
   /** "Việc cần làm": "OC", "Dọn lối đi". */
   taskLabel?: string;
   groupId?: string | null;
+  /** The ticked codes (OUT / OC / VC and/or OTHER); an older item: its one code. */
+  taskCodes?: string[];
+  /** "Công việc N" — null for an item created before work groups existed. */
+  workGroup?: { id: string; number: number; name: string | null } | null;
+  /** "Không cần dọn": the housekeeper's request and the manager's decision. */
+  noClean?: {
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    reason: string | null;
+    requestedAt: string | null;
+    requestedByName: string | null;
+    decidedAt: string | null;
+    decidedByName: string | null;
+    decisionNote: string | null;
+  } | null;
   phase?: WorkPhase;
   phaseLabel?: string;
   acceptedAt?: string | null;
@@ -158,18 +193,48 @@ export interface WorkAreas {
   /** Rooms no floor can be read for — listed, never hidden. */
   unplacedRooms: string[];
   unplacedLabel: string;
-  sharedAreas: { kind: Exclude<WorkAreaKind, 'ROOM'>; label: string }[];
+  sharedAreas: { kind: 'HALLWAY' | 'STAIRCASE' | 'OTHER'; label: string }[];
+  /** Only the branches that have one. */
+  hasRooftop?: boolean;
+  rooftopLabel?: string;
   roomTaskCodes: { code: string; label: string }[];
 }
 
-export interface WorkItemInput {
+/** One room / area of a work group as the form sends it. */
+export interface GroupItemInput {
   areaKind: WorkAreaKind;
   roomNumber?: string;
   floor?: string;
-  taskCode?: string;
-  taskName?: string;
+  taskCodes: WorkTaskCode[];
   note?: string;
   priority?: boolean;
+}
+
+/** "Công việc N" — one or many rooms / areas, given out and accepted together. */
+export interface WorkGroup {
+  id: string;
+  branchId: number;
+  branch: { id: number; code: string; hotelName: string; address: string; branchNumber: number };
+  workDate: string;
+  number: number;
+  title: string;
+  name: string | null;
+  assignee: { id: number; name: string } | null;
+  acceptedAt: string | null;
+  status: { code: 'UNASSIGNED' | 'ACCEPTED' | 'IN_PROGRESS' | 'DONE'; label: string };
+  floors: string[];
+  counts: { items: number; completed: number; noCleanPending: number };
+  /** Every place, removed ones included (`voided`). */
+  items: RoomTask[];
+  createdByName: string;
+  createdAt: string;
+}
+
+export interface WorkerHistory {
+  workDate: string;
+  items: RoomTask[];
+  totals: { completed: number; noClean: number };
+  shifts: WorkShiftLite[];
 }
 
 export interface ReviewInput {
@@ -276,7 +341,7 @@ export const roomWorkApi = {
     note?: string;
     assigneeUserId?: number | null;
   }) => api.post<{ created: number; skipped: string[] }>('/housekeeping/manager/tasks', input),
-  updateTask: (id: string, input: { statusCode?: string; priority?: boolean; note?: string | null }) =>
+  updateTask: (id: string, input: { statusCode?: string; taskCodes?: WorkTaskCode[]; priority?: boolean; note?: string | null }) =>
     api.patch<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}`, input),
   assign: (id: string, assigneeUserId: number | null) =>
     api.post<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}/assign`, { assigneeUserId }),
@@ -287,9 +352,20 @@ export const roomWorkApi = {
   history: (id: string) => api.get<{ cycles: RoomTask[] }>(`/housekeeping/manager/tasks/${id}/history`),
   /** "Chọn khu vực". */
   areas: (p: { branchId?: number }) => api.get<{ areas: WorkAreas }>(`/housekeeping/manager/areas${query({ ...p })}`),
-  /** "Tạo công việc": one or many items; `requestId` makes a repeat harmless. */
-  createWorkItems: (input: { branchId?: number; workDate: string; requestId: string; items: WorkItemInput[] }) =>
-    api.post<{ created: number; duplicate: boolean; tasks: RoomTask[] }>('/housekeeping/manager/work-items', input),
+  /** The day's work groups ("Công việc 1, 2, …") of the branch. */
+  workGroups: (p: { date: string; branchId?: number }) =>
+    api.get<{ groups: WorkGroup[] }>(`/housekeeping/manager/work-groups${query({ ...p })}`),
+  /** "Tạo công việc": one group, its places; `requestId` makes a repeat harmless. */
+  createWorkGroup: (input: { branchId?: number; workDate: string; requestId: string; name?: string; items: GroupItemInput[] }) =>
+    api.post<{ duplicate: boolean; group: WorkGroup }>('/housekeeping/manager/work-groups', input),
+  renameWorkGroup: (id: string, name: string | null) => api.patch<{ group: WorkGroup }>(`/housekeeping/manager/work-groups/${id}`, { name }),
+  addWorkGroupItems: (id: string, items: GroupItemInput[]) =>
+    api.post<{ group: WorkGroup }>(`/housekeeping/manager/work-groups/${id}/items`, { items }),
+  assignWorkGroup: (id: string, assigneeUserId: number | null) =>
+    api.post<{ group: WorkGroup }>(`/housekeeping/manager/work-groups/${id}/assign`, { assigneeUserId }),
+  /** "Không cần dọn": approve (the place leaves the work) or reject (back to work). */
+  decideNoClean: (id: string, approve: boolean, note?: string) =>
+    api.post<{ task: RoomTask }>(`/housekeeping/manager/tasks/${id}/no-clean-decision`, note ? { approve, note } : { approve }),
   /** "Các công việc trong ngày" for the reception managers (their branches). */
   workOrders: (p: { date: string; branchId?: number }) =>
     api.get<{ tasks: RoomTask[] }>(`/housekeeping/work-orders${query({ ...p })}`),
@@ -323,7 +399,15 @@ export const roomWorkApi = {
   myTasks: (date: string) => api.get<{ tasks: RoomTask[] }>(`/housekeeping/work?date=${date}`),
   /** The items of the open shift's branch: one's own and the unclaimed. `working` false: no shift yet. */
   workItems: (date: string) => api.get<{ working: boolean; tasks: RoomTask[] }>(`/housekeeping/work/items?date=${date}`),
-  /** "Nhận": exactly these items, all or none. */
+  /** The day's work groups at the shift's branch, and who holds each. `working` false: no shift. */
+  workerGroups: (date: string) => api.get<{ working: boolean; groups: WorkGroup[] }>(`/housekeeping/work/groups?date=${date}`),
+  /** "Nhận công việc": the whole group. */
+  acceptGroup: (id: string) => api.post<{ group: WorkGroup }>(`/housekeeping/work/groups/${id}/accept`, {}),
+  /** "Không cần dọn" for one room, with the reason. */
+  requestNoClean: (id: string, reason: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/no-clean`, { reason }),
+  /** The housekeeper's own finished work of a day. */
+  workerHistory: (date: string) => api.get<WorkerHistory>(`/housekeeping/work/history?date=${date}`),
+  /** "Nhận" (an item created before work groups): exactly these items, all or none. */
   claim: (taskIds: string[]) => api.post<{ tasks: RoomTask[] }>('/housekeeping/work/claim', { taskIds }),
   /** "Kiểm tra": the inspection begins. */
   beginInspection: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/begin-inspection`, {}),

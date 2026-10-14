@@ -8,7 +8,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/auth';
-import { createWorkplaceRateLimiter } from '../middleware/rateLimit';
+import { createWorkplaceLookupRateLimiter, createWorkplaceRateLimiter } from '../middleware/rateLimit';
 import { getClock } from '../lib/clock';
 import { hcmRange } from '../booking/recreationReport';
 import {
@@ -28,7 +28,7 @@ import {
   ROOM_ISSUE_TYPES,
   ROOM_ISSUE_TYPE_LABELS,
 } from '../housekeeping/roomIssueTypes';
-import { currentShift, endShift, listShifts, startShift, switchShiftBranch } from '../housekeeping/workShiftService';
+import { currentShift, endShift, listShifts, lookupWorkplace, startShift, switchShiftBranch } from '../housekeeping/workShiftService';
 
 const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const TYPE = z.enum(ROOM_ISSUE_TYPES as [string, ...string[]]);
@@ -52,17 +52,19 @@ const collectionSchema = z.object({
 
 const voidSchema = z.object({ reason: z.string() });
 
-/** "Vào ca" / "Đổi chi nhánh": the account's branch (a branch sent must be it), and who cleans. */
-const shiftBranchSchema = z.object({
+/**
+ * "Vào ca": the hotel's address as typed — resolved by the service. A branch id
+ * the browser sends is not a way to pick the branch and is ignored.
+ */
+const shiftStartSchema = z.object({
   branchId: z.number().int().positive().optional(),
   // Optional: the account is the person; a name is kept only when one is sent.
   staffName: z.string().trim().max(100).optional(),
-});
-
-/** "Vào ca": the hotel's address as typed — resolved by the service, never echoed back. */
-const shiftStartSchema = shiftBranchSchema.extend({
   address: z.string().max(500).optional(),
 });
+
+/** "Vào ca", step one: what the typed start of an address identifies. */
+const shiftLookupSchema = z.object({ address: z.string().max(500).optional() });
 
 const shiftListSchema = z.object({
   branchId: z.coerce.number().int().positive().optional(),
@@ -92,6 +94,7 @@ export function createHousekeepingRouter(): Router {
   const router = Router();
   // One per app: an account's "Vào ca" address attempts are counted (see rateLimit.ts).
   const workplaceLimiter = createWorkplaceRateLimiter();
+  const lookupLimiter = createWorkplaceLookupRateLimiter();
   router.use(
     '/housekeeping',
     requireAuth,
@@ -173,13 +176,22 @@ export function createHousekeepingRouter(): Router {
     THE HOUSEKEEPING WORKDAY — "Vào ca", "Đổi chi nhánh", "Kết thúc ca", and the
     history of workdays. The account itself only ever acts on its own workday.
   */
-  router.get('/housekeeping/shift', requireRole('HOUSEKEEPING'), (req, res, next) => {
+  router.get('/housekeeping/shift', requireRole('HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'), (req, res, next) => {
     (async () => {
       res.json({ shift: await currentShift(actorOf(req)) });
     })().catch(next);
   });
 
-  router.post('/housekeeping/shift/start', requireRole('HOUSEKEEPING'), workplaceLimiter, (req, res, next) => {
+  // Only the ONE branch the input uniquely identifies is named back; otherwise a
+  // generic "nhập thêm". Every lookup counts toward the account's limit.
+  router.post('/housekeeping/shift/lookup', requireRole('HOUSEKEEPING'), lookupLimiter, (req, res, next) => {
+    (async () => {
+      const body = shiftLookupSchema.parse(req.body ?? {});
+      res.json(await lookupWorkplace(actorOf(req), body));
+    })().catch(next);
+  });
+
+  router.post('/housekeeping/shift/start', requireRole('HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'), workplaceLimiter, (req, res, next) => {
     (async () => {
       const body = shiftStartSchema.parse(req.body ?? {});
       res.status(201).json({ shift: await startShift(actorOf(req), body, getClock()) });
@@ -188,12 +200,11 @@ export function createHousekeepingRouter(): Router {
 
   router.post('/housekeeping/shift/switch', requireRole('HOUSEKEEPING'), (req, res, next) => {
     (async () => {
-      const body = shiftBranchSchema.parse(req.body ?? {});
-      res.json({ shift: await switchShiftBranch(actorOf(req), body, getClock()) });
+      res.json({ shift: await switchShiftBranch(actorOf(req)) });
     })().catch(next);
   });
 
-  router.post('/housekeeping/shift/end', requireRole('HOUSEKEEPING'), (req, res, next) => {
+  router.post('/housekeeping/shift/end', requireRole('HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'), (req, res, next) => {
     (async () => {
       res.json({ shift: await endShift(actorOf(req), getClock()) });
     })().catch(next);

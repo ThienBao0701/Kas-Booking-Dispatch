@@ -16,6 +16,12 @@ interface ModalProps {
    */
   /** `4xl` (896px) is for a form that needs a four-column grid, e.g. a payment. */
   size?: 'lg' | 'xl' | '2xl' | '4xl';
+  /**
+   * Where the dialog sits. `center` (the default) suits a short, fixed form.
+   * `top` keeps its top edge still while its content grows — a picker that adds
+   * rows below would otherwise shift up by half of every row added.
+   */
+  anchor?: 'center' | 'top';
 }
 
 const WIDTH: Record<NonNullable<ModalProps['size']>, string> = {
@@ -26,7 +32,7 @@ const WIDTH: Record<NonNullable<ModalProps['size']>, string> = {
 };
 
 /** A minimal accessible modal dialog (Escape / overlay to close). */
-export function Modal({ open, title, onClose, children, footer, size = 'lg' }: ModalProps) {
+export function Modal({ open, title, onClose, children, footer, size = 'lg', anchor = 'center' }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -39,7 +45,7 @@ export function Modal({ open, title, onClose, children, footer, size = 'lg' }: M
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className={`fixed inset-0 z-50 flex justify-center p-4 ${anchor === 'top' ? 'items-start' : 'items-center'}`}>
       <div className="absolute inset-0 bg-slate-900/40" onClick={onClose} aria-hidden="true" />
       {/*
         HEADER AND FOOTER STAY PUT; THE BODY SCROLLS.

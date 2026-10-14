@@ -44,6 +44,8 @@ export const GLOBAL_ROLES: readonly ManageableRole[] = [
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
   'TECHNICAL_GENERAL_MANAGER',
+  // No permanent branch: the hotel is named by its address at "Vào ca".
+  'HOUSEKEEPING',
 ];
 
 export function requiresBranch(role: ManageableRole | undefined): boolean {
@@ -51,11 +53,12 @@ export function requiresBranch(role: ManageableRole | undefined): boolean {
 }
 
 /**
- * Quản lý buồng phòng and Bộ phận buồng phòng: exactly ONE branch, chosen in the
- * same checkbox list — the worker's "Vào ca" opens the shift there.
+ * Quản lý buồng phòng: exactly ONE branch, chosen in the same checkbox list —
+ * the branch whose housekeeping work it manages. Bộ phận buồng phòng has none:
+ * each shift is at the hotel the housekeeper names at "Vào ca".
  */
 export function requiresSingleBranchChoice(role: UserRole | undefined): boolean {
-  return role === 'HOUSEKEEPING_MANAGER' || role === 'HOUSEKEEPING';
+  return role === 'HOUSEKEEPING_MANAGER';
 }
 
 /** Quản lý lễ tân, Quản lý kỹ thuật and Tổng quản lý kỹ thuật pick their branches — one or more, with checkboxes. */

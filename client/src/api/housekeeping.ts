@@ -196,7 +196,14 @@ export const housekeepingApi = {
   shift: () => api.get<{ shift: WorkShift | null }>('/housekeeping/shift'),
   /** "Vào ca" — at the account's branch; the server decides it. */
   /** "Vào ca": the hotel named by its typed address — the server resolves it, never lists branches. */
-  startShift: (address: string) => api.post<{ shift: WorkShift }>('/housekeeping/shift/start', { address }),
+  /** "Vào ca", step one: only the ONE hotel the typed start of an address identifies. */
+  lookupWorkplace: (address: string) =>
+    api.post<
+      | { status: 'RESOLVED'; branch: { address: string; branchNumber: number } }
+      | { status: 'AMBIGUOUS' | 'NONE'; message: string }
+    >('/housekeeping/shift/lookup', { address }),
+  /** A housekeeper names the hotel by address; a Quản lý buồng phòng starts at its own branch (no address). */
+  startShift: (address?: string) => api.post<{ shift: WorkShift }>('/housekeeping/shift/start', address === undefined ? {} : { address }),
   /** "Kết thúc ca": the day's summary comes back. */
   endShift: () => api.post<{ shift: WorkShift }>('/housekeeping/shift/end', {}),
   /** Workdays on record: one's own, or a supervisor's scope. */

@@ -42,6 +42,11 @@ const GLOBAL_ROLES: readonly string[] = [
   'TECHNICAL_MANAGER',
   // All branches by definition — no `branchId`, no assignment rows.
   'RECEPTION_GENERAL_MANAGER',
+  // Bộ phận buồng phòng: no permanent branch — the hotel is named by its
+  // address at "Vào ca", and the shift's branch scopes all its work. Branch
+  // access is given to the Quản lý buồng phòng instead. A `branchId` an older
+  // account still carries is kept as history and not used.
+  'HOUSEKEEPING',
   // Several branches, through UserBranchAssignment — never one `branchId`.
   'RECEPTION_MANAGER',
   'TECHNICAL_MANAGER',
@@ -94,11 +99,6 @@ const createUserSchema = z
   })
   .refine((v) => v.role !== 'HOUSEKEEPING_MANAGER' || v.branchId !== undefined, {
     message: 'Quản lý buồng phòng phải được gán đúng một chi nhánh.',
-    path: ['branchId'],
-  })
-  // Bộ phận buồng phòng: the one branch it works at — "Vào ca" opens the shift there.
-  .refine((v) => v.role !== 'HOUSEKEEPING' || v.branchId !== undefined, {
-    message: 'Bộ phận buồng phòng phải được gán đúng một chi nhánh.',
     path: ['branchId'],
   })
   .refine((v) => !GLOBAL_ROLES.includes(v.role) || v.branchId === undefined, {

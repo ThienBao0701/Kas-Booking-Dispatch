@@ -16,6 +16,7 @@ import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, createAdmin, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
+import { workedRecentlyAt } from './helpers/workplace';
 import { serveAllBranches } from './helpers/issues';
 import { notifyOperational, pushNotification, setPushSender, settlePushes } from '../src/push/pushService';
 import { encryptPayload, generateVapidKeys, isPushServiceEndpoint, vapidAuthorization } from '../src/push/webPush';
@@ -85,6 +86,8 @@ beforeEach(async () => {
     return answer(subscription.endpoint);
   });
   setClock({ now: () => hcm(DAY, '08:00') });
+  // A branch's staff are the housekeepers who worked there lately (no permanent branch).
+  for (const [name, branchId] of [['lan', cn1], ['hoa', cn1], ['mai', cn2]] as const) await workedRecentlyAt(ids[name]!, branchId, hcm(DAY, '08:00'));
 });
 
 afterEach(async () => {

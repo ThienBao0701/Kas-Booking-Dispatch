@@ -18,7 +18,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, BedDouble, ClipboardCheck, Download, FileSpreadsheet, FileText, Plus, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { ArrowRight, BedDouble, ClipboardCheck, Download, FileSpreadsheet, FileText, Hand, LogIn, LogOut, Plus, Users, Wallet, type LucideIcon } from 'lucide-react';
 import {
   ROOM_WORK_KEY,
   formatMinutes,
@@ -29,9 +29,12 @@ import {
   type KpiRow,
   type FindingLine,
   type OperationsRow,
+  type WorkGroup,
 } from '../api/roomWork';
 import { branchesApi } from '../api/bookings';
-import type { RoomCollectionStatus } from '../api/housekeeping';
+import { HOUSEKEEPING_SHIFT_KEY, housekeepingApi, type RoomCollectionStatus, type WorkShift } from '../api/housekeeping';
+import { useWorkStep } from '../api/useWorkStep';
+import { AcceptGroupDialog, OwnAction } from '../components/HkWorkerActions';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel, type Branch } from '../auth/types';
@@ -43,7 +46,9 @@ import { Modal } from '../components/Modal';
 import { QueryState } from '../components/PageState';
 import { BranchPicker, ReportFilterBar } from '../components/ReportFilter';
 import { RoomTaskDetail } from '../components/RoomTaskDetail';
-import { CreateWorkDialog, ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
+import { PhaseBadge, ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
+import { CodeChips, CreateWorkDialog, NoCleanReviewList, WorkGroupCard, WorkGroupEditor } from '../components/HkWorkGroups';
+import { placeText } from '../lib/workPlaces';
 import { can } from '../auth/capabilities';
 import { Toast } from '../components/Toast';
 import {
@@ -51,8 +56,6 @@ import {
   CodeTag,
   HkHeader,
   HkSection,
-  ManagerLegend,
-  ManagerRoomBoard,
   Metric,
   PriorityBadge,
   ProgressBar,
@@ -676,6 +679,79 @@ function useBranchStaff(branchId: number | undefined) {
  * Tình trạng phòng — the board, and setting rooms up on it
  * ------------------------------------------------------------------ */
 
+/**
+ * "CA LÀM VIỆC" OF A QUẢN LÝ BUỒNG PHÒNG who does room work itself: at its own
+ * branch, no address to type. On shift it can take a group ("Nhận công việc");
+ * its inspections and cleanings are recorded on that shift like a housekeeper's.
+ */
+function ManagerShiftBar({ shift, loading, onChanged }: { shift: WorkShift | null; loading: boolean; onChanged: (message: string) => void }) {
+  const queryClient = useQueryClient();
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: HOUSEKEEPING_SHIFT_KEY });
+    await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+  };
+  const start = useMutation({ mutationFn: () => housekeepingApi.startShift(), onSuccess: async () => { await refresh(); onChanged('Đã vào ca làm việc.'); } });
+  const end = useMutation({ mutationFn: () => housekeepingApi.endShift(), onSuccess: async () => { await refresh(); onChanged('Đã kết thúc ca làm việc.'); } });
+  const current = shift?.current ?? null;
+  return (
+    <section
+      className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-white px-4 py-3"
+      aria-label="Ca làm việc của bạn"
+      data-testid="manager-shift"
+    >
+      <p className="text-sm text-slate-700">
+        {loading ? 'Đang tải ca làm việc…' : current ? (
+          <>
+            <span className="font-semibold text-slate-900">Bạn đang trong ca làm việc</span> từ {formatDateTime(current.startedAt)} — có thể nhận và làm công việc.
+          </>
+        ) : (
+          'Muốn tự nhận và làm công việc? Vào ca làm việc tại chi nhánh của bạn.'
+        )}
+      </p>
+      {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
+      {end.isError ? <ErrorAlert>{toUserMessage(end.error)}</ErrorAlert> : null}
+      {current ? (
+        <Button variant="secondary" onClick={() => end.mutate()} loading={end.isPending} data-testid="manager-shift-end">
+          <LogOut className="h-4 w-4" aria-hidden="true" />
+          Kết thúc ca
+        </Button>
+      ) : (
+        <Button variant="secondary" onClick={() => start.mutate()} loading={start.isPending} disabled={loading} data-testid="manager-shift-start">
+          <LogIn className="h-4 w-4" aria-hidden="true" />
+          Vào ca làm việc
+        </Button>
+      )}
+    </section>
+  );
+}
+
+/**
+ * A room set up before work groups existed — shown as its own small card in
+ * "Phòng đang thực hiện", worked exactly as before.
+ */
+function OlderTaskCard({ task: t, onOpen }: { task: RoomTask; onOpen: () => void }) {
+  return (
+    <article className="rounded-2xl border border-dashed border-line-strong bg-white px-4 py-3" data-testid={`older-task-${t.roomNumber}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
+          <p className="text-sm font-bold text-slate-900">
+            {placeText(t)} <span className="text-xs font-medium text-slate-500">(giao trước khi có nhóm công việc)</span>
+            {t.reclean ? <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">Cần dọn lại</span> : null}
+          </p>
+          <p className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+            <span>{t.assignee ? `Người làm: ${t.assignee.name}` : 'Chưa giao'}</span>
+            <PhaseBadge task={t} />
+          </p>
+          <CodeChips task={t} />
+        </div>
+        <Button variant="secondary" onClick={onOpen} aria-label={`Xem chi tiết phòng ${t.roomNumber}`} data-testid={`older-task-open-${t.roomNumber}`}>
+          Chi tiết
+        </Button>
+      </div>
+    </article>
+  );
+}
+
 export function HkRoomBoardPage() {
   const [date, setDate] = useState(hcmToday());
   const scope = useScope(false);
@@ -684,9 +760,9 @@ export function HkRoomBoardPage() {
   const [failing, setFailing] = useState<RoomTask | null>(null);
   const [creating, setCreating] = useState(false);
   const [reassigning, setReassigning] = useState<RoomTask | null>(null);
+  const [editing, setEditing] = useState<WorkGroup | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const { user } = useAuth();
-  const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
   const staff = useBranchStaff(scope.branchId);
   const tasks = useQuery({
     queryKey: [...ROOM_WORK_KEY, 'tasks', date, scope.branchId ?? null],
@@ -694,8 +770,27 @@ export function HkRoomBoardPage() {
     enabled: scope.branchId !== undefined,
     refetchInterval: 30_000,
   });
+  // "Công việc 1, 2, …" in creation order — the board's main view.
+  const groups = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'groups', date, scope.branchId ?? null],
+    queryFn: () => roomWorkApi.workGroups({ date, branchId: scope.branchId }),
+    enabled: scope.branchId !== undefined,
+    refetchInterval: 30_000,
+  });
   const live = tasks.data?.tasks ?? [];
   const b = splitBoard(live);
+  const dayGroups = (groups.data?.groups ?? []).filter((g) => g.counts.items > 0);
+  // Rooms set up before work groups existed are shown on their own, as before.
+  const olderActive = b.active.filter((t) => !t.workGroup);
+  const noCleanPending = [...dayGroups.flatMap((g) => g.items), ...olderActive].filter((t) => t.noClean?.status === 'PENDING' && !t.voided);
+  // A Quản lý buồng phòng may also take a group and do the work itself — on a
+  // shift at its own branch (the server checks the role, branch, shift and owner).
+  const worksToo = user?.role === 'HOUSEKEEPING_MANAGER';
+  const myShift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift(), enabled: worksToo });
+  const onShift = Boolean(myShift.data?.shift?.current);
+  const [accepting, setAccepting] = useState<WorkGroup | null>(null);
+  const step = useWorkStep(() => void groups.refetch());
+  const mine = (t: RoomTask) => worksToo && t.assignee?.id === user?.id && !t.voided && t.phase !== 'COMPLETED' && t.phase !== 'NO_CLEAN_PENDING';
 
   return (
     <div>
@@ -721,7 +816,8 @@ export function HkRoomBoardPage() {
         <PickBranchFirst />
       ) : (
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-8" data-testid="board-summary">
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-9" data-testid="board-summary">
+            <Metric label="Công việc" value={dayGroups.length} testId="metric-groups" />
             <Metric label="Đang thực hiện" value={b.active.length} />
             <Metric label="Chưa bắt đầu" value={b.notStarted} tone="gray" />
             <Metric label="Đã kiểm tra" value={b.inspected} tone="amber" />
@@ -732,14 +828,67 @@ export function HkRoomBoardPage() {
             <Metric label="Ưu tiên" value={b.priority} tone="red" />
           </div>
           <div className="min-w-0 space-y-5">
-            <HkSection title="Phòng đang thực hiện" testId="board-active" aside={<ManagerLegend />}>
-              <QueryState isLoading={tasks.isLoading} isError={tasks.isError} error={tasks.error} onRetry={() => void tasks.refetch()}>
-                {live.length === 0 ? (
+            {noCleanPending.length > 0 ? (
+              <HkSection
+                title="Chờ duyệt “Không cần dọn”"
+                testId="board-no-clean"
+                accent
+                aside={<Badge tone="amber">{noCleanPending.length} phòng</Badge>}
+              >
+                <NoCleanReviewList items={noCleanPending} onDecided={setToast} />
+              </HkSection>
+            ) : null}
+            {worksToo ? <ManagerShiftBar shift={myShift.data?.shift ?? null} loading={myShift.isLoading} onChanged={setToast} /> : null}
+            <HkSection title="Phòng đang thực hiện" testId="board-active">
+              <QueryState
+                isLoading={tasks.isLoading || groups.isLoading}
+                isError={tasks.isError || groups.isError}
+                error={tasks.error ?? groups.error}
+                onRetry={() => {
+                  void tasks.refetch();
+                  void groups.refetch();
+                }}
+              >
+                {dayGroups.length === 0 && olderActive.length === 0 ? (
                   <p className="py-6 text-center text-sm text-slate-500">Chưa có công việc nào ngày này — bấm “+ Tạo công việc”.</p>
-                ) : b.active.length === 0 ? (
-                  <p className="py-4 text-center text-sm text-slate-500">Không có phòng đang thực hiện.</p>
                 ) : (
-                  <ManagerRoomBoard tasks={b.active} codes={catalog.data?.statusCodes ?? []} onSelect={setOpen} />
+                  <div className="space-y-3" data-testid="work-groups">
+                    {dayGroups.map((g) => (
+                      <WorkGroupCard
+                        key={g.id}
+                        group={g}
+                        onEdit={() => setEditing(g)}
+                        headerAction={
+                          !worksToo ? null : !g.assignee ? (
+                            <Button
+                              onClick={() => setAccepting(g)}
+                              disabled={!onShift}
+                              title={onShift ? undefined : 'Vào ca làm việc để nhận công việc'}
+                              data-testid={`group-accept-${g.number}`}
+                            >
+                              <Hand className="h-4 w-4" aria-hidden="true" />
+                              Nhận công việc
+                            </Button>
+                          ) : g.assignee.id === user?.id ? (
+                            <span className="self-center rounded-full bg-brand-100 px-3 py-1 text-sm font-semibold text-brand-800" data-testid={`group-mine-${g.number}`}>
+                              Công việc của bạn
+                            </span>
+                          ) : null
+                        }
+                        itemAction={(t) => (
+                          <>
+                            {mine(t) ? <OwnAction task={t} busy={step.isPending && step.variables?.id === t.id} onStep={() => step.mutate(t)} /> : null}
+                            <Button variant="ghost" onClick={() => setOpen(t)} aria-label={`Chi tiết ${placeText(t)}`} data-testid={`group-item-open-${t.id}`}>
+                              Chi tiết
+                            </Button>
+                          </>
+                        )}
+                      />
+                    ))}
+                    {olderActive.map((t) => (
+                      <OlderTaskCard key={t.id} task={t} onOpen={() => setOpen(t)} />
+                    ))}
+                  </div>
                 )}
               </QueryState>
             </HkSection>
@@ -802,6 +951,26 @@ export function HkRoomBoardPage() {
             setCreating(false);
             setToast(msg);
           }}
+        />
+      ) : null}
+      {accepting ? (
+        <AcceptGroupDialog
+          group={accepting}
+          onClose={() => setAccepting(null)}
+          onAccepted={(g) => {
+            setAccepting(null);
+            setToast(`Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
+          }}
+          onRefresh={() => void groups.refetch()}
+        />
+      ) : null}
+      {step.isError ? <Toast message={toUserMessage(step.error)} onDone={() => step.reset()} /> : null}
+      {editing ? (
+        <WorkGroupEditor
+          group={editing}
+          staff={staff.data?.staff ?? []}
+          onClose={() => setEditing(null)}
+          onChanged={setToast}
         />
       ) : null}
       {reassigning ? (

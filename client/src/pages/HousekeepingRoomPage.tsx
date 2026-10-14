@@ -25,6 +25,7 @@ import { ArrowLeft, Check, ClipboardCheck, Minus, Pencil, Play, Plus, Save, Spar
 import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
 import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
+import { useAuth } from '../auth/AuthProvider';
 import { branchLabel } from '../auth/types';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
@@ -58,13 +59,15 @@ export function HousekeepingRoomPage() {
   };
 
   const t = task.data?.task;
+  // A Quản lý buồng phòng doing a room it accepted comes back to its board.
+  const manager = useAuth().user?.role === 'HOUSEKEEPING_MANAGER';
   const active = tab ?? (t && t.state !== 'NOT_STARTED' ? 'clean' : 'inspect');
 
   return (
     <div className="mx-auto max-w-3xl pb-24">
-      <Link to="/app/inspections" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
+      <Link to={manager ? '/app/hk/rooms' : '/app/inspections'} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        Danh sách công việc
+        {manager ? 'Tình trạng phòng' : 'Danh sách công việc'}
       </Link>
       <QueryState isLoading={task.isLoading || catalog.isLoading} isError={task.isError} error={task.error} onRetry={() => void task.refetch()}>
         {t && catalog.data ? (

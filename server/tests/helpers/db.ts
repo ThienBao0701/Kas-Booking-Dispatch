@@ -73,6 +73,9 @@ export async function resetHousekeepingData(): Promise<void> {
   // The daily room work first: its items hold references to inspections and accounts.
   await testPrisma.housekeepingRoomTaskEvent.deleteMany();
   await testPrisma.housekeepingRoomTask.deleteMany();
+  // Work groups ("Công việc 1, 2, …") after their places: they hold RESTRICT
+  // references to Branch and User.
+  await testPrisma.housekeepingWorkGroup.deleteMany();
   await testPrisma.roomIssueCollectionEvent.deleteMany();
   await testPrisma.roomIssueCollection.deleteMany();
   await testPrisma.roomInspectionIssue.deleteMany();

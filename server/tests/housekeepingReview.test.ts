@@ -19,7 +19,7 @@ import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetShiftData, testPrisma } from './helpers/db';
 import { ADMIN_PASSWORD, RECEPTIONIST_PASSWORD, createAdmin, createReceptionist, createUser, loginAgent } from './helpers/auth';
 import { resetClock, setClock } from '../src/lib/clock';
-import { workplaceOf } from './helpers/workplace';
+import { addressOf, workedRecentlyAt } from './helpers/workplace';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -68,6 +68,8 @@ beforeEach(async () => {
   await resetHousekeepingData();
   await resetShiftData();
   setClock({ now: () => hcm(DAY, '07:30') });
+  // A branch's staff are the housekeepers who worked there lately (no permanent branch).
+  for (const [userId, branchId] of [[lanId, cn1], [hoaId, cn1], [maiId, cn2]] as const) await workedRecentlyAt(userId, branchId, hcm(DAY, '07:30'));
 });
 
 afterAll(async () => {
@@ -97,7 +99,7 @@ async function boardTasks(agent: Agent = manager1) {
 }
 
 async function onShift(agent: Agent) {
-  const res = await agent.post('/api/housekeeping/shift/start').send({ address: await workplaceOf(agent) });
+  const res = await agent.post('/api/housekeeping/shift/start').send({ address: await addressOf(cn1) });
   expect([201, 409]).toContain(res.status);
 }
 
@@ -203,6 +205,8 @@ describe('"Không đạt" and the re-clean cycle', () => {
     expect(await setUp('101', null)).toEqual({ created: 0, skipped: ['101'] });
 
     // 14. Chị Hoa sees "cần dọn lại" and the reason; Chị Lan sees nothing.
+    // (A housekeeper's list is its shift's: Chị Hoa is on shift at the branch.)
+    await onShift(hoa);
     expect((await lan.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks).toEqual([]);
     const mine = (await hoa.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks;
     expect(mine).toEqual([expect.objectContaining({ id: failed.body.reclean.id, cycleNumber: 2, reclean: expect.objectContaining({ reason: 'Thiếu khăn tắm' }) })]);

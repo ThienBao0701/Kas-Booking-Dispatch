@@ -4,10 +4,13 @@
  * THE CLAIMS THIS FILE EXISTS TO PROVE:
  *   1. The role lands on "Tổng quan" with exactly its six menu entries, its
  *      branch fixed and named — no picker.
- *   2. "+ Tạo công việc" saves one or many items — a room's job, a hallway's
- *      (with its required note) — after a review, in one POST carrying one
- *      request id; "Các công việc trong ngày" shows one row per item, filtered,
- *      and "Giao lại" an item waiting for cleaning with a confirmation.
+ *   2. "+ Tạo công việc" saves ONE work group: its optional name, then floor →
+ *      tiles (several places) → each place's own checkboxes (one of OUT / OC /
+ *      VC, and/or Khác), note and priority — after a review, one POST with one
+ *      request id. "Phòng đang thực hiện" shows the day's groups as numbered
+ *      cards ("Công việc 1, 2, …"), never by OUT / OC / VC; "Chỉnh sửa" renames,
+ *      gives the whole group, takes one room out with its confirmation;
+ *      "Không cần dọn" waits for the manager's confirmed decision.
  *   3. "Phân công công việc" assigns from the row; the room's dialog edits,
  *      shows the history, and voids with a reason.
  *   4. "Theo dõi nhân viên" opens a worker's full detail, cleaning included.
@@ -121,6 +124,8 @@ function shell(user: unknown, extra: Record<string, Handler> = {}): Record<strin
     // … and the branch's own workers, for setting up and assigning rooms.
     [`GET /api/housekeeping/manager/staff?branchId=1`]: () => ({ status: 200, body: STAFF }),
     'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH] } }),
+    // "Phòng đang thực hiện": the day's work groups (none unless a test says so).
+    [`GET /api/housekeeping/manager/work-groups?date=${hcmToday()}&branchId=1`]: () => ({ status: 200, body: { groups: [] } }),
     ...extra,
   };
 }
@@ -139,6 +144,8 @@ const AREAS = {
     { kind: 'STAIRCASE', label: 'Cầu thang' },
     { kind: 'OTHER', label: 'Khác' },
   ],
+  hasRooftop: false,
+  rooftopLabel: 'Rooftop',
   roomTaskCodes: [
     { code: 'OUT', label: 'OUT' },
     { code: 'OC', label: 'OC' },
@@ -146,6 +153,30 @@ const AREAS = {
     { code: 'OTHER', label: 'Khác' },
   ],
 };
+
+/** One "Công việc N" as the server sends it. */
+function workGroup(id: string, number: number, items: unknown[], over: Record<string, unknown> = {}) {
+  return {
+    id,
+    branchId: 1,
+    branch: BRANCH,
+    workDate: TODAY,
+    number,
+    title: `Công việc ${number}`,
+    name: null,
+    assignee: null,
+    acceptedAt: null,
+    status: { code: 'UNASSIGNED', label: 'Chưa giao' },
+    floors: ['Tầng 1'],
+    counts: { items: items.length, completed: 0, noCleanPending: 0 },
+    items,
+    createdByName: 'Quản lý Buồng',
+    createdAt: '2026-10-05T01:00:00.000Z',
+    ...over,
+  };
+}
+
+const GROUPS_URL = `GET /api/housekeeping/manager/work-groups?date=${TODAY}&branchId=1`;
 
 const TASKS_URL = `GET /api/housekeeping/manager/tasks?date=${TODAY}&branchId=1`;
 const KPI_ROW = {
@@ -242,64 +273,104 @@ describe('Quản lý buồng phòng — menu and overview', () => {
 });
 
 describe('Quản lý buồng phòng — Tình trạng phòng', () => {
-  it('creates several items in one request — a room’s job and a hallway’s, each with what it needs', async () => {
+  it('creates ONE work group across floors — sections, compact rows, a note only with "Khác", nothing lost on the way', async () => {
     const posted: { requestId: string; [k: string]: unknown }[] = [];
     installApiMock(
       shell(MANAGER, {
-        [TASKS_URL]: () => ({ status: 200, body: { tasks: [task('t1', { assignee: { id: 6, name: 'Buồng phòng Một' } })] } }),
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [] } }),
         'GET /api/housekeeping/manager/areas?branchId=1': () => ({ status: 200, body: { areas: { branchId: 1, ...AREAS } } }),
-        'POST /api/housekeeping/manager/work-items': (init) => {
+        'POST /api/housekeeping/manager/work-groups': (init) => {
           posted.push(JSON.parse(String(init.body)));
-          return { status: 201, body: { created: 2, duplicate: false, tasks: [] } };
+          return { status: 201, body: { duplicate: false, group: workGroup('g1', 1, []) } };
         },
       }),
     );
     renderApp('/app/hk/rooms');
     expect(await screen.findByRole('heading', { name: `Tình trạng phòng ngày ${TODAY.split('-').reverse().join('/')}` })).toBeInTheDocument();
-    const row = await screen.findByTestId('room-row-OUT');
-    expect(within(row).getByTestId('room-chip-101')).toHaveTextContent('Buồng phòng Một');
-    const summary = screen.getByTestId('board-summary');
-    expect(summary).toHaveTextContent('Đang thực hiện1');
-    expect(summary).not.toHaveTextContent('₫');
-    // No permanent "Thêm phòng vào bảng" panel any more: one button opens the form.
-    expect(screen.queryByTestId('board-setup')).not.toBeInTheDocument();
     await userEvent.click(screen.getByTestId('work-create-open'));
-
     const dialog = await screen.findByRole('dialog');
-    const g0 = await within(dialog).findByTestId('work-group-0');
-    // The floors come from the branch's catalog, with the rooms it could not place.
-    expect([...g0.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chọn tầng —', 'Tầng 1', 'Tầng 2', 'Phòng chưa xác định tầng']);
-    expect(within(dialog).getByTestId('work-review')).toBeDisabled();
-    await userEvent.selectOptions(g0, '1');
-    const place0 = within(dialog).getByTestId('work-place-0');
-    expect([...place0.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chọn —', 'Phòng 101', 'Phòng 102', 'Phòng 103', 'Hành lang', 'Cầu thang', 'Khác']);
-    await userEvent.selectOptions(place0, '102');
-    await userEvent.selectOptions(within(dialog).getByTestId('work-code-0'), 'OTHER');
-    // "Khác" for a room needs its note.
-    expect(within(dialog).getByTestId('work-problem-0')).toHaveTextContent('"Khác" cần ghi chú');
-    await userEvent.selectOptions(within(dialog).getByTestId('work-code-0'), 'OC');
-    expect(within(dialog).queryByTestId('work-problem-0')).not.toBeInTheDocument();
+    // The group's name, first — optional.
+    await userEvent.type(await within(dialog).findByTestId('work-name'), 'Tổng vệ sinh buổi sáng');
 
-    // "+ Chọn khu vực": a second item — a hallway, whose note is required.
-    await userEvent.click(within(dialog).getByTestId('work-add-area'));
-    await userEvent.selectOptions(within(dialog).getByTestId('work-group-1'), '2');
-    await userEvent.selectOptions(within(dialog).getByTestId('work-place-1'), 'HALLWAY');
-    expect(within(dialog).queryByTestId('work-code-1')).not.toBeInTheDocument();
-    await userEvent.type(within(dialog).getByTestId('work-name-1'), 'Hút bụi thảm');
-    expect(within(dialog).getByTestId('work-problem-1')).toHaveTextContent('cần ghi chú / hướng dẫn');
-    expect(within(dialog).getByTestId('work-review')).toBeDisabled();
-    await userEvent.type(within(dialog).getByTestId('work-note-1'), 'Thảm trước phòng 201');
-    // A third, then removed again.
-    await userEvent.click(within(dialog).getByTestId('work-add-area'));
-    expect(within(dialog).getByTestId('work-review')).toBeDisabled();
-    await userEvent.click(within(dialog).getByTestId('work-remove-2'));
-    expect(within(dialog).queryByTestId('work-item-2')).not.toBeInTheDocument();
+    // Khu vực 1 — its own floor and tiles.
+    const floor0 = within(dialog).getByTestId('place-floor-0');
+    expect([...floor0.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chọn tầng —', 'Tầng 1', 'Tầng 2', 'Phòng chưa xác định tầng']);
+    await userEvent.selectOptions(floor0, '1');
+    const tiles0 = within(dialog).getByTestId('place-tiles-0');
+    const tileOrder = () => within(tiles0).getAllByRole('button').map((b) => b.getAttribute('data-testid'));
+    const before = tileOrder();
+    expect(within(tiles0).getAllByRole('button').map((b) => b.textContent)).toEqual(['101', '102', '103', 'Hành lang', 'Cầu thang', 'Khác']);
 
+    // 101: picked — one compact row, its details open; no note and no priority until "Khác".
+    await userEvent.click(within(tiles0).getByTestId('place-tile-ROOM:101'));
+    expect(within(dialog).getByTestId('place-row-ROOM:101')).toHaveTextContent('Phòng 101 — chưa chọn việc');
+    expect(within(dialog).getByTestId('place-detail-ROOM:101')).toBeInTheDocument();
+    expect(within(dialog).queryByTestId('place-note-ROOM:101')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/Ưu tiên/)).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:101-OUT'));
+    // One of OUT / OC / VC: OC clears OUT; "Khác" brings its required note.
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:101-OC'));
+    expect(within(dialog).getByTestId('place-code-ROOM:101-OUT')).not.toBeChecked();
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:101-OTHER'));
+    expect(within(dialog).getByTestId('place-problem-ROOM:101')).toHaveTextContent('"Khác" cần ghi rõ');
+    await userEvent.type(within(dialog).getByTestId('place-note-ROOM:101'), 'Thay rèm');
+    // Unticking "Khác" hides the note; ticking it again shows what was typed.
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:101-OTHER'));
+    expect(within(dialog).queryByTestId('place-note-ROOM:101')).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:101-OTHER'));
+    expect(within(dialog).getByTestId('place-note-ROOM:101')).toHaveValue('Thay rèm');
+
+    // 102: its row opens and 101's closes — the tiles never move.
+    await userEvent.click(within(tiles0).getByTestId('place-tile-ROOM:102'));
+    expect(within(dialog).queryByTestId('place-detail-ROOM:101')).not.toBeInTheDocument();
+    expect(within(dialog).getByTestId('place-row-ROOM:101')).toHaveTextContent('Phòng 101 — OC + Khác');
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:102-VC'));
+    // A hallway always says what to do.
+    await userEvent.click(within(tiles0).getByTestId('place-tile-HALLWAY:1'));
+    expect(within(dialog).getByTestId('place-problem-HALLWAY:1')).toHaveTextContent('cần ghi rõ việc cần làm');
+    await userEvent.type(within(dialog).getByTestId('place-note-HALLWAY:1'), 'Lau sàn');
+    expect(tileOrder()).toEqual(before);
+    expect(floor0).toBeDisabled();
+
+    // "+ Thêm khu vực": Khu vực 2 — Tầng 2, its own tiles; Tầng 1 is already taken.
+    await userEvent.click(within(dialog).getByTestId('place-add-section'));
+    const floor1 = within(dialog).getByTestId('place-floor-1');
+    expect(within(floor1).getByRole('option', { name: /Tầng 1/ })).toBeDisabled();
+    await userEvent.selectOptions(floor1, '2');
+    await userEvent.click(within(dialog).getByTestId('place-tile-ROOM:201'));
+    await userEvent.click(within(dialog).getByTestId('place-code-ROOM:201-OUT'));
+    // What was entered on Tầng 1 is all still there.
+    await userEvent.click(within(dialog).getByTestId('place-open-ROOM:101'));
+    expect(within(dialog).getByTestId('place-note-ROOM:101')).toHaveValue('Thay rèm');
+
+    // A third section with a pick, removed only after confirming what goes with it.
+    await userEvent.click(within(dialog).getByTestId('place-add-section'));
+    await userEvent.selectOptions(within(dialog).getByTestId('place-floor-2'), '__unplaced__');
+    await userEvent.click(within(dialog).getByTestId('place-tile-ROOM:001'));
+    await userEvent.click(within(dialog).getByTestId('place-section-remove-2'));
+    expect(within(dialog).getByTestId('place-section-confirm-2')).toHaveTextContent('sẽ bỏ 1 phòng / khu vực đã chọn (Phòng 001)');
+    await userEvent.click(within(within(dialog).getByTestId('place-section-confirm-2')).getByRole('button', { name: 'Giữ lại' }));
+    expect(within(dialog).getByTestId('place-row-ROOM:001')).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByTestId('place-section-remove-2'));
+    await userEvent.click(within(dialog).getByTestId('place-section-remove-confirm-2'));
+    expect(within(dialog).queryByTestId('place-section-2')).not.toBeInTheDocument();
+    expect(within(dialog).queryByTestId('place-row-ROOM:001')).not.toBeInTheDocument();
+
+    // The review — then back, and nothing is lost.
     await userEvent.click(within(dialog).getByTestId('work-review'));
     const review = within(dialog).getByTestId('work-review-list');
-    expect(review).toHaveTextContent('1. Phòng - 102 · OC');
-    expect(review).toHaveTextContent('2. Hành lang - Tầng 2 · Hút bụi thảm');
-    expect(review).toHaveTextContent('Ghi chú: Thảm trước phòng 201');
+    expect(review).toHaveTextContent('Tên công việc: Tổng vệ sinh buổi sáng');
+    expect(review).toHaveTextContent('Tầng / khu vực: Tầng 1, Tầng 2');
+    expect(within(review).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      '1. Tầng 1 · Phòng 101 · OC + KhácGhi chú: Thay rèm',
+      '2. Tầng 1 · Phòng 102 · VC',
+      '3. Tầng 1 · Hành lang · KhácGhi chú: Lau sàn',
+      '4. Tầng 2 · Phòng 201 · OUT',
+    ]);
+    await userEvent.click(within(dialog).getByRole('button', { name: /Sửa lại/ }));
+    expect(within(dialog).getByTestId('place-row-ROOM:201')).toHaveTextContent('Phòng 201 — OUT');
+    expect(within(dialog).getByTestId('place-floor-1')).toHaveValue('2');
+    await userEvent.click(within(dialog).getByTestId('work-review'));
     await userEvent.click(within(dialog).getByTestId('work-save'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
@@ -307,13 +378,229 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
       branchId: 1,
       workDate: TODAY,
       requestId: expect.any(String),
+      name: 'Tổng vệ sinh buổi sáng',
       items: [
-        { areaKind: 'ROOM', roomNumber: '102', taskCode: 'OC', priority: false },
-        { areaKind: 'HALLWAY', floor: '2', taskName: 'Hút bụi thảm', note: 'Thảm trước phòng 201', priority: false },
+        { areaKind: 'ROOM', roomNumber: '101', taskCodes: ['OC', 'OTHER'], note: 'Thay rèm' },
+        { areaKind: 'ROOM', roomNumber: '102', taskCodes: ['VC'] },
+        { areaKind: 'HALLWAY', floor: '1', taskCodes: ['OTHER'], note: 'Lau sàn' },
+        { areaKind: 'ROOM', roomNumber: '201', taskCodes: ['OUT'] },
       ],
     });
     expect(posted[0]!.requestId.length).toBeGreaterThanOrEqual(8);
-    expect(await screen.findByText('Đã tạo 2 công việc.')).toBeInTheDocument();
+  });
+
+  it('offers the Rooftop only where the branch has one, and no "chưa xác định tầng" when every room is placed', async () => {
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [] } }),
+        'GET /api/housekeeping/manager/areas?branchId=1': () => ({
+          status: 200,
+          body: { areas: { branchId: 1, ...AREAS, unplacedRooms: [], hasRooftop: true, rooftopLabel: 'Rooftop' } },
+        }),
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    await userEvent.click(await screen.findByTestId('work-create-open'));
+    const floor = await screen.findByTestId('place-floor-0');
+    expect([...floor.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['— Chọn tầng —', 'Tầng 1', 'Tầng 2', 'Rooftop']);
+    await userEvent.selectOptions(floor, '__rooftop__');
+    await userEvent.click(screen.getByTestId('place-tile-ROOFTOP'));
+    expect(screen.getByTestId('place-row-ROOFTOP')).toHaveTextContent('Rooftop — Khác');
+    // The Rooftop is always "Khác": its note is there and required.
+    expect(screen.getByTestId('place-note-ROOFTOP')).toBeInTheDocument();
+    expect(screen.getByTestId('work-review')).toBeDisabled();
+  });
+
+  it('lets the Quản lý buồng phòng take a group and do the work — on its shift at its branch', async () => {
+    const MANAGER_ID = 9;
+    let onShift = false;
+    const started: unknown[] = [];
+    const accepted: string[] = [];
+    const shiftBody = () =>
+      onShift
+        ? { shift: { id: 's1', user: { id: MANAGER_ID, fullName: 'Quản lý Buồng' }, startedAt: '2026-10-05T01:00:00.000Z', endedAt: null, segments: [], current: { id: 'seg', branch: BRANCH, staffName: 'Quản lý Buồng', startedAt: '2026-10-05T01:00:00.000Z', endedAt: null, rooms: 0, inspections: 0, issues: 0, byType: [] }, totals: { rooms: 0, inspections: 0, issues: 0, byType: [] } } }
+        : { shift: null };
+    const free = workGroup('g1', 1, [task('a1', { roomNumber: '101', floor: '1', taskCodes: ['OUT'], phase: 'UNCLAIMED', phaseLabel: 'Chưa giao' })]);
+    const mine = workGroup('g2', 2, [task('b1', { roomNumber: '201', floor: '2', taskCodes: ['VC'], assignee: { id: MANAGER_ID, name: 'Quản lý Buồng' }, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+      assignee: { id: MANAGER_ID, name: 'Quản lý Buồng' },
+      status: { code: 'ACCEPTED', label: 'Đã nhận' },
+    });
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [] } }),
+        [GROUPS_URL]: () => ({ status: 200, body: { groups: [free, mine] } }),
+        'GET /api/housekeeping/shift': () => ({ status: 200, body: shiftBody() }),
+        'POST /api/housekeeping/shift/start': (init) => {
+          started.push(JSON.parse(String(init.body)));
+          onShift = true;
+          return { status: 201, body: shiftBody() };
+        },
+        'POST /api/housekeeping/work/groups/g1/accept': () => {
+          accepted.push('g1');
+          return { status: 200, body: { group: { ...free, assignee: { id: MANAGER_ID, name: 'Quản lý Buồng' } } } };
+        },
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    const bar = await screen.findByTestId('manager-shift');
+    // Off shift: nothing to take yet.
+    await waitFor(() => expect(within(bar).getByTestId('manager-shift-start')).toBeEnabled());
+    expect(await screen.findByTestId('group-accept-1')).toBeDisabled();
+    await userEvent.click(within(bar).getByTestId('manager-shift-start'));
+    // No address: the manager works at its own branch.
+    await waitFor(() => expect(started).toEqual([{}]));
+    expect(await within(bar).findByTestId('manager-shift-end')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('group-accept-1')).toBeEnabled());
+    await userEvent.click(screen.getByTestId('group-accept-1'));
+    await userEvent.click(await screen.findByTestId('group-accept-confirm'));
+    await waitFor(() => expect(accepted).toEqual(['g1']));
+    // Its own group: "Công việc của bạn", and the next step on its room.
+    const two = screen.getByTestId('group-card-2');
+    expect(within(two).getByTestId('group-mine-2')).toHaveTextContent('Công việc của bạn');
+    expect(within(two).getByTestId('work-step-b1')).toHaveTextContent('Kiểm tra');
+    expect(within(two).getByTestId('group-edit-2')).toBeInTheDocument();
+  });
+
+  it('shows the day’s work groups as numbered cards inside "Phòng đang thực hiện" — one row per floor, never by OUT / OC / VC', async () => {
+    const g1 = workGroup('g1', 1, [
+      task('a1', { roomNumber: '101', floor: '1', taskCodes: ['OUT'], phase: 'UNCLAIMED', phaseLabel: 'Chưa giao' }),
+      task('a2', { roomNumber: '102', floor: '1', taskCodes: ['OC', 'OTHER'], note: 'Thay rèm', phase: 'UNCLAIMED', phaseLabel: 'Chưa giao' }),
+      task('a3', { roomNumber: '103', floor: '1', taskCodes: ['VC'], phase: 'UNCLAIMED', phaseLabel: 'Chưa giao' }),
+      task('a4', { roomNumber: 'Hành lang - Tầng 2', areaKind: 'HALLWAY', areaKindLabel: 'Hành lang', floor: '2', taskCodes: ['OTHER'], note: 'Lau sàn', phase: 'UNCLAIMED', phaseLabel: 'Chưa giao' }),
+    ], { name: 'Dọn sáng', floors: ['Tầng 1', 'Tầng 2'] });
+    const g2 = workGroup('g2', 2, [task('b1', { roomNumber: '201', floor: '2', taskCodes: ['VC'], assignee: { id: 6, name: 'Buồng phòng Một' }, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+      assignee: { id: 6, name: 'Buồng phòng Một' },
+      status: { code: 'ACCEPTED', label: 'Đã nhận' },
+      floors: ['Tầng 2'],
+    });
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [task('old', { roomNumber: '301' })] } }),
+        [GROUPS_URL]: () => ({ status: 200, body: { groups: [g1, g2] } }),
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    const active = await screen.findByTestId('board-active');
+    await waitFor(() => expect(within(active).getAllByRole('article').map((a) => a.getAttribute('data-testid'))).toEqual(['group-card-1', 'group-card-2', 'older-task-301']));
+    expect(within(active).queryByTestId('room-row-OUT')).not.toBeInTheDocument();
+    const one = within(active).getByTestId('group-card-1');
+    expect(one).toHaveTextContent('Công việc 1 — Dọn sáng');
+    expect(within(one).getByTestId('group-assignee-1')).toHaveTextContent('Người thực hiện: Chưa giao');
+    expect(within(one).getByTestId('group-edit-1')).toHaveTextContent('Chỉnh sửa');
+    // One floor, one row: 101, 102 and 103 side by side in the SAME row container.
+    const floor1 = within(one).getByTestId('group-floor-1-0');
+    expect(within(floor1).getByRole('heading')).toHaveTextContent('Tầng 1');
+    const row1 = within(floor1).getByTestId('group-floor-row-1-0');
+    expect(row1.className).toContain('flex-wrap');
+    expect(within(row1).getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))).toEqual(['group-item-a1', 'group-item-a2', 'group-item-a3']);
+    // Another floor: its own section and row.
+    const floor2 = within(one).getByTestId('group-floor-1-1');
+    expect(within(floor2).getByRole('heading')).toHaveTextContent('Tầng 2');
+    expect(within(within(floor2).getByTestId('group-floor-row-1-1')).getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))).toEqual(['group-item-a4']);
+    // Each tile keeps what is to be done, who has it, and where it stands.
+    const tile = within(row1).getByTestId('group-item-a2');
+    expect(tile).toHaveTextContent('Phòng 102');
+    expect(tile).toHaveTextContent('OC');
+    expect(tile).toHaveTextContent('Khác');
+    expect(tile).toHaveTextContent('Chưa giao');
+    expect(within(tile).getByTestId('phase-a2')).toHaveTextContent('Chưa giao');
+    expect(tile).toHaveTextContent('Ghi chú: Thay rèm');
+    expect(within(floor2).getByTestId('group-item-a4')).toHaveTextContent('Hành lang');
+    // Separate groups stay separate cards; the second has its own floor row.
+    const two = within(active).getByTestId('group-card-2');
+    expect(within(two).getByTestId('group-floor-2-0')).toHaveTextContent('Tầng 2');
+    expect(within(one).queryByTestId('group-item-b1')).not.toBeInTheDocument();
+    // "Chi tiết" on a tile still opens that room.
+    await userEvent.click(within(tile).getByTestId('group-item-open-a2'));
+    expect(await screen.findByRole('dialog', { name: /Phòng 102/ })).toBeInTheDocument();
+    expect(within(active).getByTestId('group-assignee-2')).toHaveTextContent('Người thực hiện: Buồng phòng Một');
+    expect(screen.getByTestId('metric-groups')).toHaveTextContent('2');
+  });
+
+  it('"Chỉnh sửa": renames, gives the whole group, and takes one room out only with its confirmation', async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    const record = (url: string, status = 200, body: unknown = {}) => (init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init.body ?? '{}')) });
+      return { status, body };
+    };
+    const g1 = workGroup('g1', 1, [
+      task('a1', { roomNumber: '101', floor: '1', taskCodes: ['OUT'], assignee: { id: 6, name: 'Buồng phòng Một' }, phase: 'ACCEPTED', phaseLabel: 'Đã nhận' }),
+      task('a2', { roomNumber: '102', floor: '1', taskCodes: ['OC'], assignee: { id: 6, name: 'Buồng phòng Một' }, phase: 'ACCEPTED', phaseLabel: 'Đã nhận' }),
+    ], { assignee: { id: 6, name: 'Buồng phòng Một' } });
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [] } }),
+        [GROUPS_URL]: () => ({ status: 200, body: { groups: [g1] } }),
+        'GET /api/housekeeping/manager/areas?branchId=1': () => ({ status: 200, body: { areas: { branchId: 1, ...AREAS } } }),
+        'PATCH /api/housekeeping/manager/work-groups/g1': record('rename', 200, { group: { ...g1, name: 'Ca chiều' } }),
+        'POST /api/housekeeping/manager/work-groups/g1/assign': record('assign', 200, { group: { ...g1, assignee: { id: 7, name: 'Buồng phòng Hai' } } }),
+        'POST /api/housekeeping/manager/tasks/a2/void': record('void', 200, { voided: true }),
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    await userEvent.click(await screen.findByTestId('group-edit-1'));
+    const editor = await screen.findByTestId('group-editor');
+    await userEvent.type(within(editor).getByTestId('group-name'), 'Ca chiều');
+    await userEvent.click(within(editor).getByTestId('group-name-save'));
+    await waitFor(() => expect(calls[0]).toEqual({ url: 'rename', body: { name: 'Ca chiều' } }));
+
+    await waitFor(() => expect([...within(editor).getByTestId('group-assignee').querySelectorAll('option')].length).toBeGreaterThan(1));
+    await userEvent.selectOptions(within(editor).getByTestId('group-assignee'), '7');
+    await userEvent.click(within(editor).getByTestId('group-assign-save'));
+    await waitFor(() => expect(calls[1]).toEqual({ url: 'assign', body: { assigneeUserId: 7 } }));
+
+    // A room's note appears only with "Khác", and is then required; no priority input.
+    expect(within(editor).queryByTestId('item-note-a1')).not.toBeInTheDocument();
+    expect(within(editor).queryByText(/Ưu tiên/)).not.toBeInTheDocument();
+    await userEvent.click(within(editor).getByTestId('item-code-a1-OTHER'));
+    expect(within(editor).getByTestId('item-note-a1')).toBeInTheDocument();
+    expect(within(editor).getByTestId('item-save-a1')).toBeDisabled();
+    await userEvent.click(within(editor).getByTestId('item-code-a1-OTHER'));
+    expect(within(editor).queryByTestId('item-note-a1')).not.toBeInTheDocument();
+
+    // Taking out a room someone holds: confirmed, with its reason.
+    await userEvent.click(within(editor).getByTestId('item-remove-a2'));
+    const confirm = await screen.findByTestId('item-remove-confirm');
+    expect(screen.getByTestId('item-remove-dialog')).toHaveTextContent('Phòng vẫn còn trong danh sách phòng của chi nhánh');
+    expect(confirm).toBeDisabled();
+    await userEvent.type(screen.getByTestId('item-remove-reason'), 'Khách ở thêm');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(calls[2]).toEqual({ url: 'void', body: { reason: 'Khách ở thêm' } }));
+  });
+
+  it('shows "Không cần dọn" requests to the manager, and approves one only after confirming', async () => {
+    const decided: unknown[] = [];
+    const pending = task('a1', {
+      roomNumber: '101',
+      floor: '1',
+      taskCodes: ['OUT'],
+      assignee: { id: 6, name: 'Buồng phòng Một' },
+      phase: 'NO_CLEAN_PENDING',
+      phaseLabel: 'Chờ duyệt không cần dọn',
+      workGroup: { id: 'g1', number: 1, name: null },
+      noClean: { status: 'PENDING', reason: 'Khách không muốn dọn', requestedAt: '2026-10-05T03:00:00.000Z', requestedByName: 'Buồng phòng Một', decidedAt: null, decidedByName: null, decisionNote: null },
+    });
+    installApiMock(
+      shell(MANAGER, {
+        [TASKS_URL]: () => ({ status: 200, body: { tasks: [] } }),
+        [GROUPS_URL]: () => ({ status: 200, body: { groups: [workGroup('g1', 1, [pending], { assignee: { id: 6, name: 'Buồng phòng Một' } })] } }),
+        'POST /api/housekeeping/manager/tasks/a1/no-clean-decision': (init) => {
+          decided.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { task: { ...pending, phase: 'NO_CLEAN', voided: true } } };
+        },
+      }),
+    );
+    renderApp('/app/hk/rooms');
+    const box = await screen.findByTestId('board-no-clean');
+    const row = within(box).getByTestId('no-clean-a1');
+    expect(row).toHaveTextContent('Công việc 1 · Tầng 1 · Phòng 101');
+    expect(row).toHaveTextContent('Lý do: Khách không muốn dọn');
+    expect(row).toHaveTextContent('Buồng phòng Một');
+    await userEvent.click(within(row).getByTestId('no-clean-approve-a1'));
+    expect(await screen.findByTestId('no-clean-decision')).toHaveTextContent('phòng ra khỏi công việc đang làm hôm nay');
+    expect(decided).toEqual([]);
+    await userEvent.click(screen.getByTestId('no-clean-decision-confirm'));
+    await waitFor(() => expect(decided).toEqual([{ approve: true }]));
   });
 
   it('lists one row per item in "Các công việc trong ngày", filters them, and reassigns one waiting for cleaning', async () => {
@@ -422,16 +709,17 @@ describe('Quản lý buồng phòng — đánh giá chất lượng', () => {
       'GET /api/branches/1/rooms': () => ({ status: 200, body: { branchId: 1, rooms: ['101', '102', '103', '104', '105', '106'] } }),
       ...extra,
     });
-  const chips = (el: HTMLElement) => within(el).queryAllByTestId(/^room-chip-/).map((c) => c.getAttribute('data-testid')!.replace('room-chip-', ''));
 
   it('splits the board: rooms being cleaned, rooms waiting for review, and every item of the day', async () => {
     installApiMock(routes());
     renderApp('/app/hk/rooms');
     const active = await screen.findByTestId('board-active');
-    await waitFor(() => expect(chips(active)).toEqual(['101', '102', '105']));
+    // Rooms set up before work groups existed: each its own card, in the same container.
+    await waitFor(() =>
+      expect(within(active).getAllByRole('article').map((a) => a.getAttribute('data-testid'))).toEqual(['older-task-101', 'older-task-102', 'older-task-105']),
+    );
     // A re-clean, marked.
-    expect(within(active).getByTestId('room-chip-105')).toHaveAttribute('data-reclean', 'true');
-    expect(within(active).getByTestId('room-chip-105')).toHaveTextContent('Cần dọn lại');
+    expect(within(active).getByTestId('older-task-105')).toHaveTextContent('Cần dọn lại');
     // Waiting for the manager: its own area, with who, when and how long.
     const review = screen.getByTestId('board-review');
     expect(within(review).queryAllByTestId(/^review-card-/).map((c) => c.getAttribute('data-testid'))).toEqual(['review-card-103']);

@@ -173,7 +173,9 @@ export async function createInspection(
   client: PrismaClient = defaultPrisma,
   options: InspectionOptions = {},
 ) {
-  if (actor.role !== 'HOUSEKEEPING') {
+  // A Quản lý buồng phòng doing a room it accepted inspects it the same way —
+  // inside a room's work only (`options.branchId`), on its shift at its branch.
+  if (actor.role !== 'HOUSEKEEPING' && !(actor.role === 'HOUSEKEEPING_MANAGER' && options.branchId !== undefined)) {
     throw ApiError.forbidden('Chỉ bộ phận buồng phòng mới ghi nhận được kiểm tra phòng.');
   }
   /*

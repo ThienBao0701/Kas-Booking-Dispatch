@@ -94,13 +94,13 @@ async function report(agent: Agent, body: Record<string, unknown>): Promise<stri
 /* 1 ---------------------------------------------------------------- floors */
 
 describe('the floor catalog', () => {
-  it('is served with the rooms, and keeps Chi nhánh 4’s two buildings apart', async () => {
+  it('is served with the rooms, and keeps Chi nhánh 4’s Suite floors apart from the main building’s', async () => {
     const one = await letan1.get(`/api/branches/${cn1}/rooms`);
     expect(one.body.floors).toEqual(['1', '2', '3', '4', '5', '6', '7']);
     const four = await letan4.get(`/api/branches/${cn4}/rooms`);
-    expect(four.body.floors).toContain('2 (Khu Suite)');
-    expect(four.body.floors).toContain('2 (Tòa bên cạnh)');
-    expect(four.body.floors).not.toContain('1 (Tòa bên cạnh)');
+    // The Suite floors carry their block; the main building's are plain "Tầng 2" … "Tầng 8".
+    expect(four.body.floors).toEqual(['1 (Khu Suite)', '2 (Khu Suite)', '3 (Khu Suite)', '2', '3', '4', '5', '6', '7', '8']);
+    expect(four.body.floors.join()).not.toContain('Tòa bên cạnh');
   });
 
   it('refuses a floor the branch does not have', async () => {
@@ -109,9 +109,14 @@ describe('the floor catalog', () => {
     expect(ok.status).toBe(201);
     expect(ok.body.issue.locationLabel).toContain('Tầng 7');
     expect((await letan4.post('/api/issues').send({ areaCategory: 'STAIRCASE', floorNumber: '9', description: 'x' })).status).toBe(422);
-    const suite = await letan4.post('/api/issues').send({ areaCategory: 'STAIRCASE', floorNumber: '2 (Tòa bên cạnh)', description: 'x' });
+    const suite = await letan4.post('/api/issues').send({ areaCategory: 'STAIRCASE', floorNumber: '2 (Khu Suite)', description: 'x' });
     expect(suite.status).toBe(201);
-    expect(suite.body.issue.locationLabel).toContain('Tầng 2 (Tòa bên cạnh)');
+    expect(suite.body.issue.locationLabel).toContain('Tầng 2 (Khu Suite)');
+    // The old name of a main-building floor is still understood — and stored as the floor.
+    const main = await letan4.post('/api/issues').send({ areaCategory: 'STAIRCASE', floorNumber: '2 (Tòa bên cạnh)', description: 'y' });
+    expect(main.status).toBe(201);
+    expect(main.body.issue.locationLabel).toContain('Tầng 2');
+    expect(main.body.issue.locationLabel).not.toContain('Tòa bên cạnh');
   });
 });
 
@@ -243,17 +248,16 @@ describe('a repair in stages', () => {
 /* 5 ----------------------------------------------------------------- accounts */
 
 describe('account management', () => {
-  it('edits in place: a manager’s branches, a name, a housekeeping account’s one branch', async () => {
+  it('edits in place: a manager’s branches, a name — and never gives a housekeeping account a branch', async () => {
     const moved = await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1, cn4], fullName: 'Quản lý kỹ thuật A' });
     expect(moved.status).toBe(200);
     expect(moved.body.user.fullName).toBe('Quản lý kỹ thuật A');
     expect(moved.body.user.managedBranches.map((b: { id: number }) => b.id).sort()).toEqual([cn1, cn4].sort());
     const hk = await createUser({ username: 'buong_sua', password: PASSWORD, fullName: 'Buồng', role: 'HOUSEKEEPING', branchId: null });
-    const assigned = await admin.put(`/api/admin/users/${hk.id}`).send({ branchId: cn1 });
-    expect(assigned.status).toBe(200);
-    expect(assigned.body.user.branch.id).toBe(cn1);
-    // One branch, never a set.
+    // Bộ phận buồng phòng has no permanent branch: it names the hotel at "Vào ca".
+    expect((await admin.put(`/api/admin/users/${hk.id}`).send({ branchId: cn1 })).status).toBe(422);
     expect((await admin.put(`/api/admin/users/${hk.id}`).send({ branchIds: [cn1, cn4] })).status).toBe(422);
+    expect((await admin.put(`/api/admin/users/${hk.id}`).send({ fullName: 'Buồng Sửa' })).body.user).toMatchObject({ fullName: 'Buồng Sửa', branch: null });
     await admin.put(`/api/admin/users/${managerId}`).send({ branchIds: [cn1], fullName: 'Quản lý kỹ thuật' });
   });
 

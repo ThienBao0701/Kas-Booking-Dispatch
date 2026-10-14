@@ -1,31 +1,29 @@
 /**
  * "BUỒNG PHÒNG" — the worker's home.
  *
- *   Vào ca → the hotel's ADDRESS, typed (no list, nothing prefilled) → the shift
- *   opens at the account's branch once the server has matched it.
+ *   Vào ca → the hotel's ADDRESS, typed; only the one hotel it identifies is
+ *   shown (no list, nothing prefilled) → the shift opens there. Bộ phận buồng
+ *   phòng has no permanent branch: the shift's hotel scopes all its work.
  *   [Ca hiện tại · Chi nhánh: …]                          Kết thúc ca
- *   Công việc ngày dd/mm/yyyy — ONE ROW PER WORK ITEM
- *     ☐ Phòng - 502 · OC · Chưa tiếp nhận               [Nhận]
- *       Phòng - 502 · Khác — Thay rèm · Đã tiếp nhận    [Kiểm tra]
- *       Hành lang - Tầng 5 · Dọn lối đi · Chờ dọn phòng [Dọn phòng]
+ *   Công việc ngày dd/mm/yyyy — the day's WORK GROUPS, numbered:
+ *     Công việc 1 — Người thực hiện: Chưa giao       [Nhận công việc]
+ *       Tầng 1 · Phòng 101 · OUT
+ *     Công việc 2 — Người thực hiện: Bạn
+ *       Tầng 1 · Phòng 102 · OC          [Kiểm tra] [Không cần dọn]
+ *   Công việc đã làm ngày dd/mm/yyyy — rooms finished, "Không cần dọn" answered.
  *
- * NOTHING BEFORE "VÀO CA". Until the address has established where the account
- * works, no branch and no work item is shown. Then: the items of that branch
- * that are this account's, and the ones nobody has accepted yet.
- *
- * "NHẬN" ALWAYS ASKS FIRST — which items, by name and count — and takes exactly
- * the ones selected; two items of one room are taken one by one. The work then
- * goes Nhận → Kiểm tra (saved) → Dọn phòng, in that order; "Dọn phòng" opens the
- * room's own cleaning page. The server enforces every step.
+ * NOTHING BEFORE "VÀO CA" but the history. A group is accepted WHOLE, always
+ * confirmed; a colleague's group shows who works it. Each room then goes Kiểm
+ * tra (saved) → Dọn phòng, in that order; "Không cần dọn" waits for the
+ * manager. The server enforces every step.
  *
  * NOTHING ABOUT MONEY HERE. The worker's own collections are on "KPI & Thu tiền".
  */
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { BedDouble, ClipboardCheck, Hand, LogIn, LogOut, Play, RefreshCw, Sparkles } from 'lucide-react';
+import { Ban, BedDouble, Hand, LogIn, LogOut, RefreshCw } from 'lucide-react';
 import { HOUSEKEEPING_SHIFT_KEY, ROOM_ISSUES_KEY, housekeepingApi, type WorkShift } from '../api/housekeeping';
-import { ROOM_WORK_KEY, roomWorkApi, type RoomTask } from '../api/roomWork';
+import { ROOM_WORK_KEY, roomWorkApi, type RoomTask, type WorkGroup } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
 import { branchLabel } from '../auth/types';
@@ -33,24 +31,38 @@ import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { PhaseBadge } from '../components/HkWorkOrders';
+import { WorkGroupCard } from '../components/HkWorkGroups';
+import { AcceptGroupDialog, OwnAction } from '../components/HkWorkerActions';
+import { useWorkStep } from '../api/useWorkStep';
+import { placeText } from '../lib/workPlaces';
 import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
 import { formatDate, formatDateTime, hcmToday } from '../lib/format';
 
 export function HousekeepingInspectionPage() {
   const today = hcmToday();
-  // An account with no Admin-assigned branch cannot work at all; which branch it is stays unsaid until "Vào ca".
   const me = useAuth().user;
-  const hasBranch = (me?.branch ?? null) !== null;
   const shift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift() });
   const [ended, setEnded] = useState<WorkShift | null>(null);
   const current = shift.data?.shift?.current ?? null;
+  const groups = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'worker-groups', today],
+    queryFn: () => roomWorkApi.workerGroups(today),
+    refetchInterval: 30_000,
+    enabled: current !== null,
+  });
+  // Rooms set up before work groups existed: still worked one by one.
   const items = useQuery({
     queryKey: [...ROOM_WORK_KEY, 'items', today],
     queryFn: () => roomWorkApi.workItems(today),
     refetchInterval: 30_000,
     enabled: current !== null,
   });
+  const olderItems = items.data?.tasks ?? [];
+  const refresh = () => {
+    void groups.refetch();
+    void items.refetch();
+  };
 
   return (
     <div>
@@ -59,39 +71,273 @@ export function HousekeepingInspectionPage() {
         description="Vào ca, nhận công việc, kiểm tra rồi dọn phòng."
         actions={
           current ? (
-            <Button variant="secondary" onClick={() => void items.refetch()} aria-label="Làm mới">
-              <RefreshCw className={`h-4 w-4 ${items.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
+            <Button variant="secondary" onClick={refresh} aria-label="Làm mới">
+              <RefreshCw className={`h-4 w-4 ${groups.isFetching || items.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
               Làm mới
             </Button>
           ) : null
         }
       />
       <QueryState isLoading={shift.isLoading} isError={shift.isError} error={shift.error} onRetry={() => void shift.refetch()}>
-        {current && shift.data?.shift ? (
-          <ShiftStrip shift={shift.data.shift} onEnded={setEnded} />
-        ) : hasBranch ? (
-          <StartShift />
-        ) : (
-          <EmptyState
-            icon={<BedDouble className="h-6 w-6" aria-hidden="true" />}
-            title="Tài khoản chưa được gán chi nhánh"
-            message="Vui lòng liên hệ Admin để được gán chi nhánh làm việc trước khi vào ca."
-          />
-        )}
+        {current && shift.data?.shift ? <ShiftStrip shift={shift.data.shift} onEnded={setEnded} /> : <StartShift />}
       </QueryState>
 
       {current ? (
-        <section className="mt-5 space-y-3" aria-labelledby="work-items-title">
-          <h2 id="work-items-title" className="text-lg font-bold text-slate-900">
+        <section className="mt-5 space-y-3" aria-labelledby="work-groups-title">
+          <h2 id="work-groups-title" className="text-lg font-bold text-slate-900">
             Công việc ngày {formatDate(today)}
           </h2>
-          <QueryState isLoading={items.isLoading} isError={items.isError} error={items.error} onRetry={() => void items.refetch()}>
-            <WorkItemList tasks={items.data?.tasks ?? []} meId={me?.id} onChanged={() => void items.refetch()} />
+          <QueryState isLoading={groups.isLoading} isError={groups.isError} error={groups.error} onRetry={() => void groups.refetch()}>
+            <WorkGroupList groups={groups.data?.groups ?? []} meId={me?.id} onChanged={refresh} hasOlder={olderItems.length > 0} />
           </QueryState>
+          {olderItems.length > 0 ? (
+            <div className="space-y-2" data-testid="older-items">
+              <h3 className="text-sm font-semibold text-slate-700">Phòng giao trước khi có nhóm công việc</h3>
+              <WorkItemList tasks={olderItems} meId={me?.id} onChanged={refresh} />
+            </div>
+          ) : null}
         </section>
       ) : null}
+      <WorkHistory meId={me?.id} />
       {ended ? <ShiftSummaryModal shift={ended} onClose={() => setEnded(null)} /> : null}
     </div>
+  );
+}
+
+/**
+ * THE DAY'S WORK GROUPS at the shift's hotel — every one, and who holds it. A
+ * free group is accepted WHOLE ("Nhận công việc", always confirmed); a
+ * colleague's shows who works it and cannot be taken. On one's own group, each
+ * room carries its next step and "Không cần dọn".
+ */
+function WorkGroupList({ groups, meId, onChanged, hasOlder }: { groups: WorkGroup[]; meId?: number; onChanged: () => void; hasOlder: boolean }) {
+  const [accepting, setAccepting] = useState<WorkGroup | null>(null);
+  const [noClean, setNoClean] = useState<RoomTask | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const step = useWorkStep(onChanged);
+
+  if (groups.length === 0) {
+    return hasOlder ? null : (
+      <EmptyState
+        icon={<BedDouble className="h-6 w-6" aria-hidden="true" />}
+        title="Chưa có công việc"
+        message="Quản lý buồng phòng sẽ tạo công việc trong ngày. Bấm “Làm mới” để xem công việc mới."
+      />
+    );
+  }
+  return (
+    <div className="space-y-3" data-testid="worker-groups">
+      {message ? (
+        <p className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900" role="status" data-testid="accept-done">
+          {message}
+        </p>
+      ) : null}
+      {step.isError ? <ErrorAlert>{toUserMessage(step.error)}</ErrorAlert> : null}
+      {groups.map((g) => {
+        const mine = g.assignee?.id === meId;
+        return (
+          <WorkGroupCard
+            key={g.id}
+            group={g}
+            headerAction={
+              !g.assignee ? (
+                <Button onClick={() => setAccepting(g)} data-testid={`group-accept-${g.number}`}>
+                  <Hand className="h-4 w-4" aria-hidden="true" />
+                  Nhận công việc
+                </Button>
+              ) : mine ? (
+                <span className="rounded-full bg-brand-100 px-3 py-1 text-sm font-semibold text-brand-800" data-testid={`group-mine-${g.number}`}>
+                  Công việc của bạn
+                </span>
+              ) : (
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700" data-testid={`group-taken-${g.number}`}>
+                  {g.assignee.name} đang làm
+                </span>
+              )
+            }
+            itemAction={(t) =>
+              t.assignee?.id === meId ? (
+                <OwnGroupItemActions
+                  task={t}
+                  busy={step.isPending && step.variables?.id === t.id}
+                  onStep={() => step.mutate(t)}
+                  onNoClean={() => setNoClean(t)}
+                />
+              ) : null
+            }
+          />
+        );
+      })}
+      {accepting ? (
+        <AcceptGroupDialog
+          group={accepting}
+          onClose={() => setAccepting(null)}
+          onAccepted={(g) => {
+            setAccepting(null);
+            setMessage(`Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
+          }}
+          onRefresh={onChanged}
+        />
+      ) : null}
+      {noClean ? (
+        <NoCleanDialog
+          task={noClean}
+          onClose={() => setNoClean(null)}
+          onSent={() => {
+            setNoClean(null);
+            setMessage('Đã gửi yêu cầu “Không cần dọn”. Chờ quản lý duyệt.');
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** One's own room in a group: its next step, and "Không cần dọn" while that can still be asked. */
+function OwnGroupItemActions({ task: t, busy, onStep, onNoClean }: { task: RoomTask; busy: boolean; onStep: () => void; onNoClean: () => void }) {
+  if (t.voided || t.phase === 'COMPLETED') return null;
+  if (t.phase === 'NO_CLEAN_PENDING') {
+    return <span className="text-xs font-medium text-amber-800">Chờ quản lý duyệt</span>;
+  }
+  const canAskNoClean = t.state === 'NOT_STARTED' || t.state === 'INSPECTED';
+  return (
+    <>
+      <OwnAction task={t} busy={busy} onStep={onStep} />
+      {canAskNoClean ? (
+        <Button variant="secondary" onClick={onNoClean} data-testid={`no-clean-open-${t.id}`}>
+          <Ban className="h-4 w-4" aria-hidden="true" />
+          Không cần dọn
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
+/** "KHÔNG CẦN DỌN" — the reason is required; the manager decides. */
+function NoCleanDialog({ task: t, onClose, onSent }: { task: RoomTask; onClose: () => void; onSent: () => void }) {
+  const queryClient = useQueryClient();
+  const [reason, setReason] = useState('');
+  const send = useMutation({
+    mutationFn: () => roomWorkApi.requestNoClean(t.id, reason.trim()),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+      onSent();
+    },
+  });
+  return (
+    <Modal
+      open
+      title="Không cần dọn"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={send.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => send.mutate()} loading={send.isPending} disabled={!reason.trim()} data-testid="no-clean-send">
+            Gửi quản lý duyệt
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3" data-testid="no-clean-dialog">
+        <p className="text-sm text-slate-700">
+          <span className="font-semibold">{placeText(t)}</span> — phòng chỉ được bỏ khỏi công việc sau khi quản lý buồng phòng duyệt.
+        </p>
+        <label className="block text-sm font-medium text-slate-700" htmlFor="no-clean-reason">
+          Lý do *
+          <textarea
+            id="no-clean-reason"
+            className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            rows={3}
+            maxLength={1000}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Ví dụ: Khách không muốn dọn phòng hôm nay"
+            data-testid="no-clean-reason"
+          />
+        </label>
+        {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * "CÔNG VIỆC ĐÃ LÀM" — this housekeeper's own finished rooms and answered
+ * "Không cần dọn" of a day, with the times, and that day's shifts.
+ */
+function WorkHistory({ meId }: { meId?: number }) {
+  const today = hcmToday();
+  const [date, setDate] = useState(today);
+  const history = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'worker-history', date, meId ?? null],
+    queryFn: () => roomWorkApi.workerHistory(date),
+    enabled: meId !== undefined,
+  });
+  const data = history.data;
+  return (
+    <section className="mt-6 space-y-3" aria-labelledby="work-history-title" data-testid="work-history">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h2 id="work-history-title" className="text-lg font-bold text-slate-900">
+          Công việc đã làm ngày {formatDate(date)}
+        </h2>
+        <label className="text-sm font-medium text-slate-700">
+          Ngày
+          <input
+            type="date"
+            className="ml-2 min-h-[2.5rem] rounded-xl border border-line-strong bg-white px-3 py-1.5 text-sm"
+            value={date}
+            max={today}
+            onChange={(e) => e.target.value && setDate(e.target.value)}
+            data-testid="work-history-date"
+          />
+        </label>
+      </div>
+      <QueryState isLoading={history.isLoading} isError={history.isError} error={history.error} onRetry={() => void history.refetch()}>
+        {data ? (
+          <>
+            <p className="text-sm text-slate-700" data-testid="work-history-totals">
+              Đã dọn xong: <span className="font-semibold">{data.totals.completed}</span> · Không cần dọn (đã duyệt):{' '}
+              <span className="font-semibold">{data.totals.noClean}</span>
+            </p>
+            {data.shifts.length > 0 ? (
+              <ul className="space-y-1 text-xs text-slate-600" data-testid="work-history-shifts">
+                {data.shifts.map((s) => (
+                  <li key={s.id}>
+                    Ca: {formatDateTime(s.startedAt)} – {s.endedAt ? formatDateTime(s.endedAt) : 'đang làm'} ·{' '}
+                    {s.segments.map((seg) => branchLabel(seg.branch)).join(', ')}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {data.items.length === 0 ? (
+              <p className="text-sm text-slate-500">Chưa có phòng nào hoàn thành trong ngày này.</p>
+            ) : (
+              <ul className="divide-y divide-line-subtle rounded-2xl border border-line bg-white" data-testid="work-history-items">
+                {data.items.map((t) => (
+                  <li key={t.id} className="px-4 py-2.5 text-sm" data-testid={`history-item-${t.id}`}>
+                    <p className="font-semibold text-slate-900">
+                      {t.workGroup ? `Công việc ${t.workGroup.number} · ` : ''}
+                      {placeText(t)} <PhaseBadge task={t} />
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {t.state === 'COMPLETED' && t.cleanedBy?.id === meId
+                        ? `Bắt đầu ${t.startedAt ? formatDateTime(t.startedAt) : '—'} · Hoàn thành ${t.completedAt ? formatDateTime(t.completedAt) : '—'}${
+                            t.durationSeconds !== null ? ` · ${Math.round(t.durationSeconds / 60)} phút` : ''
+                          }${t.review ? ` · ${t.review.label}` : ''}`
+                        : t.noClean
+                          ? `Không cần dọn — ${t.noClean.status === 'APPROVED' ? 'đã duyệt' : 'bị từ chối'}${t.noClean.decidedByName ? ` bởi ${t.noClean.decidedByName}` : ''} · Lý do: ${t.noClean.reason}`
+                          : t.stateLabel}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : null}
+      </QueryState>
+    </section>
   );
 }
 
@@ -102,8 +348,6 @@ const itemName = (t: RoomTask) => `${t.areaLabel ?? `Phòng - ${t.roomNumber}`} 
  * housekeeper's own carry the next step of their work.
  */
 function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: number; onChanged: () => void }) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [confirming, setConfirming] = useState<RoomTask[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -112,18 +356,7 @@ function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: nu
   const picked = claimable.filter((t) => selected.has(t.id));
   const mine = useMemo(() => tasks.filter((t) => t.assignee?.id === meId), [tasks, meId]);
 
-  const step = useMutation({
-    mutationFn: async (t: RoomTask) => {
-      if (t.phase === 'ACCEPTED') await roomWorkApi.beginInspection(t.id);
-      if (t.phase === 'AWAITING_CLEANING') await roomWorkApi.start(t.id);
-      return t;
-    },
-    onSuccess: async (t) => {
-      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
-      navigate(`/app/inspections/room/${t.id}`);
-    },
-    onError: () => onChanged(),
-  });
+  const step = useWorkStep(onChanged);
 
   if (tasks.length === 0) {
     return (
@@ -233,24 +466,6 @@ function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: nu
   );
 }
 
-/** The next step of the housekeeper's own item — one button, the stage's own. */
-function OwnAction({ task: t, busy, onStep }: { task: RoomTask; busy: boolean; onStep: () => void }) {
-  const [label, Icon] =
-    t.phase === 'ACCEPTED'
-      ? (['Kiểm tra', ClipboardCheck] as const)
-      : t.phase === 'INSPECTING'
-        ? (['Tiếp tục kiểm tra', ClipboardCheck] as const)
-        : t.phase === 'AWAITING_CLEANING'
-          ? (['Dọn phòng', Sparkles] as const)
-          : (['Tiếp tục dọn phòng', Play] as const);
-  return (
-    <Button onClick={onStep} loading={busy} data-testid={`work-step-${t.id}`}>
-      <Icon className="h-4 w-4" aria-hidden="true" />
-      {label}
-    </Button>
-  );
-}
-
 /** "NHẬN" — always confirmed first: exactly which items, by name and count. */
 function ClaimDialog({
   tasks,
@@ -323,15 +538,43 @@ function useShiftChanged() {
 
 /**
  * "VÀO CA" — the hotel named by its address, typed by the housekeeper. No list,
- * no suggestion and nothing prefilled: the server matches what was typed and
- * opens the shift only at the account's own branch; anything it cannot match
- * for certain comes back as a neutral message that names no hotel.
+ * no suggestion and nothing prefilled: as the housekeeper types, the server is
+ * asked what the text identifies, and ONLY the one hotel it fits uniquely is
+ * shown ("17" → "170-172-174 Nguyễn Thái Bình"); too little or several fits is
+ * one generic "nhập thêm". "Vào ca" sends the typed address again and the
+ * server resolves it itself — nothing here picks the branch.
  */
 function StartShift() {
   const changed = useShiftChanged();
   const [address, setAddress] = useState('');
+  const [lookup, setLookup] = useState<{ input: string; result: Awaited<ReturnType<typeof housekeepingApi.lookupWorkplace>> } | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const typed = address.trim();
+  useEffect(() => {
+    setLookupError(null);
+    if (!typed) {
+      setLookup(null);
+      return;
+    }
+    let stale = false;
+    const timer = setTimeout(() => {
+      housekeepingApi
+        .lookupWorkplace(typed)
+        .then((result) => {
+          if (!stale) setLookup({ input: typed, result });
+        })
+        .catch((error: unknown) => {
+          if (!stale) setLookupError(toUserMessage(error));
+        });
+    }, 350);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [typed]);
+  const current = lookup && lookup.input === typed ? lookup.result : null;
   const start = useMutation({
-    mutationFn: () => housekeepingApi.startShift(address.trim()),
+    mutationFn: () => housekeepingApi.startShift(typed),
     onSuccess: changed,
   });
   return (
@@ -339,7 +582,7 @@ function StartShift() {
       data-testid="shift-start"
       onSubmit={(e) => {
         e.preventDefault();
-        if (address.trim()) start.mutate();
+        if (current?.status === 'RESOLVED') start.mutate();
       }}
       className="max-w-md space-y-4 rounded-2xl border-section border-line bg-white p-4 shadow-sm"
       autoComplete="off"
@@ -362,14 +605,28 @@ function StartShift() {
             setAddress(e.target.value);
             if (start.isError) start.reset();
           }}
-          placeholder="Nhập số nhà và tên đường"
+          placeholder="Nhập số nhà, ví dụ 170"
+          aria-describedby="shift-lookup-status"
           data-testid="shift-address"
         />
       </label>
-      <p className="text-xs text-slate-500">Nhập địa chỉ khách sạn bạn đang làm việc để xác định ca làm.</p>
+      <div id="shift-lookup-status" aria-live="polite">
+        {current?.status === 'RESOLVED' ? (
+          <p className="rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-900" data-testid="shift-lookup-match">
+            Khách sạn: <span className="font-semibold">Chi nhánh {current.branch.branchNumber} — {current.branch.address}</span>
+          </p>
+        ) : current ? (
+          <p className="text-sm text-slate-600" data-testid="shift-lookup-hint">
+            {current.message}
+          </p>
+        ) : (
+          <p className="text-xs text-slate-500">Nhập số nhà / tên đường của khách sạn bạn đang làm việc để vào ca.</p>
+        )}
+      </div>
+      {lookupError ? <ErrorAlert>{lookupError}</ErrorAlert> : null}
       {start.isError ? <ErrorAlert>{toUserMessage(start.error)}</ErrorAlert> : null}
       <div className="flex justify-end">
-        <Button type="submit" loading={start.isPending} disabled={!address.trim()} data-testid="shift-start-submit">
+        <Button type="submit" loading={start.isPending} disabled={current?.status !== 'RESOLVED'} data-testid="shift-start-submit">
           <LogIn className="h-4 w-4" aria-hidden="true" />
           Vào ca
         </Button>
@@ -380,7 +637,6 @@ function StartShift() {
 
 /** "CA HIỆN TẠI · CHI NHÁNH: …" — always in view, with the two shift actions. */
 function ShiftStrip({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: WorkShift) => void }) {
-  const homeId = useAuth().user?.branch?.id ?? null;
   const changed = useShiftChanged();
   const current = shift.current!;
   const [confirmEnd, setConfirmEnd] = useState(false);
@@ -404,12 +660,6 @@ function ShiftStrip({ shift, onEnded }: { shift: WorkShift; onEnded: (shift: Wor
           <p className="text-sm text-slate-700">
             Từ {formatDateTime(current.startedAt)} · {current.inspections} lượt kiểm phòng
           </p>
-          {homeId !== null && current.branch.id !== homeId ? (
-            // A shift opened before the Admin set the account's branch.
-            <p className="mt-1 text-sm font-medium text-amber-800" data-testid="shift-other-branch">
-              Ca đang mở không ở chi nhánh của tài khoản. Hãy “Kết thúc ca” rồi “Vào ca” lại.
-            </p>
-          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => setConfirmEnd(true)} data-testid="shift-end">

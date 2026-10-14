@@ -22,7 +22,6 @@ import {
   claimTasks,
   completeTask,
   createTasks,
-  createWorkItems,
   listWorkAreas,
   listWorkOrders,
   reassignAwaitingCleaning,
@@ -41,6 +40,18 @@ import {
   updateTask,
   voidTask,
 } from '../housekeeping/roomTaskService';
+import {
+  acceptWorkGroup,
+  addWorkGroupItems,
+  assignWorkGroup,
+  createWorkGroup,
+  decideNoClean,
+  listWorkGroups,
+  renameWorkGroup,
+  requestNoClean,
+  workerGroups,
+  workerHistory,
+} from '../housekeeping/workGroupService';
 import { housekeepingKpi, myKpi, operationsReport, overview, staffDetail, staffProgress } from '../housekeeping/housekeepingKpi';
 import { buildHousekeepingOpsWorkbook, housekeepingOpsFileName } from '../report/housekeepingOpsReport';
 import { buildHousekeepingCleaningPdf } from '../report/housekeepingCleaningPdf';
@@ -64,24 +75,23 @@ const issuesSchema = z.object({
   note: z.string().max(2000).optional(),
 });
 
-/** "Tạo công việc": shape only — what each kind of area REQUIRES is the service's rule. */
-const workItemsSchema = z.object({
+/** One room / area of a work group: shape only — what each REQUIRES is the service's rule. */
+const groupItemSchema = z.object({
+  areaKind: z.string().optional(),
+  roomNumber: z.string().max(100).optional(),
+  floor: z.string().max(100).optional(),
+  taskCodes: z.array(z.string().max(20)).max(4).optional(),
+  note: z.string().max(2000).optional(),
+  priority: z.boolean().optional(),
+});
+
+/** "Tạo công việc": the group (its optional name) and its places. */
+const workGroupSchema = z.object({
   branchId: z.number().int().positive().optional(),
   workDate: isoDay,
   requestId: z.string().max(64).optional(),
-  items: z
-    .array(
-      z.object({
-        areaKind: z.string().optional(),
-        roomNumber: z.string().max(100).optional(),
-        floor: z.string().max(100).optional(),
-        taskCode: z.string().max(20).optional(),
-        taskName: z.string().max(500).optional(),
-        note: z.string().max(2000).optional(),
-        priority: z.boolean().optional(),
-      }),
-    )
-    .max(50),
+  name: z.string().max(500).optional(),
+  items: z.array(groupItemSchema).max(50),
 });
 
 const claimSchema = z.object({ taskIds: z.array(z.string().min(1).max(100)).min(1).max(50) });
@@ -146,7 +156,13 @@ export function createHousekeepingWorkRouter(): Router {
   router.patch('/housekeeping/manager/tasks/:id', ...gate, (req, res, next) => {
     (async () => {
       const body = z
-        .object({ statusCode: z.string().optional(), priority: z.boolean().optional(), note: z.string().max(1000).nullable().optional() })
+        .object({
+          statusCode: z.string().optional(),
+          // A work group's place: its ticked codes (OUT / OC / VC and/or OTHER).
+          taskCodes: z.array(z.string().max(20)).max(4).optional(),
+          priority: z.boolean().optional(),
+          note: z.string().max(1000).nullable().optional(),
+        })
         .parse(req.body ?? {});
       res.json({ task: await updateTask(actorOf(req), req.params.id!, body, getClock()) });
     })().catch(next);
@@ -261,12 +277,53 @@ export function createHousekeepingWorkRouter(): Router {
     })().catch(next);
   });
 
-  // "Tạo công việc": one or many items, saved together, each its own row.
-  router.post('/housekeeping/manager/work-items', ...gate, (req, res, next) => {
+  /* ---------------- WORK GROUPS — "Công việc 1, 2, …" (the manager) ---------------- */
+
+  router.get('/housekeeping/manager/work-groups', ...gate, (req, res, next) => {
     (async () => {
-      const input = workItemsSchema.parse(req.body ?? {});
-      const result = await createWorkItems(actorOf(req), input, getClock());
+      const q = z.object({ date: isoDay, branchId: branchQuery }).parse(req.query);
+      res.json({ groups: await listWorkGroups(actorOf(req), { workDate: q.date, branchId: q.branchId }) });
+    })().catch(next);
+  });
+
+  // "Tạo công việc": one group, its places, one transaction.
+  router.post('/housekeeping/manager/work-groups', ...gate, (req, res, next) => {
+    (async () => {
+      const input = workGroupSchema.parse(req.body ?? {});
+      const result = await createWorkGroup(actorOf(req), input, getClock());
       res.status(result.duplicate ? 200 : 201).json(result);
+    })().catch(next);
+  });
+
+  // "Chỉnh sửa": the group's name.
+  router.patch('/housekeeping/manager/work-groups/:id', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ name: z.string().max(500).nullable().optional() }).parse(req.body ?? {});
+      res.json({ group: await renameWorkGroup(actorOf(req), req.params.id!, body, getClock()) });
+    })().catch(next);
+  });
+
+  // "Chỉnh sửa": more places. (A place is taken out with /manager/tasks/:id/void.)
+  router.post('/housekeeping/manager/work-groups/:id/items', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ items: z.array(groupItemSchema).max(50) }).parse(req.body ?? {});
+      res.status(201).json({ group: await addWorkGroupItems(actorOf(req), req.params.id!, body, getClock()) });
+    })().catch(next);
+  });
+
+  // "Giao" the whole group (null: "Chưa giao").
+  router.post('/housekeeping/manager/work-groups/:id/assign', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ assigneeUserId: z.number().int().positive().nullable() }).parse(req.body ?? {});
+      res.json({ group: await assignWorkGroup(actorOf(req), req.params.id!, body, getClock()) });
+    })().catch(next);
+  });
+
+  // "Không cần dọn": the manager's decision.
+  router.post('/housekeeping/manager/tasks/:id/no-clean-decision', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ approve: z.boolean(), note: z.string().max(1000).optional() }).parse(req.body ?? {});
+      res.json({ task: await decideNoClean(actorOf(req), req.params.id!, body, getClock()) });
     })().catch(next);
   });
 
@@ -304,7 +361,40 @@ export function createHousekeepingWorkRouter(): Router {
     })().catch(next);
   });
 
-  // "Nhận": exactly the selected items, all or none.
+  /* ---------------- WORK GROUPS — the housekeeper ---------------- */
+
+  // The day's groups at the shift's branch, and who holds each.
+  router.get('/housekeeping/work/groups', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ date: isoDay }).parse(req.query);
+      res.json(await workerGroups(actorOf(req), q.date));
+    })().catch(next);
+  });
+
+  // "Nhận công việc": the whole group, never two owners.
+  router.post('/housekeeping/work/groups/:id/accept', ...gate, (req, res, next) => {
+    (async () => {
+      res.json({ group: await acceptWorkGroup(actorOf(req), req.params.id!, getClock()) });
+    })().catch(next);
+  });
+
+  // "Không cần dọn": asked for one room, with the reason.
+  router.post('/housekeeping/work/tasks/:id/no-clean', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ reason: z.string().max(1000).optional() }).parse(req.body ?? {});
+      res.json({ task: await requestNoClean(actorOf(req), req.params.id!, body, getClock()) });
+    })().catch(next);
+  });
+
+  // The housekeeper's own finished work of a day, and that day's shifts.
+  router.get('/housekeeping/work/history', ...gate, (req, res, next) => {
+    (async () => {
+      const q = z.object({ date: isoDay }).parse(req.query);
+      res.json(await workerHistory(actorOf(req), q.date));
+    })().catch(next);
+  });
+
+  // "Nhận" (an item created before work groups): exactly the selected items, all or none.
   router.post('/housekeeping/work/claim', ...gate, (req, res, next) => {
     (async () => {
       const input = claimSchema.parse(req.body ?? {});

@@ -47,3 +47,22 @@ export function createWorkplaceRateLimiter(): RequestHandler {
     },
   });
 }
+
+/**
+ * "Vào ca", step one — the address lookup. EVERY lookup counts (a lookup that
+ * names a hotel is exactly what an enumeration would want), per account, in its
+ * own budget beside the start's. Generous for a person typing a few digits with
+ * a pause between them; nowhere near enough to walk every prefix.
+ */
+export function createWorkplaceLookupRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 40,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `workplace-lookup:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã tra địa chỉ quá nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}

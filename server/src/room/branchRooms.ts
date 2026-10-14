@@ -91,10 +91,15 @@ export function catalogRoom(branchCode: string, raw: string | null | undefined):
  * THE FLOOR CATALOG — the same idea for "Hành lang" and "Cầu thang".
  *
  * A floor is stored as the value below, and read everywhere as "Tầng <value>".
- * Chi nhánh 4 has TWO buildings whose floor numbers overlap (Tầng 2 and Tầng 3
- * exist in both), so its values carry the building: "2 (Khu Suite)" and
- * "2 (Tòa bên cạnh)" are different places, in the label and in every duplicate
- * or repeat check that groups by place. Keyed by branch code, like the rooms.
+ * Keyed by branch code, like the rooms.
+ *
+ * Chi nhánh 4 (170-172-174 Nguyễn Thái Bình) has a SUITE block whose floors
+ * overlap the main building's: "Tầng 1/2/3 (Khu Suite)" hold exactly rooms
+ * 001 / 002 / 003 (ROOM_FLOOR_OVERRIDES), and are separate places from the
+ * main building's "Tầng 2" … "Tầng 8", which hold the 2xx … 8xx rooms. The main
+ * building has no 1xx room in the catalog, so it has no "Tầng 1". Its floors
+ * were once stored as "2 (Tòa bên cạnh)" …; those values are read back as the
+ * plain floor (LEGACY_FLOOR_ALIASES), and older rows keep what they stored.
  * ------------------------------------------------------------------ */
 
 const floorRange = (n: number): string[] => Array.from({ length: n }, (_, i) => String(i + 1));
@@ -103,15 +108,38 @@ const FLOORS_BY_BRANCH_CODE: Record<string, readonly string[]> = {
   TRUONG_DINH_05: floorRange(7),
   LY_TU_TRONG_260: floorRange(8),
   NGUYEN_TRAI_47A: floorRange(11),
-  NGUYEN_THAI_BINH_170: [
-    ...['1', '2', '3'].map((f) => `${f} (Khu Suite)`),
-    ...['2', '3', '4', '5', '6', '7', '8'].map((f) => `${f} (Tòa bên cạnh)`),
-  ],
+  NGUYEN_THAI_BINH_170: [...['1', '2', '3'].map((f) => `${f} (Khu Suite)`), '2', '3', '4', '5', '6', '7', '8'],
   LE_THANH_TON_278: floorRange(5),
   BUI_THI_XUAN_40: floorRange(8),
   BUI_THI_XUAN_13: floorRange(9),
   LE_THANH_TON_191: floorRange(7),
 };
+
+/** Rooms whose floor is not their number minus the last two digits. */
+const ROOM_FLOOR_OVERRIDES: Record<string, Readonly<Record<string, string>>> = {
+  NGUYEN_THAI_BINH_170: { '001': '1 (Khu Suite)', '002': '2 (Khu Suite)', '003': '3 (Khu Suite)' },
+};
+
+/** Floor values a branch used to store, and what they are now. */
+const LEGACY_FLOOR_ALIASES: Record<string, Readonly<Record<string, string>>> = {
+  NGUYEN_THAI_BINH_170: Object.fromEntries(['2', '3', '4', '5', '6', '7', '8'].map((f) => [`${f} (Tòa bên cạnh)`, f])),
+};
+
+/**
+ * "ROOFTOP" — the branches that have one, by stable code: Chi nhánh 2 (260 Lý Tự
+ * Trọng), 3 (47A Nguyễn Trãi) and 4 (170-172-174 Nguyễn Thái Bình). Never by id
+ * or display order.
+ */
+const ROOFTOP_BRANCH_CODES: readonly string[] = ['LY_TU_TRONG_260', 'NGUYEN_TRAI_47A', 'NGUYEN_THAI_BINH_170'];
+
+export function hasRooftop(code: string): boolean {
+  return ROOFTOP_BRANCH_CODES.includes(code);
+}
+
+/** A room's floor fixed by the catalog, when its number does not say it. */
+export function roomFloorOverride(code: string, room: string): string | null {
+  return ROOM_FLOOR_OVERRIDES[code]?.[room] ?? null;
+}
 
 /** The branch's floors in walking order — or null when the branch has no floor catalog. */
 export function floorsForBranchCode(code: string): readonly string[] | null {
@@ -123,8 +151,9 @@ export function floorsForBranchCode(code: string): readonly string[] | null {
  * catalog — one of its floors, or refused. Mirrors `catalogRoom`.
  */
 export function catalogFloor(branchCode: string, raw: string | null | undefined): string | null {
-  const floor = (raw ?? '').trim();
-  if (!floor) return null;
+  const typed = (raw ?? '').trim();
+  if (!typed) return null;
+  const floor = LEGACY_FLOOR_ALIASES[branchCode]?.[typed] ?? typed;
   const floors = floorsForBranchCode(branchCode);
   if (floors && !floors.includes(floor)) {
     throw ApiError.validation(`Tầng ${floor} không thuộc chi nhánh này. Vui lòng chọn tầng trong danh sách.`);
