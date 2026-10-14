@@ -67,10 +67,18 @@ npm run dev        # backend :3001 + client dev :5173 (client proxy /api sang ba
 
 ## Máy lễ tân
 
-1. Tìm địa chỉ IP LAN của máy chủ (ví dụ `ipconfig` → `192.168.1.10`).
-2. Trên máy lễ tân, mở Chrome/Edge tới `http://192.168.1.10:3001`.
-3. Đăng nhập bằng tài khoản lễ tân do Admin tạo.
-4. (Tùy chọn) Cài đặt Kas như một ứng dụng — xem `pwa-install.md`.
+1. Trên máy lễ tân, mở Chrome/Edge tới **địa chỉ công khai** của Kas — đúng giá trị
+   `APP_ORIGIN` trong `.env` của máy chủ (ví dụ `https://kasbookingapp.com`).
+2. Đăng nhập bằng tài khoản lễ tân do Admin tạo.
+3. (Tùy chọn) Cài đặt Kas như một ứng dụng — xem `pwa-install.md` — **từ địa chỉ
+   công khai đó**, không phải từ địa chỉ IP.
+
+> **Không dùng `http://<IP-máy-chủ>:3001`.** Ở chế độ production, cookie đăng nhập
+> chỉ gửi qua HTTPS, máy chủ chỉ chấp nhận yêu cầu từ `APP_ORIGIN`, và trình duyệt
+> được yêu cầu nâng mọi tài nguyên lên https — mở bằng địa chỉ IP sẽ ra trang trắng
+> và không đăng nhập được. Máy chủ tự chuyển một trang mở bằng địa chỉ khác sang
+> `APP_ORIGIN`; ứng dụng (PWA) đã cài từ địa chỉ IP cần gỡ và cài lại từ địa chỉ
+> công khai.
 
 ## Cơ sở dữ liệu dùng chung
 

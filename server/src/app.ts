@@ -3,12 +3,13 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import { CLIENT_DIST_DIR, env, serveClient } from './config/env';
+import { CLIENT_DIST_DIR, env, isProduction, serveClient } from './config/env';
 import { createApiRouter } from './routes';
 import { createSessionMiddleware } from './auth/session';
 import { requestContext } from './middleware/requestContext';
 import { requestLogger } from './middleware/requestLogger';
 import { sameOriginCheck } from './middleware/sameOrigin';
+import { canonicalOriginRedirect } from './middleware/canonicalOrigin';
 import { notFoundHandler } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -73,6 +74,10 @@ function mountClient(app: Express): void {
     console.warn('Không tìm thấy bản build của client — chỉ phục vụ API.');
     return;
   }
+
+  // A page opened by another address than APP_ORIGIN (the LAN IP) is sent to
+  // the public origin: it cannot load or log in anywhere else. See canonicalOrigin.ts.
+  app.use(canonicalOriginRedirect({ production: isProduction, appOrigin: env.APP_ORIGIN }));
 
   app.use(
     express.static(CLIENT_DIST_DIR, {
