@@ -12,6 +12,7 @@ import { sameOriginCheck } from './middleware/sameOrigin';
 import { canonicalOriginRedirect } from './middleware/canonicalOrigin';
 import { notFoundHandler } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
+import { servesSpaShell } from './middleware/spaFallback';
 
 export function createApp(): Express {
   const app = express();
@@ -95,8 +96,8 @@ function mountClient(app: Express): void {
   );
 
   app.use((req, res, next) => {
-    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-    if (req.path.startsWith('/api/')) return next();
+    // Page navigations only — a missing script or file is a 404, never the shell (see spaFallback.ts).
+    if (!servesSpaShell(req.method, req.path)) return next();
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(CLIENT_DIST_DIR, 'index.html'), (err) => {
       if (err) next();

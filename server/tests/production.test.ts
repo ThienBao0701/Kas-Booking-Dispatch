@@ -896,7 +896,10 @@ describe('production regressions', () => {
     // the client and that the compiled entry point is what production runs.
     const appSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'app.ts'), 'utf8');
     expect(appSource).toContain('mountClient(app)');
-    expect(appSource).toContain("req.path.startsWith('/api/')");
+    // The shell answers pages only — never /api, never a file (spaFallback.ts, covered by spaFallback.test.ts).
+    expect(appSource).toContain('if (!servesSpaShell(req.method, req.path)) return next();');
+    const fallback = fs.readFileSync(path.join(__dirname, '..', 'src', 'middleware', 'spaFallback.ts'), 'utf8');
+    expect(fallback).toContain("path.startsWith('/api/')");
 
     const pkg = JSON.parse(
       fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
