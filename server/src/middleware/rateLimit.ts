@@ -66,3 +66,20 @@ export function createWorkplaceLookupRateLimiter(): RequestHandler {
     },
   });
 }
+
+/**
+ * "Gửi thông báo thử" — per ACCOUNT, a handful per ten minutes: enough to check
+ * a phone twice over, never a way to flood a push service from this server.
+ */
+export function createPushTestRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `push-test:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã gửi thông báo thử nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}

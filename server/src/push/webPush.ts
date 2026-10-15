@@ -89,6 +89,22 @@ export function generateVapidKeys(): { publicKey: string; privateKey: string } {
   };
 }
 
+/**
+ * Whether a VAPID pair is usable: a 65-byte uncompressed public key that IS the
+ * private scalar's own. A mismatched pair signs tokens every push service refuses.
+ */
+export function vapidKeysMatch(publicKey: string, privateKey: string): boolean {
+  try {
+    const d = fromB64u(privateKey);
+    if (d.length === 0 || d.length > 32) return false;
+    const ecdh = createECDH('prime256v1');
+    ecdh.setPrivateKey(Buffer.concat([Buffer.alloc(32 - d.length), d]));
+    return ecdh.getPublicKey().equals(fromB64u(publicKey));
+  } catch {
+    return false;
+  }
+}
+
 /** The VAPID `Authorization` header (RFC 8292 §2–3) for one push service origin. */
 export function vapidAuthorization(endpoint: string, vapid: VapidKeys, nowMs: number = Date.now()): string {
   const audience = new URL(endpoint).origin;

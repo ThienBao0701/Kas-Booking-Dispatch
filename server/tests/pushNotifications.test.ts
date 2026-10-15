@@ -8,9 +8,12 @@
  *   27  three rooms given at once are ONE notice
  *   28  a device the push service reports gone is revoked; the others still get it
  *   +   the wire format: RFC 8291's own test vector, and a verifiable VAPID token
+ *   +   the configuration: a mismatched key pair is no configuration at all
+ *   +   "Gửi thông báo thử": the caller's own devices only, nothing recorded
  */
 import { createECDH, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import request from 'supertest';
 import { createApp } from '../src/app';
 import { seedBranches } from '../src/db/seed';
 import { resetAll, resetHousekeepingData, resetIssueData, resetShiftData, testPrisma } from './helpers/db';
@@ -18,8 +21,8 @@ import { ADMIN_PASSWORD, createAdmin, createUser, loginAgent } from './helpers/a
 import { resetClock, setClock } from '../src/lib/clock';
 import { workedRecentlyAt } from './helpers/workplace';
 import { serveAllBranches } from './helpers/issues';
-import { notifyOperational, pushNotification, setPushSender, settlePushes } from '../src/push/pushService';
-import { encryptPayload, generateVapidKeys, isPushServiceEndpoint, vapidAuthorization } from '../src/push/webPush';
+import { notifyOperational, pushNotification, setPushSender, settlePushes, vapidConfig } from '../src/push/pushService';
+import { encryptPayload, generateVapidKeys, isPushServiceEndpoint, vapidAuthorization, vapidKeysMatch } from '../src/push/webPush';
 
 const app = createApp();
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
@@ -306,5 +309,99 @@ describe('the wire format', () => {
     expect(verify('sha256', Buffer.from(`${h}.${c}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(s!, 'base64url'))).toBe(true);
     expect(isPushServiceEndpoint('https://web.push.apple.com/QGx')).toBe(true);
     expect(isPushServiceEndpoint('https://localhost/x')).toBe(false);
+  });
+});
+
+describe('the configuration', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    for (const k of ['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT', 'APP_ORIGIN']) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('accepts only a public key that IS the private key’s — a mismatched pair is push switched off', () => {
+    const a = generateVapidKeys();
+    const b = generateVapidKeys();
+    expect(vapidKeysMatch(a.publicKey, a.privateKey)).toBe(true);
+    expect(vapidKeysMatch(a.publicKey, b.privateKey)).toBe(false);
+    expect(vapidKeysMatch('not-a-key', a.privateKey)).toBe(false);
+    expect(vapidKeysMatch(a.publicKey, '')).toBe(false);
+    // The documented generator may drop a leading zero byte of the scalar: still the same key.
+    const ecdh = createECDH('prime256v1');
+    for (let i = 0; i < 50_000; i += 1) {
+      ecdh.generateKeys();
+      const d = ecdh.getPrivateKey();
+      if (d.length < 32 || d[0] === 0) break;
+    }
+    expect(vapidKeysMatch(ecdh.getPublicKey('base64url'), ecdh.getPrivateKey('base64url'))).toBe(true);
+
+    process.env.VAPID_PUBLIC_KEY = a.publicKey;
+    process.env.VAPID_PRIVATE_KEY = b.privateKey;
+    expect(vapidConfig()).toBeNull();
+    process.env.VAPID_PRIVATE_KEY = a.privateKey;
+    expect(vapidConfig()).toMatchObject({ publicKey: a.publicKey });
+  });
+
+  it('names the app’s own https origin as the contact when VAPID_SUBJECT is not set', () => {
+    const a = generateVapidKeys();
+    process.env.VAPID_PUBLIC_KEY = a.publicKey;
+    process.env.VAPID_PRIVATE_KEY = a.privateKey;
+    delete process.env.VAPID_SUBJECT;
+    process.env.APP_ORIGIN = 'https://kas.example.vn';
+    expect(vapidConfig()?.subject).toBe('https://kas.example.vn');
+    process.env.VAPID_SUBJECT = 'mailto:it@kas.example.vn';
+    expect(vapidConfig()?.subject).toBe('mailto:it@kas.example.vn');
+  });
+});
+
+describe('"Gửi thông báo thử"', () => {
+  it('goes to the caller’s own live devices only, records nothing, and says what each device’s push service answered', async () => {
+    const phone = device('hoa-phone');
+    const tablet = device('hoa-tablet');
+    const stale = device('hoa-old');
+    for (const d of [phone, tablet, stale]) expect((await hoa.post('/api/push/subscriptions').send(d)).status).toBe(201);
+    expect((await lan.post('/api/push/subscriptions').send(device('lan-phone'))).status).toBe(201);
+    answer = (endpoint) => (endpoint === stale.endpoint ? 410 : endpoint === tablet.endpoint ? 403 : 201);
+
+    const res = await hoa.post('/api/push/test');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ devices: 3, sent: 1, revoked: 1, rejected: 1, failed: 0 });
+    // Only Hoa's devices — never Lan's.
+    expect(sent.map((x) => x.endpoint).sort()).toEqual([phone.endpoint, stale.endpoint, tablet.endpoint].sort());
+    expect(sent[0]!.message).toMatchObject({ title: 'KAS — thông báo thử', url: '/app' });
+    // Nothing operational recorded: no bell row; the gone device is revoked, the refused one kept.
+    expect(await testPrisma.notification.count()).toBe(0);
+    expect(await testPrisma.pushSubscription.findUniqueOrThrow({ where: { endpoint: stale.endpoint } })).toMatchObject({ revokedAt: expect.any(Date) });
+    expect(await testPrisma.pushSubscription.findUniqueOrThrow({ where: { endpoint: tablet.endpoint } })).toMatchObject({ revokedAt: null });
+
+    // No device left to reach is said plainly, not as a success.
+    await testPrisma.pushSubscription.updateMany({ where: { userId: ids.hoa! }, data: { revokedAt: new Date() } });
+    expect((await hoa.post('/api/push/test')).body).toMatchObject({ devices: 0, sent: 0 });
+
+    // Signed out: refused.
+    expect((await request(app).post('/api/push/test')).status).toBe(401);
+    // A handful per ten minutes, per account.
+    for (let i = 0; i < 3; i += 1) await hoa.post('/api/push/test');
+    const limited = await hoa.post('/api/push/test');
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.message).toContain('thông báo thử');
+  });
+
+  it('says the server is not configured instead of pretending to send', async () => {
+    setPushSender(null);
+    const saved = { pub: process.env.VAPID_PUBLIC_KEY, priv: process.env.VAPID_PRIVATE_KEY };
+    delete process.env.VAPID_PUBLIC_KEY;
+    delete process.env.VAPID_PRIVATE_KEY;
+    try {
+      expect((await lan.get('/api/push/config')).body).toEqual({ publicKey: null });
+      const res = await lan.post('/api/push/test');
+      expect(res.status).toBe(503);
+      expect(res.body.error.message).toContain('chưa được cấu hình');
+    } finally {
+      if (saved.pub !== undefined) process.env.VAPID_PUBLIC_KEY = saved.pub;
+      if (saved.priv !== undefined) process.env.VAPID_PRIVATE_KEY = saved.priv;
+    }
   });
 });

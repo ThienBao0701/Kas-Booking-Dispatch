@@ -24,18 +24,43 @@ import type { NotificationKind, PrismaClient } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock } from '../lib/clock';
-import { isPushServiceEndpoint, sendWebPush, validKeys, type SubscriptionKeys, type VapidKeys } from './webPush';
+import { isPushServiceEndpoint, sendWebPush, validKeys, vapidKeysMatch, type SubscriptionKeys, type VapidKeys } from './webPush';
 
 /* ------------------------------------------------------------------ *
  * Configuration
  * ------------------------------------------------------------------ */
 
-/** The server's VAPID keys from the environment, or null when push is not configured. */
+let warnedMismatch = false;
+
+/**
+ * Who the push services may contact: VAPID_SUBJECT, else the app's own https
+ * origin (Apple refuses a token whose subject is not a real mailto: or https URL).
+ */
+function vapidSubject(): string {
+  const subject = process.env.VAPID_SUBJECT?.trim();
+  if (subject) return subject;
+  const origin = process.env.APP_ORIGIN?.trim();
+  return origin?.startsWith('https://') ? origin : 'mailto:admin@localhost';
+}
+
+/**
+ * The server's VAPID keys from the environment, or null when push is not
+ * configured — or configured with a pair that does not match, which no push
+ * service would accept (logged once, never the keys themselves).
+ */
 export function vapidConfig(): VapidKeys | null {
   const publicKey = process.env.VAPID_PUBLIC_KEY?.trim();
   const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
   if (!publicKey || !privateKey) return null;
-  return { publicKey, privateKey, subject: process.env.VAPID_SUBJECT?.trim() || 'mailto:admin@localhost' };
+  if (!vapidKeysMatch(publicKey, privateKey)) {
+    if (!warnedMismatch) {
+      warnedMismatch = true;
+      // eslint-disable-next-line no-console
+      console.warn('[push] VAPID_PUBLIC_KEY is not the public key of VAPID_PRIVATE_KEY — device push is OFF.');
+    }
+    return null;
+  }
+  return { publicKey, privateKey, subject: vapidSubject() };
 }
 
 /** What the browser needs to subscribe — the PUBLIC key only. */
@@ -159,12 +184,33 @@ export async function pushNotification(id: string, client: PrismaClient = prisma
   });
   if (claimed.count === 0) return { sent: 0, revoked: 0 };
   const notice = await client.notification.findUniqueOrThrow({ where: { id } });
-  const devices = await client.pushSubscription.findMany({ where: { userId: notice.userId, revokedAt: null } });
   const payload = Buffer.from(
     JSON.stringify({ title: notice.title, body: notice.body, url: notice.link ?? '/app', tag: `kas-${notice.id}` }),
   );
+  const { sent, revoked } = await pushToDevices(notice.userId, payload, send, now, client);
+  return { sent, revoked };
+}
+
+export interface DeliveryCounts {
+  /** Live devices of the account when the message went out. */
+  devices: number;
+  /** Accepted by the push service — NOT yet proof the phone showed it. */
+  sent: number;
+  /** Reported gone (404 / 410): revoked; the account's other devices are unaffected. */
+  revoked: number;
+  /** Refused for another reason (e.g. 400 / 403 / 413 / 429). */
+  rejected: number;
+  /** Not reached at all (network failure). */
+  failed: number;
+}
+
+/** Sends one payload to every live device of ONE account. */
+async function pushToDevices(userId: number, payload: Buffer, send: PushSender, now: Date, client: PrismaClient): Promise<DeliveryCounts> {
+  const devices = await client.pushSubscription.findMany({ where: { userId, revokedAt: null } });
   let sent = 0;
   let revoked = 0;
+  let rejected = 0;
+  let failed = 0;
   for (const device of devices) {
     try {
       const status = await send({ endpoint: device.endpoint, p256dh: device.p256dh, auth: device.auth }, payload);
@@ -174,12 +220,30 @@ export async function pushNotification(id: string, client: PrismaClient = prisma
       } else if (status >= 200 && status < 300) {
         await client.pushSubscription.update({ where: { id: device.id }, data: { lastUsedAt: now } });
         sent += 1;
+      } else {
+        rejected += 1;
+        // eslint-disable-next-line no-console
+        console.warn(`[push] device ${device.id} refused by ${new URL(device.endpoint).hostname}: HTTP ${status}`);
       }
     } catch (err) {
       // A network failure on one device is not a reason to stop the others.
+      failed += 1;
       // eslint-disable-next-line no-console
       console.warn(`[push] device ${device.id} unreachable:`, err instanceof Error ? err.message : err);
     }
   }
-  return { sent, revoked };
+  return { devices: devices.length, sent, revoked, rejected, failed };
+}
+
+/**
+ * "Gửi thông báo thử" — one message to the caller's OWN live devices, nothing
+ * else: no notification row, no booking, room or incident is touched.
+ */
+export async function sendTestPush(userId: number, client: PrismaClient = prisma): Promise<DeliveryCounts> {
+  const send = activeSender();
+  if (!send) throw new ApiError('SERVICE_UNAVAILABLE', 'Máy chủ chưa được cấu hình gửi thông báo đẩy. Vui lòng báo quản trị viên.');
+  const payload = Buffer.from(
+    JSON.stringify({ title: 'KAS — thông báo thử', body: 'Điện thoại này đã nhận được thông báo từ KAS.', url: '/app', tag: 'kas-test' }),
+  );
+  return pushToDevices(userId, payload, send, getClock().now(), client);
 }

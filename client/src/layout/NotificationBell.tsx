@@ -5,7 +5,8 @@ import { Bell, BellRing, CheckCheck } from 'lucide-react';
 import { notificationsApi, type NotificationItem } from '../api/notifications';
 import { relativeTime } from '../lib/format';
 import { useAuth } from '../auth/AuthProvider';
-import { disablePush, enablePush, pushState, type PushState } from '../pwa/push';
+import { toUserMessage } from '../api/errors';
+import { disablePush, enablePush, isIos, pushState, PushError, sendTestPush, type PushState, type TestPushResult } from '../pwa/push';
 
 /*
   THE BELL IS THE IN-APP FALLBACK of the device push: the same notices, read
@@ -24,44 +25,98 @@ function noticeTarget(n: NotificationItem): string | null {
   return n.bookingId ? `/app/booking/${n.bookingId}` : null;
 }
 
+const pushErrorText = (err: unknown) => (err instanceof PushError ? err.message : toUserMessage(err));
+
+/** What a test reached — "sent" is the push service's acceptance, not the phone showing it. */
+function testResultText(r: TestPushResult): string {
+  if (r.devices === 0) return 'Máy chủ chưa có thiết bị nào của bạn. Bấm “Tắt” rồi “Bật thông báo” lại.';
+  const parts: string[] = [];
+  if (r.sent > 0) {
+    parts.push(
+      `Đã gửi tới dịch vụ thông báo cho ${r.sent} thiết bị. Nếu điện thoại hiện “KAS — thông báo thử” là đã nhận được; không thấy sau 1 phút thì kiểm tra cài đặt thông báo của điện thoại.`,
+    );
+  }
+  if (r.revoked > 0) parts.push(`${r.revoked} thiết bị đã hết hạn đăng ký và đã được gỡ — trên thiết bị đó, bấm “Bật thông báo” lại.`);
+  if (r.rejected > 0) parts.push(`Dịch vụ thông báo từ chối gửi tới ${r.rejected} thiết bị.`);
+  if (r.failed > 0) parts.push(`Không liên lạc được dịch vụ thông báo của ${r.failed} thiết bị.`);
+  return parts.join(' ');
+}
+
+const DENIED_HELP = isIos()
+  ? 'Thông báo đang bị chặn. Trên iPhone/iPad: mở Cài đặt → Thông báo → KAS → bật “Cho phép thông báo”, rồi mở lại KAS.'
+  : 'Thông báo đang bị chặn. Trên Android (Chrome): bấm biểu tượng bên trái địa chỉ trang → Quyền → Thông báo → Cho phép (hoặc Cài đặt → Ứng dụng → Chrome/KAS → Thông báo), rồi tải lại trang.';
+
 /** "Bật thông báo" for this device — asked only when pressed. */
-function PushControl() {
+export function PushControl() {
   const [state, setState] = useState<PushState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
   useEffect(() => {
     let alive = true;
     pushState()
+      // Already on: refresh the server's copy quietly (no prompt — permission is granted).
+      .then((s) => (s === 'on' ? enablePush().catch(() => s) : s))
       .then((s) => alive && setState(s))
       .catch(() => alive && setState('unsupported'));
     return () => {
       alive = false;
     };
   }, []);
-  if (state === null || state === 'unsupported' || state === 'unconfigured') return null;
-  const run = (job: () => Promise<PushState | void>, after?: PushState) => {
+  if (state === null) return null;
+  const turnOn = () => {
     setBusy(true);
-    job()
-      .then((s) => setState(s ?? after ?? 'off'))
-      .catch(() => setState('off'))
+    setNote(null);
+    enablePush()
+      .then((s) => {
+        setState(s);
+        if (s === 'on') setNote({ text: 'Đã đăng ký thiết bị này. Bấm “Gửi thông báo thử” để kiểm tra điện thoại có hiện thông báo không.', error: false });
+      })
+      .catch((err: unknown) => setNote({ text: pushErrorText(err), error: true }))
+      .finally(() => setBusy(false));
+  };
+  const turnOff = () => {
+    setBusy(true);
+    setNote(null);
+    disablePush()
+      .then(() => setState('off'))
+      .finally(() => setBusy(false));
+  };
+  const test = () => {
+    setBusy(true);
+    setNote(null);
+    sendTestPush()
+      .then((r) => setNote({ text: testResultText(r), error: r.sent === 0 }))
+      .catch((err: unknown) => setNote({ text: pushErrorText(err), error: true }))
       .finally(() => setBusy(false));
   };
   return (
     <div data-testid="push-control" className="border-b border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
       {state === 'on' ? (
-        <p className="flex items-center justify-between gap-2">
-          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700">
-            <BellRing className="h-3.5 w-3.5" aria-hidden="true" />
-            Đã bật thông báo trên thiết bị này
-          </span>
-          <button type="button" disabled={busy} onClick={() => run(disablePush, 'off')} className="font-medium text-slate-500 hover:text-slate-800">
-            Tắt
+        <>
+          <p className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700">
+              <BellRing className="h-3.5 w-3.5" aria-hidden="true" />
+              Đã đăng ký thiết bị này
+            </span>
+            <button type="button" disabled={busy} onClick={turnOff} className="font-medium text-slate-500 hover:text-slate-800">
+              Tắt
+            </button>
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={test}
+            data-testid="push-test"
+            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+          >
+            Gửi thông báo thử
           </button>
-        </p>
+        </>
       ) : state === 'off' ? (
         <button
           type="button"
           disabled={busy}
-          onClick={() => run(enablePush)}
+          onClick={turnOn}
           data-testid="push-enable"
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
         >
@@ -69,10 +124,25 @@ function PushControl() {
           Bật thông báo
         </button>
       ) : state === 'denied' ? (
-        <p>Thông báo đang bị chặn. Hãy cho phép thông báo cho KAS trong cài đặt của trình duyệt hoặc điện thoại.</p>
+        <p data-testid="push-denied">{DENIED_HELP}</p>
+      ) : state === 'unconfigured' ? (
+        <p data-testid="push-unconfigured">Máy chủ chưa bật gửi thông báo đẩy. Thông báo vẫn hiện trong chuông này. Vui lòng báo quản trị viên.</p>
+      ) : state === 'install-first' ? (
+        <p data-testid="push-install-first">
+          Trên iPhone/iPad, KAS chỉ nhận thông báo khi mở từ Màn hình chính: trong Safari nhấn Chia sẻ → “Thêm vào MH chính”, rồi mở KAS
+          từ biểu tượng đó và bấm “Bật thông báo” (cần iOS 16.4 trở lên).
+        </p>
       ) : (
-        <p>Trên iPhone/iPad: nhấn Chia sẻ → “Thêm vào MH chính”, rồi mở KAS từ biểu tượng đó để bật thông báo.</p>
+        <p data-testid="push-unsupported">
+          Trình duyệt này không nhận được thông báo đẩy. Trên Android hãy mở KAS bằng Chrome; trên iPhone/iPad cần iOS 16.4 trở lên và mở
+          KAS từ Màn hình chính.
+        </p>
       )}
+      {note ? (
+        <p data-testid="push-note" role={note.error ? 'alert' : 'status'} className={`mt-2 ${note.error ? 'text-red-700' : 'text-emerald-700'}`}>
+          {note.text}
+        </p>
+      ) : null}
     </div>
   );
 }

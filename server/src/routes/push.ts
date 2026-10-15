@@ -9,7 +9,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, requirePasswordChanged } from '../middleware/auth';
-import { pushClientConfig, removeSubscription, saveSubscription } from '../push/pushService';
+import { createPushTestRateLimiter } from '../middleware/rateLimit';
+import { pushClientConfig, removeSubscription, saveSubscription, sendTestPush } from '../push/pushService';
 
 const keysSchema = z.object({
   p256dh: z.string().min(1).max(200),
@@ -44,6 +45,13 @@ export function createPushRouter(): Router {
     (async () => {
       const body = unsubscribeSchema.parse(req.body ?? {});
       res.json({ removed: await removeSubscription(req.currentUser!.id, body.endpoint) });
+    })().catch(next);
+  });
+
+  // POST /api/push/test — "Gửi thông báo thử" to the caller's own devices only.
+  router.post('/push/test', createPushTestRateLimiter(), (req, res, next) => {
+    (async () => {
+      res.json(await sendTestPush(req.currentUser!.id));
     })().catch(next);
   });
 

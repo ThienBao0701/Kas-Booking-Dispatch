@@ -13,7 +13,19 @@ import { api } from '../api/client';
 
 export type PushState = 'unsupported' | 'install-first' | 'unconfigured' | 'denied' | 'off' | 'on';
 
-function isIos(): boolean {
+/** A step of "Bật thông báo" that failed, said in words the worker can act on. */
+export class PushError extends Error {}
+
+/** What "Gửi thông báo thử" reached — accepted by a push service is not yet shown on a phone. */
+export interface TestPushResult {
+  devices: number;
+  sent: number;
+  revoked: number;
+  rejected: number;
+  failed: number;
+}
+
+export function isIos(): boolean {
   const ua = navigator.userAgent;
   return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
@@ -48,19 +60,27 @@ async function registration(): Promise<ServiceWorkerRegistration | null> {
 export async function pushState(): Promise<PushState> {
   if (!pushSupported()) return isIos() && !isStandalone() ? 'install-first' : 'unsupported';
   if (Notification.permission === 'denied') return 'denied';
+  // No worker yet (first load): "Bật thông báo" says so when pressed.
   const reg = await registration();
-  if (!reg) return 'unsupported';
-  const sub = await reg.pushManager.getSubscription();
+  const sub = await reg?.pushManager.getSubscription();
   return sub && Notification.permission === 'granted' ? 'on' : 'off';
 }
 
-/** Asks for permission (from a press), subscribes, and registers the device. */
+/**
+ * Asks for permission (from a press), subscribes, and registers the device.
+ * Run again on load once it is on: no prompt then (permission is already
+ * granted), and the server's copy is refreshed — re-attached to whoever is
+ * signed in, revived if it had been revoked, renewed if the server key changed.
+ */
 export async function enablePush(): Promise<PushState> {
   if (!pushSupported()) return isIos() && !isStandalone() ? 'install-first' : 'unsupported';
   const key = await serverKey();
   if (!key) return 'unconfigured';
-  const permission = await Notification.requestPermission();
+  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
   if (permission !== 'granted') return permission === 'denied' ? 'denied' : 'off';
+  if (!(await registration())) {
+    throw new PushError('Ứng dụng chưa sẵn sàng nhận thông báo. Hãy tải lại trang rồi bấm “Bật thông báo” lần nữa.');
+  }
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   // A subscription made for another server key cannot be reused.
@@ -69,10 +89,23 @@ export async function enablePush(): Promise<PushState> {
     await sub.unsubscribe();
     sub = null;
   }
-  sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) as BufferSource });
+  try {
+    sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) as BufferSource });
+  } catch {
+    throw new PushError('Không đăng ký được thiết bị nhận thông báo. Kiểm tra kết nối mạng rồi thử lại.');
+  }
   const json = sub.toJSON();
+  if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+    await sub.unsubscribe().catch(() => undefined);
+    throw new PushError('Trình duyệt trả về đăng ký không hợp lệ. Bấm “Bật thông báo” lần nữa.');
+  }
   await api.post('/push/subscriptions', { endpoint: json.endpoint, keys: json.keys });
   return 'on';
+}
+
+/** "Gửi thông báo thử" — to this account's own registered devices. */
+export function sendTestPush(): Promise<TestPushResult> {
+  return api.post<TestPushResult>('/push/test');
 }
 
 /** Turns push off on this device — before signing out, or from the bell. */
