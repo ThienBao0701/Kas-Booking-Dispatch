@@ -21,7 +21,8 @@ import type { FindingLine } from '../api/roomWork';
 
 const COLUMNS: DataColumn<FindingLine>[] = [
   { key: 'when', header: 'Thời gian', render: (f) => formatDateTime(f.createdAt) },
-  { key: 'room', header: 'Phòng', render: (f) => `${f.roomNumber} · CN ${f.branch.branchNumber}` },
+  // The room only: the housekeeper's hotel is named by its address elsewhere, never by a branch number.
+  { key: 'room', header: 'Phòng', render: (f) => f.roomNumber },
   { key: 'type', header: 'Phát sinh', render: (f) => (f.note ? `${f.typeLabel} — ${f.note}` : f.typeLabel) },
   { key: 'status', header: 'Thu tiền', render: (f) => f.collectionStatusLabel },
   { key: 'amount', header: 'Số tiền', align: 'right', render: (f) => (f.amount === null ? '—' : formatVnd(f.amount)) },

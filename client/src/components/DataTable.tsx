@@ -159,6 +159,11 @@ interface DataTableProps<T> {
    * a table that sits inside a section someone else draws.
    */
   embedded?: boolean;
+  /**
+   * "light": a thin-bordered white card with quiet rules — the housekeeping
+   * manager's screens. Every other table keeps the default frame.
+   */
+  frame?: 'default' | 'light';
 }
 
 export function DataTable<T>({
@@ -184,6 +189,7 @@ export function DataTable<T>({
   compact = false,
   section,
   embedded = false,
+  frame = 'default',
 }: DataTableProps<T>) {
   const [openRows, setOpenRows] = useState<ReadonlySet<string>>(() => new Set<string>());
   const toggleRow = (key: string) =>
@@ -221,9 +227,12 @@ export function DataTable<T>({
   const cellX = recordRows ? 'px-2.5' : 'px-3';
   // Their scroll box is also a size container, so an open record can be held to
   // the visible width while the row above it scrolls (see FragmentRow).
+  const light = frame === 'light' && !strong;
   const headRowClass = strong
     ? 'border-b-rule border-line bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600'
-    : 'border-b-rule border-line text-xs uppercase tracking-wide text-slate-600';
+    : light
+      ? 'border-b border-line-subtle bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500'
+      : 'border-b-rule border-line text-xs uppercase tracking-wide text-slate-600';
   const headCellClass = strong ? 'py-2.5 font-semibold' : 'py-2 font-medium';
 
   const body = (
@@ -289,7 +298,7 @@ export function DataTable<T>({
                 ) : null}
               </tr>
             </thead>
-            <tbody className="divide-y-rule divide-line-subtle">
+            <tbody className={light ? 'divide-y divide-line-subtle' : 'divide-y-rule divide-line-subtle'}>
               {rows.map((row, index) => {
                 const key = rowKey(row);
                 return (
@@ -319,7 +328,7 @@ export function DataTable<T>({
 
       {footer && !isLoading && !isError ? (
         <div
-          className={`border-t-rule px-4 py-2.5 ${strong ? 'border-line bg-slate-50' : 'border-line-subtle bg-slate-50/70'}`}
+          className={`px-4 py-2.5 ${light ? 'border-t border-line-subtle bg-slate-50' : `border-t-rule ${strong ? 'border-line bg-slate-50' : 'border-line-subtle bg-slate-50/70'}`}`}
         >
           {footer}
         </div>
@@ -334,6 +343,26 @@ export function DataTable<T>({
       <ReportSection testId={testId} marker={section.marker} title={title} count={badge} aside={headerAction}>
         {body}
       </ReportSection>
+    );
+  }
+
+  if (light) {
+    return (
+      <section
+        data-testid={testId}
+        className="overflow-hidden rounded-xl border border-line-subtle bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05)]"
+      >
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line-subtle px-4 py-3">
+          <h3 className="text-[15px] font-semibold text-slate-900">
+            {title}
+            {badge !== undefined ? (
+              <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium tabular-nums text-slate-600">{badge}</span>
+            ) : null}
+          </h3>
+          {headerAction}
+        </header>
+        {body}
+      </section>
     );
   }
 

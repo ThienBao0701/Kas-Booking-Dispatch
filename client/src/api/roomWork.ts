@@ -316,6 +316,8 @@ export interface OperationsRow {
   collectedAmount: number;
   pendingAmount: number;
   pendingCount: number;
+  /** Findings marked "Không thu được" — a count: no amount is recorded for them. */
+  uncollectibleCount: number;
   voided: number;
   notes: number;
 }
@@ -324,6 +326,23 @@ export interface Period {
   from: string;
   to: string;
   branchId?: number;
+}
+
+/** "Loại báo cáo": the rooms' work and the inspections, or one of the two. */
+export type ReportType = 'ALL' | 'CLEANING' | 'INSPECTION';
+
+export const REPORT_TYPE_OPTIONS: { value: ReportType; label: string }[] = [
+  { value: 'ALL', label: 'Tổng hợp vận hành' },
+  { value: 'CLEANING', label: 'Công việc dọn phòng' },
+  { value: 'INSPECTION', label: 'Kiểm phòng & thu tiền' },
+];
+
+/** The report's filters — applied by the server, to the screen and to both files alike. */
+export interface ReportQuery extends Period {
+  userId?: number;
+  type?: ReportType;
+  /** A room / area, a worker's name, or a finding's id. */
+  q?: string;
 }
 
 export const roomWorkApi = {
@@ -393,7 +412,14 @@ export const roomWorkApi = {
     api.get<{ rows: KpiRow[]; totals: Omit<KpiRow, 'userId' | 'fullName'>; findings: FindingLine[] }>(
       `/housekeeping/manager/kpi${query({ ...p })}`,
     ),
-  report: (p: Period) => api.get<{ from: string; to: string; rows: OperationsRow[] }>(`/housekeeping/manager/report${query({ ...p })}`),
+  report: (p: ReportQuery) =>
+    api.get<{
+      from: string;
+      to: string;
+      filters: { type: ReportType; typeLabel: string; employee: string | null; q: string | null };
+      rows: OperationsRow[];
+      findings: FindingLine[];
+    }>(`/housekeeping/manager/report${query({ ...p, type: p.type === 'ALL' ? undefined : p.type })}`),
 
   /* The worker */
   myTasks: (date: string) => api.get<{ tasks: RoomTask[] }>(`/housekeeping/work?date=${date}`),
@@ -423,9 +449,9 @@ export const roomWorkApi = {
     api.get<{ summary: KpiRow; findings: FindingLine[] }>(`/housekeeping/kpi/me${query({ ...p })}`),
 };
 
-/** The report files, opened as ordinary links. */
-export function housekeepingReportUrl(kind: 'pdf' | 'xlsx', p: Period): string {
-  return `/api/housekeeping/manager/report.${kind}${query({ ...p })}`;
+/** The report files, opened as ordinary links — with the very filters the screen shows. */
+export function housekeepingReportUrl(kind: 'pdf' | 'xlsx', p: ReportQuery): string {
+  return `/api/housekeeping/manager/report.${kind}${query({ ...p, type: p.type === 'ALL' ? undefined : p.type })}`;
 }
 
 /** "42 phút", "1 giờ 5 phút". */

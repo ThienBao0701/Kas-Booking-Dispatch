@@ -206,7 +206,10 @@ describe('B. "Vào ca" by address — one hotel named back, never a list', () =>
     expect(resolveWorkplace('1', branches)).toEqual({ status: 'AMBIGUOUS' });
     expect(resolveWorkplace('17', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('NGUYEN_THAI_BINH_170') });
     expect(resolveWorkplace('13', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('BUI_THI_XUAN_13') });
-    expect(resolveWorkplace('5', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('TRUONG_DINH_05') });
+    // One character names nothing — a digit neither ("5" alone, "4" alone).
+    expect(resolveWorkplace('5', branches)).toEqual({ status: 'AMBIGUOUS' });
+    expect(resolveWorkplace('4', branches)).toEqual({ status: 'AMBIGUOUS' });
+    expect(resolveWorkplace('05', branches)).toEqual({ status: 'RESOLVED', branchId: idOf('TRUONG_DINH_05') });
     expect(resolveWorkplace('Bùi Thị Xuân', branches)).toEqual({ status: 'AMBIGUOUS' });
     expect(resolveWorkplace('uyen thai', branches)).toEqual({ status: 'NONE' });
     expect(resolveWorkplace('x', branches)).toEqual({ status: 'AMBIGUOUS' });
@@ -219,7 +222,9 @@ describe('B. "Vào ca" by address — one hotel named back, never a list', () =>
     expect(one.status).toBe(200);
     expect(one.body).toEqual({ status: 'AMBIGUOUS', message: WORKPLACE_AMBIGUOUS });
     const seventeen = await lookup(lan, '17');
-    expect(seventeen.body).toEqual({ status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình', branchNumber: 4 } });
+    // The address only — never the branch number.
+    expect(seventeen.body).toEqual({ status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình' } });
+    expect((await lookup(lan, '4')).body).toEqual({ status: 'AMBIGUOUS', message: WORKPLACE_AMBIGUOUS });
     const nothing = await lookup(lan, 'không có đâu');
     expect(nothing.body).toEqual({ status: 'NONE', message: WORKPLACE_NOT_FOUND });
     // No answer carries another branch: not an address, not a code, not a count.
@@ -228,7 +233,7 @@ describe('B. "Vào ca" by address — one hotel named back, never a list', () =>
       expect(everything).not.toContain(b.address);
       expect(everything).not.toContain(b.code);
     }
-    expect(everything).not.toMatch(/"(id|branchId|branches|count)"/);
+    expect(everything).not.toMatch(/"(id|branchId|branchNumber|branches|count)"/);
   });
 
   it('opens the shift at the hotel the address names — the shift decides every branch check', async () => {
@@ -244,7 +249,7 @@ describe('B. "Vào ca" by address — one hotel named back, never a list', () =>
     expect(sneaky.body.shift.current.branch.id).toBe(cn2);
     // To work elsewhere: "Kết thúc ca", then "Vào ca" there.
     expect((await lan.post('/api/housekeeping/shift/switch').send({ branchId: cn1 })).status).toBe(409);
-    expect((await lan.post('/api/housekeeping/shift/start').send({ address: '5' })).status).toBe(409);
+    expect((await lan.post('/api/housekeeping/shift/start').send({ address: '05' })).status).toBe(409);
     await lan.post('/api/housekeeping/shift/end').send({});
     expect((await lan.get('/api/auth/me')).body.user.branch).toBeNull();
     expect((await lan.post('/api/housekeeping/shift/start').send({ address: '1' })).body.error.message).toBe(WORKPLACE_AMBIGUOUS);
@@ -674,5 +679,82 @@ describe('J. the Quản lý buồng phòng takes a group and does the work itsel
     await manager1.post('/api/housekeeping/shift/end').send({});
     const g2 = await group([room('201', ['VC'])]);
     expect((await accept(manager1, g2.id)).status).toBe(409);
+  });
+});
+
+describe('K. a place in an open item is not given to a second group — until its work is resolved', () => {
+  const openRows = (roomNumber: string) => testPrisma.housekeepingRoomTask.count({ where: { roomNumber, voidedAt: null, reviewResult: null } });
+
+  it('refuses a room or a fixed area already in an open group — and lets "Khác" be described twice', async () => {
+    await group([room('101', ['OUT']), { areaKind: 'HALLWAY', floor: '1', note: 'Lau sàn' }]);
+    const again = await createGroup([room('101', ['OC'])]);
+    expect(again.status).toBe(409);
+    expect(again.body.error.message).toContain('Phòng 101 (Công việc 1)');
+    const hallway = await createGroup([{ areaKind: 'HALLWAY', floor: '1', note: 'Lau kính' }]);
+    expect(hallway.status).toBe(409);
+    expect(hallway.body.error.message).toContain('Hành lang - Tầng 1');
+    // Another floor's hallway is another place; "Khác" is a free description.
+    await group([{ areaKind: 'HALLWAY', floor: '2', note: 'Lau sàn' }, { areaKind: 'OTHER', floor: '1', note: 'Gom rác' }]);
+    await group([{ areaKind: 'OTHER', floor: '1', note: 'Thay bóng đèn' }]);
+    // Adding to a group is held to the same rule.
+    const g = await group([room('103', ['VC'])]);
+    expect((await manager1.post(`/api/housekeeping/manager/work-groups/${g.id}/items`).send({ items: [room('101', ['VC'])] })).status).toBe(409);
+  });
+
+  it('saves a room of an untouched floor — room 401, as reported — and refuses it to a second group with a clear 409', async () => {
+    // Nothing on floor 4 yet: the save must work (it used to fail with a 500 in the place lock).
+    expect(await openRows('401')).toBe(0);
+    const g = await group([room('401', ['OUT'])]);
+    expect(g.items.map((i) => i.roomNumber)).toEqual(['401']);
+    expect(await openRows('401')).toBe(1);
+    // A genuine conflict: 409, naming the room and its group — never a system error.
+    const again = await createGroup([room('401', ['OC'])]);
+    expect(again.status).toBe(409);
+    expect(again.body.error.message).toContain(`Phòng 401 (Công việc ${g.number})`);
+    // Room 402, untouched, is still free.
+    expect((await createGroup([room('402', ['OUT'])])).status).toBe(201);
+  });
+
+  it('gives a room to ONE of two managers saving it at the same moment — whatever code each picked', async () => {
+    const [a, b] = await Promise.all([createGroup([room('201', ['OUT'])]), createGroup([room('201', ['OC'])], {}, manager1)]);
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    expect(await openRows('201')).toBe(1);
+    const [c, d] = await Promise.all([
+      createGroup([{ areaKind: 'STAIRCASE', floor: '2', note: 'Lau' }]),
+      createGroup([{ areaKind: 'STAIRCASE', floor: '2', note: 'Quét' }]),
+    ]);
+    expect([c.status, d.status].sort()).toEqual([201, 409]);
+    expect(await openRows('Cầu thang - Tầng 2')).toBe(1);
+  });
+
+  it('offers the room again once its work is resolved: reviewed, "Không cần dọn" approved, or removed — not before', async () => {
+    // 1. Cleaned: held while it waits for "Đạt / Không đạt", free once reviewed.
+    const g1 = await group([room('101', ['OUT'])]);
+    await manager1.post('/api/housekeeping/shift/start').send({});
+    expect((await accept(manager1, g1.id)).status).toBe(200);
+    const [p101] = g1.items;
+    expect((await manager1.post(`${url(p101!.id)}/begin-inspection`)).status).toBe(200);
+    expect((await manager1.post(`${url(p101!.id)}/inspect`).send({ issues: [] })).status).toBe(201);
+    expect((await manager1.post(`${url(p101!.id)}/start`)).status).toBe(200);
+    expect((await manager1.post(`${url(p101!.id)}/complete`).send({})).status).toBe(200);
+    expect((await createGroup([room('101', ['VC'])])).status).toBe(409);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/review`).send({ result: 'PASSED' })).status).toBe(200);
+    expect((await createGroup([room('101', ['VC'])])).status).toBe(201);
+
+    // 2. "Không cần dọn": held while it waits for the manager, free once approved.
+    const g2 = await group([room('102', ['OC'])]);
+    await startShiftAt(lan, cn1);
+    expect((await accept(lan, g2.id)).status).toBe(200);
+    const [p102] = g2.items;
+    expect((await lan.post(`${url(p102!.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' })).status).toBe(200);
+    expect((await createGroup([room('102', ['OC'])])).status).toBe(409);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p102!.id}/no-clean-decision`).send({ approve: true })).status).toBe(200);
+    expect((await createGroup([room('102', ['OC'])])).status).toBe(201);
+
+    // 3. Removed from its group: free at once.
+    const g3 = await group([room('103', ['OUT'])]);
+    expect((await createGroup([room('103', ['OUT'])])).status).toBe(409);
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${g3.items[0]!.id}/void`).send({ reason: 'Khách ở thêm' })).status).toBe(200);
+    expect((await createGroup([room('103', ['OUT'])])).status).toBe(201);
   });
 });

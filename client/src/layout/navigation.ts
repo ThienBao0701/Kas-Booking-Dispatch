@@ -63,18 +63,30 @@ const COMPLETED_GROUP: NavItem = {
 };
 
 /**
- * "QUẢN LÝ BUỒNG PHÒNG" — six focused screens over one branch's housekeeping.
- * The Quản lý buồng phòng's whole menu; for the Admin, a group (every branch).
+ * "QUẢN LÝ BUỒNG PHÒNG" — five focused screens over one branch's housekeeping.
+ * Work is assigned inside "Tình trạng phòng", so there is no separate
+ * "Phân công công việc" entry for this role. Every screen keeps its title here.
  */
-const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = [
-  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard, section: 'Vận hành' },
+const HOUSEKEEPING_MANAGER_SCREENS: NavItem[] = [
+  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard },
   { to: '/app/hk/rooms', label: 'Tình trạng phòng', icon: BedDouble },
-  { to: '/app/hk/assign', label: 'Phân công công việc', icon: ClipboardCheck },
   { to: '/app/hk/staff', label: 'Theo dõi nhân viên', icon: Users },
-  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet, section: 'KPI & Báo cáo' },
+  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet },
   { to: '/app/hk/report', label: 'Báo cáo', icon: FileText },
 ];
 
+/**
+ * Off the menu, not removed: "Theo dõi nhân viên" and "Báo cáo" are hidden from
+ * the "Quản lý buồng phòng" menu (the manager's and the Admin's group alike).
+ * Their pages, routes, permissions and data are unchanged — the links inside
+ * "Tổng quan" and "Tình trạng phòng", and their addresses, still open them.
+ */
+const HIDDEN_FROM_MENU = new Set(['/app/hk/staff', '/app/hk/report']);
+
+/** The "Quản lý buồng phòng" menu: Tổng quan, Tình trạng phòng, KPI & Thu tiền. */
+const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = HOUSEKEEPING_MANAGER_SCREENS.filter((item) => !HIDDEN_FROM_MENU.has(item.to));
+
+/** For the Admin, the same menu as one group (every branch). */
 const HOUSEKEEPING_MANAGER_GROUP: NavItem = {
   to: '/app/hk',
   label: 'Quản lý buồng phòng',
@@ -262,6 +274,8 @@ export function titleForPath(pathname: string): string {
     ...TECHNICAL_MANAGER_NAV,
     ...HOUSEKEEPING_NAV,
     ...HOUSEKEEPING_MANAGER_NAV,
+    // Screens kept off the menu still have their title.
+    ...HOUSEKEEPING_MANAGER_SCREENS,
     ...RECEPTION_MANAGER_NAV,
   ];
   const flat = (items: NavItem[]): NavItem[] => items.flatMap((i) => [i, ...flat(i.children ?? [])]);

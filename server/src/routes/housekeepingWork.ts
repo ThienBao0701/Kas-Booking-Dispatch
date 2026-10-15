@@ -52,7 +52,7 @@ import {
   workerGroups,
   workerHistory,
 } from '../housekeeping/workGroupService';
-import { housekeepingKpi, myKpi, operationsReport, overview, staffDetail, staffProgress } from '../housekeeping/housekeepingKpi';
+import { REPORT_TYPES, housekeepingKpi, myKpi, operationsReport, overview, staffDetail, staffProgress } from '../housekeeping/housekeepingKpi';
 import { buildHousekeepingOpsWorkbook, housekeepingOpsFileName } from '../report/housekeepingOpsReport';
 import { buildHousekeepingCleaningPdf } from '../report/housekeepingCleaningPdf';
 import { contentDisposition } from '../report/format';
@@ -63,6 +63,20 @@ const branchQuery = z.coerce.number().int().positive().optional();
 const periodSchema = z
   .object({ from: isoDay, to: isoDay, branchId: branchQuery })
   .refine((q) => q.from <= q.to, { message: 'Khoảng ngày không hợp lệ.', path: ['to'] });
+
+/** "Báo cáo": the period and branch, and the report's own filters — the screen and both files alike. */
+const reportSchema = periodSchema.and(
+  z.object({
+    userId: z.coerce.number().int().positive().optional(),
+    type: z.enum(REPORT_TYPES).optional(),
+    q: z
+      .string()
+      .trim()
+      .max(100, 'Từ khóa tìm kiếm quá dài.')
+      .optional()
+      .transform((v) => (v ? v : undefined)),
+  }),
+);
 
 const actorOf = (req: Request): HousekeepingActor => {
   const u = req.currentUser!;
@@ -105,7 +119,9 @@ async function scopeLabel(actor: HousekeepingActor, branchId?: number): Promise<
   const id = branchId ?? (actor.role === 'HOUSEKEEPING_MANAGER' ? actor.branchId : null);
   if (id === null || id === undefined) return 'Tất cả chi nhánh';
   const b = await prisma.branch.findUnique({ where: { id }, select: { address: true, branchNumber: true } });
-  return b ? `Chi nhánh ${b.branchNumber} — ${b.address}` : 'Chi nhánh';
+  if (!b) return 'Chi nhánh';
+  // The Quản lý buồng phòng's files name its hotel by address only.
+  return actor.role === 'HOUSEKEEPING_MANAGER' ? b.address : `Chi nhánh ${b.branchNumber} — ${b.address}`;
 }
 
 function sendFile(res: Response, body: Buffer, type: string, fileName: string): void {
@@ -249,18 +265,19 @@ export function createHousekeepingWorkRouter(): Router {
 
   router.get('/housekeeping/manager/report', ...gate, (req, res, next) => {
     (async () => {
-      res.json(await operationsReport(actorOf(req), periodSchema.parse(req.query)));
+      res.json(await operationsReport(actorOf(req), reportSchema.parse(req.query)));
     })().catch(next);
   });
 
   router.get(/^\/housekeeping\/manager\/report\.(pdf|xlsx)$/, ...gate, (req, res, next) => {
     (async () => {
       const kind = req.path.endsWith('.pdf') ? 'pdf' : 'xlsx';
-      const q = periodSchema.parse(req.query);
+      const q = reportSchema.parse(req.query);
       const actor = actorOf(req);
+      // The same query as the screen, with the same filters — the file cannot differ from it.
       const report = await operationsReport(actor, q);
       const data = { ...report, scope: await scopeLabel(actor, q.branchId), generatedAt: getClock().now() };
-      const fileName = housekeepingOpsFileName(q.from, q.to, kind);
+      const fileName = housekeepingOpsFileName(q.from, q.to, kind, report.filters.type);
       // The PDF reports what was entered in "Dọn phòng"; the workbook adds the KPI sheet.
       if (kind === 'pdf') sendFile(res, await buildHousekeepingCleaningPdf(data), 'application/pdf', fileName);
       else sendFile(res, await buildHousekeepingOpsWorkbook(data), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName);

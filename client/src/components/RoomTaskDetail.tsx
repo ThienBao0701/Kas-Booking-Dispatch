@@ -34,25 +34,33 @@ function eventText(e: RoomTask['events'][number]): string {
   }
 }
 
-export function RoomTaskDetail({ task, catalog }: { task: RoomTask; catalog?: RoomWorkCatalog }) {
+/**
+ * `compact`: for a dialog whose header already names the code, the state and
+ * the person — only the times and the work follow, with tighter spacing.
+ */
+export function RoomTaskDetail({ task, catalog, compact = false }: { task: RoomTask; catalog?: RoomWorkCatalog; compact?: boolean }) {
   const label = (list: { code: string; label: string }[] | undefined, code: string) => list?.find((i) => i.code === code)?.label ?? code;
   const c = task.cleaning;
+  const times: (readonly [string, string])[] = [
+    ['Kiểm phòng', task.inspection ? `${task.inspection.inspectorName} · ${formatDateTime(task.inspection.createdAt)}` : '—'],
+    ['Bắt đầu', task.startedAt ? formatDateTime(task.startedAt) : '—'],
+    ['Hoàn thành', task.completedAt ? formatDateTime(task.completedAt) : '—'],
+    ['Thời gian dọn', formatMinutes(task.durationSeconds ?? task.elapsedSeconds)],
+    ['Người dọn', task.cleanedBy?.name ?? '—'],
+  ];
+  const facts: (readonly [string, string])[] = compact
+    ? times
+    : [
+        ['Mã phòng', task.statusCode],
+        ['Ưu tiên', task.priority ? 'Có' : 'Không'],
+        ['Trạng thái', task.stateLabel],
+        ['Người được giao', task.assignee?.name ?? 'Chưa giao'],
+        ...times,
+      ];
   return (
-    <div className="space-y-4 text-sm" data-testid="room-task-detail">
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
-        {(
-          [
-            ['Mã phòng', task.statusCode],
-            ['Ưu tiên', task.priority ? 'Có' : 'Không'],
-            ['Trạng thái', task.stateLabel],
-            ['Người được giao', task.assignee?.name ?? 'Chưa giao'],
-            ['Kiểm phòng', task.inspection ? `${task.inspection.inspectorName} · ${formatDateTime(task.inspection.createdAt)}` : '—'],
-            ['Bắt đầu', task.startedAt ? formatDateTime(task.startedAt) : '—'],
-            ['Hoàn thành', task.completedAt ? formatDateTime(task.completedAt) : '—'],
-            ['Thời gian dọn', formatMinutes(task.durationSeconds ?? task.elapsedSeconds)],
-            ['Người dọn', task.cleanedBy?.name ?? '—'],
-          ] as const
-        ).map(([k, v]) => (
+    <div className={`${compact ? 'space-y-3' : 'space-y-4'} text-sm`} data-testid="room-task-detail">
+      <dl className={`grid grid-cols-2 gap-x-4 sm:grid-cols-3 ${compact ? 'gap-y-1.5' : 'gap-y-2'}`}>
+        {facts.map(([k, v]) => (
           <div key={k}>
             <dt className="text-xs text-slate-500">{k}</dt>
             <dd className="text-slate-900">{v}</dd>

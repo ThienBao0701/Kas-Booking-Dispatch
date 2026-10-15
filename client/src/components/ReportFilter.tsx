@@ -42,6 +42,7 @@ export function ReportFilterBar({
   allowAll = true,
   showShifts = true,
   rangeOnly = false,
+  framed = true,
   testId = 'report-filter',
 }: {
   value: ReportFilterValue;
@@ -61,6 +62,8 @@ export function ReportFilterBar({
    * only period that means anything. The caller keeps `value.mode` at RANGE.
    */
   rangeOnly?: boolean;
+  /** false: no frame of its own — the page draws the card around it and its other filters. */
+  framed?: boolean;
   testId?: string;
 }) {
   const period = reportPeriod(value, today);
@@ -85,7 +88,7 @@ export function ReportFilterBar({
     <section
       data-testid={testId}
       aria-label="Bộ lọc báo cáo"
-      className="mb-4 rounded-xl border-section border-line bg-white px-4 py-3 shadow-sm"
+      className={framed ? 'mb-4 rounded-xl border-section border-line bg-white px-4 py-3 shadow-sm' : ''}
     >
       <div className="flex flex-wrap items-start justify-between gap-x-8 gap-y-3">
         <div className="min-w-0">

@@ -127,6 +127,9 @@ function totalsOf(rows: KpiRow[]): Omit<KpiRow, 'userId' | 'fullName'> {
   return rest;
 }
 
+/** One finding of a report or a KPI: where, who, what, and where its collection stands. */
+export type FindingLineRow = ReturnType<typeof findingLines>[number];
+
 function findingLines(inspections: InspectionRow[], status?: RoomCollectionStatus) {
   return inspections.flatMap((i) =>
     i.issues
@@ -169,7 +172,9 @@ export async function housekeepingKpi(
   return {
     rows,
     totals: totalsOf(rows),
-    findings: filter.userId !== undefined ? findingLines(inspections, filter.status) : [],
+    // Every finding in scope (the same inspections the rows count) — the
+    // manager's "Phát sinh theo giờ / ngày" chart, and one worker's detail.
+    findings: findingLines(inspections, filter.status),
   };
 }
 
@@ -336,6 +341,61 @@ export async function overview(actor: HousekeepingActor, filter: { workDate: str
  * "Báo cáo vận hành buồng phòng"
  * ------------------------------------------------------------------ */
 
+/**
+ * "Loại báo cáo" — which records the report is made of, both kinds the data holds:
+ *   ALL         Tổng hợp vận hành: the rooms' work and the inspections
+ *   CLEANING    Công việc dọn phòng: the rooms given and cleaned only
+ *   INSPECTION  Kiểm phòng & thu tiền: the inspections, their findings and collections only
+ */
+export const REPORT_TYPES = ['ALL', 'CLEANING', 'INSPECTION'] as const;
+export type ReportType = (typeof REPORT_TYPES)[number];
+export const REPORT_TYPE_LABELS: Record<ReportType, string> = {
+  ALL: 'Tổng hợp vận hành',
+  CLEANING: 'Công việc dọn phòng',
+  INSPECTION: 'Kiểm phòng & thu tiền',
+};
+
+/** The report's own filters, on top of the period and branch. */
+export interface ReportFilter extends PeriodFilter {
+  /** One worker: the rooms given to it and the inspections it recorded. */
+  userId?: number;
+  type?: ReportType;
+  /** A room / area, a worker's name, or a finding's / inspection's id. */
+  q?: string;
+}
+
+/** "Chị Lan" ~ "chi lan": case and Vietnamese marks do not matter in a search. */
+function fold(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+    .trim();
+}
+
+/**
+ * The worker a report is narrowed to must belong to the reader's scope: a
+ * Buồng phòng (or Quản lý buồng phòng) account with work, an inspection or a
+ * shift at one of the branches the reader may see. Anyone else is refused —
+ * the id in the request is never taken on trust.
+ */
+async function assertReportEmployee(userId: number, branchWhere: { branchId?: number | { in: number[] } }, client: PrismaClient): Promise<{ id: number; fullName: string }> {
+  const user = await client.user.findFirst({
+    where: { id: userId, role: { in: ['HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'] } },
+    select: { id: true, fullName: true },
+  });
+  if (!user) throw ApiError.notFound('Không tìm thấy nhân viên buồng phòng.');
+  const [task, inspection, segment] = await Promise.all([
+    client.housekeepingRoomTask.findFirst({ where: { ...branchWhere, OR: [{ assigneeUserId: userId }, { cleanedByUserId: userId }] }, select: { id: true } }),
+    client.roomInspection.findFirst({ where: { ...branchWhere, createdByUserId: userId }, select: { id: true } }),
+    client.housekeepingWorkSegment.findFirst({ where: { ...branchWhere, session: { userId } }, select: { id: true } }),
+  ]);
+  if (!task && !inspection && !segment) throw ApiError.forbidden('Nhân viên này không thuộc phạm vi chi nhánh của bạn.');
+  return user;
+}
+
 export interface OperationsRow {
   branchLabel: string;
   workDate: string;
@@ -350,6 +410,8 @@ export interface OperationsRow {
   collectedAmount: number;
   pendingAmount: number;
   pendingCount: number;
+  /** Findings Reception marked "Không thu được" — a count: no amount is recorded for them. */
+  uncollectibleCount: number;
   /** Rooms voided that day, and rooms with a worker's note. */
   voided: number;
   notes: number;
@@ -398,12 +460,18 @@ export type CleaningDetailRow = {
  * ONE ROW PER CLEANING CYCLE, never collapsed: a room failed once and then
  * passed is two rows, each with its own worker, times, form and review.
  */
-export async function operationsReport(actor: HousekeepingActor, filter: PeriodFilter, client: PrismaClient = defaultPrisma) {
+export async function operationsReport(actor: HousekeepingActor, filter: ReportFilter, client: PrismaClient = defaultPrisma) {
   const { start, end } = assertPeriod(filter);
   const branchWhere = managerBranchWhere(actor, filter.branchId);
-  const [tasks, inspections] = await Promise.all([
+  const type: ReportType = filter.type ?? 'ALL';
+  const employee = filter.userId !== undefined ? await assertReportEmployee(filter.userId, branchWhere, client) : null;
+  const loadTasks = () =>
     client.housekeepingRoomTask.findMany({
-      where: { ...branchWhere, workDate: { gte: filter.from, lte: filter.to }, assigneeUserId: { not: null } },
+      where: {
+        ...branchWhere,
+        workDate: { gte: filter.from, lte: filter.to },
+        assigneeUserId: employee ? employee.id : { not: null },
+      },
       select: {
         branchId: true,
         workDate: true,
@@ -428,12 +496,31 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
         inspection: { select: { createdAt: true } },
         branch: { select: { address: true, branchNumber: true } },
       },
-    }),
-    inspectionsFor({ ...branchWhere, createdAt: { gte: start, lt: end } }, client),
+    });
+  // "Kiểm phòng & thu tiền" reads no rooms; "Công việc dọn phòng" reads no inspections.
+  const [allTasks, allInspections] = await Promise.all([
+    type === 'INSPECTION' ? Promise.resolve([] as Awaited<ReturnType<typeof loadTasks>>) : loadTasks(),
+    type === 'CLEANING'
+      ? Promise.resolve([] as InspectionRow[])
+      : inspectionsFor({ ...branchWhere, createdAt: { gte: start, lt: end }, ...(employee ? { createdByUserId: employee.id } : {}) }, client),
   ]);
+  // "Tìm kiếm": a room / area or a worker's name keeps the records that name it;
+  // a finding's id keeps that finding alone (its inspection still counts once).
+  const needle = filter.q ? fold(filter.q) : '';
+  const hit = (...values: (string | null | undefined)[]) => values.some((v) => v && fold(v).includes(needle));
+  const tasks = needle ? allTasks.filter((t) => hit(t.roomNumber, t.assigneeNameSnapshot, t.cleanedByNameSnapshot)) : allTasks;
+  const inspections = needle
+    ? allInspections.flatMap((i) => {
+        if (hit(i.roomNumber, i.createdByNameSnapshot, i.id)) return [i];
+        const issues = i.issues.filter((f) => hit(f.id));
+        return issues.length > 0 ? [{ ...i, issues }] : [];
+      })
+    : allInspections;
   type Acc = OperationsRow & { durations: number[]; sortKey: string };
   const rows = new Map<string, Acc>();
-  const label = (b: { address: string; branchNumber: number }) => `Chi nhánh ${b.branchNumber} — ${b.address}`;
+  // The Quản lý buồng phòng reads its hotel by address only; the Admin, across branches, by number too.
+  const label = (b: { address: string; branchNumber: number }) =>
+    actor.role === 'HOUSEKEEPING_MANAGER' ? b.address : `Chi nhánh ${b.branchNumber} — ${b.address}`;
   const get = (branchId: number, branch: { address: string; branchNumber: number }, workDate: string, userId: number, name: string) => {
     const key = `${branchId}|${workDate}|${userId}`;
     const row =
@@ -451,6 +538,7 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
         collectedAmount: 0,
         pendingAmount: 0,
         pendingCount: 0,
+        uncollectibleCount: 0,
         voided: 0,
         notes: 0,
         durations: [],
@@ -481,6 +569,7 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
     row.collectedAmount += k.collectedAmount;
     row.pendingAmount += k.pendingAmount;
     row.pendingCount += k.pendingCount;
+    row.uncollectibleCount += k.uncollectibleCount;
   }
   // Per room and day: how many cycles, how many re-cleans, and the latest one.
   const live = tasks.filter((t) => !t.voidedAt);
@@ -532,7 +621,11 @@ export async function operationsReport(actor: HousekeepingActor, filter: PeriodF
   return {
     from: filter.from,
     to: filter.to,
+    /** The filters as the server applied them — printed on the exported files. */
+    filters: { type, typeLabel: REPORT_TYPE_LABELS[type], employee: employee?.fullName ?? null, q: filter.q ?? null },
     rows: out,
     rooms: rooms.sort((a, b) => a.sortKey.localeCompare(b.sortKey)).map(({ sortKey: _k, ...r }) => r),
+    /** Each finding of the report's inspections, with where its collection stands. */
+    findings: findingLines(inspections),
   };
 }

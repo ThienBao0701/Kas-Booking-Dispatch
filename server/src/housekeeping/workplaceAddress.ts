@@ -53,8 +53,9 @@ function fits(input: string, address: string): boolean {
 
 export function resolveWorkplace(raw: string, branches: readonly { id: number; address: string }[]): WorkplaceResolution {
   const input = normalizeAddress(raw);
-  // A house number may be one digit ("5"); a word needs at least two letters.
-  if (input.replace(/ /g, '').length < MIN_ADDRESS_CHARS && !/^\d+$/.test(input)) return { status: 'AMBIGUOUS' };
+  // One TYPED character discloses nothing — not even a digit ("4" alone would name "40-42 …").
+  // Counted on what was typed: "05" is two characters even though it reads as "5".
+  if (raw.replace(/\s/g, '').length < MIN_ADDRESS_CHARS) return { status: 'AMBIGUOUS' };
   const matches = branches.filter((b) => fits(input, normalizeAddress(b.address)));
   if (matches.length === 0) return { status: 'NONE' };
   if (matches.length > 1) return { status: 'AMBIGUOUS' };

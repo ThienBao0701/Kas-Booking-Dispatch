@@ -24,7 +24,7 @@
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, CheckCircle2, ChevronDown, ChevronUp, Pencil, Plus, Trash2 } from 'lucide-react';
 import {
   ROOM_WORK_KEY,
   roomWorkApi,
@@ -33,7 +33,7 @@ import {
   type WorkGroup,
   type WorkTaskCode,
 } from '../api/roomWork';
-import { toUserMessage } from '../api/errors';
+import { ApiError, toUserMessage } from '../api/errors';
 import { formatDateTime } from '../lib/format';
 import { Button } from './Button';
 import { ErrorAlert } from './ErrorAlert';
@@ -44,6 +44,8 @@ import {
   codesLabel,
   needsNote,
   nextSection,
+  noteProblem,
+  openPlaceKeys,
   placeInput,
   placeName,
   placeProblem,
@@ -98,6 +100,87 @@ function tilesOf(areas: WorkAreas, group: string, section: number): PlaceDraft[]
 }
 
 /* ------------------------------------------------------------------ *
+ * "Lý do / việc cần làm (Khác)" — with its own "Xác nhận"
+ * ------------------------------------------------------------------ */
+
+/**
+ * The reason and its "Xác nhận" in ONE framed box: the text above, the button
+ * at its bottom-right, never over the text. "Xác nhận" marks the reason as
+ * checked IN THE DRAFT — nothing is saved before the whole form is — and any
+ * edit afterwards asks for it again. The state is announced to screen readers.
+ */
+function ConfirmedNote({
+  id,
+  value,
+  confirmed,
+  placeholder,
+  disabled = false,
+  onChange,
+  onConfirm,
+}: {
+  id: string;
+  value: string;
+  confirmed: boolean;
+  placeholder?: string;
+  disabled?: boolean;
+  onChange: (next: string) => void;
+  onConfirm: () => void;
+}) {
+  const problem = noteProblem(value);
+  const statusId = `${id}-status`;
+  return (
+    <div>
+      <label className={LABEL} htmlFor={id}>
+        Lý do / việc cần làm (Khác) <span className="text-red-600">*</span>
+      </label>
+      <div
+        className={`mt-1 rounded-xl border bg-white focus-within:ring-2 focus-within:ring-brand-600 ${confirmed ? 'border-green-600' : 'border-line-strong hover:border-slate-600'}`}
+        data-testid={`${id}-box`}
+      >
+        <textarea
+          id={id}
+          rows={2}
+          maxLength={1000}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-describedby={statusId}
+          className="block w-full resize-y rounded-t-xl border-0 bg-transparent px-3 pt-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-0 disabled:text-slate-500"
+          data-testid={id}
+        />
+        <div className="flex flex-wrap items-center justify-end gap-2 px-2 pb-2 pt-1">
+          <span id={statusId} aria-live="polite" className={`mr-auto inline-flex items-center gap-1 px-1 text-xs ${confirmed ? 'font-semibold text-green-700' : 'text-slate-500'}`} data-testid={`${id}-state`}>
+            {confirmed ? (
+              <>
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Đã xác nhận
+              </>
+            ) : value.trim() ? (
+              (problem ?? 'Chưa xác nhận')
+            ) : (
+              'Nhập lý do rồi bấm “Xác nhận”.'
+            )}
+          </span>
+          {confirmed ? null : (
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={disabled || problem !== null}
+              className="inline-flex min-h-[2.25rem] items-center gap-1 rounded-lg bg-brand-600 px-3 text-xs font-semibold text-white hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-slate-300"
+              data-testid={`${id}-confirm`}
+            >
+              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+              Xác nhận
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * PlacePicker
  * ------------------------------------------------------------------ */
 
@@ -114,7 +197,11 @@ export function PlacePicker({
   onSections: (next: FloorSection[]) => void;
   value: PlaceDraft[];
   onChange: (next: PlaceDraft[]) => void;
-  /** Rooms already in the group being edited — not offered again. */
+  /**
+   * Places with an OPEN item today (keys as the tiles: "ROOM:101", "HALLWAY:5",
+   * "ROOFTOP") — in this group or another: not offered. They come back once
+   * their work is resolved. (The server checks again when the group is saved.)
+   */
   taken?: ReadonlySet<string>;
 }) {
   // One place's details open at a time; every value stays in `value` either way.
@@ -143,7 +230,9 @@ export function PlacePicker({
       {sections.map((sec, i) => {
         const mine = value.filter((d) => d.section === sec.key);
         const usedElsewhere = new Set(sections.filter((s) => s.key !== sec.key).map((s) => s.group).filter(Boolean));
-        const tiles = sec.group ? tilesOf(areas, sec.group, sec.key) : [];
+        const allTiles = sec.group ? tilesOf(areas, sec.group, sec.key) : [];
+        const tiles = allTiles.filter((tile) => !taken.has(tile.key));
+        const held = allTiles.length - tiles.length;
         const selectId = `place-floor-${i}`;
         return (
           <fieldset key={sec.key} className="min-w-0 rounded-xl border border-line bg-white p-3" data-testid={`place-section-${i}`}>
@@ -208,16 +297,21 @@ export function PlacePicker({
             {sec.group ? (
               <div className="mt-3" role="group" aria-label={`Chọn phòng / khu vực — Khu vực ${i + 1}`}>
                 <p className="mb-2 text-sm font-medium text-slate-700">Chọn phòng / khu vực (chọn được nhiều)</p>
+                {held > 0 ? (
+                  <p className="mb-2 text-xs text-slate-500" data-testid={`place-held-${i}`}>
+                    {tiles.length === 0
+                      ? 'Mọi phòng / khu vực của tầng này đang có công việc chưa xong — chọn tầng khác.'
+                      : `${held} phòng / khu vực đang có công việc chưa xong nên không hiện ở đây.`}
+                  </p>
+                ) : null}
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(5.5rem,1fr))] gap-2" data-testid={`place-tiles-${i}`}>
                   {tiles.map((tile) => {
-                    const isTaken = tile.areaKind === 'ROOM' && taken.has(tile.roomNumber!);
                     const on = picked.has(tile.key);
                     return (
                       <button
                         key={tile.key}
                         type="button"
                         aria-pressed={on}
-                        disabled={isTaken}
                         onClick={() => toggle(tile)}
                         className={`flex min-h-[2.75rem] items-center justify-center gap-1 rounded-xl border-2 px-2 py-1.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 disabled:cursor-not-allowed disabled:opacity-40 ${
                           on ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line bg-white text-slate-800 hover:border-slate-500'
@@ -241,6 +335,7 @@ export function PlacePicker({
                   <PlaceRow
                     key={d.key}
                     draft={d}
+                    blocked={taken.has(d.key)}
                     open={open === d.key}
                     onToggle={() => setOpen(open === d.key ? null : d.key)}
                     onChange={(next) => patch(d.key, next)}
@@ -266,18 +361,21 @@ export function PlacePicker({
  */
 function PlaceRow({
   draft: d,
+  blocked = false,
   open,
   onToggle,
   onChange,
   onRemove,
 }: {
   draft: PlaceDraft;
+  /** Taken by another group since it was picked: it must be removed. */
+  blocked?: boolean;
   open: boolean;
   onToggle: () => void;
   onChange: (next: Partial<PlaceDraft>) => void;
   onRemove: () => void;
 }) {
-  const problem = placeProblem(d);
+  const problem = blocked ? 'Vừa có công việc khác nhận nơi này — bỏ chọn.' : placeProblem(d);
   const noteId = `place-note-${d.key}`;
   const detailId = `place-detail-${d.key}`;
   return (
@@ -341,19 +439,14 @@ function PlaceRow({
             <p className="text-sm text-slate-600">Việc cần làm: Khác — ghi rõ lý do / việc cần làm.</p>
           )}
           {needsNote(d) ? (
-            <label className={LABEL} htmlFor={noteId}>
-              Lý do / việc cần làm (Khác) *
-              <textarea
-                id={noteId}
-                className={FIELD}
-                rows={2}
-                maxLength={1000}
-                value={d.note}
-                onChange={(e) => onChange({ note: e.target.value })}
-                placeholder={d.areaKind === 'ROOM' ? 'Ví dụ: Thay rèm cửa sổ' : 'Ví dụ: Lau sàn, gom rác'}
-                data-testid={noteId}
-              />
-            </label>
+            <ConfirmedNote
+              id={noteId}
+              value={d.note}
+              confirmed={Boolean(d.noteConfirmed)}
+              placeholder={d.areaKind === 'ROOM' ? 'Ví dụ: Thay rèm cửa sổ' : 'Ví dụ: Lau sàn, gom rác'}
+              onChange={(note) => onChange({ note, noteConfirmed: false })}
+              onConfirm={() => onChange({ note: d.note.trim(), noteConfirmed: true })}
+            />
           ) : null}
         </div>
       ) : null}
@@ -365,6 +458,14 @@ function newRequestId(): string {
   const c = globalThis.crypto as Crypto | undefined;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/** The day's items of the branch — shared with the board's own query. */
+function useDayTasks(branchId: number, date: string) {
+  return useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'tasks', date, branchId],
+    queryFn: () => roomWorkApi.tasks({ date, branchId }),
+  });
 }
 
 function useAreas(branchId: number) {
@@ -398,6 +499,9 @@ export function CreateWorkDialog({
 }) {
   const queryClient = useQueryClient();
   const areas = useAreas(branchId);
+  // The day's items — the same list as the board's — say which places are still open.
+  const day = useDayTasks(branchId, date);
+  const taken = useMemo(() => openPlaceKeys(day.data?.tasks ?? []), [day.data]);
   const [name, setName] = useState('');
   // The draft lives here, not in the picker: the review and back keep every value.
   const [sections, setSections] = useState<FloorSection[]>([{ key: 1, group: '' }]);
@@ -405,7 +509,7 @@ export function CreateWorkDialog({
   const [reviewing, setReviewing] = useState(false);
   // One id per dialog: a double click, or a retry after a lost answer, creates one group.
   const requestId = useRef(newRequestId());
-  const ready = places.length > 0 && places.every((p) => placeProblem(p) === null);
+  const ready = places.length > 0 && places.every((p) => placeProblem(p) === null && !taken.has(p.key));
   const save = useMutation({
     mutationFn: () =>
       roomWorkApi.createWorkGroup({
@@ -418,6 +522,10 @@ export function CreateWorkDialog({
     onSuccess: async (r) => {
       await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
       onCreated(r.duplicate ? `${r.group.title} đã được lưu trước đó.` : `Đã tạo ${r.group.title} (${r.group.counts.items} phòng / khu vực).`);
+    },
+    // Another manager took a place first: reload which places are open, so the form shows it.
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) void day.refetch();
     },
   });
   const a = areas.data?.areas;
@@ -455,7 +563,15 @@ export function CreateWorkDialog({
         )
       }
     >
-      <QueryState isLoading={areas.isLoading} isError={areas.isError} error={areas.error} onRetry={() => void areas.refetch()}>
+      <QueryState
+        isLoading={areas.isLoading || day.isLoading}
+        isError={areas.isError || day.isError}
+        error={areas.error ?? day.error}
+        onRetry={() => {
+          void areas.refetch();
+          void day.refetch();
+        }}
+      >
         {a ? (
           reviewing ? (
             <div className="space-y-3" data-testid="work-review-list">
@@ -476,7 +592,15 @@ export function CreateWorkDialog({
                 ))}
               </ol>
               <p className="text-xs text-slate-500">Một công việc, giao và nhận cùng nhau; mỗi phòng / khu vực vẫn được kiểm tra và dọn riêng.</p>
-              {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
+              {save.isError ? (
+                <ErrorAlert>
+                  {toUserMessage(save.error)}{' '}
+                  {/* Only a real conflict means another group took a place: the list was reloaded for it. */}
+                  {save.error instanceof ApiError && save.error.status === 409
+                    ? 'Bấm “Sửa lại” để chọn lại — danh sách phòng đã được tải lại.'
+                    : 'Công việc chưa được lưu. Bấm “Lưu công việc” để thử lại.'}
+                </ErrorAlert>
+              ) : null}
             </div>
           ) : (
             <div className="space-y-4">
@@ -492,7 +616,7 @@ export function CreateWorkDialog({
                   data-testid="work-name"
                 />
               </label>
-              <PlacePicker areas={a} sections={sections} onSections={setSections} value={places} onChange={setPlaces} />
+              <PlacePicker areas={a} sections={sections} onSections={setSections} value={places} onChange={setPlaces} taken={taken} />
             </div>
           )
         ) : null}
@@ -550,20 +674,25 @@ export function WorkGroupCard({
 }) {
   const liveItems = group.items.filter((t) => !t.voided);
   const closed = group.items.filter((t) => t.voided);
+  // The owner is said ONCE, in the header. A tile names its person only when the
+  // room went to someone else (a re-clean given to another housekeeper).
+  const ownerId = group.assignee?.id ?? null;
   return (
-    <article className="rounded-2xl border border-line bg-white shadow-sm" data-testid={`group-card-${group.number}`} aria-labelledby={`group-title-${group.id}`}>
+    <article className="rounded-2xl border border-line-subtle bg-white shadow-sm" data-testid={`group-card-${group.number}`} aria-labelledby={`group-title-${group.id}`}>
       <header className="flex flex-wrap items-start justify-between gap-2 border-b border-line-subtle px-4 py-3">
         <div className="min-w-0">
           <h3 id={`group-title-${group.id}`} className="text-base font-bold text-slate-900">
             {group.title}
             {group.name ? <span className="font-semibold text-slate-700"> — {group.name}</span> : null}
           </h3>
-          <p className="mt-0.5 text-sm text-slate-700" data-testid={`group-assignee-${group.number}`}>
-            Người thực hiện:{' '}
-            {group.assignee ? <span className="font-semibold">{group.assignee.name}</span> : <span className="text-slate-500">Chưa giao</span>}
-            <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{group.status.label}</span>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[15px] text-slate-700" data-testid={`group-assignee-${group.number}`}>
+            <span>
+              Người thực hiện:{' '}
+              {group.assignee ? <span className="font-semibold text-slate-900">{group.assignee.name}</span> : <span className="text-slate-500">Chưa giao</span>}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{group.status.label}</span>
           </p>
-          {group.floors.length > 0 ? <p className="mt-0.5 text-xs text-slate-500">{group.floors.join(' · ')}</p> : null}
+          {group.floors.length > 0 ? <p className="mt-0.5 text-sm text-slate-600">{group.floors.join(' · ')}</p> : null}
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {headerAction}
@@ -579,27 +708,31 @@ export function WorkGroupCard({
         {placesByFloor(liveItems).map((floor, i) => (
           <section key={floor.heading} aria-label={`${group.title} — ${floor.heading}`} data-testid={`group-floor-${group.number}-${i}`}>
             <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{floor.heading}</h4>
-            {/* One floor, one row: tiles side by side, wrapping only when the row is full. */}
-            <ul className="flex flex-wrap gap-2" data-testid={`group-floor-row-${group.number}-${i}`}>
+            {/* One floor, one row: compact tiles side by side, wrapping only when the row is full. */}
+            <ul className="flex flex-wrap items-start gap-2" data-testid={`group-floor-row-${group.number}-${i}`}>
               {floor.tasks.map((t) => (
                 <li
                   key={t.id}
-                  className="flex w-[calc(50%-0.25rem)] min-w-0 flex-col gap-1.5 rounded-xl border border-line bg-slate-50/60 p-2.5 sm:w-48"
+                  className="flex w-[calc(50%-0.25rem)] min-w-0 flex-col gap-1 rounded-lg border border-line-subtle bg-slate-50/60 px-2.5 py-2 sm:w-44"
                   data-testid={`group-item-${t.id}`}
                 >
                   <p className="flex flex-wrap items-center gap-1.5 text-sm font-bold text-slate-900">
                     <span className="break-words">{placeName(t)}</span>
+                    <CodeChips task={t} />
                     {t.priority ? <span className="rounded bg-red-600 px-1.5 py-0.5 text-[11px] font-semibold text-white">Ưu tiên</span> : null}
-                    {t.reclean ? <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-800">Cần dọn lại</span> : null}
                   </p>
-                  <CodeChips task={t} />
-                  <p className="text-xs text-slate-600">{t.assignee ? `Người làm: ${t.assignee.name}` : 'Chưa giao'}</p>
+                  {t.reclean ? <span className="w-fit rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-800">Cần dọn lại</span> : null}
                   <div>
                     <PhaseBadge task={t} />
                   </div>
+                  {t.assignee && t.assignee.id !== ownerId ? (
+                    <p className="text-xs text-slate-600" data-testid={`group-item-person-${t.id}`}>
+                      Người làm: {t.assignee.name}
+                    </p>
+                  ) : null}
                   {t.note ? <p className="line-clamp-2 whitespace-pre-wrap text-xs text-slate-600" title={t.note}>Ghi chú: {t.note}</p> : null}
                   <NoCleanLine task={t} />
-                  {itemAction ? <div className="mt-auto flex flex-col gap-1.5 pt-1 [&>button]:w-full">{itemAction(t)}</div> : null}
+                  {itemAction ? <div className="flex flex-col gap-1 pt-0.5 [&>button]:min-h-[2.25rem] [&>button]:w-full">{itemAction(t)}</div> : null}
                 </li>
               ))}
             </ul>
@@ -658,10 +791,13 @@ export function WorkGroupEditor({
       setAddSections([{ key: 1, group: '' }]);
       await done(next, `Đã thêm vào ${next.title}.`);
     },
+    onError: () => void day.refetch(),
   });
   const liveItems = current.items.filter((t) => !t.voided);
-  const taken = useMemo(() => new Set(liveItems.filter((t) => t.areaKind === 'ROOM' || !t.areaKind).map((t) => t.roomNumber)), [liveItems]);
-  const addReady = adding.length > 0 && adding.every((p) => placeProblem(p) === null);
+  // Open places: this group's own, and every other group's of the day.
+  const day = useDayTasks(current.branchId, current.workDate);
+  const taken = useMemo(() => openPlaceKeys([...current.items, ...(day.data?.tasks ?? [])]), [current.items, day.data]);
+  const addReady = adding.length > 0 && adding.every((p) => placeProblem(p) === null && !taken.has(p.key));
   const reload = async () => {
     const { groups } = await roomWorkApi.workGroups({ date: current.workDate, branchId: current.branchId });
     const next = groups.find((g) => g.id === current.id);
@@ -759,9 +895,12 @@ function ItemEditor({ task: t, onSaved, onRemove }: { task: RoomTask; onSaved: (
   const initial = (t.taskCodes && t.taskCodes.length > 0 ? t.taskCodes : [t.statusCode]) as WorkTaskCode[];
   const [codes, setCodes] = useState<WorkTaskCode[]>(initial);
   const [note, setNote] = useState(t.note ?? '');
+  // The note on record counts as confirmed; a new or edited one is confirmed again.
+  const [confirmedNote, setConfirmedNote] = useState<string | null>(t.note ? t.note : null);
   const isRoom = t.areaKind === 'ROOM' || !t.areaKind;
   const withNote = needsNote({ areaKind: t.areaKind ?? 'ROOM', codes });
   const locked = t.state === 'COMPLETED';
+  const confirmed = confirmedNote !== null && confirmedNote === note && noteProblem(note) === null;
   const changed = codes.join() !== initial.join() || (withNote && note !== (t.note ?? ''));
   const save = useMutation({
     mutationFn: () => roomWorkApi.updateTask(t.id, { ...(isRoom ? { taskCodes: codes } : {}), ...(withNote ? { note: note.trim() || null } : {}) }),
@@ -774,7 +913,11 @@ function ItemEditor({ task: t, onSaved, onRemove }: { task: RoomTask; onSaved: (
         ? isRoom
           ? '"Khác" cần ghi rõ lý do / việc cần làm.'
           : 'Khu vực này cần ghi rõ việc cần làm.'
-        : null;
+        : withNote && noteProblem(note)
+          ? noteProblem(note)
+          : withNote && !confirmed
+            ? 'Bấm “Xác nhận” lý do (Khác) trước khi lưu.'
+            : null;
   const removable = t.state === 'NOT_STARTED' || t.state === 'INSPECTED';
   return (
     <div className="rounded-xl border border-line p-3" data-testid={`item-editor-${t.id}`}>
@@ -811,10 +954,19 @@ function ItemEditor({ task: t, onSaved, onRemove }: { task: RoomTask; onSaved: (
         </div>
       ) : null}
       {withNote ? (
-        <label className={`${LABEL} mt-2`}>
-          Lý do / việc cần làm (Khác) *
-          <textarea className={FIELD} rows={2} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} data-testid={`item-note-${t.id}`} />
-        </label>
+        <div className="mt-2">
+          <ConfirmedNote
+            id={`item-note-${t.id}`}
+            value={note}
+            confirmed={confirmed}
+            disabled={locked}
+            onChange={setNote}
+            onConfirm={() => {
+              setNote(note.trim());
+              setConfirmedNote(note.trim());
+            }}
+          />
+        </div>
       ) : null}
       {problem ? <p className="mt-1 text-xs text-amber-800">{problem}</p> : null}
       {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}

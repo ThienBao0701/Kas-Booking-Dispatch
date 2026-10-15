@@ -18,9 +18,9 @@
  * dọn phòng" sheet is written from, so the two cannot disagree. Money and KPI
  * figures are deliberately absent: they belong to "KPI & Thu tiền".
  */
-import type { CleaningDetailRow } from '../housekeeping/housekeepingKpi';
+import type { CleaningDetailRow, FindingLineRow, ReportType } from '../housekeeping/housekeepingKpi';
 import { LINEN_ITEMS, LINEN_SIZES, QUANTITY_ITEMS, REPLACEMENT_ITEMS, ROOM_WORK_STATE_LABELS, SPECIAL_STATUSES } from '../housekeeping/roomTaskCatalog';
-import { cleaningClock, cleaningDuration, reviewCells } from './housekeepingOpsReport';
+import { cleaningClock, cleaningDuration, reportFilterLines, reviewCells } from './housekeepingOpsReport';
 import { hcmDateTime, hcmDayLabel, periodLabel } from './format';
 import {
   FONT_BOLD,
@@ -39,6 +39,8 @@ import {
 } from './pdf';
 
 export const HOUSEKEEPING_CLEANING_TITLE = 'KAS – BÁO CÁO KIỂM TRA & DỌN PHÒNG';
+/** The same file for "Loại báo cáo: Kiểm phòng & thu tiền" — its findings instead of its rooms. */
+export const HOUSEKEEPING_FINDINGS_TITLE = 'KAS – BÁO CÁO KIỂM PHÒNG & PHÁT SINH';
 
 export interface HousekeepingCleaningData {
   from: string;
@@ -47,6 +49,10 @@ export interface HousekeepingCleaningData {
   scope: string;
   generatedAt: Date;
   rooms: CleaningDetailRow[];
+  /** The report's findings — the body of "Kiểm phòng & thu tiền". */
+  findings?: FindingLineRow[];
+  /** The filters the report was made with — printed in its header. */
+  filters?: { type: ReportType; typeLabel: string; employee: string | null; q: string | null };
 }
 
 type Row = CleaningDetailRow;
@@ -126,6 +132,22 @@ const NOTE_COLUMNS = fits('housekeeping cleaning — notes', [
 
 const SPECIAL_LEGEND = SPECIAL_STATUSES.map((s) => `${s.short}: ${s.label}`).join(' · ');
 
+/** "Kiểm phòng & thu tiền": one row per finding, money to the right. */
+export const FINDING_COLUMNS = assertHeadersFit(
+  'housekeeping findings',
+  assertFitsLandscape('housekeeping findings', [
+    { header: 'Thời gian', width: 78, value: (f: FindingLineRow) => hcmDateTime(new Date(f.createdAt)) },
+    { header: 'Chi nhánh', width: 46, value: (f: FindingLineRow) => `CN ${f.branch.branchNumber}`, align: 'center' },
+    { header: 'Phòng', width: 60, value: (f: FindingLineRow) => f.roomNumber },
+    { header: 'Người kiểm phòng', width: 100, value: (f: FindingLineRow) => f.inspectorName },
+    { header: 'Phát sinh', width: 118, value: (f: FindingLineRow) => f.typeLabel },
+    { header: 'Ghi chú', width: 120, value: (f: FindingLineRow) => f.note ?? '' },
+    { header: 'Thu tiền', width: 76, value: (f: FindingLineRow) => f.collectionStatusLabel },
+    { header: 'Số tiền (VND)', width: 70, value: (f: FindingLineRow) => (f.amount === null ? '' : f.amount.toLocaleString('vi-VN')), align: 'right' },
+    { header: 'Lễ tân xác nhận', width: 92, value: (f: FindingLineRow) => f.collectedByName ?? '' },
+  ]),
+);
+
 /** A table's own heading, kept on the page with the table's header and first row. */
 function table(doc: PdfDoc, title: string, group: string, columns: Column<Row>[], rows: Row[], caption?: string): void {
   doc.x = doc.page.margins.left;
@@ -138,9 +160,11 @@ function table(doc: PdfDoc, title: string, group: string, columns: Column<Row>[]
 }
 
 export async function buildHousekeepingCleaningPdf(data: HousekeepingCleaningData): Promise<Buffer> {
-  const employees = [...new Set(data.rooms.map((r) => r.employee))].sort((a, b) => a.localeCompare(b, 'vi'));
+  const findingsOnly = data.filters?.type === 'INSPECTION';
+  const people = findingsOnly ? (data.findings ?? []).map((f) => f.inspectorName) : data.rooms.map((r) => r.employee);
+  const employees = [...new Set(people)].sort((a, b) => a.localeCompare(b, 'vi'));
   const doc = createReportDocument({
-    title: HOUSEKEEPING_CLEANING_TITLE,
+    title: findingsOnly ? HOUSEKEEPING_FINDINGS_TITLE : HOUSEKEEPING_CLEANING_TITLE,
     period: periodLabel(data.from, data.to),
     generatedAt: hcmDateTime(data.generatedAt),
     scope: data.scope,
@@ -150,9 +174,23 @@ export async function buildHousekeepingCleaningPdf(data: HousekeepingCleaningDat
         ? { label: 'Ngày nghiệp vụ', value: hcmDayLabel(data.from) }
         : { label: 'Khoảng ngày', value: periodLabel(data.from, data.to) },
       { label: 'Nhân viên', value: employees.join(', ') || '—' },
+      // What the file was filtered by — the same choices as on the screen.
+      ...reportFilterLines(data.filters).filter((l) => l.label !== 'Nhân viên'),
       { label: 'Xuất lúc', value: hcmDateTime(data.generatedAt) },
     ],
   });
+
+  if (findingsOnly) {
+    const findings = data.findings ?? [];
+    if (findings.length === 0) doc.text('Không có phát sinh nào trong kỳ báo cáo này.');
+    else {
+      sectionTitle(doc, `Phát sinh khi kiểm phòng · ${findings.length} phát sinh`);
+      doc.moveDown(0.2);
+      drawTable(doc, FINDING_COLUMNS, findings, { frame: true, continuedTitle: 'Phát sinh khi kiểm phòng (tiếp)' });
+    }
+    addPageNumbers(doc);
+    return finishDocument(doc);
+  }
 
   if (data.rooms.length === 0) {
     doc.text('Không có phòng nào trong kỳ báo cáo này.');

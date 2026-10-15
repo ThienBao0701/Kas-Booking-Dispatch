@@ -5,9 +5,12 @@
  *
  *   AcceptGroupDialog  "Nhận công việc" — always asks first, with every place.
  *   OwnAction          the next step on one's own room: Kiểm tra → Dọn phòng.
+ *   NoCleanRequestDialog  "Không cần dọn" for one's own room: a reason, then
+ *                      the Quản lý buồng phòng decides (the existing approval).
  *
  * The server decides who may (role, branch, shift) and keeps one owner per group.
  */
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ClipboardCheck, Play, Sparkles } from 'lucide-react';
 import { ROOM_WORK_KEY, roomWorkApi, type RoomTask, type WorkGroup } from '../api/roomWork';
@@ -89,5 +92,66 @@ export function OwnAction({ task: t, busy, onStep }: { task: RoomTask; busy: boo
       <Icon className="h-4 w-4" aria-hidden="true" />
       {label}
     </Button>
+  );
+}
+
+/**
+ * "KHÔNG CẦN DỌN" — asked from the room itself. The room and its work group are
+ * named, the reason is required, and the request goes to the Quản lý buồng
+ * phòng's queue: the room stays in the work ("Chờ Quản lý xác nhận") until the
+ * manager approves it — only then is it taken out. Nothing here decides.
+ */
+export function NoCleanRequestDialog({ task: t, onClose, onSent }: { task: RoomTask; onClose: () => void; onSent: (task: RoomTask) => void }) {
+  const queryClient = useQueryClient();
+  const [reason, setReason] = useState('');
+  const send = useMutation({
+    mutationFn: () => roomWorkApi.requestNoClean(t.id, reason.trim()),
+    onSuccess: async ({ task: next }) => {
+      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+      onSent(next);
+    },
+  });
+  return (
+    <Modal
+      open
+      title="Không cần dọn"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={send.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => send.mutate()} loading={send.isPending} disabled={!reason.trim() || send.isPending} data-testid="no-clean-send">
+            Gửi yêu cầu
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3" data-testid="no-clean-dialog">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+          <dt className="text-slate-500">Phòng / khu vực</dt>
+          <dd className="font-semibold text-slate-900" data-testid="no-clean-place">
+            {placeText(t)}
+          </dd>
+          <dt className="text-slate-500">Công việc</dt>
+          <dd className="text-slate-900">{t.workGroup ? `Công việc ${t.workGroup.number}${t.workGroup.name ? ` — ${t.workGroup.name}` : ''}` : '—'}</dd>
+        </dl>
+        <p className="text-sm text-slate-600">Phòng chỉ được bỏ khỏi công việc sau khi Quản lý buồng phòng duyệt.</p>
+        <label className="block text-sm font-medium text-slate-700" htmlFor="no-clean-reason">
+          Lý do <span className="text-red-600">*</span>
+          <textarea
+            id="no-clean-reason"
+            className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            rows={3}
+            maxLength={1000}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Ví dụ: Khách không muốn dọn phòng hôm nay"
+            data-testid="no-clean-reason"
+          />
+        </label>
+        {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
   );
 }

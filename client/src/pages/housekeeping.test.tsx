@@ -262,7 +262,9 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     renderApp('/app');
     const current = await screen.findByTestId('shift-current');
     expect(current).toHaveTextContent('Ca hiện tại');
-    expect(current).toHaveTextContent('Chi nhánh: Chi nhánh 1 — 05 Trương Định');
+    // The hotel by its address — never a branch number.
+    expect(within(current).getByTestId('shift-hotel')).toHaveTextContent('Khách sạn: 05 Trương Định');
+    expect(document.body).not.toHaveTextContent(/Chi nhánh \d/);
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng', 'KPI & Thu tiền']);
 
@@ -284,9 +286,14 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     const two = screen.getByTestId('group-card-2');
     expect(within(two).getByTestId('group-mine-2')).toHaveTextContent('Công việc của bạn');
     expect(within(two).getByTestId('work-step-w4')).toHaveTextContent('Kiểm tra');
-    expect(within(two).getByTestId('no-clean-open-w4')).toBeInTheDocument();
+    // "Không cần dọn" is asked from the room's own page, not from its tile.
+    expect(within(two).queryByTestId('no-clean-open-w4')).not.toBeInTheDocument();
+    expect(within(two).queryByRole('button', { name: /Không cần dọn/ })).not.toBeInTheDocument();
     expect(within(two).getByTestId('group-item-w4')).toHaveTextContent('OC');
     expect(within(two).getByTestId('group-item-w4')).toHaveTextContent('Khác');
+    // The owner is named once, in the group's header — not again on each tile.
+    expect(within(two).getByTestId('group-assignee-2')).toHaveTextContent('Buồng phòng Một');
+    expect(within(two).getByTestId('group-item-w4')).not.toHaveTextContent('Người làm');
 
     // A colleague's group: who has it — and nothing to press.
     const three = screen.getByTestId('group-card-3');
@@ -295,7 +302,7 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(within(three).queryByTestId('work-step-w5')).not.toBeInTheDocument();
   });
 
-  it('names only the one hotel the typed address identifies — "17", never 13 Bùi Thị Xuân — and opens the shift', async () => {
+  it('names only the one hotel the typed address identifies — its address alone, chosen with "Chọn" — and opens the shift', async () => {
     const posted: Record<string, unknown>[] = [];
     const looked: string[] = [];
     const fetchMock = installApiMock(
@@ -305,7 +312,7 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
           const { address } = JSON.parse(String(init.body)) as { address: string };
           looked.push(address);
           return address === '17'
-            ? { status: 200, body: { status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình', branchNumber: 4 } } }
+            ? { status: 200, body: { status: 'RESOLVED', branch: { address: '170-172-174 Nguyễn Thái Bình' } } }
             : { status: 200, body: { status: 'AMBIGUOUS', message: 'Nhập thêm số nhà hoặc tên đường để xác định khách sạn.' } };
         },
         'POST /api/housekeeping/shift/start': (init) => {
@@ -331,10 +338,27 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
     await userEvent.type(address, '7');
     const match = await within(start).findByTestId('shift-lookup-match');
-    expect(match).toHaveTextContent('Chi nhánh 4 — 170-172-174 Nguyễn Thái Bình');
+    // The address only — no branch number — and nothing chosen yet.
+    expect(match).toHaveTextContent('170-172-174 Nguyễn Thái Bình');
+    expect(match).not.toHaveTextContent('Chi nhánh');
     expect(document.body).not.toHaveTextContent('13 Bùi Thị Xuân');
+    expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
+    // "Chọn": the address fills the field, and only then does "Vào ca" open.
+    await userEvent.click(within(match).getByTestId('shift-lookup-choose'));
+    expect(address).toHaveValue('170-172-174 Nguyễn Thái Bình');
+    expect(within(start).getByTestId('shift-lookup-chosen')).toHaveTextContent('Đã chọn: 170-172-174 Nguyễn Thái Bình');
+    expect(within(start).getByTestId('shift-start-submit')).toBeEnabled();
+    // An edit undoes the choice; choosing again restores it.
+    await userEvent.type(address, 'x');
+    expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
+    await userEvent.type(address, '{Backspace}');
+    expect(within(start).getByTestId('shift-start-submit')).toBeDisabled();
+    await userEvent.clear(address);
+    await userEvent.type(address, '17');
+    await userEvent.click(await within(start).findByTestId('shift-lookup-choose'));
     await userEvent.click(within(start).getByTestId('shift-start-submit'));
-    await waitFor(() => expect(posted).toEqual([{ address: '17' }]));
+    // The chosen address is sent; the server resolves it again itself.
+    await waitFor(() => expect(posted).toEqual([{ address: '170-172-174 Nguyễn Thái Bình' }]));
     expect(looked.at(-1)).toBe('17');
   });
 
@@ -397,20 +421,37 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     await waitFor(() => expect(listed).toBeGreaterThan(before));
   });
 
-  it('"Không cần dọn" needs a reason, and sends it for the manager to decide', async () => {
+  it('"Không cần dọn" is asked from the room’s page: the room and its group named, a reason required, then "Chờ Quản lý xác nhận"', async () => {
     const asked: unknown[] = [];
+    const own = { ...(G2.items[0] as Record<string, unknown>), workGroup: { id: 'g2', number: 2, name: null } };
     installApiMock(
       routes({
+        'GET /api/housekeeping/work/tasks/w4': () => ({ status: 200, body: { task: own } }),
+        'POST /api/housekeeping/work/tasks/w4/open': () => ({ status: 200, body: { task: own } }),
         'POST /api/housekeeping/work/tasks/w4/no-clean': (init) => {
           asked.push(JSON.parse(String(init.body)));
-          return { status: 200, body: { task: { ...(G2.items[0] as Record<string, unknown>), phase: 'NO_CLEAN_PENDING' } } };
+          return {
+            status: 200,
+            body: {
+              task: {
+                ...own,
+                phase: 'NO_CLEAN_PENDING',
+                phaseLabel: 'Chờ duyệt không cần dọn',
+                noClean: { status: 'PENDING', reason: 'Khách không muốn dọn', requestedAt: '2026-10-05T03:00:00.000Z', requestedByName: 'Buồng phòng Một', decidedAt: null, decidedByName: null, decisionNote: null },
+              },
+            },
+          };
         },
       }),
     );
-    renderApp('/app/inspections');
-    await userEvent.click(await screen.findByTestId('no-clean-open-w4'));
+    renderApp('/app/inspections/room/w4');
+    const header = await screen.findByTestId('room-header');
+    // Top right of the room's header; the hotel by its address.
+    expect(within(header).getByTestId('room-hotel')).toHaveTextContent('Công việc 2 · 05 Trương Định');
+    await userEvent.click(within(header).getByTestId('room-no-clean-open'));
     const dialog = await screen.findByTestId('no-clean-dialog');
-    expect(dialog).toHaveTextContent('Tầng 3 · Phòng 301');
+    expect(within(dialog).getByTestId('no-clean-place')).toHaveTextContent('Tầng 3 · Phòng 301');
+    expect(dialog).toHaveTextContent('Công việc 2');
     const send = screen.getByTestId('no-clean-send');
     expect(send).toBeDisabled();
     await userEvent.type(within(dialog).getByTestId('no-clean-reason'), '   ');
@@ -418,7 +459,10 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     await userEvent.type(within(dialog).getByTestId('no-clean-reason'), 'Khách không muốn dọn');
     await userEvent.click(send);
     await waitFor(() => expect(asked).toEqual([{ reason: 'Khách không muốn dọn' }]));
-    expect(await screen.findByTestId('accept-done')).toHaveTextContent('Chờ quản lý duyệt');
+    // Waiting for the manager: said so, asked no twice, nothing inspected meanwhile.
+    expect(await within(header).findByTestId('room-no-clean-waiting')).toHaveTextContent('Chờ Quản lý xác nhận');
+    expect(within(header).queryByTestId('room-no-clean-open')).not.toBeInTheDocument();
+    expect(screen.getByTestId('room-no-clean-pending')).toHaveTextContent('Khách không muốn dọn');
   });
 
   it('"Kiểm tra" begins the inspection of one’s own room and opens it', async () => {
@@ -463,7 +507,8 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(within(history).getByTestId('history-item-h1')).toHaveTextContent('Công việc 1 · Tầng 1 · Phòng 101');
     expect(within(history).getByTestId('history-item-h1')).toHaveTextContent('30 phút');
     expect(within(history).getByTestId('history-item-h2')).toHaveTextContent('Không cần dọn — đã duyệt bởi Quản lý · Lý do: Khách từ chối');
-    expect(within(history).getByTestId('work-history-shifts')).toHaveTextContent('Chi nhánh 1');
+    expect(within(history).getByTestId('work-history-shifts')).toHaveTextContent('05 Trương Định');
+    expect(within(history).getByTestId('work-history-shifts')).not.toHaveTextContent('Chi nhánh');
   });
 
   it('offers no "Đổi chi nhánh" on shift — only "Kết thúc ca"', async () => {
@@ -481,7 +526,8 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     await userEvent.click(within(await screen.findByTestId('shift-current')).getByTestId('shift-end'));
     await userEvent.click(await screen.findByTestId('shift-end-confirm'));
     const summary = await screen.findByTestId('shift-summary');
-    expect(summary).toHaveTextContent('1 chi nhánh');
+    expect(summary).toHaveTextContent('1 khách sạn');
+    expect(summary).not.toHaveTextContent(/Chi nhánh \d/);
     expect(summary).toHaveTextContent('Hút thuốc: 2');
   });
 });

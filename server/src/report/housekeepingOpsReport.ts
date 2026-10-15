@@ -12,7 +12,7 @@
  * nhận đặc biệt", notes.
  */
 import ExcelJS from 'exceljs';
-import type { CleaningDetailRow, OperationsRow } from '../housekeeping/housekeepingKpi';
+import type { CleaningDetailRow, FindingLineRow, OperationsRow, ReportType } from '../housekeeping/housekeepingKpi';
 import { LINEN_ITEMS, ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS } from '../housekeeping/roomTaskCatalog';
 import { formatDuration } from '../lib/duration';
 import { hcmDateTime, hcmDayLabel } from './format';
@@ -25,6 +25,20 @@ export interface HousekeepingOpsData {
   rows: OperationsRow[];
   /** Each room's saved "Dọn phòng" form. */
   rooms?: CleaningDetailRow[];
+  /** The report's findings, with their collections. */
+  findings?: FindingLineRow[];
+  /** The filters the report was made with — printed under the figures. */
+  filters?: { type: ReportType; typeLabel: string; employee: string | null; q: string | null };
+}
+
+/** "Loại báo cáo: … · Nhân viên: … · Tìm kiếm: …" — what the file was filtered by. */
+export function reportFilterLines(filters: HousekeepingOpsData['filters']): { label: string; value: string }[] {
+  if (!filters) return [];
+  return [
+    { label: 'Loại báo cáo', value: filters.typeLabel },
+    ...(filters.employee ? [{ label: 'Nhân viên', value: filters.employee }] : []),
+    ...(filters.q ? [{ label: 'Tìm kiếm', value: `"${filters.q}"` }] : []),
+  ];
 }
 
 /**
@@ -100,7 +114,13 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
   }
   sheet.addRow({});
   sheet.addRow({ branch: `Kỳ báo cáo: ${hcmDayLabel(data.from)} – ${hcmDayLabel(data.to)} · ${data.scope}` });
+  for (const line of reportFilterLines(data.filters)) sheet.addRow({ branch: `${line.label}: ${line.value}` });
   for (const key of ['collected', 'pending']) sheet.getColumn(key).numFmt = '#,##0';
+
+  const type = data.filters?.type ?? 'ALL';
+  if (type !== 'CLEANING') addFindingsSheet(wb, data.findings ?? []);
+  // "Kiểm phòng & thu tiền" has no cleaning cycles to list.
+  if (type === 'INSPECTION') return Buffer.from(await wb.xlsx.writeBuffer());
 
   const detail = wb.addWorksheet('Chi tiết dọn phòng');
   detail.columns = [
@@ -160,12 +180,46 @@ export async function buildHousekeepingOpsWorkbook(data: HousekeepingOpsData): P
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+/** "Phát sinh & thu tiền": each finding of the report, its collection and who confirmed it. */
+function addFindingsSheet(wb: ExcelJS.Workbook, findings: FindingLineRow[]): void {
+  const sheet = wb.addWorksheet('Phát sinh & thu tiền');
+  sheet.columns = [
+    { header: 'Thời gian', key: 'at', width: 18 },
+    { header: 'Chi nhánh', key: 'branch', width: 30 },
+    { header: 'Phòng', key: 'room', width: 12 },
+    { header: 'Người kiểm phòng', key: 'inspector', width: 24 },
+    { header: 'Phát sinh', key: 'type', width: 26 },
+    { header: 'Ghi chú', key: 'note', width: 32 },
+    { header: 'Thu tiền', key: 'status', width: 16 },
+    { header: 'Số tiền (VND)', key: 'amount', width: 16 },
+    { header: 'Lễ tân xác nhận', key: 'by', width: 24 },
+    { header: 'Mã phát sinh', key: 'id', width: 28 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.views = [{ state: 'frozen', ySplit: 1 }];
+  for (const f of findings) {
+    sheet.addRow({
+      at: hcmDateTime(new Date(f.createdAt)),
+      branch: `Chi nhánh ${f.branch.branchNumber} — ${f.branch.address}`,
+      room: f.roomNumber,
+      inspector: f.inspectorName,
+      type: f.typeLabel,
+      note: f.note ?? '',
+      status: f.collectionStatusLabel,
+      amount: f.amount,
+      by: f.collectedByName ?? '',
+      id: f.id,
+    });
+  }
+  sheet.getColumn('amount').numFmt = '#,##0';
+}
+
 /**
  * "Bao cao kiem tra don phong_<period>.pdf" / "Bao cao buong phong_<period>.xlsx"
- * — ASCII, like every other report file name.
+ * — ASCII, like every other report file name. "Kiểm phòng & thu tiền" is named so.
  */
-export function housekeepingOpsFileName(from: string, to: string, ext: 'pdf' | 'xlsx'): string {
+export function housekeepingOpsFileName(from: string, to: string, ext: 'pdf' | 'xlsx', type: ReportType = 'ALL'): string {
   const d = (s: string) => s.split('-').reverse().join('-');
-  const base = ext === 'pdf' ? 'Bao cao kiem tra don phong' : 'Bao cao buong phong';
+  const base = type === 'INSPECTION' ? 'Bao cao kiem phong phat sinh' : ext === 'pdf' ? 'Bao cao kiem tra don phong' : 'Bao cao buong phong';
   return `${base}_${from === to ? d(from) : `${d(from)}_${d(to)}`}.${ext}`;
 }

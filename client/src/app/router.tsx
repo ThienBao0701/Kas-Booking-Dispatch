@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { LoginPage } from '../auth/LoginPage';
 import { ChangePasswordPage } from '../auth/ChangePasswordPage';
 import { PublicOnly, RequireAuth, RequirePasswordChange, RequireRole } from '../auth/ProtectedRoute';
@@ -40,7 +40,6 @@ import { ConfidentialReportsPage } from '../pages/ConfidentialReportsPage';
 import { HousekeepingRoomPage } from '../pages/HousekeepingRoomPage';
 import { HousekeepingKpiPage } from '../pages/HousekeepingKpiPage';
 import {
-  HkAssignPage,
   HkKpiPage,
   HkOverviewPage,
   HkReportPage,
@@ -51,6 +50,18 @@ import {
 /** "Quản lý buồng phòng" — its branch; the Admin, every branch. The server scopes. */
 const HK_MANAGER_ROLES: readonly UserRole[] = ['ADMIN', 'HOUSEKEEPING_MANAGER'];
 const ROOM_WORKER_ROLES: readonly UserRole[] = ['HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'];
+
+/**
+ * "Phân công công việc" is no longer a screen of its own: work is assigned in
+ * "Tình trạng phòng" (whole groups in "Công việc", one item at a time in
+ * "Danh sách" and its "Chi tiết"). An old link lands there — its query kept.
+ */
+function HkAssignRedirect() {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  params.set('view', 'list');
+  return <Navigate to={`/app/hk/rooms?${params.toString()}`} replace />;
+}
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -274,11 +285,11 @@ export function AppRoutes() {
           {/* A room is worked by its housekeeper — or by the Quản lý buồng phòng who took its group. */}
           <Route path="inspections/room/:id" element={<RequireRole role={ROOM_WORKER_ROLES}><HousekeepingRoomPage /></RequireRole>} />
           <Route path="my-kpi" element={<RequireRole role="HOUSEKEEPING"><HousekeepingKpiPage /></RequireRole>} />
-          {/* "Quản lý buồng phòng": six focused screens. */}
+          {/* "Quản lý buồng phòng": five focused screens. */}
           <Route path="hk" element={<Navigate to="/app/hk/overview" replace />} />
           <Route path="hk/overview" element={<RequireRole role={HK_MANAGER_ROLES}><HkOverviewPage /></RequireRole>} />
           <Route path="hk/rooms" element={<RequireRole role={HK_MANAGER_ROLES}><HkRoomBoardPage /></RequireRole>} />
-          <Route path="hk/assign" element={<RequireRole role={HK_MANAGER_ROLES}><HkAssignPage /></RequireRole>} />
+          <Route path="hk/assign" element={<RequireRole role={HK_MANAGER_ROLES}><HkAssignRedirect /></RequireRole>} />
           <Route path="hk/staff" element={<RequireRole role={HK_MANAGER_ROLES}><HkStaffPage /></RequireRole>} />
           <Route path="hk/kpi" element={<RequireRole role={HK_MANAGER_ROLES}><HkKpiPage /></RequireRole>} />
           <Route path="hk/report" element={<RequireRole role={HK_MANAGER_ROLES}><HkReportPage /></RequireRole>} />

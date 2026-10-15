@@ -32,6 +32,22 @@ export interface PlaceDraft {
   codes: WorkTaskCode[];
   /** Asked for — and sent — only with "Khác" (always "Khác" for a shared area). */
   note: string;
+  /**
+   * "Xác nhận" pressed on the note as it now reads — a draft state only: nothing
+   * is saved before the whole group is. Any edit of the note clears it.
+   */
+  noteConfirmed?: boolean;
+}
+
+/** The shortest reason that says something ("Thay rèm", "Lau sàn"). */
+export const MIN_NOTE_CHARS = 3;
+
+/** Why a "Khác" note cannot be confirmed yet, or null. */
+export function noteProblem(note: string): string | null {
+  const text = note.trim();
+  if (!text) return 'Nhập lý do / việc cần làm.';
+  if (text.length < MIN_NOTE_CHARS) return `Ghi rõ hơn (ít nhất ${MIN_NOTE_CHARS} ký tự).`;
+  return null;
 }
 
 /** "Khác" says what in its note: a room with "Khác" ticked, or any shared area. */
@@ -48,7 +64,28 @@ export function codesLabel(codes: readonly string[]): string {
 export function placeProblem(d: PlaceDraft): string | null {
   if (d.areaKind === 'ROOM' && d.codes.length === 0) return 'Chọn việc cần làm.';
   if (needsNote(d) && !d.note.trim()) return d.areaKind === 'ROOM' ? '"Khác" cần ghi rõ lý do / việc cần làm.' : 'Khu vực này cần ghi rõ việc cần làm.';
+  if (needsNote(d) && noteProblem(d.note)) return noteProblem(d.note);
+  if (needsNote(d) && !d.noteConfirmed) return 'Bấm “Xác nhận” lý do (Khác).';
   return null;
+}
+
+/**
+ * The places of the day that are still OPEN — the server's own rule: an item
+ * not removed (an approved "Không cần dọn" removes it) and not yet reviewed. A
+ * room cleaned and waiting for "Đạt / Không đạt", or with "Không cần dọn" not
+ * yet approved, is still open. Keys as the form's tiles: "ROOM:101",
+ * "HALLWAY:5", "STAIRCASE:5", "ROOFTOP". "Khác" is a free description, never held.
+ */
+export function openPlaceKeys(tasks: readonly RoomTask[]): Set<string> {
+  const keys = new Set<string>();
+  for (const t of tasks) {
+    if (t.voided || (t.review && t.review.status !== 'PENDING')) continue;
+    const kind = t.areaKind ?? 'ROOM';
+    if (kind === 'ROOM') keys.add(`ROOM:${t.roomNumber}`);
+    else if (kind === 'ROOFTOP') keys.add('ROOFTOP');
+    else if ((kind === 'HALLWAY' || kind === 'STAIRCASE') && t.floor) keys.add(`${kind}:${t.floor}`);
+  }
+  return keys;
 }
 
 export function placeInput(d: PlaceDraft): GroupItemInput {

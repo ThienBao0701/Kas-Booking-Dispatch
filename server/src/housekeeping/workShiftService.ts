@@ -173,8 +173,9 @@ export async function lookupWorkplace(actor: ShiftActor, input: { address?: unkn
   if (!typed.trim()) return { status: 'AMBIGUOUS' as const, message: WORKPLACE_AMBIGUOUS };
   try {
     const branch = await resolveTyped(typed, client);
-    const row = await client.branch.findUniqueOrThrow({ where: { id: branch.id }, select: { address: true, branchNumber: true } });
-    return { status: 'RESOLVED' as const, branch: { address: row.address, branchNumber: row.branchNumber } };
+    // The address only: the housekeeper names a hotel, it never sees a branch number.
+    const row = await client.branch.findUniqueOrThrow({ where: { id: branch.id }, select: { address: true } });
+    return { status: 'RESOLVED' as const, branch: { address: row.address } };
   } catch (error) {
     if (error instanceof ApiError && error.status === 422) {
       return { status: error.message === WORKPLACE_NOT_FOUND ? ('NONE' as const) : ('AMBIGUOUS' as const), message: error.message };

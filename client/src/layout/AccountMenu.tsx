@@ -22,6 +22,8 @@ export function AccountMenu() {
   const roleLabel = ROLE_LABEL[user.role];
   // Bộ phận buồng phòng names its hotel at "Vào ca" (by address); it is not shown before that.
   const hideBranch = user.role === 'HOUSEKEEPING';
+  // Housekeeping names its hotel by address — never a branch number or code.
+  const housekeeping = user.role === 'HOUSEKEEPING' || user.role === 'HOUSEKEEPING_MANAGER';
 
   const onLogout = async () => {
     setOpen(false);
@@ -46,7 +48,7 @@ export function AccountMenu() {
           <p className="text-sm font-medium text-slate-800">{user.fullName}</p>
           <p className="text-xs text-slate-500">
             {roleLabel}
-            {user.branch && !hideBranch ? ` · ${user.branch.hotelName}` : ''}
+            {user.branch && !hideBranch ? ` · ${housekeeping ? user.branch.address : user.branch.hotelName}` : ''}
           </p>
         </div>
         <ChevronDown className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -68,7 +70,7 @@ export function AccountMenu() {
               <p className="text-xs text-slate-500">@{user.username}</p>
               <p className="mt-1 text-xs text-slate-500">{roleLabel}</p>
               {user.branch && !hideBranch ? (
-                <p className="text-xs text-slate-500">Chi nhánh: {user.branch.hotelName}</p>
+                <p className="text-xs text-slate-500">{housekeeping ? `Khách sạn: ${user.branch.address}` : `Chi nhánh: ${user.branch.hotelName}`}</p>
               ) : null}
             </div>
             <div className="my-1 h-px bg-slate-100" />

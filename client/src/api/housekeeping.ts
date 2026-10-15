@@ -199,7 +199,7 @@ export const housekeepingApi = {
   /** "Vào ca", step one: only the ONE hotel the typed start of an address identifies. */
   lookupWorkplace: (address: string) =>
     api.post<
-      | { status: 'RESOLVED'; branch: { address: string; branchNumber: number } }
+      | { status: 'RESOLVED'; branch: { address: string } }
       | { status: 'AMBIGUOUS' | 'NONE'; message: string }
     >('/housekeeping/shift/lookup', { address }),
   /** A housekeeper names the hotel by address; a Quản lý buồng phòng starts at its own branch (no address). */

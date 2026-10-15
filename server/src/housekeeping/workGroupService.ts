@@ -194,22 +194,61 @@ function normalizePlaces(rawItems: unknown, branchCode: string): PlaceItem[] {
   return items;
 }
 
-/** A room may be in ONE open item a day — a second group would give it two people. */
+/**
+ * The places that are ONE place: a room, a floor's hallway or staircase, the
+ * Rooftop. Each may be in one open item a day — a second group would give it
+ * two people. ("Khác" is a free description, so several may be open at once.)
+ */
+const SINGLE_PLACE_KINDS: readonly HousekeepingAreaKind[] = ['ROOM', 'HALLWAY', 'STAIRCASE', 'ROOFTOP'];
+
+/**
+ * Still open — not yet given back to the day: not removed (a removal, and an
+ * approved "Không cần dọn", void the item) and not yet reviewed ("Đạt", or
+ * "Không đạt" — a re-clean opens its own next cycle). A room cleaned and
+ * waiting for "Đạt / Không đạt", or with a "Không cần dọn" not yet approved,
+ * is still open. The same predicate as the open-item unique indexes.
+ */
+const OPEN_ITEM = { voidedAt: null, reviewResult: null } as const;
+
+/** A place's identity for the "one open item" rule. */
+const placeKey = (areaKind: HousekeepingAreaKind, roomNumber: string) => `${areaKind}|${roomNumber}`;
+
+/**
+ * Makes "check the places are free, then save them" one step per branch: the
+ * creations and additions of the same branch wait for each other until the
+ * transaction ends, so two managers saving the same room at once cannot both
+ * pass the check. Other branches are never held up.
+ */
+async function lockBranchPlaces(tx: Prisma.TransactionClient, branchId: number): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('housekeeping-open-places'), ${branchId}::int)`;
+}
+
+/** A place may be in ONE open item a day — refused, naming each one and the group that holds it. */
 async function assertRoomsFree(
   client: PrismaClient | Prisma.TransactionClient,
   branchId: number,
   workDate: string,
   items: PlaceItem[],
 ): Promise<void> {
-  const rooms = items.filter((i) => i.areaKind === 'ROOM').map((i) => i.roomNumber);
-  if (rooms.length === 0) return;
+  const single = items.filter((i) => SINGLE_PLACE_KINDS.includes(i.areaKind));
+  if (single.length === 0) return;
+  const wanted = new Set(single.map((i) => placeKey(i.areaKind, i.roomNumber)));
   const open = await client.housekeepingRoomTask.findMany({
-    where: { branchId, workDate, areaKind: 'ROOM', roomNumber: { in: rooms }, voidedAt: null, reviewResult: null },
-    select: { roomNumber: true, workGroup: { select: { number: true } } },
+    where: {
+      branchId,
+      workDate,
+      ...OPEN_ITEM,
+      areaKind: { in: [...SINGLE_PLACE_KINDS] },
+      roomNumber: { in: [...new Set(single.map((i) => i.roomNumber))] },
+    },
+    select: { areaKind: true, roomNumber: true, workGroup: { select: { number: true } } },
   });
-  if (open.length > 0) {
-    const where = open.map((o) => `Phòng ${o.roomNumber}${o.workGroup ? ` (Công việc ${o.workGroup.number})` : ''}`);
-    throw ApiError.conflict(`Đã có việc đang mở trong ngày: ${where.join(', ')}. Sửa công việc đó thay vì tạo lại.`);
+  const taken = open.filter((o) => wanted.has(placeKey(o.areaKind, o.roomNumber)));
+  if (taken.length > 0) {
+    const where = [
+      ...new Set(taken.map((o) => `${o.areaKind === 'ROOM' ? `Phòng ${o.roomNumber}` : o.roomNumber}${o.workGroup ? ` (Công việc ${o.workGroup.number})` : ''}`)),
+    ];
+    throw ApiError.conflict(`Đã có việc đang mở trong ngày: ${where.join(', ')}. Tải lại danh sách phòng rồi chọn lại.`);
   }
 }
 
@@ -304,6 +343,7 @@ export async function createWorkGroup(
   for (let attempt = 0; ; attempt += 1) {
     try {
       const id = await client.$transaction(async (tx) => {
+        await lockBranchPlaces(tx, branch.id);
         await assertRoomsFree(tx, branch.id, workDate, items);
         const { _max } = await tx.housekeepingWorkGroup.aggregate({ where: { branchId: branch.id, workDate }, _max: { number: true } });
         const group = await tx.housekeepingWorkGroup.create({
@@ -395,6 +435,7 @@ export async function addWorkGroupItems(
   const now = clock.now();
   try {
     const created = await client.$transaction(async (tx) => {
+      await lockBranchPlaces(tx, row.branchId);
       await assertRoomsFree(tx, row.branchId, row.workDate, items);
       const { _max } = await tx.housekeepingRoomTask.aggregate({ where: { workGroupId: id }, _max: { groupIndex: true } });
       return createItems(tx, row, items, (_max.groupIndex ?? -1) + 1, actor, now);

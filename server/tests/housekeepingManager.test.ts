@@ -429,7 +429,7 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     const report = (await manager1.get(`/api/housekeeping/manager/report?from=${DAY}&to=${DAY}`)).body;
     expect(report.rooms).toEqual([
       {
-        branchLabel: expect.stringContaining('Chi nhánh'),
+        branchLabel: '05 Trương Định',
         workDate: DAY,
         roomNumber: '101',
         statusCode: 'OUT',
@@ -554,7 +554,9 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     ]) {
       expect(drawn).toContain(value);
     }
-    expect(drawn.some((t) => /^Chi nhánh: Chi nhánh \d+ — /.test(t))).toBe(true);
+    // The Quản lý buồng phòng's file names its hotel by address — no branch number.
+    expect(drawn).toContain('Chi nhánh: 05 Trương Định');
+    expect(drawn.some((t) => /Chi nhánh \d+ — /.test(t))).toBe(false);
     expect(drawn.some((t) => t.startsWith('Xuất lúc: '))).toBe(true);
     // The bedding row: the room, then Ga giường's count beside its ticked King.
     const bedding = drawn.indexOf('Bảo vệ nệm\nSố lượng');
@@ -640,9 +642,13 @@ describe('a finding, Reception’s collection, and the worker’s KPI', () => {
     const branch = (await manager1.get(`/api/housekeeping/manager/kpi?from=${DAY}&to=${DAY}`)).body;
     expect(branch.rows).toEqual([expect.objectContaining({ userId: workerId, collectedAmount: 600000, pendingAmount: 200000 })]);
     expect(branch.totals.collectedAmount).toBe(600000);
+    // Each finding in scope, with where its collection stands — the chart's data.
+    expect(branch.findings.map((f: { collectionStatus: string }) => f.collectionStatus).sort()).toEqual(['COLLECTED', 'PENDING']);
     // Another worker's KPI is not in this worker's; another branch's manager sees none of it.
     expect((await worker2.get(`/api/housekeeping/kpi/me?from=${DAY}&to=${DAY}`)).body.summary.collectedAmount).toBe(0);
-    expect((await manager2.get(`/api/housekeeping/manager/kpi?from=${DAY}&to=${DAY}`)).body.rows).toEqual([]);
+    const other = (await manager2.get(`/api/housekeeping/manager/kpi?from=${DAY}&to=${DAY}`)).body;
+    expect(other.rows).toEqual([]);
+    expect(other.findings).toEqual([]);
     expect((await admin.get(`/api/housekeeping/manager/kpi?from=${DAY}&to=${DAY}`)).body.totals.collectedAmount).toBe(600000);
 
     // The report states the same figures, and exports in the manager's scope.
@@ -654,6 +660,136 @@ describe('a finding, Reception’s collection, and the worker’s KPI', () => {
     const xlsx = await manager1.get(`/api/housekeeping/manager/report.xlsx?from=${DAY}&to=${DAY}`);
     expect(xlsx.status).toBe(200);
     expect((await manager1.get(`/api/housekeeping/manager/report.pdf?from=${DAY}&to=${DAY}&branchId=${cn2}`)).status).toBe(403);
+  });
+});
+
+describe('"Báo cáo": its filters — worker, type, search — on the screen and in both files, never outside the branch', () => {
+  const fileOf = (agent: Agent, url: string) =>
+    agent
+      .get(url)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+  const PERIOD = `from=${DAY}&to=${DAY}`;
+  const report = async (agent: Agent, extra = '') => agent.get(`/api/housekeeping/manager/report?${PERIOD}${extra}`);
+
+  /** Room 101 for Chị Lan (inspected: one finding collected, one not collectible); room 102 for Chị Hoa. */
+  async function day() {
+    await setUp(manager1, ['101'], workerId);
+    const tasks = await setUp(manager1, ['102'], worker2Id);
+    const t101 = tasks.find((t) => t.roomNumber === '101')!;
+    await onShift(worker, cn1);
+    const inspected = await worker.post(`/api/housekeeping/work/tasks/${t101.id}/inspect`).send({ issues: [{ type: 'SMOKING' }, { type: 'ODOR' }] });
+    expect(inspected.status).toBe(201);
+    const [smoking, odor] = inspected.body.task.inspection.findings as { id: string }[];
+    expect((await letan1.put(`/api/housekeeping/issues/${smoking!.id}/collection`).send({ status: 'COLLECTED', amount: 500000, method: 'CASH' })).status).toBe(200);
+    expect((await letan1.put(`/api/housekeeping/issues/${odor!.id}/collection`).send({ status: 'UNCOLLECTIBLE', amount: 200000, reason: 'Khách đã rời đi' })).status).toBe(200);
+    return { smoking: smoking!, odor: odor! };
+  }
+
+  it('narrows the figures, the rooms and the findings by worker, type and search', async () => {
+    const { smoking } = await day();
+    const names = (body: { rows: { employee: string }[] }) => body.rows.map((r) => r.employee).sort();
+
+    // Everything: both workers; "Không thu được" counted per row (no amount is recorded for it).
+    const all = (await report(manager1)).body;
+    expect(names(all)).toEqual(['Chị Hoa', 'Chị Lan']);
+    expect(all.rows.find((r: { employee: string }) => r.employee === 'Chị Lan')).toMatchObject({ assigned: 1, inspections: 1, findings: 2, collectedAmount: 500000, uncollectibleCount: 1 });
+    expect(all.filters).toEqual({ type: 'ALL', typeLabel: 'Tổng hợp vận hành', employee: null, q: null });
+    expect(all.findings).toHaveLength(2);
+
+    // One worker: its rooms and its inspections only.
+    const lan = (await report(manager1, `&userId=${workerId}`)).body;
+    expect(names(lan)).toEqual(['Chị Lan']);
+    expect(lan.rooms.map((r: { roomNumber: string }) => r.roomNumber)).toEqual(['101']);
+    expect(lan.filters.employee).toBe('Chị Lan');
+    const hoa = (await report(manager1, `&userId=${worker2Id}`)).body;
+    expect(hoa.rows).toEqual([expect.objectContaining({ employee: 'Chị Hoa', assigned: 1, inspections: 0, findings: 0 })]);
+    expect(hoa.findings).toEqual([]);
+
+    // The type: the rooms' work only, or the inspections only.
+    const cleaning = (await report(manager1, '&type=CLEANING')).body;
+    expect(cleaning.rows.every((r: { inspections: number; findings: number }) => r.inspections === 0 && r.findings === 0)).toBe(true);
+    expect(cleaning.rooms).toHaveLength(2);
+    expect(cleaning.findings).toEqual([]);
+    const inspection = (await report(manager1, '&type=INSPECTION')).body;
+    expect(inspection.rows).toEqual([expect.objectContaining({ employee: 'Chị Lan', assigned: 0, inspections: 1, findings: 2 })]);
+    expect(inspection.rooms).toEqual([]);
+    expect(inspection.filters.typeLabel).toBe('Kiểm phòng & thu tiền');
+
+    // The search: a room, a name without its marks, a finding's id.
+    expect(names((await report(manager1, '&q=102')).body)).toEqual(['Chị Hoa']);
+    expect(names((await report(manager1, `&q=${encodeURIComponent('chi lan')}`)).body)).toEqual(['Chị Lan']);
+    const one = (await report(manager1, `&q=${smoking.id}`)).body;
+    expect(one.findings.map((f: { id: string }) => f.id)).toEqual([smoking.id]);
+    expect(one.rows).toEqual([expect.objectContaining({ employee: 'Chị Lan', inspections: 1, findings: 1, collectedAmount: 500000, uncollectibleCount: 0 })]);
+    expect((await report(manager1, '&q=khong-co-phong-nay')).body.rows).toEqual([]);
+  });
+
+  it('refuses a worker outside the reader’s branches, an unknown worker and an unknown type — on the screen and for the files', async () => {
+    await day();
+    // Chị Mai works at the other branch: not this manager's to report on.
+    expect((await report(manager1, `&userId=${worker3Id}`)).status).toBe(403);
+    expect((await fileOf(manager1, `/api/housekeeping/manager/report.pdf?${PERIOD}&userId=${worker3Id}`)).status).toBe(403);
+    expect((await fileOf(manager1, `/api/housekeeping/manager/report.xlsx?${PERIOD}&userId=${worker3Id}`)).status).toBe(403);
+    // Nor is Chị Lan the other branch's manager's.
+    expect((await report(manager2, `&userId=${workerId}`)).status).toBe(403);
+    // The branch is still checked first, and an id is never taken on trust.
+    expect((await report(manager1, `&branchId=${cn2}`)).status).toBe(403);
+    expect((await report(manager1, '&userId=999999')).status).toBe(404);
+    expect((await report(manager1, '&type=EVERYTHING')).status).toBe(422);
+    expect((await report(manager1, `&q=${'x'.repeat(101)}`)).status).toBe(422);
+    // The Admin reads any branch's worker.
+    expect((await report(admin, `&userId=${worker3Id}`)).status).toBe(200);
+  });
+
+  it('writes the same filtered report into the Excel workbook and the PDF', async () => {
+    await day();
+    // Excel, "Kiểm phòng & thu tiền" for Chị Lan: the figures, the findings — and the filters, written down.
+    const res = await fileOf(manager1, `/api/housekeeping/manager/report.xlsx?${PERIOD}&type=INSPECTION&userId=${workerId}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('Bao cao kiem phong phat sinh_05-10-2026.xlsx');
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.body as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Vận hành buồng phòng', 'Phát sinh & thu tiền']);
+    const ops = wb.getWorksheet('Vận hành buồng phòng')!;
+    const cells = ops.getColumn(1).values.map(String);
+    expect(cells).toContain('Loại báo cáo: Kiểm phòng & thu tiền');
+    expect(cells).toContain('Nhân viên: Chị Lan');
+    expect(ops.getRow(2).getCell(3).value).toBe('Chị Lan');
+    expect(ops.getRow(3).getCell(3).value).toBe(null);
+    const findings = wb.getWorksheet('Phát sinh & thu tiền')!;
+    expect(findings.rowCount).toBe(3);
+    expect(findings.getColumn(7).values.slice(2).map(String).sort()).toEqual(['Không thu được', 'Đã thu']);
+
+    // A search narrows the workbook as it narrows the screen: room 102 only.
+    const searched = await fileOf(manager1, `/api/housekeeping/manager/report.xlsx?${PERIOD}&q=102`);
+    const wb2 = new ExcelJS.Workbook();
+    await wb2.xlsx.load(searched.body as unknown as Parameters<typeof wb2.xlsx.load>[0]);
+    expect(wb2.getWorksheet('Vận hành buồng phòng')!.getRow(2).getCell(3).value).toBe('Chị Hoa');
+    expect(wb2.getWorksheet('Vận hành buồng phòng')!.getColumn(1).values.map(String)).toContain('Tìm kiếm: "102"');
+    expect(wb2.getWorksheet('Chi tiết dọn phòng')!.getColumn(3).values.slice(2).map(String)).toEqual(['102']);
+
+    // The PDF of "Kiểm phòng & thu tiền": its findings, and what it was filtered by.
+    const text = vi.spyOn(PDFDocument.prototype, 'text');
+    let drawn: string[] = [];
+    try {
+      const pdf = await fileOf(manager1, `/api/housekeeping/manager/report.pdf?${PERIOD}&type=INSPECTION&userId=${workerId}`);
+      expect(pdf.status).toBe(200);
+      expect((pdf.body as Buffer).subarray(0, 5).toString()).toBe('%PDF-');
+      expect(pdf.headers['content-disposition']).toContain('Bao cao kiem phong phat sinh_05-10-2026.pdf');
+      drawn = text.mock.calls.map((c) => String(c[0]));
+    } finally {
+      text.mockRestore();
+    }
+    const joined = drawn.join('\n');
+    for (const value of ['KAS – BÁO CÁO KIỂM PHÒNG & PHÁT SINH', 'Loại báo cáo: Kiểm phòng & thu tiền', 'Nhân viên: Chị Lan', 'Đã thu', 'Không thu được', '500.000']) {
+      expect(joined).toContain(value);
+    }
   });
 });
 

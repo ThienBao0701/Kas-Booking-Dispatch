@@ -75,6 +75,7 @@ export function WorkOrderTable({
   onReassign,
   canReassign,
   showBranch = false,
+  frame,
 }: {
   tasks: RoomTask[];
   isLoading?: boolean;
@@ -87,6 +88,8 @@ export function WorkOrderTable({
   onReassign?: (task: RoomTask) => void;
   canReassign: boolean;
   showBranch?: boolean;
+  /** The table's frame — "light" on the housekeeping manager's board. */
+  frame?: 'default' | 'light';
 }) {
   const [area, setArea] = useState('');
   const [phase, setPhase] = useState<WorkPhase | ''>('');
@@ -168,6 +171,7 @@ export function WorkOrderTable({
         </select>
       </div>
       <DataTable
+        frame={frame}
         testId="work-orders-table"
         title="Các công việc trong ngày"
         badge={shown.length}

@@ -15,19 +15,25 @@
  * what the housekeeper noted (it has no room findings), and its cleaning is the
  * same form and the same times.
  *
+ * "KHÔNG CẦN DỌN" is asked HERE, beside the room's name (top right): the reason
+ * is required, the Quản lý buồng phòng decides, and while it waits the room says
+ * "Chờ Quản lý xác nhận" — nothing is inspected or cleaned meanwhile.
+ *
+ * The hotel is named by its address only — never a branch number.
+ *
  * Phone first: every control is a large tap target, the sections stack, numbers
  * use the numeric keyboard, and the main action sits at the bottom of the screen.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Check, ClipboardCheck, Minus, Pencil, Play, Plus, Save, Sparkles } from 'lucide-react';
+import { ArrowLeft, Ban, Check, ClipboardCheck, Hourglass, Minus, Pencil, Play, Plus, Save, Sparkles } from 'lucide-react';
 import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
 import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
-import { branchLabel } from '../auth/types';
 import { Button } from '../components/Button';
+import { NoCleanRequestDialog } from '../components/HkWorkerActions';
 import { Modal } from '../components/Modal';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { QueryState } from '../components/PageState';
@@ -44,6 +50,7 @@ export function HousekeepingRoomPage() {
   const catalog = useQuery({ queryKey: [...ROOM_WORK_KEY, 'catalog'], queryFn: () => roomWorkApi.catalog(), staleTime: Infinity });
   const [tab, setTab] = useState<'inspect' | 'clean' | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [askingNoClean, setAskingNoClean] = useState(false);
 
   // "Mở phòng" is recorded once (the server ignores a repeat); it starts nothing.
   const opened = useRef(false);
@@ -59,9 +66,15 @@ export function HousekeepingRoomPage() {
   };
 
   const t = task.data?.task;
+  const me = useAuth().user;
   // A Quản lý buồng phòng doing a room it accepted comes back to its board.
-  const manager = useAuth().user?.role === 'HOUSEKEEPING_MANAGER';
+  const manager = me?.role === 'HOUSEKEEPING_MANAGER';
   const active = tab ?? (t && t.state !== 'NOT_STARTED' ? 'clean' : 'inspect');
+  // "Không cần dọn": the housekeeper's own room, not yet being cleaned, nothing pending
+  // (the server holds the same rule). The manager decides such requests — it never asks.
+  const waitingNoClean = t?.noClean?.status === 'PENDING' && !t.voided;
+  const canAskNoClean =
+    !!t && me?.role === 'HOUSEKEEPING' && t.assignee?.id === me.id && !t.voided && (t.state === 'NOT_STARTED' || t.state === 'INSPECTED') && !waitingNoClean;
 
   return (
     <div className="mx-auto max-w-3xl pb-24">
@@ -72,7 +85,22 @@ export function HousekeepingRoomPage() {
       <QueryState isLoading={task.isLoading || catalog.isLoading} isError={task.isError} error={task.error} onRetry={() => void task.refetch()}>
         {t && catalog.data ? (
           <>
-            <RoomHeader task={t} />
+            <RoomHeader
+              task={t}
+              action={
+                canAskNoClean ? (
+                  <Button variant="secondary" onClick={() => setAskingNoClean(true)} className="!border-amber-400 !text-amber-900 hover:!bg-amber-50" data-testid="room-no-clean-open">
+                    <Ban className="h-4 w-4" aria-hidden="true" />
+                    Không cần dọn
+                  </Button>
+                ) : waitingNoClean ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-900" data-testid="room-no-clean-waiting">
+                    <Hourglass className="h-4 w-4" aria-hidden="true" />
+                    Chờ Quản lý xác nhận
+                  </span>
+                ) : null
+              }
+            />
             <div role="tablist" aria-label="Công việc phòng" className="my-4 grid grid-cols-2 gap-2">
               {(
                 [
@@ -97,10 +125,15 @@ export function HousekeepingRoomPage() {
                 </button>
               ))}
             </div>
-            {t.state === 'NOT_STARTED' && active === 'inspect' ? (
+            {t.state === 'NOT_STARTED' && active === 'inspect' && !waitingNoClean ? (
               <p className="mb-3 text-sm text-slate-600">“Dọn phòng” mở sau khi lưu kiểm tra; thời gian dọn chỉ bắt đầu khi bấm “Bắt đầu dọn”.</p>
             ) : null}
-            {active === 'inspect' && t.areaKind && t.areaKind !== 'ROOM' ? (
+            {waitingNoClean ? (
+              <p className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-3 text-base text-amber-950" data-testid="room-no-clean-pending">
+                Đã gửi yêu cầu “Không cần dọn” — lý do: <span className="font-semibold">{t.noClean?.reason}</span>. Chờ Quản lý buồng phòng xác nhận;
+                trong lúc chờ, chưa kiểm tra hay dọn phòng này.
+              </p>
+            ) : active === 'inspect' && t.areaKind && t.areaKind !== 'ROOM' ? (
               <AreaInspectPanel
                 task={t}
                 onSaved={(next) => {
@@ -139,6 +172,17 @@ export function HousekeepingRoomPage() {
           </>
         ) : null}
       </QueryState>
+      {askingNoClean && t ? (
+        <NoCleanRequestDialog
+          task={t}
+          onClose={() => setAskingNoClean(false)}
+          onSent={(next) => {
+            setAskingNoClean(false);
+            refresh(next);
+            setToast('Đã gửi yêu cầu “Không cần dọn”. Chờ Quản lý xác nhận.');
+          }}
+        />
+      ) : null}
       <Toast message={toast} onDone={() => setToast(null)} />
     </div>
   );
@@ -157,7 +201,7 @@ function useElapsed(task: RoomTask): number | null {
   return Math.max(0, Math.round((now - Date.parse(task.startedAt)) / 1000));
 }
 
-function RoomHeader({ task }: { task: RoomTask }) {
+function RoomHeader({ task, action }: { task: RoomTask; action?: React.ReactNode }) {
   const elapsed = useElapsed(task);
   const stateTone =
     task.state === 'COMPLETED'
@@ -177,17 +221,28 @@ function RoomHeader({ task }: { task: RoomTask }) {
   );
   return (
     <section className="rounded-2xl border border-line-strong bg-white p-4 shadow-sm" data-testid="room-header">
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-2xl font-bold text-slate-900">
-          {task.areaKind && task.areaKind !== 'ROOM' ? task.areaLabel : `PHÒNG ${task.roomNumber}`}
-        </h1>
-        <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-sm font-bold text-white">{task.taskLabel ?? task.statusCode}</span>
-        <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${stateTone}`} data-testid="room-state">
-          {task.stateLabel}
-        </span>
-        {task.priority ? <span className="rounded-full bg-red-600 px-2.5 py-0.5 text-sm font-semibold text-white">Ưu tiên</span> : null}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-bold text-slate-900">
+            {task.areaKind && task.areaKind !== 'ROOM' ? task.areaLabel : `PHÒNG ${task.roomNumber}`}
+          </h1>
+          <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-sm font-bold text-white">{task.taskLabel ?? task.statusCode}</span>
+          <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${stateTone}`} data-testid="room-state">
+            {task.stateLabel}
+          </span>
+          {task.priority ? <span className="rounded-full bg-red-600 px-2.5 py-0.5 text-sm font-semibold text-white">Ưu tiên</span> : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
       </div>
-      <p className="mt-1 text-sm text-slate-600">{branchLabel(task.branch)}</p>
+      <p className="mt-1 text-sm text-slate-600" data-testid="room-hotel">
+        {task.workGroup ? `Công việc ${task.workGroup.number} · ` : ''}
+        {task.branch.address}
+      </p>
+      {task.noClean?.status === 'REJECTED' ? (
+        <p className="mt-3 rounded-xl border border-line-strong bg-slate-50 px-3 py-2 text-sm text-slate-700" data-testid="room-no-clean-rejected">
+          Quản lý không duyệt “Không cần dọn”{task.noClean.decisionNote ? ` — ${task.noClean.decisionNote}` : ''}. Tiếp tục kiểm tra và dọn phòng.
+        </p>
+      ) : null}
       {task.reclean && task.state !== 'COMPLETED' ? (
         <p className="mt-3 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-base text-red-900" data-testid="room-reclean">
           <span className="font-bold">CẦN DỌN LẠI</span>
@@ -654,7 +709,7 @@ function CleaningSummary({ task, catalog, form }: { task: RoomTask; catalog: Roo
   return (
     <div data-testid="cleaning-summary">
       <p className="mb-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
-        <span className="font-semibold">Phòng {task.roomNumber}</span> · {branchLabel(task.branch)}
+        <span className="font-semibold">Phòng {task.roomNumber}</span> · {task.branch.address}
         {task.assignee ? ` · ${task.assignee.name}` : ''}
         {task.startedAt ? ` · bắt đầu ${formatDateTime(task.startedAt)}` : ''}
       </p>
