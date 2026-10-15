@@ -84,6 +84,51 @@ export interface BranchHistoryEntry {
   changedAt: string;
 }
 
+/* ------------------------------------------------------------------ */
+/* Platform identities — one current hotel name per platform           */
+/* ------------------------------------------------------------------ */
+
+/** The five platforms a branch can be listed on. Order drives the UI rows. */
+export const OTA_PLATFORMS = [
+  'BOOKING_COM',
+  'AGODA',
+  'CTRIP',
+  'TRIPADVISOR',
+  'TRAVELOKA',
+] as const;
+
+export type OtaPlatform = (typeof OTA_PLATFORMS)[number];
+
+export const PLATFORM_LABEL: Record<OtaPlatform, string> = {
+  BOOKING_COM: 'Booking.com',
+  AGODA: 'Agoda',
+  CTRIP: 'CTrip',
+  TRIPADVISOR: 'Tripadvisor',
+  TRAVELOKA: 'Traveloka',
+};
+
+/** One platform row. `name === null` means "Chưa thiết lập". */
+export interface PlatformIdentity {
+  platform: OtaPlatform;
+  name: string | null;
+  normalizedName: string | null;
+  /** The migration had to choose between competing legacy names. */
+  needsConfirmation: boolean;
+  updatedAt: string | null;
+}
+
+export interface IdentityHistoryEntry {
+  id: string;
+  platform: OtaPlatform;
+  action: string;
+  oldValue: string | null;
+  newValue: string | null;
+  reason: string | null;
+  actor: { id: number; fullName: string } | null;
+  correlationId: string | null;
+  createdAt: string;
+}
+
 export const adminBranchesApi = {
   list: () => api.get<{ branches: AdminBranch[] }>('/admin/branches'),
   get: (id: number) => api.get<{ branch: AdminBranch }>(`/admin/branches/${id}`),
@@ -92,12 +137,24 @@ export const adminBranchesApi = {
   create: (input: CreateBranchInput) => api.post<{ branch: AdminBranch }>('/admin/branches', input),
   update: (id: number, input: UpdateBranchInput) =>
     api.patch<{ branch: AdminBranch }>(`/admin/branches/${id}`, input),
-  addAlias: (id: number, input: NewAliasInput) =>
-    api.post<{ branch: AdminBranch }>(`/admin/branches/${id}/aliases`, input),
-  updateAlias: (id: number, aliasId: number, input: Partial<BranchAlias>) =>
-    api.patch<{ branch: AdminBranch }>(`/admin/branches/${id}/aliases/${aliasId}`, input),
-  removeAlias: (id: number, aliasId: number) =>
-    api.del<{ branch: AdminBranch }>(`/admin/branches/${id}/aliases/${aliasId}`),
+  // --- Platform identities (replaces the alias mutations) ---
+  identities: (id: number) =>
+    api.get<{ identities: PlatformIdentity[] }>(`/admin/branches/${id}/platform-identities`),
+  setIdentity: (id: number, platform: OtaPlatform, name: string) =>
+    api.put<{ identities: PlatformIdentity[] }>(
+      `/admin/branches/${id}/platform-identities/${platform}`,
+      { name },
+    ),
+  deleteIdentity: (id: number, platform: OtaPlatform) =>
+    api.del<{ identities: PlatformIdentity[] }>(
+      `/admin/branches/${id}/platform-identities/${platform}`,
+    ),
+  confirmIdentity: (id: number, platform: OtaPlatform) =>
+    api.post<{ identities: PlatformIdentity[] }>(
+      `/admin/branches/${id}/platform-identities/${platform}/confirm`,
+    ),
+  identityHistory: (id: number) =>
+    api.get<{ history: IdentityHistoryEntry[] }>(`/admin/branches/${id}/identity-history`),
   activate: (id: number) => api.post<{ branch: AdminBranch }>(`/admin/branches/${id}/activate`),
   deactivate: (id: number) =>
     api.post<{ branch: AdminBranch; affectedReceptionists: AffectedReceptionist[] }>(

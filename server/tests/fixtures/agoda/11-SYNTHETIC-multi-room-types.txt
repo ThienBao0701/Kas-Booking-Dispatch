@@ -1,0 +1,47 @@
+SYNTHETIC CERTIFICATION FIXTURE - NOT PRODUCTION EVIDENCE
+No real Agoda mail with several room types has been collected yet. This file was
+constructed by hand from the confirmed bilingual layout, changing only the room
+table, so multi-room behaviour can be certified. Treat its room rows as a
+DESIGN EXPECTATION, not as observed Agoda output.
+
+Booking ID
+Mã số đặt phòng
+1790000001
+Reservation Information
+THÔNG TIN ĐẶT PHÒNG
+TRẢ TRƯỚC
+Agoda Booking Confirmation
+Xác Nhận Đặt Phòng Agoda
+KAS Sonata Luxury Hotel
+(Property ID 90000001)
+City Thành phố : Ho Chi Minh City
+Customer First Name Tên Khách Hàng	Sample
+Customer Last Name Họ Khách Hàng	Guest
+Country of Residence Quốc gia cư trú	Vietnam
+Check-in Nhận phòng	10-Sep-2026 (10-09-2026)
+Check-out Trả phòng	12-Sep-2026 (12-09-2026)
+Other Guests Khách Khác	[RmNo.1] Sample Guest, [RmNo.2] Guest of Sample Guest
+Room Type
+Loại Phòng	No. of Rooms
+Số phòng	Occupancy
+Số người	No. of Extra Bed
+Số Giường Thêm :
+Deluxe Room	2	4 Adults	1
+King Room	1	2 Adults	0
+Standard Double Room	3	6 Adults	0
+Benefits Included Bao gồm các quyền lợi
+Coffee & tea, Free WiFi
+Cancellation Policy Chính sách hủy phòng
+Non-refundable.
+Website Language Ngôn ngữ Website
+English
+From - To Đến - Đi	Rates Giá phòng
+September 10, 2026      	VND 3,000,000.00
+September 11, 2026      	VND 3,000,000.00
+Reference sell rate (incl. taxes & fees)
+Giá bán tham khảo (bao gồm thuế & phí)	VND 9,000,000.00
+Commission
+Tiền hoa hồng	VND -1,500,000.00
+Net rate (incl. taxes & fees)
+Giá thực tế (bao gồm thuế & phí)
+VND 6,000,000.00

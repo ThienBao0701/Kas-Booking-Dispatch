@@ -12,10 +12,23 @@ const listQuery = z.object({
   pageSize: z.coerce.number().int().positive().max(100).default(20),
 });
 
-function view(n: { id: string; bookingId: string | null; title: string; body: string; read: boolean; createdAt: Date; readAt: Date | null }) {
+function view(n: {
+  id: string;
+  bookingId: string | null;
+  link: string | null;
+  kind: string | null;
+  title: string;
+  body: string;
+  read: boolean;
+  createdAt: Date;
+  readAt: Date | null;
+}) {
   return {
     id: n.id,
     bookingId: n.bookingId,
+    /** Where a press goes — an in-app path; null on older rows. */
+    link: n.link,
+    kind: n.kind,
     title: n.title,
     body: n.body,
     read: n.read,

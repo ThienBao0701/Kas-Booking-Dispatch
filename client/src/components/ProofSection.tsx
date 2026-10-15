@@ -27,6 +27,8 @@ import { ImageUploadDropzone } from './ImageUploadDropzone';
 import { ProofOcrCard } from './ProofOcrCard';
 import { ProofComparisonCard } from './ProofComparisonCard';
 import { useProofComparison } from '../hooks/useProofComparison';
+import { DUPLICATE_WARNING } from '../lib/claim';
+import { useShiftSession } from '../hooks/useShiftSession';
 
 /**
  * The proof-of-creation workflow surface. What it renders depends on the
@@ -75,19 +77,24 @@ export function ProofSection({
 
 function UploadCard({ booking: b, onChanged }: { booking: BookingDetail; onChanged?: (m: string) => void }) {
   const [file, setFile] = useState<File | null>(null);
-  const [note, setNote] = useState('');
   const rejected = b.verificationStatus === 'REJECTED';
   const lastRejection = [...b.proofs].reverse().find((p) => p.status === 'REJECTED');
+  // Who the server will record as the creator. Shown, never typed.
+  const { data: shift } = useShiftSession();
+  const session = shift?.session ?? null;
 
   const submit = useMutation({
-    mutationFn: () => bookingsApi.submitProof(b.id, file!, note),
+    mutationFn: () => bookingsApi.submitProof(b.id, file!),
     onSuccess: () => {
       // Only clear on success; a failure keeps the image so the user can retry.
       setFile(null);
-      setNote('');
       onChanged?.('Đã gửi ảnh cho Admin kiểm tra.');
     },
   });
+
+  function handleSubmit() {
+    submit.mutate();
+  }
 
   return (
     <Card className={`p-5 ${rejected ? 'border-red-200 bg-red-50/40' : 'border-brand-200 bg-brand-50/40'}`}>
@@ -98,12 +105,13 @@ function UploadCard({ booking: b, onChanged }: { booking: BookingDetail; onChang
             <span className="text-sm font-semibold">Admin yêu cầu tạo lại</span>
           </div>
           <p className="mt-1 text-sm text-red-700">
-            Lý do: <strong>{lastRejection.reviewReasonCode ? REVIEW_REASON_LABEL[lastRejection.reviewReasonCode] : '—'}</strong>
+            Lý do mới nhất: <strong>{lastRejection.reviewReasonCode ? REVIEW_REASON_LABEL[lastRejection.reviewReasonCode] : '—'}</strong>
             {lastRejection.reviewNote ? ` — ${lastRejection.reviewNote}` : ''}
           </p>
           <p className="mt-1 text-xs text-red-600">
-            Vui lòng kiểm tra lại, tạo đúng trên hệ thống khách sạn rồi chụp và gửi lại ảnh mới.
+            Bấm CẮT trên thông tin đơn để nhận lại đơn, tạo đúng trên hệ thống khách sạn rồi chụp và gửi lại ảnh mới.
           </p>
+          <RejectionHistory proofs={b.proofs} className="mt-3" />
         </div>
       ) : (
         <>
@@ -120,20 +128,51 @@ function UploadCard({ booking: b, onChanged }: { booking: BookingDetail; onChang
 
       {submit.isError ? <div className="mt-3"><ErrorAlert>{toUserMessage(submit.error)}</ErrorAlert></div> : null}
 
-      <label className="mt-4 block text-sm font-medium text-slate-600">
-        Ghi chú cho Admin (không bắt buộc)
-        <textarea
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          rows={2}
-          maxLength={1000}
-          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-          placeholder="Ví dụ: đã tạo trên hệ thống, mã nội bộ…"
-        />
-      </label>
+      {/*
+        THE CREATOR IS SHOWN, NOT TYPED.
+
+        This used to be a free-text "Tên người tạo đơn" box, retyped on every
+        single order and stored exactly as sent. The server now takes the name
+        from the shift the receptionist checked in with, so the field is gone:
+        there is nothing to mistype, nothing to leave blank, and nothing a
+        browser can put another receptionist's name into.
+
+        It is still DISPLAYED, because a person about to sign for work should be
+        able to see whose name is going on it.
+      */}
+      {session ? (
+        <div
+          data-testid="proof-creator"
+          className="mt-4 rounded-xl bg-slate-50 px-3 py-2.5 text-sm text-slate-700"
+        >
+          <span className="text-slate-500">Người tạo đơn:</span>{' '}
+          <strong className="text-slate-900">{session.receptionistName}</strong>
+          <span className="text-slate-400"> · </span>
+          <span>
+            {session.shiftName} ({session.shiftWindow})
+          </span>
+        </div>
+      ) : null}
+
+      {/*
+        THE DUPLICATE WARNING, IMMEDIATELY ABOVE THE SUBMIT BUTTON.
+        Placed here rather than at the top of the card, and never in a tooltip:
+        the moment it has to influence is the click, and a notice scrolled off
+        screen influences nothing. This whole feature exists to stop two
+        receptionists creating the same reservation, and this is the last point
+        at which a person can still catch it.
+      */}
+      <div
+        data-testid="duplicate-warning"
+        role="note"
+        className="mt-4 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-sm font-medium text-amber-900 ring-1 ring-inset ring-amber-200"
+      >
+        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" aria-hidden="true" />
+        <span>{DUPLICATE_WARNING}</span>
+      </div>
 
       <div className="mt-4">
-        <Button onClick={() => submit.mutate()} disabled={!file || submit.isPending} loading={submit.isPending}>
+        <Button onClick={handleSubmit} disabled={!file || submit.isPending} loading={submit.isPending}>
           <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
           {submit.isPending ? 'Đang gửi ảnh...' : 'Gửi Admin kiểm tra'}
         </Button>
@@ -162,6 +201,7 @@ function ReceptionistPendingCard({ booking: b, proof }: { booking: BookingDetail
       {/* Receptionists see only that the image was received — never OCR details. */}
       <p className="mt-1 text-xs text-slate-500">Ảnh đã được hệ thống tiếp nhận.</p>
       {proof ? <ProofThumb proof={proof} className="mt-4 w-40" /> : null}
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 1 ? <ProofHistory proofs={b.proofs} className="mt-5" /> : null}
     </Card>
   );
@@ -190,6 +230,7 @@ function AdminWaitingCard({ booking: b }: { booking: BookingDetail }) {
       ) : (
         <p className="mt-1 text-sm text-slate-600">Chi nhánh chưa gửi ảnh chứng minh. Không có gì để kiểm tra lúc này.</p>
       )}
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 0 ? <ProofHistory proofs={b.proofs} className="mt-5" /> : null}
     </Card>
   );
@@ -242,7 +283,18 @@ function AdminReviewCard({
 
   return (
     <Card className="border-brand-200 p-5">
-      <p className="mb-3 text-sm font-semibold text-slate-700">Kiểm tra ảnh chứng minh (lần {proof.attemptNumber})</p>
+      <p className="mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-700">
+        Kiểm tra ảnh chứng minh (lần {proof.attemptNumber})
+        {rejectionsOf(b.proofs).length > 0 ? (
+          <span
+            data-testid="recreated-badge"
+            className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+          >
+            Đơn tạo lại · đã yêu cầu tạo lại {rejectionsOf(b.proofs).length} lần
+          </span>
+        ) : null}
+      </p>
+      <RejectionHistory proofs={b.proofs} className="mb-4" />
 
       {/* Desktop: side-by-side comparison. Mobile: stacked. */}
       <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
@@ -394,6 +446,7 @@ function ApprovedCard({ booking: b }: { booking: BookingDetail }) {
         {b.reviewedBy ? `Admin ${b.reviewedBy.fullName} đã duyệt · ` : ''}
         {formatDateTime(b.reviewedAt ?? b.completedAt)}
       </p>
+      <RejectionHistory proofs={b.proofs} className="mt-4" />
       {b.proofs.length > 0 ? <ProofHistory proofs={b.proofs} className="mt-4" /> : null}
     </Card>
   );
@@ -424,6 +477,51 @@ const PROOF_STATUS_META: Record<ProofView['status'], { label: string; className:
   APPROVED: { label: 'Đúng', className: 'bg-green-100 text-green-700' },
   REJECTED: { label: 'Cần tạo lại', className: 'bg-red-100 text-red-700' },
 };
+
+/** The "Cần tạo lại" verdicts of an order, oldest first. */
+function rejectionsOf(proofs: ProofView[]): ProofView[] {
+  return proofs.filter((p) => p.status === 'REJECTED').sort((a, b) => a.attemptNumber - b.attemptNumber);
+}
+
+/**
+ * "CẦN TẠO LẠI" — EVERY verdict that sent this order back, oldest first: the
+ * attempt, the Admin, when, and why. One row per rejected attempt, read from the
+ * attempts themselves, so a later rejection never replaces an earlier one and a
+ * resubmission erases nothing. Renders nothing for an order never sent back.
+ * The same list on the desk's, the Admin's and the managers' view of the order.
+ */
+export function RejectionHistory({ proofs, className = '' }: { proofs: ProofView[]; className?: string }) {
+  const rejected = rejectionsOf(proofs);
+  if (rejected.length === 0) return null;
+  return (
+    <section data-testid="rejection-history" className={className} aria-label="Lịch sử yêu cầu tạo lại">
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-red-700">
+        Cần tạo lại — {rejected.length} lần
+      </p>
+      <ol className="space-y-1.5">
+        {rejected.map((p, i) => (
+          <li
+            key={p.id}
+            data-testid={`rejection-${i + 1}`}
+            className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-slate-700"
+          >
+            <p className="font-semibold text-slate-900">
+              Lần {i + 1}
+              <span className="font-normal text-slate-500"> · ảnh gửi lần {p.attemptNumber}</span>
+            </p>
+            <p className="text-xs text-slate-600">
+              Admin: {p.reviewedBy?.fullName ?? '—'} · {p.reviewedAt ? formatDateTime(p.reviewedAt) : '—'}
+            </p>
+            <p className="text-xs text-red-700">
+              Lý do: {p.reviewReasonCode ? REVIEW_REASON_LABEL[p.reviewReasonCode] : '—'}
+              {p.reviewNote ? ` — ${p.reviewNote}` : ''}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
 
 function ProofHistory({ proofs, className = '' }: { proofs: ProofView[]; className?: string }) {
   return (

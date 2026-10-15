@@ -1,0 +1,669 @@
+# KAS PRO LAUNCHER - LOCAL INSTALLER
+# Copy the entire content of this file and paste it into Windows PowerShell.
+# It installs the launcher under %LOCALAPPDATA% and creates Desktop shortcuts.
+# It does NOT write launcher files into C:\Kas, so the Git working tree remains clean.
+
+$ErrorActionPreference = 'Stop'
+
+$InstallDir = Join-Path $env:LOCALAPPDATA 'KAS-Pro-Launcher'
+$StateDir = Join-Path $InstallDir 'state'
+$LauncherPath = Join-Path $InstallDir 'KAS-Pro-Launcher.ps1'
+$ReadmePath = Join-Path $InstallDir 'README.txt'
+
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+
+$LauncherSource = @'
+param(
+    [ValidateSet('Menu','StartFull','StartLocal','Stop','Status','Open','Health','Verify','Logs','Git')]
+    [string]$Action = 'Menu'
+)
+
+$ErrorActionPreference = 'Stop'
+
+$ProjectRoot = 'C:\Kas'
+$FrontendPort = 5173
+$BackendPort = 3001
+$InstallDir = Join-Path $env:LOCALAPPDATA 'KAS-Pro-Launcher'
+$StateDir = Join-Path $InstallDir 'state'
+$TunnelOut = Join-Path $StateDir 'cloudflared-out.log'
+$TunnelErr = Join-Path $StateDir 'cloudflared-error.log'
+$TunnelPidFile = Join-Path $StateDir 'cloudflared.pid'
+$KasWindowPidFile = Join-Path $StateDir 'kas-window.pid'
+$PublicUrlFile = Join-Path $StateDir 'public-url.txt'
+
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+
+function Write-Header {
+    Clear-Host
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host '                    KAS PRO LAUNCHER' -ForegroundColor Cyan
+    Write-Host '          Frontend + Backend + Cloudflare Tunnel' -ForegroundColor Cyan
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host ''
+}
+
+function Get-RequiredExecutables {
+    if (-not (Test-Path (Join-Path $ProjectRoot 'package.json'))) {
+        throw "Không tìm thấy project/package.json tại $ProjectRoot"
+    }
+
+    $script:NpmPath = $null
+    $npmCommand = Get-Command 'npm.cmd' -ErrorAction SilentlyContinue
+    if ($npmCommand) {
+        $script:NpmPath = $npmCommand.Source
+    }
+    if (-not $script:NpmPath) {
+        $fallbackNpm = 'C:\Program Files\nodejs\npm.cmd'
+        if (Test-Path $fallbackNpm) {
+            $script:NpmPath = $fallbackNpm
+        }
+    }
+    if (-not $script:NpmPath) {
+        throw 'Không tìm thấy npm.cmd. Hãy kiểm tra Node.js.'
+    }
+
+    $script:CloudflaredPath = $null
+    $cloudflareCommand = Get-Command 'cloudflared.exe' -ErrorAction SilentlyContinue
+    if ($cloudflareCommand) {
+        $script:CloudflaredPath = $cloudflareCommand.Source
+    }
+    if (-not $script:CloudflaredPath) {
+        $fallbackCloudflared = 'C:\Program Files (x86)\cloudflared\cloudflared.exe'
+        if (Test-Path $fallbackCloudflared) {
+            $script:CloudflaredPath = $fallbackCloudflared
+        }
+    }
+    if (-not $script:CloudflaredPath) {
+        throw 'Không tìm thấy cloudflared.exe. Cài bằng: winget install --id Cloudflare.cloudflared -e'
+    }
+}
+
+function Test-PortListening {
+    param([int]$Port)
+
+    $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    return [bool]$connection
+}
+
+function Wait-Port {
+    param(
+        [int]$Port,
+        [int]$TimeoutSeconds = 90
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-PortListening -Port $Port) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Stop-PidFileProcess {
+    param([string]$PidFile)
+
+    if (-not (Test-Path $PidFile)) {
+        return
+    }
+
+    $savedPid = Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($savedPid -match '^\d+$') {
+        $process = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+        if ($process) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-KasManagedProcesses {
+    Get-RequiredExecutables
+
+    Write-Host 'Đang dừng KAS và Cloudflare Tunnel...' -ForegroundColor Yellow
+
+    Stop-PidFileProcess -PidFile $KasWindowPidFile
+    Stop-PidFileProcess -PidFile $TunnelPidFile
+
+    $escapedRoot = [regex]::Escape($ProjectRoot)
+
+    # Dừng Quick Tunnel trỏ vào frontend KAS.
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -ieq 'cloudflared.exe' -and
+            $_.CommandLine -match 'tunnel' -and
+            $_.CommandLine -match "localhost:$FrontendPort"
+        } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+
+    # Chỉ dừng Node process thuộc C:\Kas, không dừng project Node khác.
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -ieq 'node.exe' -and
+            $_.CommandLine -match $escapedRoot
+        } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+
+    # Dừng tiến trình còn chiếm đúng hai cổng của KAS nếu đó là Node/cloudflared.
+    foreach ($port in @($FrontendPort, $BackendPort)) {
+        Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+                if ($p -and ($p.ProcessName -in @('node','cloudflared'))) {
+                    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                }
+            }
+    }
+
+    Remove-Item $PublicUrlFile -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Write-Host 'Đã dừng các tiến trình KAS được quản lý.' -ForegroundColor Green
+}
+
+function Wait-QuickTunnelUrl {
+    param([int]$TimeoutSeconds = 90)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $pattern = 'https://[a-z0-9-]+\.trycloudflare\.com'
+
+    while ((Get-Date) -lt $deadline) {
+        $content = ''
+        if (Test-Path $TunnelOut) {
+            $content += Get-Content $TunnelOut -Raw -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $TunnelErr) {
+            $content += "`n"
+            $content += Get-Content $TunnelErr -Raw -ErrorAction SilentlyContinue
+        }
+
+        $match = [regex]::Match(
+            $content,
+            $pattern,
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+
+        if ($match.Success) {
+            return $match.Value
+        }
+
+        if (Test-Path $TunnelPidFile) {
+            $savedPid = Get-Content $TunnelPidFile -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($savedPid -match '^\d+$') {
+                $process = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+                if (-not $process) {
+                    throw "Cloudflare Tunnel đã dừng. Xem log: $TunnelErr"
+                }
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "Không nhận được URL Cloudflare sau $TimeoutSeconds giây. Chọn mục Xem log Cloudflare."
+}
+
+function Start-QuickTunnel {
+    Get-RequiredExecutables
+
+    Remove-Item $TunnelOut, $TunnelErr, $PublicUrlFile -Force -ErrorAction SilentlyContinue
+
+    Write-Host 'Đang tạo Cloudflare Quick Tunnel...' -ForegroundColor Cyan
+
+    $tunnelProcess = Start-Process `
+        -FilePath $script:CloudflaredPath `
+        -ArgumentList @('tunnel','--url',"http://localhost:$FrontendPort") `
+        -RedirectStandardOutput $TunnelOut `
+        -RedirectStandardError $TunnelErr `
+        -WindowStyle Hidden `
+        -PassThru
+
+    Set-Content -Path $TunnelPidFile -Value $tunnelProcess.Id -Encoding ASCII
+
+    $publicUrl = Wait-QuickTunnelUrl
+    Set-Content -Path $PublicUrlFile -Value $publicUrl -Encoding UTF8
+    return $publicUrl
+}
+
+function Start-KasWindow {
+    param([string]$AllowedHost)
+
+    Get-RequiredExecutables
+
+    $hostLine = ''
+    if ($AllowedHost) {
+        $hostLine = "`$env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = '$AllowedHost'"
+    }
+
+    $command = @"
+`$Host.UI.RawUI.WindowTitle = 'KAS DEVELOPMENT SERVER'
+Set-Location '$ProjectRoot'
+$hostLine
+Write-Host ''
+Write-Host 'KAS project:' -ForegroundColor Cyan
+Write-Host '$ProjectRoot' -ForegroundColor Green
+if ('$AllowedHost') {
+    Write-Host 'Cloudflare hostname allowed:' -ForegroundColor Cyan
+    Write-Host '$AllowedHost' -ForegroundColor Green
+}
+Write-Host ''
+& '$script:NpmPath' run dev
+"@
+
+    $encodedCommand = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($command)
+    )
+
+    $kasWindow = Start-Process `
+        -FilePath 'powershell.exe' `
+        -ArgumentList @(
+            '-NoProfile',
+            '-NoExit',
+            '-ExecutionPolicy','Bypass',
+            '-EncodedCommand',$encodedCommand
+        ) `
+        -PassThru
+
+    Set-Content -Path $KasWindowPidFile -Value $kasWindow.Id -Encoding ASCII
+}
+
+function Show-ReadyResult {
+    param([string]$PublicUrl)
+
+    Write-Host 'Đang chờ frontend và backend...' -ForegroundColor Cyan
+    $frontendReady = Wait-Port -Port $FrontendPort -TimeoutSeconds 90
+    $backendReady = Wait-Port -Port $BackendPort -TimeoutSeconds 90
+
+    Write-Host ''
+    if ($frontendReady) {
+        Write-Host "Frontend $FrontendPort : READY" -ForegroundColor Green
+    } else {
+        Write-Host "Frontend $FrontendPort : NOT READY" -ForegroundColor Red
+    }
+
+    if ($backendReady) {
+        Write-Host "Backend  $BackendPort : READY" -ForegroundColor Green
+    } else {
+        Write-Host "Backend  $BackendPort : NOT READY" -ForegroundColor Red
+    }
+
+    if ($frontendReady -and $backendReady) {
+        Write-Host ''
+        Write-Host 'KAS đã khởi động thành công.' -ForegroundColor Green
+        Write-Host "Local : http://localhost:$FrontendPort" -ForegroundColor Gray
+
+        if ($PublicUrl) {
+            Write-Host "Public: $PublicUrl" -ForegroundColor Yellow
+            Set-Clipboard $PublicUrl
+            Write-Host 'URL Cloudflare đã được sao chép vào Clipboard.' -ForegroundColor Cyan
+            Start-Process $PublicUrl
+        } else {
+            Start-Process "http://localhost:$FrontendPort"
+        }
+    } else {
+        Write-Warning 'KAS chưa sẵn sàng hoàn toàn. Kiểm tra cửa sổ KAS DEVELOPMENT SERVER.'
+    }
+}
+
+function Start-FullKas {
+    Get-RequiredExecutables
+    Stop-KasManagedProcesses
+
+    Write-Host ''
+    Write-Host '[1/3] Tạo Cloudflare Tunnel...' -ForegroundColor Cyan
+    $publicUrl = Start-QuickTunnel
+    $allowedHost = ([Uri]$publicUrl).Host
+
+    Write-Host '[2/3] Khởi động frontend + backend...' -ForegroundColor Cyan
+    Start-KasWindow -AllowedHost $allowedHost
+
+    Write-Host '[3/3] Kiểm tra dịch vụ...' -ForegroundColor Cyan
+    Show-ReadyResult -PublicUrl $publicUrl
+
+    Write-Host ''
+    Write-Host 'Quick Tunnel chỉ dùng để kiểm thử; URL sẽ đổi sau lần khởi động mới.' -ForegroundColor DarkYellow
+}
+
+function Start-LocalKas {
+    Get-RequiredExecutables
+    Stop-KasManagedProcesses
+
+    Write-Host 'Đang khởi động KAS local...' -ForegroundColor Cyan
+    Start-KasWindow -AllowedHost ''
+    Show-ReadyResult -PublicUrl ''
+}
+
+function Get-SavedPublicUrl {
+    if (Test-Path $PublicUrlFile) {
+        return Get-Content $PublicUrlFile -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    return $null
+}
+
+function Show-KasStatus {
+    $frontendReady = Test-PortListening -Port $FrontendPort
+    $backendReady = Test-PortListening -Port $BackendPort
+
+    $tunnelRunning = $false
+    if (Test-Path $TunnelPidFile) {
+        $savedPid = Get-Content $TunnelPidFile -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($savedPid -match '^\d+$') {
+            $tunnelRunning = [bool](Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue)
+        }
+    }
+
+    $url = Get-SavedPublicUrl
+
+    if ($frontendReady) { Write-Host "Frontend $FrontendPort : RUNNING" -ForegroundColor Green }
+    else { Write-Host "Frontend $FrontendPort : STOPPED" -ForegroundColor Red }
+
+    if ($backendReady) { Write-Host "Backend  $BackendPort : RUNNING" -ForegroundColor Green }
+    else { Write-Host "Backend  $BackendPort : STOPPED" -ForegroundColor Red }
+
+    if ($tunnelRunning) { Write-Host 'Cloudflare     : RUNNING' -ForegroundColor Green }
+    else { Write-Host 'Cloudflare     : STOPPED' -ForegroundColor Red }
+
+    if ($url) { Write-Host "Public URL     : $url" -ForegroundColor Yellow }
+    else { Write-Host 'Public URL     : Chưa có' -ForegroundColor Gray }
+}
+
+function Open-KasPublicUrl {
+    $url = Get-SavedPublicUrl
+    if ($url) {
+        Set-Clipboard $url
+        Start-Process $url
+        Write-Host "Đã mở và sao chép: $url" -ForegroundColor Green
+    } else {
+        Write-Warning 'Chưa có URL Cloudflare. Hãy chọn Khởi động đầy đủ trước.'
+    }
+}
+
+function Invoke-KasHealthChecks {
+    Write-Host 'Đang kiểm tra KAS...' -ForegroundColor Cyan
+
+    foreach ($endpoint in @(
+        "http://localhost:$BackendPort/api/health",
+        "http://localhost:$BackendPort/api/ready"
+    )) {
+        try {
+            $response = Invoke-WebRequest -Uri $endpoint -UseBasicParsing -TimeoutSec 15
+            Write-Host "PASS $($response.StatusCode)  $endpoint" -ForegroundColor Green
+        } catch {
+            Write-Host "FAIL             $endpoint" -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor DarkRed
+        }
+    }
+
+    $url = Get-SavedPublicUrl
+    if ($url) {
+        foreach ($path in @('/','/api/health','/api/ready')) {
+            $endpoint = "$url$path"
+            try {
+                $response = Invoke-WebRequest -Uri $endpoint -UseBasicParsing -TimeoutSec 30
+                Write-Host "PASS $($response.StatusCode)  $endpoint" -ForegroundColor Green
+            } catch {
+                Write-Host "FAIL             $endpoint" -ForegroundColor Red
+                Write-Host $_.Exception.Message -ForegroundColor DarkRed
+            }
+        }
+    }
+}
+
+function Start-FullVerification {
+    Get-RequiredExecutables
+
+    $command = @"
+`$Host.UI.RawUI.WindowTitle = 'KAS FULL VERIFICATION'
+Set-Location '$ProjectRoot'
+Write-Host 'KAS FULL VERIFICATION' -ForegroundColor Cyan
+Write-Host '1. db:generate' -ForegroundColor Yellow
+& '$script:NpmPath' run db:generate
+if (`$LASTEXITCODE -ne 0) { throw 'db:generate failed' }
+Write-Host '2. typecheck' -ForegroundColor Yellow
+& '$script:NpmPath' run typecheck
+if (`$LASTEXITCODE -ne 0) { throw 'typecheck failed' }
+Write-Host '3. lint' -ForegroundColor Yellow
+& '$script:NpmPath' run lint
+if (`$LASTEXITCODE -ne 0) { throw 'lint failed' }
+Write-Host '4. test' -ForegroundColor Yellow
+& '$script:NpmPath' test
+if (`$LASTEXITCODE -ne 0) { throw 'test failed' }
+Write-Host '5. build' -ForegroundColor Yellow
+& '$script:NpmPath' run build
+if (`$LASTEXITCODE -ne 0) { throw 'build failed' }
+Write-Host ''
+Write-Host 'FULL VERIFICATION PASSED' -ForegroundColor Green
+"@
+
+    $encodedCommand = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($command)
+    )
+
+    Start-Process `
+        -FilePath 'powershell.exe' `
+        -ArgumentList @(
+            '-NoProfile',
+            '-NoExit',
+            '-ExecutionPolicy','Bypass',
+            '-EncodedCommand',$encodedCommand
+        )
+
+    Write-Host 'Đã mở cửa sổ KAS FULL VERIFICATION.' -ForegroundColor Green
+}
+
+function Show-CloudflareLogs {
+    Write-Host '===== CLOUDFLARED OUTPUT =====' -ForegroundColor Cyan
+    if (Test-Path $TunnelOut) {
+        Get-Content $TunnelOut -Tail 60
+    } else {
+        Write-Host 'Chưa có output log.' -ForegroundColor Gray
+    }
+
+    Write-Host ''
+    Write-Host '===== CLOUDFLARED INFO / ERROR =====' -ForegroundColor Cyan
+    if (Test-Path $TunnelErr) {
+        Get-Content $TunnelErr -Tail 120
+    } else {
+        Write-Host 'Chưa có info/error log.' -ForegroundColor Gray
+    }
+}
+
+function Show-GitInformation {
+    Set-Location $ProjectRoot
+    Write-Host 'Branch:' -ForegroundColor Cyan
+    git branch --show-current
+    Write-Host ''
+    Write-Host 'HEAD:' -ForegroundColor Cyan
+    git log -1 --oneline
+    Write-Host ''
+    Write-Host 'Working tree:' -ForegroundColor Cyan
+    git status --short
+    Write-Host ''
+    Write-Host 'Diff check:' -ForegroundColor Cyan
+    git diff --check
+}
+
+function Run-Menu {
+    while ($true) {
+        Write-Header
+        Show-KasStatus
+        Write-Host ''
+        Write-Host '[1] Khởi động lại TOÀN BỘ + Cloudflare' -ForegroundColor Green
+        Write-Host '[2] Khởi động KAS local, không Cloudflare'
+        Write-Host '[3] Dừng KAS + Cloudflare' -ForegroundColor Yellow
+        Write-Host '[4] Kiểm tra trạng thái'
+        Write-Host '[5] Mở / sao chép URL Cloudflare'
+        Write-Host '[6] Kiểm tra Health + Ready'
+        Write-Host '[7] Chạy FULL verification'
+        Write-Host '[8] Xem log Cloudflare'
+        Write-Host '[9] Xem Git branch/status'
+        Write-Host '[0] Đóng Launcher'
+        Write-Host ''
+
+        $choice = Read-Host 'Chọn'
+
+        try {
+            switch ($choice) {
+                '1' {
+                    Write-Header
+                    Start-FullKas
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '2' {
+                    Write-Header
+                    Start-LocalKas
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '3' {
+                    Write-Header
+                    Stop-KasManagedProcesses
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '4' {
+                    Write-Header
+                    Show-KasStatus
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '5' {
+                    Open-KasPublicUrl
+                    Start-Sleep -Seconds 2
+                }
+                '6' {
+                    Write-Header
+                    Invoke-KasHealthChecks
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '7' {
+                    Start-FullVerification
+                    Start-Sleep -Seconds 2
+                }
+                '8' {
+                    Write-Header
+                    Show-CloudflareLogs
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '9' {
+                    Write-Header
+                    Show-GitInformation
+                    Write-Host ''
+                    Read-Host 'Nhấn Enter để quay lại menu'
+                }
+                '0' {
+                    return
+                }
+                default {
+                    Write-Warning 'Lựa chọn không hợp lệ.'
+                    Start-Sleep -Seconds 1
+                }
+            }
+        } catch {
+            Write-Host ''
+            Write-Host "LỖI: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host ''
+            Read-Host 'Nhấn Enter để quay lại menu'
+        }
+    }
+}
+
+try {
+    switch ($Action) {
+        'StartFull'  { Start-FullKas }
+        'StartLocal' { Start-LocalKas }
+        'Stop'       { Stop-KasManagedProcesses }
+        'Status'     { Show-KasStatus }
+        'Open'       { Open-KasPublicUrl }
+        'Health'     { Invoke-KasHealthChecks }
+        'Verify'     { Start-FullVerification }
+        'Logs'       { Show-CloudflareLogs }
+        'Git'        { Show-GitInformation }
+        default      { Run-Menu }
+    }
+} catch {
+    Write-Host ''
+    Write-Host 'KAS PRO LAUNCHER gặp lỗi:' -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ''
+    Read-Host 'Nhấn Enter để đóng'
+    exit 1
+}
+'@
+
+Set-Content -Path $LauncherPath -Value $LauncherSource -Encoding UTF8
+Unblock-File -Path $LauncherPath -ErrorAction SilentlyContinue
+
+$Readme = @'
+KAS PRO LAUNCHER
+================
+
+Vị trí cài đặt:
+%LOCALAPPDATA%\KAS-Pro-Launcher
+
+Project được quản lý:
+C:\Kas
+
+Desktop shortcuts:
+- KAS PRO LAUNCHER
+- KAS PRO STOP
+
+Menu chính:
+[1] Restart toàn bộ frontend + backend + Cloudflare Quick Tunnel
+[2] Start local không Cloudflare
+[3] Stop KAS + Cloudflare
+[4] Status
+[5] Open/copy Cloudflare URL
+[6] Health/ready check
+[7] Full verification: db:generate, typecheck, lint, test, build
+[8] Cloudflare logs
+[9] Git status
+
+Launcher và log được lưu ngoài Git repository nên không làm bẩn working tree.
+Quick Tunnel chỉ dành cho kiểm thử; URL thay đổi mỗi lần chạy lại.
+'@
+
+Set-Content -Path $ReadmePath -Value $Readme -Encoding UTF8
+
+$Desktop = [Environment]::GetFolderPath('Desktop')
+$Shell = New-Object -ComObject WScript.Shell
+$PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+$MainShortcutPath = Join-Path $Desktop 'KAS PRO LAUNCHER.lnk'
+$MainShortcut = $Shell.CreateShortcut($MainShortcutPath)
+$MainShortcut.TargetPath = $PowerShellExe
+$MainShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$LauncherPath`" -Action Menu"
+$MainShortcut.WorkingDirectory = $InstallDir
+$MainShortcut.IconLocation = "$PowerShellExe,0"
+$MainShortcut.Description = 'KAS frontend, backend and Cloudflare launcher'
+$MainShortcut.Save()
+
+$StopShortcutPath = Join-Path $Desktop 'KAS PRO STOP.lnk'
+$StopShortcut = $Shell.CreateShortcut($StopShortcutPath)
+$StopShortcut.TargetPath = $PowerShellExe
+$StopShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$LauncherPath`" -Action Stop"
+$StopShortcut.WorkingDirectory = $InstallDir
+$StopShortcut.IconLocation = "$PowerShellExe,0"
+$StopShortcut.Description = 'Stop KAS and Cloudflare Tunnel'
+$StopShortcut.Save()
+
+Write-Host ''
+Write-Host 'KAS PRO LAUNCHER ĐÃ ĐƯỢC CÀI THÀNH CÔNG!' -ForegroundColor Green
+Write-Host ''
+Write-Host "Launcher: $LauncherPath" -ForegroundColor Cyan
+Write-Host "README  : $ReadmePath" -ForegroundColor Cyan
+Write-Host ''
+Write-Host 'Đã tạo ngoài Desktop:' -ForegroundColor Cyan
+Write-Host '- KAS PRO LAUNCHER'
+Write-Host '- KAS PRO STOP'
+Write-Host ''
+Write-Host 'Nhấp đúp KAS PRO LAUNCHER rồi chọn [1].' -ForegroundColor Yellow

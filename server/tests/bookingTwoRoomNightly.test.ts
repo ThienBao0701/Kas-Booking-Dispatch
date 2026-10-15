@@ -1,17 +1,13 @@
 import fs from 'node:fs';
+import { fixtureBranches } from './helpers/branchFixtures';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseBooking } from '../src/booking/parser';
 import { resolvePaymentStatus } from '../src/booking/paymentStatus';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch, ParsedBooking } from '../src/booking/types';
+import type { ParsedBooking } from '../src/booking/types';
 
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 const RAW = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'booking', '25-real-sample-two-room-nightly.txt'),
@@ -37,9 +33,14 @@ describe('real Booking.com extranet sample — two rooms, nightly-rate tables', 
     expect(r.hotelName).not.toMatch(/\d/);
   });
 
-  it('2. matches the correct branch confidently', () => {
+  it('2. resolves the correct branch from the property-ID-suffixed name (5.1)', () => {
+    // The sample's hotel line is 'Saigon Hotel & Ben Thanh Market16806954'. It
+    // carries the branch's internal name as a whole word sequence, so the 5.1
+    // resolver assigns it. The branch is the same one that was previously
+    // suggested — the hotfix changed whether it is assigned, never which.
     expect(r.suggestedBranch?.address).toBe('05 Trương Định');
     expect(r.branchConfident).toBe(true);
+    expect(r.requiresManualConfirmation).toBe(false);
   });
 
   it('3. takes the main customer name', () => {
@@ -190,7 +191,9 @@ describe('real Booking.com extranet sample — two rooms, nightly-rate tables', 
   });
 
   it('34. produces no warnings at all', () => {
-    expect(r.warnings).toEqual([]);
+    // The branch-confirmation warning was the last one standing; since 5.1
+    // resolves this hotel name outright, a clean sample extracts cleanly.
+    expect(codes(r)).toEqual([]);
   });
 });
 

@@ -21,6 +21,8 @@ export interface PublicUser {
   branch: PublicBranch | null;
   active: boolean;
   mustChangePassword: boolean;
+  /** Quản lý lễ tân only: the ids of the branches it supervises. */
+  managedBranchIds?: number[];
 }
 
 /** Managed accounts add audit timestamps for the Admin listing. */
@@ -28,6 +30,8 @@ export interface ManagedUser extends PublicUser {
   createdAt: Date;
   updatedAt: Date;
   lastLoginAt: Date | null;
+  /** Quản lý lễ tân: the branches it supervises (empty for every other role). */
+  managedBranches: PublicBranch[];
 }
 
 export function serializeBranch(branch: Branch | null): PublicBranch | null {
@@ -47,7 +51,7 @@ export function serializeBranch(branch: Branch | null): PublicBranch | null {
  * `passwordHash` is never referenced here, so it cannot leak through any
  * endpoint that serializes a user this way.
  */
-export function serializeUser(user: UserWithBranch): PublicUser {
+export function serializeUser(user: UserWithBranch & { managedBranchIds?: number[] }): PublicUser {
   return {
     id: user.id,
     username: user.username,
@@ -56,14 +60,20 @@ export function serializeUser(user: UserWithBranch): PublicUser {
     branch: serializeBranch(user.branch),
     active: user.active,
     mustChangePassword: user.mustChangePassword,
+    // Only a Quản lý lễ tân carries it; the screens scope their branch pickers
+    // by it. The SERVER never trusts it back — every request reloads the rows.
+    ...(user.managedBranchIds ? { managedBranchIds: user.managedBranchIds } : {}),
   };
 }
 
-export function serializeManagedUser(user: UserWithBranch): ManagedUser {
+export function serializeManagedUser(
+  user: UserWithBranch & { branchAssignments?: { branch: Branch }[] },
+): ManagedUser {
   return {
     ...serializeUser(user),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     lastLoginAt: user.lastLoginAt,
+    managedBranches: (user.branchAssignments ?? []).map((a) => serializeBranch(a.branch)!),
   };
 }

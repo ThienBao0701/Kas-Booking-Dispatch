@@ -31,6 +31,22 @@ beforeEach(async () => {
   ownAgent = (await loginAgent(app, 'letan_own', RECEPTIONIST_PASSWORD)).agent;
   await createReceptionist(otherBranchId, { username: 'letan_other', mustChangePassword: false });
   otherAgent = (await loginAgent(app, 'letan_other', RECEPTIONIST_PASSWORD)).agent;
+
+  /*
+    Both receptionists check in to a shift.
+
+    Submitting a proof IS the receptionist asserting "I created this
+    reservation", so the server now takes the order's creator from the shift
+    they are working and refuses the submission when there is none. That is the
+    subject of bookingCreatorAttribution.test.ts; here it is just the precondition
+    every one of these cases needs, so it is established once in the setup.
+  */
+  for (const agent of [ownAgent, otherAgent]) {
+    const res = await agent
+      .post('/api/reception/shifts/check-in')
+      .send({ shiftType: 'A', receptionistName: 'Lễ tân trực' });
+    expect(res.status).toBe(201);
+  }
 });
 
 afterAll(async () => {
@@ -38,7 +54,18 @@ afterAll(async () => {
 });
 
 function newBooking(branchId = ownBranchId, code = 'PROOF00001') {
-  return createDraftBooking({ status: 'NEW', branchId, bookingCode: code, verificationStatus: 'NOT_SUBMITTED' });
+  // Arrives already claimed by the branch receptionist: CUT is a hard
+  // prerequisite for submitting proof, so a fixture exercising that workflow
+  // must be in the state a real order is in after the receptionist pressed it.
+  return createDraftBooking({
+    status: 'NEW',
+    branchId,
+    bookingCode: code,
+    verificationStatus: 'NOT_SUBMITTED',
+    // Only the own-branch fixture is claimed. An other-branch booking exists to
+    // be REFUSED, and claiming it would mask which rule did the refusing.
+    claimedByUserId: branchId === ownBranchId ? ownReceptionistId : null,
+  });
 }
 
 describe('POST /api/bookings/:id/proofs (submit)', () => {
@@ -142,15 +169,21 @@ describe('POST /api/bookings/:id/proofs/:proofId/approve', () => {
     return { bookingId: b.id, proofId: res.body.booking.proofs[0].id as string };
   }
 
-  it('lets an admin approve, completing the booking', async () => {
+  it('lets an admin approve the proof WITHOUT completing the booking', async () => {
+    // Proof state and booking state are independent. Approving a proof says the
+    // reservation was entered into the hotel system correctly; it says nothing
+    // about whether the guest's stay has finished. Completing the booking here
+    // would have marked a stay complete while the guest was still in the room,
+    // and skipped every operational state beneath it.
     const { bookingId, proofId } = await submit();
     const res = await adminAgent.post(`/api/bookings/${bookingId}/proofs/${proofId}/approve`).send({});
     expect(res.status).toBe(200);
-    expect(res.body.booking.status).toBe('COMPLETED');
     expect(res.body.booking.verificationStatus).toBe('APPROVED');
+    // The lifecycle is untouched: the booking is still awaiting its branch.
+    expect(res.body.booking.status).toBe('NEW');
 
     const history = await testPrisma.bookingStatusHistory.findMany({ where: { bookingId, newStatus: 'COMPLETED' } });
-    expect(history).toHaveLength(1);
+    expect(history).toHaveLength(0);
 
     // The submitting receptionist is notified of the approval.
     const notes = await testPrisma.notification.findMany({ where: { userId: ownReceptionistId, bookingId } });
@@ -209,6 +242,18 @@ describe('POST /api/bookings/:id/proofs/:proofId/reject and resubmit', () => {
     const { bookingId, proofId } = await submit('RESUB00001');
     await adminAgent.post(`/api/bookings/${bookingId}/proofs/${proofId}/reject`).send({ reasonCode: 'UNCLEAR_IMAGE' });
 
+    // The verdict releases the claim: the order is back in "Đơn mới", takeable,
+    // with a new claim cycle — and cannot be resubmitted until it is CUT again.
+    const returned = await testPrisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+    expect(returned.claimedByUserId).toBeNull();
+    const queue = await ownAgent.get('/api/bookings/new');
+    expect(queue.body.bookings.map((b: { id: string }) => b.id)).toContain(bookingId);
+    const unclaimed = await ownAgent
+      .post(`/api/bookings/${bookingId}/proofs`)
+      .attach('image', jpegBuffer(), { filename: 'again.jpg', contentType: 'image/jpeg' });
+    expect(unclaimed.status).toBe(409);
+    expect((await ownAgent.post(`/api/bookings/${bookingId}/claim`).send({})).status).toBe(200);
+
     const res = await ownAgent
       .post(`/api/bookings/${bookingId}/proofs`)
       .attach('image', jpegBuffer(), { filename: 'again.jpg', contentType: 'image/jpeg' });
@@ -265,7 +310,8 @@ describe('verification list endpoints', () => {
     await createDraftBooking({ status: 'NEW', branchId: ownBranchId, bookingCode: 'LIST000003', verificationStatus: 'REJECTED' });
 
     const fresh = await ownAgent.get('/api/bookings/new');
-    expect(fresh.body.bookings.map((b: { bookingCode: string }) => b.bookingCode)).toEqual(['LIST000001']);
+    // "Đơn mới" holds the fresh order AND the one sent back as "Cần tạo lại".
+    expect(fresh.body.bookings.map((b: { bookingCode: string }) => b.bookingCode).sort()).toEqual(['LIST000001', 'LIST000003']);
 
     const pending = await ownAgent.get('/api/bookings/pending-review');
     expect(pending.body.bookings.map((b: { bookingCode: string }) => b.bookingCode)).toEqual(['LIST000002']);

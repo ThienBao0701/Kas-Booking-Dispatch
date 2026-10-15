@@ -1,0 +1,65 @@
+# Everything the production image must never contain. Anything not needed to
+# build or run the app is excluded so the build context stays small, the image
+# holds no development artefact, and no secret can be baked in by accident.
+
+# Git metadata (also keeps the commit history out of the image)
+.git
+.gitignore
+.gitattributes
+
+# Dependencies are installed inside the image from package-lock.json
+node_modules
+**/node_modules
+
+# Build output is produced inside the image, never copied from the host
+dist
+**/dist
+client/dev-dist
+
+# Secrets and environment files — NEVER in an image layer
+.env
+.env.*
+!.env.example
+!.env.production.example
+secrets/
+**/*.pem
+**/*.key
+
+# Local databases and operational data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+prisma/data.db*
+server/uploads/
+backups/
+data/
+
+# Tests, fixtures and coverage: not shipped to production
+**/*.test.ts
+**/*.test.tsx
+server/tests
+client/src/test
+server/.tmp
+coverage
+playwright-report
+test-results
+
+# Tooling / editor / OS
+.claude
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Docs and deployment scripts are read on the host, not needed in the image
+docs
+scripts/production
+README.md
+compose.production.yml
+Caddyfile
+Dockerfile
+.dockerignore

@@ -1,0 +1,42 @@
+KAS - TRUNG TAM DIEU PHOI DAT PHONG
+Dieu khoan su dung noi bo
+
+1. PHAN MEM NOI BO
+
+   Day la phan mem noi bo cua khach san, khong phai san pham thuong mai va
+   khong duoc phat hanh cong khai. Chi cai dat tren may tinh do khach san
+   quan ly.
+
+2. PHAN MEM CHUA DUOC KY SO
+
+   KasSetup.exe chua duoc ky bang chung chi so. Windows SmartScreen se canh
+   bao "Khong ro nha phat hanh". Day la dieu binh thuong voi phan mem noi bo.
+   Chi chay tep nay neu ban nhan duoc no tu nguoi phu trach he thong cua
+   khach san, va chi sau khi da doi chieu Checksums.txt.
+
+3. DU LIEU
+
+   Phan mem luu tru du lieu dat phong, anh xac nhan tao don va thong tin
+   khach hang trong co so du lieu PostgreSQL do khach san van hanh. Trinh cai
+   dat KHONG gui du lieu nay di dau ca, va khong ket noi ra ngoai internet.
+
+   Khi nang cap, cau hinh (.env), anh xac nhan, nhat ky va cac ban sao luu
+   duoc giu nguyen. Co so du lieu khong bi dong toi.
+
+4. TRACH NHIEM SAO LUU
+
+   Phan mem tu dong sao luu hang ngay luc 22:00 vao thu muc backups. Ban sao
+   nam cung mot may KHONG chong duoc hong o dia. Khach san chiu trach nhiem
+   sao chep thu muc backups sang mot may khac hoac o cung roi.
+
+5. KHONG BAO HANH
+
+   Phan mem duoc cung cap "nguyen trang". Nguoi phat trien khong chiu trach
+   nhiem ve thiet hai phat sinh tu viec su dung, ke ca mat mat du lieu.
+
+6. QUYEN RIENG TU
+
+   Nhat ky cua phan mem khong ghi mat khau, chuoi ket noi co so du lieu,
+   cookie phien dang nhap hay so dien thoai that cua khach.
+
+Bam "I agree" de tiep tuc cai dat.

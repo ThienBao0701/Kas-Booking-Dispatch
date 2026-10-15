@@ -1,30 +1,157 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bell, CheckCheck } from 'lucide-react';
+import { Bell, BellRing, CheckCheck } from 'lucide-react';
 import { notificationsApi, type NotificationItem } from '../api/notifications';
 import { relativeTime } from '../lib/format';
+import { useAuth } from '../auth/AuthProvider';
+import { toUserMessage } from '../api/errors';
+import { disablePush, enablePush, isIos, pushState, PushError, sendTestPush, type PushState, type TestPushResult } from '../pwa/push';
 
+/*
+  THE BELL IS THE IN-APP FALLBACK of the device push: the same notices, read
+  here when push is off, denied, unsupported or the phone was offline. It polls
+  a cheap count; it no longer raises an OS notification of its own — the server
+  pushes the real one, once, and a second one from here would be a duplicate.
+*/
 const POLL_MS = 20_000;
 
-/** A subtle browser notification when unread rises — only if permission is already granted. */
-function maybeBrowserNotify(count: number): void {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-  try {
-    new Notification('Kas — Có cập nhật mới', {
-      body: `Bạn có ${count} thông báo chưa đọc.`,
-      tag: 'kas-unread',
-    });
-  } catch {
-    // best-effort only
+/** The roles whose assignments are pushed to their devices (version 1). */
+const PUSH_ROLES = new Set(['TECHNICAL', 'HOUSEKEEPING']);
+
+/** Where a press on a notice goes: its own in-app link, else its booking. */
+function noticeTarget(n: NotificationItem): string | null {
+  if (n.link && n.link.startsWith('/app')) return n.link;
+  return n.bookingId ? `/app/booking/${n.bookingId}` : null;
+}
+
+const pushErrorText = (err: unknown) => (err instanceof PushError ? err.message : toUserMessage(err));
+
+/** What a test reached — "sent" is the push service's acceptance, not the phone showing it. */
+function testResultText(r: TestPushResult): string {
+  if (r.devices === 0) return 'Máy chủ chưa có thiết bị nào của bạn. Bấm “Tắt” rồi “Bật thông báo” lại.';
+  const parts: string[] = [];
+  if (r.sent > 0) {
+    parts.push(
+      `Đã gửi tới dịch vụ thông báo cho ${r.sent} thiết bị. Nếu điện thoại hiện “KAS — thông báo thử” là đã nhận được; không thấy sau 1 phút thì kiểm tra cài đặt thông báo của điện thoại.`,
+    );
   }
+  if (r.revoked > 0) parts.push(`${r.revoked} thiết bị đã hết hạn đăng ký và đã được gỡ — trên thiết bị đó, bấm “Bật thông báo” lại.`);
+  if (r.rejected > 0) parts.push(`Dịch vụ thông báo từ chối gửi tới ${r.rejected} thiết bị.`);
+  if (r.failed > 0) parts.push(`Không liên lạc được dịch vụ thông báo của ${r.failed} thiết bị.`);
+  return parts.join(' ');
+}
+
+const DENIED_HELP = isIos()
+  ? 'Thông báo đang bị chặn. Trên iPhone/iPad: mở Cài đặt → Thông báo → KAS → bật “Cho phép thông báo”, rồi mở lại KAS.'
+  : 'Thông báo đang bị chặn. Trên Android (Chrome): bấm biểu tượng bên trái địa chỉ trang → Quyền → Thông báo → Cho phép (hoặc Cài đặt → Ứng dụng → Chrome/KAS → Thông báo), rồi tải lại trang.';
+
+/** "Bật thông báo" for this device — asked only when pressed. */
+export function PushControl() {
+  const [state, setState] = useState<PushState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    pushState()
+      // Already on: refresh the server's copy quietly (no prompt — permission is granted).
+      .then((s) => (s === 'on' ? enablePush().catch(() => s) : s))
+      .then((s) => alive && setState(s))
+      .catch(() => alive && setState('unsupported'));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  if (state === null) return null;
+  const turnOn = () => {
+    setBusy(true);
+    setNote(null);
+    enablePush()
+      .then((s) => {
+        setState(s);
+        if (s === 'on') setNote({ text: 'Đã đăng ký thiết bị này. Bấm “Gửi thông báo thử” để kiểm tra điện thoại có hiện thông báo không.', error: false });
+      })
+      .catch((err: unknown) => setNote({ text: pushErrorText(err), error: true }))
+      .finally(() => setBusy(false));
+  };
+  const turnOff = () => {
+    setBusy(true);
+    setNote(null);
+    disablePush()
+      .then(() => setState('off'))
+      .finally(() => setBusy(false));
+  };
+  const test = () => {
+    setBusy(true);
+    setNote(null);
+    sendTestPush()
+      .then((r) => setNote({ text: testResultText(r), error: r.sent === 0 }))
+      .catch((err: unknown) => setNote({ text: pushErrorText(err), error: true }))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div data-testid="push-control" className="border-b border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
+      {state === 'on' ? (
+        <>
+          <p className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700">
+              <BellRing className="h-3.5 w-3.5" aria-hidden="true" />
+              Đã đăng ký thiết bị này
+            </span>
+            <button type="button" disabled={busy} onClick={turnOff} className="font-medium text-slate-500 hover:text-slate-800">
+              Tắt
+            </button>
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={test}
+            data-testid="push-test"
+            className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+          >
+            Gửi thông báo thử
+          </button>
+        </>
+      ) : state === 'off' ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={turnOn}
+          data-testid="push-enable"
+          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+        >
+          <BellRing className="h-4 w-4" aria-hidden="true" />
+          Bật thông báo
+        </button>
+      ) : state === 'denied' ? (
+        <p data-testid="push-denied">{DENIED_HELP}</p>
+      ) : state === 'unconfigured' ? (
+        <p data-testid="push-unconfigured">Máy chủ chưa bật gửi thông báo đẩy. Thông báo vẫn hiện trong chuông này. Vui lòng báo quản trị viên.</p>
+      ) : state === 'install-first' ? (
+        <p data-testid="push-install-first">
+          Trên iPhone/iPad, KAS chỉ nhận thông báo khi mở từ Màn hình chính: trong Safari nhấn Chia sẻ → “Thêm vào MH chính”, rồi mở KAS
+          từ biểu tượng đó và bấm “Bật thông báo” (cần iOS 16.4 trở lên).
+        </p>
+      ) : (
+        <p data-testid="push-unsupported">
+          Trình duyệt này không nhận được thông báo đẩy. Trên Android hãy mở KAS bằng Chrome; trên iPhone/iPad cần iOS 16.4 trở lên và mở
+          KAS từ Màn hình chính.
+        </p>
+      )}
+      {note ? (
+        <p data-testid="push-note" role={note.error ? 'alert' : 'status'} className={`mt-2 ${note.error ? 'text-red-700' : 'text-emerald-700'}`}>
+          {note.text}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const prevCount = useRef<number | null>(null);
+  const { user } = useAuth();
 
   // Poll the cheap unread count on a timer (no SSE in this phase).
   const unread = useQuery({
@@ -55,16 +182,11 @@ export function NotificationBell() {
 
   const count = unread.data?.count ?? 0;
 
-  // Subtle browser notification when the unread count rises (permission granted only).
-  useEffect(() => {
-    if (prevCount.current !== null && count > prevCount.current) maybeBrowserNotify(count);
-    prevCount.current = count;
-  }, [count]);
-
   const onItem = (n: NotificationItem) => {
     if (!n.read) markOne.mutate(n.id);
     setOpen(false);
-    if (n.bookingId) navigate(`/app/booking/${n.bookingId}`);
+    const target = noticeTarget(n);
+    if (target) navigate(target);
   };
 
   return (
@@ -99,6 +221,7 @@ export function NotificationBell() {
                 Đọc tất cả
               </button>
             </div>
+            {user && PUSH_ROLES.has(user.role) ? <PushControl /> : null}
             <div className="max-h-96 overflow-y-auto">
               {list.isLoading ? (
                 <p className="px-4 py-6 text-center text-sm text-slate-400">Đang tải…</p>

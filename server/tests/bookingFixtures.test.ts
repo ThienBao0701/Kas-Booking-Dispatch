@@ -1,19 +1,26 @@
 import fs from 'node:fs';
+import { fixtureBranches } from './helpers/branchFixtures';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseBooking } from '../src/booking/parser';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch, ParsedBooking } from '../src/booking/types';
+import type { ParsedBooking } from '../src/booking/types';
 
-// Branch fixtures mirror the seed, with deterministic ids 1..8.
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'booking');
+
+/** Fixtures that may only ever SUGGEST a branch, never auto-assign one. */
+/**
+ * Fixtures whose hotel line the resolver still cannot assign on its own.
+ *
+ * Since the 5.1 hotfix this is ONE file. The three real extranet samples used
+ * to sit here too: their hotel line is the internal name with the property id
+ * glued on, which now resolves by containment. 09 stays because its name is
+ * genuinely truncated mid-word — a fragment that half-spells a property is
+ * exactly what should reach an operator rather than be guessed.
+ */
+const NON_EXACT_HOTEL_FIXTURES = new Set(['09-hotel-name-truncated.txt']);
 
 function load(name: string): string {
   return fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8');
@@ -127,11 +134,17 @@ describe('raw Booking.com fixtures', () => {
     expect(r.paymentStatusKnown).toBe(true);
   });
 
-  it('09 — truncated hotel name still matches its branch', () => {
+  it('09 — a truncated hotel name is SUGGESTED only and blocks automatic assignment', () => {
+    // 'Luxury Elegance Hotel Ben Tha' is neither the branch's current Booking.com
+    // identity nor its internal name. A high similarity score is still reported,
+    // and the branch is still offered — but it is never assigned automatically,
+    // so an Admin has to confirm before the booking can be dispatched.
     const r = parse('09-hotel-name-truncated.txt');
     expect(r.suggestedBranch?.address).toBe('260 Lý Tự Trọng');
-    expect(r.branchConfident).toBe(true);
     expect(r.branchMatchScore).toBeGreaterThanOrEqual(0.85);
+    expect(r.branchConfident).toBe(false);
+    expect(r.requiresManualConfirmation).toBe(true);
+    expect(codes(r)).toContain('LOW_BRANCH_CONFIDENCE');
   });
 
   it('10 — duplicated navigation/policy text does not change values', () => {
@@ -205,9 +218,16 @@ describe('raw Booking.com fixtures', () => {
     expect(files.length).toBeGreaterThanOrEqual(23);
     for (const file of files) {
       const r = parse(file);
-      // Every seeded-hotel fixture matches its branch confidently.
+      // Every fixture still resolves to A branch candidate. Only an EXACT
+      // identity / internal-name match may be assigned automatically, so the
+      // truncated fixture is deliberately the one that requires confirmation.
       expect(r.suggestedBranch, file).not.toBeNull();
-      expect(r.branchConfident, file).toBe(true);
+      // Fixtures whose hotel line is neither the branch's CURRENT platform
+      // identity nor its internal name: a truncated name, plus the real extranet
+      // samples that glue the property id onto the name.
+      const needsConfirmation = NON_EXACT_HOTEL_FIXTURES.has(file);
+      expect(r.branchConfident, file).toBe(!needsConfirmation);
+      expect(r.requiresManualConfirmation, file).toBe(needsConfirmation);
       // Check-out is always excluded from the generated nights.
       for (const room of r.rooms) {
         for (const night of room.nights) {

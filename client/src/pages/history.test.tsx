@@ -96,8 +96,10 @@ describe('HistoryPage — branch filter is admin-only', () => {
     // Scope to the filter form: the sidebar also shows a "Chi nhánh" panel.
     const form = await screen.findByRole('form', { name: 'Bộ lọc lịch sử' });
     expect(within(form).queryByText('Chi nhánh')).not.toBeInTheDocument();
-    // Status and payment filters are still available to the receptionist.
-    expect(within(form).getByText('Trạng thái')).toBeInTheDocument();
+    // The role-independent filters are still available to the receptionist.
+    // (The stay-outcome "Trạng thái" filter was removed from this screen for
+    // everyone — role has nothing to do with its absence.)
+    expect(within(form).getByText('Thanh toán')).toBeInTheDocument();
   });
 
   it('gives the admin a branch selector', async () => {
@@ -105,7 +107,8 @@ describe('HistoryPage — branch filter is admin-only', () => {
     renderApp('/app/history');
 
     // Wait for the page, then the branch filter label is present.
-    expect(await screen.findByText('Trạng thái')).toBeInTheDocument();
-    expect(screen.getByText('Chi nhánh')).toBeInTheDocument();
+    const form = await screen.findByRole('form', { name: 'Bộ lọc lịch sử' });
+    expect(within(form).getByText('Thanh toán')).toBeInTheDocument();
+    expect(within(form).getByText('Chi nhánh')).toBeInTheDocument();
   });
 });

@@ -6,12 +6,14 @@ import { resetAll, testPrisma } from './helpers/db';
 import { createAdmin } from './helpers/auth';
 import { generateDemoData } from '../src/devtest/demoFactory';
 import { ensureTestReceptionist } from '../src/devtest/testAccount';
-import { prepareForProduction } from '../src/devtest/prepareProduction';
+import { prepareForProduction, RESET_DUMP_NAME } from '../src/devtest/prepareProduction';
 import { env, PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR } from '../src/config/env';
 import { BRANCH_COUNT } from '../src/db/branches';
 import { TEST_RECEPTIONIST_USERNAME } from '../src/devtest/constants';
 
-const dbFilePath = env.DATABASE_URL.replace(/^file:/, '');
+// The reset takes a real pg_dump archive of DATABASE_URL before it deletes
+// anything; there is no database FILE to point at any more.
+const databaseUrl = env.DATABASE_URL;
 const scratch = path.join(__dirname, '..', '.tmp', 'reset-tests');
 
 function freshBackupRoot(): string {
@@ -46,7 +48,7 @@ describe('prepareForProduction — official launch reset', () => {
 
     const manifest = await prepareForProduction({
       confirmed: true,
-      dbFilePath,
+      databaseUrl,
       uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR],
       backupRoot,
       client: testPrisma,
@@ -55,7 +57,10 @@ describe('prepareForProduction — official launch reset', () => {
     // Backup exists with a manifest + a copy of the DB.
     expect(manifest.backupDir).not.toBeNull();
     expect(fs.existsSync(path.join(manifest.backupDir!, 'manifest.json'))).toBe(true);
-    expect(fs.existsSync(path.join(manifest.backupDir!, 'data.db'))).toBe(true);
+    const dump = path.join(manifest.backupDir!, RESET_DUMP_NAME);
+    expect(fs.existsSync(dump), 'pre-reset pg_dump archive must exist').toBe(true);
+    // A zero-byte file would satisfy existsSync but restore nothing.
+    expect(fs.statSync(dump).size).toBeGreaterThan(0);
     expect(manifest.before.bookings).toBeGreaterThan(0);
 
     // All operational data gone.
@@ -86,7 +91,7 @@ describe('prepareForProduction — official launch reset', () => {
     const before = await testPrisma.booking.count();
 
     await expect(
-      prepareForProduction({ confirmed: true, dbFilePath, uploadDirs: [PROOF_UPLOAD_DIR], backupRoot: path.join(blocker, 'sub'), client: testPrisma }),
+      prepareForProduction({ confirmed: true, databaseUrl, uploadDirs: [PROOF_UPLOAD_DIR], backupRoot: path.join(blocker, 'sub'), client: testPrisma }),
     ).rejects.toThrow();
 
     // Nothing was deleted.
@@ -94,8 +99,8 @@ describe('prepareForProduction — official launch reset', () => {
   });
 
   it('is idempotent (a second run leaves the system safely empty)', async () => {
-    await prepareForProduction({ confirmed: true, dbFilePath, uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR], backupRoot: freshBackupRoot(), client: testPrisma });
-    const second = await prepareForProduction({ confirmed: true, dbFilePath, uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR], backupRoot: freshBackupRoot(), client: testPrisma });
+    await prepareForProduction({ confirmed: true, databaseUrl, uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR], backupRoot: freshBackupRoot(), client: testPrisma });
+    const second = await prepareForProduction({ confirmed: true, databaseUrl, uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR], backupRoot: freshBackupRoot(), client: testPrisma });
     for (const c of Object.values(second.after)) expect(c).toBe(0);
     expect(second.branchesPreserved).toBe(BRANCH_COUNT);
   });

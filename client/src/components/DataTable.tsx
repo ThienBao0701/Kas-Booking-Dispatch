@@ -1,0 +1,572 @@
+/**
+ * THE ONE TABLE the reception operational module uses.
+ *
+ * WHY A SHARED COMPONENT AND NOT FIVE TABLES
+ *
+ * Five categories each grew their own markup, and they drifted: different row
+ * heights, different empty states, money left-aligned in one and right in
+ * another. A receptionist reads these all shift; the cost of that drift is paid
+ * every time they look away and back. One component means one set of decisions.
+ *
+ * WHAT IT DECIDES, SO CALLERS DO NOT HAVE TO
+ *
+ *   money right, text left      a column of amounts is read by running down it,
+ *                               and left-aligned digits cannot be compared
+ *   one row height              set by padding, not by content, so the eye can
+ *                               track across a wide row
+ *   empty / loading / error     all three, always, because a table that renders
+ *                               nothing on failure looks like a table with no data
+ *
+ * HOW IT HANDLES A NARROW SCREEN
+ *
+ * NOT by shrinking the type. Each column has a PRIORITY: the breakpoint below
+ * which it leaves the row (`hideBelow`; `secondary` is the same as `md`) and
+ * reappears in a per-row detail panel behind a chevron. The columns that
+ * identify a row — who, what, how much — never leave; a laptop drops the
+ * least-needed ones first, a phone drops every secondary one, and each is one
+ * tap away. Horizontal scrolling is the last resort, not the first.
+ */
+import { useState, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { toUserMessage } from '../api/errors';
+import { ErrorAlert } from './ErrorAlert';
+import { ReportSection, type SectionFrame } from './ReportSection';
+
+export interface DataColumn<T> {
+  /** Stable key — also the label used in the mobile detail panel. */
+  key: string;
+  header: string;
+  /** RIGHT for money and counts. Everything else reads better left. */
+  align?: 'left' | 'right';
+  /**
+   * Hidden below `md`, shown in the row's detail panel instead.
+   *
+   * Mark everything that is not needed to RECOGNISE the row. Amounts and names
+   * are primary; a note, an internal code or a second timestamp is not.
+   */
+  secondary?: boolean;
+  /**
+   * A LOWER priority than `secondary`: the column leaves the row below this
+   * breakpoint (`lg` 1024px, `xl` 1280px, `2xl` 1536px, `3xl` 1720px) and is read in the
+   * detail panel instead — so a dense table fits a 1366px laptop without a
+   * sideways scroll, and a 1920px screen still shows every column. Overrides
+   * `secondary` when both are given.
+   */
+  hideBelow?: ColumnBreakpoint;
+  /**
+   * The caller's own detail panel (`renderDetail`) already shows this value, so
+   * when the column leaves the row it is not listed a second time. A column
+   * hidden by `hideBelow` WITHOUT this is listed in the panel, so nothing that
+   * leaves the row ever becomes unreachable.
+   */
+  coveredByDetail?: boolean;
+  /** e.g. `w-[1%] whitespace-nowrap` to keep a narrow column narrow. */
+  className?: string;
+  render: (row: T, index: number) => ReactNode;
+}
+
+export type ColumnBreakpoint = 'md' | 'lg' | 'xl' | '2xl' | '3xl';
+
+const BREAKPOINT_ORDER: ColumnBreakpoint[] = ['md', 'lg', 'xl', '2xl', '3xl'];
+
+/* Literal class names, so Tailwind's scanner keeps every one of them. */
+const CELL_SHOWN_FROM: Record<ColumnBreakpoint, string> = {
+  md: 'hidden md:table-cell',
+  lg: 'hidden lg:table-cell',
+  xl: 'hidden xl:table-cell',
+  '2xl': 'hidden 2xl:table-cell',
+  '3xl': 'hidden 3xl:table-cell',
+};
+const HIDDEN_FROM: Record<ColumnBreakpoint, string> = {
+  md: 'md:hidden',
+  lg: 'lg:hidden',
+  xl: 'xl:hidden',
+  '2xl': '2xl:hidden',
+  '3xl': '3xl:hidden',
+};
+
+/** Below which width a column leaves the row — none for a primary column. */
+function columnBreakpoint<T>(c: Pick<DataColumn<T>, 'secondary' | 'hideBelow'>): ColumnBreakpoint | null {
+  return c.hideBelow ?? (c.secondary ? 'md' : null);
+}
+
+/** The widest breakpoint any column uses — the chevron is needed below it. */
+function widestBreakpoint<T>(columns: DataColumn<T>[]): ColumnBreakpoint | null {
+  let widest = -1;
+  for (const c of columns) {
+    const bp = columnBreakpoint(c);
+    if (bp) widest = Math.max(widest, BREAKPOINT_ORDER.indexOf(bp));
+  }
+  return widest < 0 ? null : BREAKPOINT_ORDER[widest]!;
+}
+
+interface DataTableProps<T> {
+  columns: DataColumn<T>[];
+  rows: T[];
+  rowKey: (row: T) => string;
+  /** The section heading above the table. */
+  title: string;
+  /** Shown beside the title — usually the row count. */
+  badge?: ReactNode;
+  /** Right-hand side of the header bar, e.g. a totals chip or an action. */
+  headerAction?: ReactNode;
+  isLoading?: boolean;
+  isError?: boolean;
+  error?: unknown;
+  onRetry?: () => void;
+  emptyTitle: string;
+  emptyMessage: string;
+  /** Row-level actions. Rendered in a trailing column when present. */
+  actions?: (row: T) => ReactNode;
+  /** Extra classes on the `<tr>` — used to grey a voided row. */
+  rowClassName?: (row: T) => string;
+  /** Rendered under the row when its detail panel is open, on every width. */
+  renderDetail?: (row: T) => ReactNode;
+  /**
+   * Where the expander is offered. `mobile` (the default) is reception's:
+   * the chevron exists only below `md`, because above it the secondary columns
+   * are already on screen and there is nothing left to reveal.
+   *
+   * `always` is for a READING screen — the Admin's — where a row is a summary
+   * of a record that has more to it than fits a row at any width. Opt-in, so
+   * reception's tables keep the behaviour they were built with.
+   */
+  detailToggle?: 'mobile' | 'always';
+  /**
+   * Whether more than one row may be open at once.
+   *
+   * Reception opens a row to check the one it just typed, so one at a time
+   * keeps the list short. An Admin opens two BECAUSE they are comparing them —
+   * reconciling a disputed payment against the one before it — and a table that
+   * closes the first when you open the second cannot answer that question.
+   */
+  multiExpand?: boolean;
+  testId?: string;
+  /** A footer strip under the table, e.g. category totals. */
+  footer?: ReactNode;
+  /**
+   * One-line loading and empty states, for a page that stacks several tables —
+   * five tall empty blocks would push everything that has content off screen.
+   */
+  compact?: boolean;
+  /**
+   * Framed as one section of the reception overview (`ReportSection`), with the
+   * stronger table rules that let several stacked tables be told apart.
+   */
+  section?: SectionFrame;
+  /**
+   * The table alone, with the same stronger rules but no frame of its own — for
+   * a table that sits inside a section someone else draws.
+   */
+  embedded?: boolean;
+  /**
+   * "light": a thin-bordered white card with quiet rules — the housekeeping
+   * manager's screens. Every other table keeps the default frame.
+   */
+  frame?: 'default' | 'light';
+}
+
+export function DataTable<T>({
+  columns,
+  rows,
+  rowKey,
+  title,
+  badge,
+  headerAction,
+  isLoading,
+  isError,
+  error,
+  onRetry,
+  emptyTitle,
+  emptyMessage,
+  actions,
+  rowClassName,
+  renderDetail,
+  detailToggle = 'mobile',
+  multiExpand = false,
+  testId,
+  footer,
+  compact = false,
+  section,
+  embedded = false,
+  frame = 'default',
+}: DataTableProps<T>) {
+  const [openRows, setOpenRows] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const toggleRow = (key: string) =>
+    setOpenRows((prev) => {
+      // Starting from an empty set when single-open is what closes the other one.
+      const next = new Set(multiExpand ? prev : []);
+      if (prev.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const secondary = columns.filter((c) => columnBreakpoint(c) !== null);
+  // A chevron column is pointless when nothing is ever hidden behind it.
+  const expandable = secondary.length > 0 || renderDetail !== undefined;
+  /*
+    Hidden from the widest breakpoint any column leaves at — there everything is
+    on screen and there is nothing left to reveal — unless the caller asked for
+    it at every width.
+  */
+  const widest = widestBreakpoint(columns);
+  const toggleHidden = detailToggle === 'always' || !widest ? '' : HIDDEN_FROM[widest];
+  // The Admin detail panel is the full record, so the mobile-only <dl> of
+  // hidden columns underneath it would be the same fields a second time.
+  const detailReplacesSecondary = detailToggle === 'always' && renderDetail !== undefined;
+  /*
+    THE STRONGER RULES, for tables stacked in the overview: a tinted header row
+    set off by a darker rule, and row separators that are visible at a glance
+    instead of barely there. Every other table keeps the lighter default.
+  */
+  const strong = section !== undefined || embedded;
+  // A framed table whose every row opens the full record (the Admin's) also marks
+  // the open row and its panel, so a reader always sees which record is expanded.
+  const recordRows = strong && detailToggle === 'always';
+  // Record tables carry the most columns (the Admin's payment ledger has fifteen),
+  // so their cells are a touch tighter: more of the row stays on a laptop screen.
+  const cellX = recordRows ? 'px-2.5' : 'px-3';
+  // Their scroll box is also a size container, so an open record can be held to
+  // the visible width while the row above it scrolls (see FragmentRow).
+  const light = frame === 'light' && !strong;
+  const headRowClass = strong
+    ? 'border-b-rule border-line bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600'
+    : light
+      ? 'border-b border-line-subtle bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500'
+      : 'border-b-rule border-line text-xs uppercase tracking-wide text-slate-600';
+  const headCellClass = strong ? 'py-2.5 font-semibold' : 'py-2 font-medium';
+
+  const body = (
+    <>
+      {isLoading ? (
+        <p
+          className={`flex items-center gap-2 px-4 text-sm text-slate-500 ${
+            compact ? 'py-3' : 'justify-center py-10'
+          }`}
+        >
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Đang tải…
+        </p>
+      ) : isError ? (
+        <div className="px-4 py-6">
+          <ErrorAlert>{toUserMessage(error)}</ErrorAlert>
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              data-testid={testId ? `${testId}-retry` : undefined}
+              className="mt-3 inline-flex min-h-[2.5rem] items-center rounded-lg border border-line-strong px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              Thử lại
+            </button>
+          ) : null}
+        </div>
+      ) : rows.length === 0 ? (
+        compact ? (
+          <p data-testid={testId ? `${testId}-empty` : undefined} className="px-4 py-3 text-sm text-slate-500">
+            {emptyTitle}
+          </p>
+        ) : (
+          <div
+            data-testid={testId ? `${testId}-empty` : undefined}
+            className={strong ? 'px-4 py-4' : 'px-4 py-10 text-center'}
+          >
+            <p className="text-sm font-medium text-slate-700">{emptyTitle}</p>
+            <p className={`text-sm text-slate-500 ${strong ? 'mt-0.5' : 'mt-1'}`}>{emptyMessage}</p>
+          </div>
+        )
+      ) : (
+        <div className={recordRows ? 'overflow-x-auto [container-type:inline-size]' : 'overflow-x-auto'}>
+          <table className={`min-w-full text-sm ${strong ? 'text-slate-800' : ''}`}>
+            <thead>
+              <tr className={headRowClass}>
+                {expandable ? <th className={`w-[1%] px-2 py-2 ${toggleHidden}`} /> : null}
+                {columns.map((c) => (
+                  <th
+                    key={c.key}
+                    scope="col"
+                    className={`${cellX} ${headCellClass} ${c.align === 'right' ? 'text-right' : 'text-left'} ${cellShownFrom(c)} ${
+                      c.className ?? ''
+                    }`}
+                  >
+                    {c.header}
+                  </th>
+                ))}
+                {actions ? (
+                  <th scope="col" className={`w-[1%] whitespace-nowrap ${cellX} text-right ${headCellClass}`}>
+                    Thao tác
+                  </th>
+                ) : null}
+              </tr>
+            </thead>
+            <tbody className={light ? 'divide-y divide-line-subtle' : 'divide-y-rule divide-line-subtle'}>
+              {rows.map((row, index) => {
+                const key = rowKey(row);
+                return (
+                  <FragmentRow
+                    key={key}
+                    rowId={key}
+                    open={openRows.has(key)}
+                    expandable={expandable}
+                    toggleHidden={toggleHidden}
+                    onToggle={() => toggleRow(key)}
+                    columns={columns}
+                    secondary={secondary}
+                    detailReplacesSecondary={detailReplacesSecondary}
+                    row={row}
+                    index={index}
+                    actions={actions}
+                    rowClassName={rowClassName}
+                    renderDetail={renderDetail}
+                    strong={recordRows}
+                  />
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {footer && !isLoading && !isError ? (
+        <div
+          className={`px-4 py-2.5 ${light ? 'border-t border-line-subtle bg-slate-50' : `border-t-rule ${strong ? 'border-line bg-slate-50' : 'border-line-subtle bg-slate-50/70'}`}`}
+        >
+          {footer}
+        </div>
+      ) : null}
+    </>
+  );
+
+  if (embedded) return <div data-testid={testId}>{body}</div>;
+
+  if (section) {
+    return (
+      <ReportSection testId={testId} marker={section.marker} title={title} count={badge} aside={headerAction}>
+        {body}
+      </ReportSection>
+    );
+  }
+
+  if (light) {
+    return (
+      <section
+        data-testid={testId}
+        className="overflow-hidden rounded-xl border border-line-subtle bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05)]"
+      >
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line-subtle px-4 py-3">
+          <h3 className="text-[15px] font-semibold text-slate-900">
+            {title}
+            {badge !== undefined ? (
+              <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium tabular-nums text-slate-600">{badge}</span>
+            ) : null}
+          </h3>
+          {headerAction}
+        </header>
+        {body}
+      </section>
+    );
+  }
+
+  return (
+    <section
+      data-testid={testId}
+      className="overflow-hidden rounded-xl border-section border-line bg-white"
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b-rule border-line bg-slate-50/70 px-4 py-2.5">
+        <h3 className="text-sm font-semibold text-slate-800">
+          {title}
+          {badge !== undefined ? (
+            <span className="ml-2 rounded bg-slate-200/80 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
+              {badge}
+            </span>
+          ) : null}
+        </h3>
+        {headerAction}
+      </header>
+      {body}
+    </section>
+  );
+}
+
+function FragmentRow<T>({
+  rowId,
+  open,
+  expandable,
+  toggleHidden,
+  onToggle,
+  columns,
+  secondary,
+  detailReplacesSecondary,
+  row,
+  index,
+  actions,
+  rowClassName,
+  renderDetail,
+  strong = false,
+}: {
+  rowId: string;
+  open: boolean;
+  expandable: boolean;
+  toggleHidden: string;
+  detailReplacesSecondary: boolean;
+  onToggle: () => void;
+  columns: DataColumn<T>[];
+  secondary: DataColumn<T>[];
+  row: T;
+  index: number;
+  actions?: (row: T) => ReactNode;
+  rowClassName?: (row: T) => string;
+  renderDetail?: (row: T) => ReactNode;
+  /** A framed record table: firmer hover, an open row that looks open, an accented panel. */
+  strong?: boolean;
+}) {
+  const span = columns.length + (actions ? 1 : 0) + (expandable ? 1 : 0);
+  const cellX = strong ? 'px-2.5' : 'px-3';
+  const rowTone = strong ? (open ? 'bg-brand-50/50' : 'hover:bg-slate-100/70') : 'hover:bg-slate-50';
+  // Every other table keeps its chevron exactly as it was.
+  const toggleClass = strong
+    ? `rounded-md p-1 transition-colors ${
+        open ? 'bg-brand-100 text-brand-700' : 'text-slate-500 hover:bg-brand-50 hover:text-brand-700'
+      }`
+    : 'rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600';
+  return (
+    <>
+      <tr
+        data-testid={`row-${rowId}`}
+        className={`transition-colors ${rowTone} ${rowClassName?.(row) ?? ''}`}
+      >
+        {expandable ? (
+          <td className={`px-2 py-2 align-top ${toggleHidden}`}>
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={open}
+              aria-label={open ? 'Thu gọn' : 'Xem thêm'}
+              data-testid={`row-toggle-${rowId}`}
+              className={toggleClass}
+            >
+              {open ? (
+                <ChevronDown className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              )}
+            </button>
+          </td>
+        ) : null}
+        {columns.map((c) => (
+          <td
+            key={c.key}
+            className={`${cellX} py-2.5 align-top ${c.align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${cellShownFrom(c)} ${
+              c.className ?? ''
+            }`}
+          >
+            {c.render(row, index)}
+          </td>
+        ))}
+        {actions ? (
+          <td className={`whitespace-nowrap ${cellX} py-2.5 text-right align-top`}>{actions(row)}</td>
+        ) : null}
+      </tr>
+
+      {/*
+        The detail panel. On a phone it carries the columns that dropped out; on
+        a wide screen those columns are already visible, so only an explicit
+        `renderDetail` has anything left to show.
+      */}
+      {open ? (
+        <tr data-testid={`row-detail-${rowId}`} className={strong ? 'bg-slate-50' : 'bg-slate-50/60'}>
+          <td
+            colSpan={span}
+            className={strong ? 'border-l-[3px] border-brand-500 px-4 py-3' : 'px-4 py-3'}
+          >
+            {strong ? (
+              /*
+                A record table can be wider than the screen and scroll sideways.
+                The record itself is pinned to the part that is visible (100cqw is
+                the scroll box's width, less this cell's padding and accent), so it
+                reads as a panel instead of running off the right-hand edge.
+              */
+              <div className="sticky left-[1.1875rem] max-w-[calc(100cqw-2.25rem)]">
+                {renderSecondary(secondary, detailReplacesSecondary, row, index)}
+                {renderDetail?.(row)}
+              </div>
+            ) : (
+              <>
+                {renderSecondary(secondary, detailReplacesSecondary, row, index)}
+                {renderDetail?.(row)}
+              </>
+            )}
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+/** A column's cell classes for its priority: always shown, or shown from its breakpoint. */
+function cellShownFrom<T>(c: DataColumn<T>): string {
+  const bp = columnBreakpoint(c);
+  return bp ? CELL_SHOWN_FROM[bp] : '';
+}
+
+/**
+ * The columns that dropped out at this width, listed under the row — each only
+ * below its own breakpoint, so nothing is printed twice. A caller whose detail
+ * IS the whole record (detailToggle 'always') would otherwise print every
+ * hidden column twice: once here and once inside its own panel.
+ */
+function renderSecondary<T>(
+  secondary: DataColumn<T>[],
+  detailReplacesSecondary: boolean,
+  row: T,
+  index: number,
+): ReactNode {
+  // A full-record panel replaces the phone list — except for a column that left
+  // the row by priority and that the record does not show itself.
+  const listed = detailReplacesSecondary
+    ? secondary.filter((c) => c.hideBelow !== undefined && !c.coveredByDetail)
+    : secondary;
+  if (listed.length === 0) return null;
+  const widest = widestBreakpoint(listed);
+  return (
+    <dl className={`grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 ${widest ? HIDDEN_FROM[widest] : ''}`}>
+      {listed.map((c) => (
+        <div key={c.key} className={HIDDEN_FROM[columnBreakpoint(c)!]}>
+          <dt className="text-xs uppercase tracking-wide text-slate-400">{c.header}</dt>
+          <dd className="text-sm text-slate-800">{c.render(row, index)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** The two row actions this module uses, so they look the same everywhere. */
+export function RowAction({
+  onClick,
+  children,
+  tone = 'default',
+  testId,
+  disabled,
+}: {
+  onClick: () => void;
+  children: ReactNode;
+  /** `danger` for a void — destructive, but never the loudest thing on screen. */
+  tone?: 'default' | 'danger';
+  testId?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      data-testid={testId}
+      className={`ml-1 inline-flex items-center gap-1 whitespace-nowrap rounded-lg border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+        tone === 'danger'
+          ? 'border-rose-300 text-rose-600 hover:bg-rose-50'
+          : 'border-line-strong text-slate-600 hover:bg-slate-50'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}

@@ -198,8 +198,8 @@ function FieldTable({ fields }: { fields: FieldComparison[] }) {
 function NoteChecklist({ components }: { components: NoteComponent[] }) {
   return (
     <div className="mt-4">
-      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Ghi chú tạo đơn</p>
-      <ul className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3" aria-label="Thành phần ghi chú tạo đơn">
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">PMS Note</p>
+      <ul className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3" aria-label="Thành phần PMS Note">
         {components.map((c) => {
           const ok = c.result === 'MATCH';
           return (

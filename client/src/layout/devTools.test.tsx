@@ -98,7 +98,7 @@ describe('DevToolsPanel — admin settings', () => {
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
       'GET /api/issues/summary': () => ({ status: 200, body: { summary: { totalUnresolved: 0, newCount: 0, inProgressCount: 0, byBranch: [] } } }),
-      'GET /api/admin/users': () => ({ status: 200, body: { users: [] } }),
+      'GET /api/admin/users?includeAdmins=true': () => ({ status: 200, body: { users: [] } }),
       'GET /api/branches': () => ({ status: 200, body: { branches: BRANCHES } }),
       ...(status === 'on' ? { 'GET /api/dev-test/status': () => statusBody() } : {}),
     });

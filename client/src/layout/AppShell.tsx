@@ -4,9 +4,18 @@ import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { DevToolsBar } from './DevToolsBar';
 import { OfflineIndicator } from '../components/OfflineIndicator';
+import { ShiftGate } from '../components/ShiftGate';
+import { ChatBubble } from '../components/ChatBubble';
+import { isReceptionSupervisor } from '../auth/types';
+import { useAuth } from '../auth/AuthProvider';
 
 export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { user } = useAuth();
+  // The chat is Admin↔Reception correspondence; no other role has a part in it.
+  // The branch chat: Reception, the Admin and the reception supervisors — the
+  // server lists only the branches each may open (a manager: its own).
+  const hasChat = user?.role === 'RECEPTIONIST' || isReceptionSupervisor(user?.role);
 
   return (
     <div className="flex min-h-screen bg-slate-100">
@@ -33,12 +42,33 @@ export function AppShell() {
         <OfflineIndicator />
         <Topbar onOpenMenu={() => setMobileOpen(true)} />
         <DevToolsBar />
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
-          <div className="mx-auto max-w-5xl">
+        {/*
+          Shift check-in. Rendered by the SHELL so it follows the receptionist
+          across every page and survives a refresh — the session is read from
+          the server, never held in React state.
+        */}
+        <ShiftGate />
+        {/*
+          THE WORKSPACE IS THE WHOLE WIDTH BETWEEN THE SIDEBAR AND THE EDGE.
+
+          It used to be capped at max-w-5xl (1024px) for every page, which left a
+          third of a 1920px screen empty beside tables that then had to scroll
+          sideways to show their last columns. The cap is now only a guard for
+          very wide monitors; `min-w-0` lets a wide table's own scroll box shrink
+          instead of pushing the page wider than the window.
+        */}
+        <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-6 xl:px-8">
+          <div className="mx-auto w-full min-w-0 max-w-[120rem]" data-testid="app-workspace">
             <Outlet />
           </div>
         </main>
       </div>
+      {/*
+        THE CHAT BUBBLE, once, for every page of both roles. Rendered by the
+        shell — not by a page — so it is never unmounted by navigating, and it
+        keeps the open branch, the draft and the scroll position.
+      */}
+      {hasChat ? <ChatBubble /> : null}
     </div>
   );
 }

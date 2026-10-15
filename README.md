@@ -17,19 +17,24 @@ npm install
 copy .env.example .env    # then edit .env (SESSION_SECRET, INITIAL_ADMIN_*)
 npm run db:migrate
 npm run db:seed
-npm run dev               # starts the backend (:3001) and the frontend (:5173) together
+npm run dev               # starts the backend (:3002) and the frontend (:5173) together
 ```
 
 Then open the frontend at **http://localhost:5173** and log in with the initial
-Admin from `.env`. The backend API runs on **http://localhost:3001**; in
+Admin from `.env`. The backend API runs on **http://localhost:3002**; in
 development the Vite dev server proxies `/api` to it, so the browser stays
 same-origin and the session cookie flows automatically.
+
+> **Development uses 3002, production uses 3001.** They are separate on purpose,
+> so both can run at the same time. If development is ever pointed back at 3001
+> and a production service is listening, the dev frontend will proxy `/api` into
+> the production backend and show live data behind a local-looking UI.
 
 To run the two servers separately:
 
 ```bash
-npm run dev -w server     # backend only, http://localhost:3001
-npm run dev -w client     # frontend only, http://localhost:5173 (proxies /api → :3001)
+npm run dev -w server     # backend only, http://localhost:3002
+npm run dev -w client     # frontend only, http://localhost:5173 (proxies /api → :3002)
 ```
 
 **Sessions & credentials:** authentication is a server-side session addressed by
@@ -120,7 +125,7 @@ copy .env.example .env    # then set SESSION_SECRET and INITIAL_ADMIN_*
 npm run db:migrate
 npm run db:seed
 npm run dev
-# POST http://localhost:3001/api/auth/login  { username, password }
+# POST http://localhost:3002/api/auth/login  { username, password }
 # -> then POST /api/auth/change-password to clear the forced change
 ```
 
@@ -352,7 +357,7 @@ later phase.**
 
 Unresolved hotel-issue counts are computed **live from `HotelIssue` status** — there
 is no persisted counter table and no duplicate totals. **Unresolved = `NEW` +
-`IN_PROGRESS`; `RESOLVED` issues stay in history but are never counted.**
+`IN_PROGRESS`; `COMPLETED` issues stay in history but are never counted.**
 
 `GET /api/issues/summary` returns totals plus a per-branch breakdown:
 
@@ -362,9 +367,10 @@ is no persisted counter table and no duplicate totals. **Unresolved = `NEW` +
                   "newCount": 2, "inProgressCount": 1, "totalUnresolved": 3 } ] }
 ```
 
-Branch scope mirrors the rest of the app: an **Admin** sees **all eight branches**
-(including zero-count ones); a **receptionist** sees **only their own branch** and
-cannot widen the scope with a `branchId` query parameter. The counters feed the
+Branch scope mirrors the rest of the app: an **Admin** and **Bộ phận kỹ thuật**
+each see **all eight branches** (including zero-count ones); a **receptionist**
+sees **only their own branch** and cannot widen the scope with a `branchId` query
+parameter. The counters feed the
 Admin sidebar badge, the dashboard "Sự cố đang mở" card, and the per-branch summary
 cards on the Issues page (click a card to filter the list). They refresh on the
 existing **polling** cadence — **no SSE**. Counts always come from issue status,
@@ -678,6 +684,11 @@ guide: [`docs/testing-8-branches.md`](docs/testing-8-branches.md). **Never enabl
 ## Documentation
 
 - [`docs/branch-management.md`](docs/branch-management.md) — Admin hotel & branch management: branch number vs stable code, internal name vs platform aliases, add/rename/re-address, Booking.com & Agoda names, exact vs similarity matching, disabling a branch.
+- [`docs/room-class-mapping.md`](docs/room-class-mapping.md) — **branch-specific room classes**: the 48 confirmed CN1–CN8 mappings and PMS codes, alias/normalisation rules, versioned draft → activate workflow, immutable per-booking snapshots, safe guest updates, audit and migration behaviour.
+- [`docs/production-deployment.md`](docs/production-deployment.md) — **Ubuntu VPS production deployment**: Docker image, Compose stack, Caddy/HTTPS, secrets, `migrate deploy`, production bootstrap, initial Admin.
+- [`docs/production-runbook.md`](docs/production-runbook.md) — day-to-day operation: status, logs, update, rollback, accounts, certificates, routine checks.
+- [`docs/backup-restore.md`](docs/backup-restore.md) — backup contents, consistency guarantees, retention, restore drill and real restore.
+- [`docs/incident-response.md`](docs/incident-response.md) — triage by symptom, rollback decision tree, disk full, suspected corruption.
 - [`docs/testing-8-branches.md`](docs/testing-8-branches.md) — developer branch test env, demo data, safe cleanup, official reset.
 - [`docs/deployment.md`](docs/deployment.md) — LAN deployment on Windows + SQLite backup.
 - [`docs/pwa-install.md`](docs/pwa-install.md) — installing Kas as a Windows PWA and pinning to the taskbar.

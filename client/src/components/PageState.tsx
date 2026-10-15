@@ -17,12 +17,35 @@ interface QueryStateProps {
   isError: boolean;
   error?: unknown;
   children: ReactNode;
+  /**
+   * Lets the operator try again. Optional only because not every caller has a
+   * refetch to hand; supply it wherever one exists — a failed load with no way
+   * forward leaves reception reaching for the browser reload button, which
+   * costs them their filters and their place in the list.
+   */
+  onRetry?: () => void;
 }
 
 /** Renders a spinner while loading, an error alert on failure, else the content. */
-export function QueryState({ isLoading, isError, error, children }: QueryStateProps) {
+export function QueryState({ isLoading, isError, error, children, onRetry }: QueryStateProps) {
   if (isLoading) return <InlineSpinner />;
-  if (isError) return <ErrorAlert>{toUserMessage(error)}</ErrorAlert>;
+  if (isError) {
+    return (
+      <div>
+        <ErrorAlert>{toUserMessage(error)}</ErrorAlert>
+        {onRetry ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            data-testid="query-retry"
+            className="mt-3 inline-flex min-h-[2.75rem] items-center rounded-xl border border-slate-300 px-4 text-sm font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+          >
+            Thử lại
+          </button>
+        ) : null}
+      </div>
+    );
+  }
   return <>{children}</>;
 }
 

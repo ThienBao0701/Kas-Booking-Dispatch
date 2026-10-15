@@ -1,0 +1,79 @@
+Reservations have not been processed. Please take action as soon as possible.
+logo
+8 property
+Messages
+Contact us
+Help Center
+English
+Account
+Home
+Reservations
+Analytics
+Reservations
+Property name
+Guest(s)
+Net rate
+Check-in
+Check-out
+Room type
+Booking date
+Reservation	Status
+KAS Zody Boutique Hotel
+GUEST/ONE SAMPLE
+VND4645956.00
+Aug 1, 2026
+Aug 8, 2026
+Standard Double Room No Window
+1 room(s)
+Aug 1, 2026
+1600000001	Confirmed
+KAS Sonata Luxury Hotel
+GUEST/TWO SAMPLE
+VND399422.00
+Aug 2, 2026
+Aug 3, 2026
+Standard
+1 room(s)
+Aug 2, 2026
+1600000002	Confirmed
+
+Booking ID
+Mã số đặt phòng
+1756224954
+Reservation Information
+THÔNG TIN ĐẶT PHÒNG
+TRẢ TRƯỚC
+Agoda Booking Confirmation
+Xác Nhận Đặt Phòng Agoda
+KAS Zody Boutique Hotel
+(Property ID 55198617)
+City Thành phố : Ho Chi Minh City
+Customer First Name Tên Khách Hàng	Nga
+Customer Last Name Họ Khách Hàng	Đỗ
+Country of Residence Quốc gia cư trú	Vietnam
+Check-in Nhận phòng	4-Aug-2026 (4-08-2026)
+Check-out Trả phòng	5-Aug-2026 (5-08-2026)
+Other Guests Khách Khác	[RmNo.1] Guest of Nga Đỗ, [RmNo.1] Nga Đỗ
+Room Type
+Loại Phòng	No. of Rooms
+Số phòng	Occupancy
+Số người	No. of Extra Bed
+Số Giường Thêm :
+Superior Double Room	1	2 Adults	0
+Benefits Included Bao gồm các quyền lợi
+Coffee & tea, Free WiFi, Drinking water
+Special Requests Yêu cầu đặc biệt ( All special requests are subject to availability upon arrival. )
+NonSmoke
+Cancellation Policy Chính sách hủy phòng
+Đơn đặt phòng không có rủi ro! Hủy trước 3 tháng 8, 2026.
+Website Language Ngôn ngữ Website
+Vietnamese
+From - To Đến - Đi	Rates Giá phòng
+August 4, 2026      	VND 529,537.00
+Reference sell rate (incl. taxes & fees)
+Giá bán tham khảo (bao gồm thuế & phí)	VND 875,000.00
+Commission
+Tiền hoa hồng	VND -175,000.00
+Net rate (incl. taxes & fees)
+Giá thực tế (bao gồm thuế & phí)
+VND 529,537.00

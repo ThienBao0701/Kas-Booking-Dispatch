@@ -26,3 +26,60 @@ export function createLoginRateLimiter(): RequestHandler {
     },
   });
 }
+
+/**
+ * "Vào ca" by address — bounded per ACCOUNT (the session's user, not the IP), so
+ * an authenticated housekeeper cannot try address after address to learn which
+ * hotels exist. Only the REFUSED attempts count: opening the shift is not a
+ * guess. Generous enough for real typing mistakes; a fresh instance per app,
+ * like the login limiter.
+ */
+export function createWorkplaceRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 30,
+    skipSuccessfulRequests: true,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `workplace:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã nhập địa chỉ quá nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}
+
+/**
+ * "Vào ca", step one — the address lookup. EVERY lookup counts (a lookup that
+ * names a hotel is exactly what an enumeration would want), per account, in its
+ * own budget beside the start's. Generous for a person typing a few digits with
+ * a pause between them; nowhere near enough to walk every prefix.
+ */
+export function createWorkplaceLookupRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 40,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `workplace-lookup:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã tra địa chỉ quá nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}
+
+/**
+ * "Gửi thông báo thử" — per ACCOUNT, a handful per ten minutes: enough to check
+ * a phone twice over, never a way to flood a push service from this server.
+ */
+export function createPushTestRateLimiter(): RequestHandler {
+  return rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `push-test:${req.currentUser?.id ?? 'anonymous'}`,
+    handler: (_req, _res, next) => {
+      next(new ApiError('RATE_LIMITED', 'Bạn đã gửi thông báo thử nhiều lần. Vui lòng thử lại sau ít phút.'));
+    },
+  });
+}

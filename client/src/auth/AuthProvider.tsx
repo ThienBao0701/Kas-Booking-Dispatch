@@ -1,3 +1,4 @@
+import { disablePush } from '../pwa/push';
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/errors';
@@ -55,6 +56,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async (): Promise<void> => {
+    // A shared phone must not keep receiving this account's work after it signs out.
+    await disablePush().catch(() => undefined);
     try {
       await authApi.logout();
     } catch {
