@@ -372,6 +372,8 @@ export type NewReportInput =
   | { category: 'FACILITY_ISSUE'; facility: { issueId: string } }
   | { category: 'CUSTOMER_COMPLAINT'; complaint: NewComplaintInput }
   | { category: 'ROOM_SERVICE'; roomService: NewRoomServiceInput }
+  // One guest, several services: one entry per service, saved together (all or none).
+  | { category: 'ROOM_SERVICE'; roomServices: NewRoomServiceInput[] }
   | { category: 'HOTEL_DELIVERY'; delivery: NewDeliveryInput };
 
 /** Bộ phận, Tên hàng hóa, Số lượng (a number) and an optional note. */

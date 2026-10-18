@@ -24,6 +24,7 @@ import {
   reportsApi,
   type DeliveryDepartment,
   type NewReportInput,
+  type NewRoomServiceInput,
   type ReportOptions,
   type RoomServiceType,
 } from '../api/receptionReports';
@@ -308,18 +309,80 @@ function parseNights(value: string): number | null {
   return n >= 1 ? n : null;
 }
 
+/** One chosen service's own fields, as typed. */
+interface ServiceDraft {
+  roomClass: string;
+  fromRoomClass: string;
+  toRoomClass: string;
+  nights: string;
+  price: string;
+  note: string;
+  // "Review": two whole-number counts, as digits typed.
+  tripadvisor: string;
+  google: string;
+}
+
+const EMPTY_DRAFT: ServiceDraft = {
+  roomClass: '',
+  fromRoomClass: '',
+  toRoomClass: '',
+  nights: '',
+  price: '',
+  note: '',
+  tripadvisor: '',
+  google: '',
+};
+
+/** Whether one chosen service has everything it asks for. */
+function draftReady(type: RoomServiceType, d: ServiceDraft): boolean {
+  const needs = roomServiceFields(type);
+  if (needs.review) {
+    // A blank count is 0; the pair must report at least one review.
+    const t = parseCount(d.tripadvisor);
+    const g = parseCount(d.google);
+    return t !== null && g !== null && t + g > 0;
+  }
+  return (
+    parseVnd(d.price) !== null &&
+    (!needs.roomClass || d.roomClass.trim().length > 0) &&
+    (!needs.upgrade || (d.fromRoomClass.trim().length > 0 && d.toRoomClass.trim().length > 0)) &&
+    (!needs.nights || parseNights(d.nights) !== null)
+  );
+}
+
+/** One service's body — its OWN fields only (see the form's comment). */
+function serviceBody(type: RoomServiceType, d: ServiceDraft, guestName: string, ezCode: string): NewRoomServiceInput {
+  const needs = roomServiceFields(type);
+  const common = { serviceType: type, guestName, ezCode: ezCode || undefined };
+  if (needs.review) {
+    // A count, not a sale: no price and no note are sent at all.
+    return { ...common, tripadvisorCount: parseCount(d.tripadvisor) ?? 0, googleCount: parseCount(d.google) ?? 0 };
+  }
+  return {
+    ...common,
+    price: parseVnd(d.price) ?? 0,
+    note: d.note.trim() || undefined,
+    ...(needs.roomClass ? { roomClass: d.roomClass.trim() } : {}),
+    ...(needs.upgrade ? { fromRoomClass: d.fromRoomClass.trim(), toRoomClass: d.toRoomClass.trim() } : {}),
+    ...(needs.nights ? { nights: parseNights(d.nights) ?? undefined } : {}),
+  };
+}
+
 /**
- * ONE FORM FOR ALL FIVE SERVICES, and it starts by asking which.
+ * ONE GUEST, ONE OR SEVERAL SERVICES — a guest may buy a room night, smoke and
+ * send laundry in the same stay.
  *
- * "Chọn dịch vụ" decides which extra fields appear — Hạng phòng and Số đêm for
- * a sale, the from/to pair and Số đêm for an upgrade, nothing more for the
- * other three — from `roomServiceFields`, the same table the tables and the
- * correction dialog read.
+ * "Chọn dịch vụ" ticks any number of the six; Tên khách and Mã EZ are asked
+ * once, and each ticked service gets its own block with exactly its own fields
+ * (from `roomServiceFields`, the table the tables and the correction dialog
+ * read). Each service is still recorded as ONE entry of its own, so every
+ * table, total, KPI and export reads it unchanged; several are saved together,
+ * all or none.
  *
- * A HIDDEN FIELD IS NEVER SENT. Typing a room class, switching to "Giặt ủi"
- * and saving submits no room class: the body is built from the chosen service's
- * own fields, not from every box that ever had text in it. The server applies
- * the same rule again on its side.
+ * A HIDDEN FIELD IS NEVER SENT. Typing a room class, unticking "Bán phòng" and
+ * saving submits no room class: each body is built from its service's own
+ * fields, not from every box that ever had text in it. The server applies the
+ * same rule again on its side.
  */
 export function RoomServiceForm({
   options,
@@ -335,82 +398,39 @@ export function RoomServiceForm({
   /** A supervisor's target branch; omitted for Reception (its shift decides). */
   branchId?: number;
 }) {
-  const [serviceType, setServiceType] = useState<RoomServiceType | ''>('');
+  const [selected, setSelected] = useState<RoomServiceType[]>([]);
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
-  const [roomClass, setRoomClass] = useState('');
-  const [fromRoomClass, setFromRoomClass] = useState('');
-  const [toRoomClass, setToRoomClass] = useState('');
-  const [nights, setNights] = useState('');
-  const [price, setPrice] = useState('');
-  const [note, setNote] = useState('');
-  // "Review": two whole-number counts, as digits typed.
-  const [tripadvisor, setTripadvisor] = useState('');
-  const [google, setGoogle] = useState('');
+  const [drafts, setDrafts] = useState<Partial<Record<RoomServiceType, ServiceDraft>>>({});
 
   const { mutation, error } = useCreateReport(async () => {
-    setServiceType('');
+    setSelected([]);
     setGuestName('');
     setEzCode('');
-    setRoomClass('');
-    setFromRoomClass('');
-    setToRoomClass('');
-    setNights('');
-    setPrice('');
-    setNote('');
-    setTripadvisor('');
-    setGoogle('');
+    setDrafts({});
     await onCreated();
   }, branchId);
 
   const labelOf = (t: RoomServiceType) =>
     options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
-  const needs = serviceType ? roomServiceFields(serviceType) : null;
+  const draftOf = (t: RoomServiceType) => drafts[t] ?? EMPTY_DRAFT;
+  const setField = (t: RoomServiceType, field: keyof ServiceDraft, value: string) =>
+    setDrafts((prev) => ({ ...prev, [t]: { ...(prev[t] ?? EMPTY_DRAFT), [field]: value } }));
+  // Always in the selector's own order, whatever order they were ticked in.
+  const toggle = (t: RoomServiceType) =>
+    setSelected((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : ROOM_SERVICE_ORDER.filter((x) => x === t || prev.includes(x))));
 
-  // A blank count is 0; the pair must report at least one review.
-  const tripadvisorCount = parseCount(tripadvisor);
-  const googleCount = parseCount(google);
-  const reviewReady =
-    tripadvisorCount !== null && googleCount !== null && tripadvisorCount + googleCount > 0;
-
-  const ready =
-    needs !== null &&
-    guestName.trim().length > 0 &&
-    (needs.review ? reviewReady : parseVnd(price) !== null) &&
-    (!needs.roomClass || roomClass.trim().length > 0) &&
-    (!needs.upgrade || (fromRoomClass.trim().length > 0 && toRoomClass.trim().length > 0)) &&
-    (!needs.nights || parseNights(nights) !== null);
+  const ready = selected.length > 0 && guestName.trim().length > 0 && selected.every((t) => draftReady(t, draftOf(t)));
 
   const submit = () => {
-    if (!serviceType || !needs) return;
-    if (needs.review) {
-      // A count, not a sale: no price and no note are sent at all.
-      mutation.mutate({
-        category: 'ROOM_SERVICE',
-        roomService: {
-          serviceType,
-          guestName: guestName.trim(),
-          ezCode: ezCode.trim() || undefined,
-          tripadvisorCount: tripadvisorCount ?? 0,
-          googleCount: googleCount ?? 0,
-        },
-      });
-      return;
-    }
-    mutation.mutate({
-      category: 'ROOM_SERVICE',
-      roomService: {
-        serviceType,
-        guestName: guestName.trim(),
-        ezCode: ezCode.trim() || undefined,
-        price: parseVnd(price) ?? 0,
-        note: note.trim() || undefined,
-        // Only the chosen service's own fields — see the component comment.
-        ...(needs.roomClass ? { roomClass: roomClass.trim() } : {}),
-        ...(needs.upgrade ? { fromRoomClass: fromRoomClass.trim(), toRoomClass: toRoomClass.trim() } : {}),
-        ...(needs.nights ? { nights: parseNights(nights) ?? undefined } : {}),
-      },
-    });
+    if (!ready) return;
+    const bodies = selected.map((t) => serviceBody(t, draftOf(t), guestName.trim(), ezCode.trim()));
+    // One service: the single entry, exactly as before. Several: saved together.
+    mutation.mutate(
+      bodies.length === 1
+        ? { category: 'ROOM_SERVICE', roomService: bodies[0]! }
+        : { category: 'ROOM_SERVICE', roomServices: bodies },
+    );
   };
 
   return (
@@ -424,121 +444,42 @@ export function RoomServiceForm({
       error={error}
       onSubmit={submit}
     >
-      <div className="space-y-1.5">
-        <label htmlFor="room-service-type" className="block text-sm font-medium text-slate-700">
-          Chọn dịch vụ
-        </label>
-        <select
-          id="room-service-type"
-          value={serviceType}
-          onChange={(e) => setServiceType(e.target.value as RoomServiceType | '')}
-          data-testid="room-service-type"
-          className="block w-full rounded-xl border border-line-strong bg-white px-3 py-2.5 text-sm text-slate-900 hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-600"
-        >
-          <option value="">— Chọn dịch vụ —</option>
-          {ROOM_SERVICE_ORDER.map((t) => (
-            <option key={t} value={t}>
-              {labelOf(t)}
-            </option>
-          ))}
-        </select>
-      </div>
+      <fieldset className="space-y-2" data-testid="room-service-type">
+        <legend className="text-sm font-medium text-slate-700">Chọn dịch vụ</legend>
+        <p className="text-xs text-slate-500">Có thể chọn nhiều dịch vụ cho cùng một khách — mỗi dịch vụ được ghi thành một dòng riêng.</p>
+        <div className="flex flex-wrap gap-2">
+          {ROOM_SERVICE_ORDER.map((t) => {
+            const on = selected.includes(t);
+            return (
+              <label
+                key={t}
+                className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+                  on ? 'border-brand-600 bg-brand-50 font-medium text-brand-800' : 'border-line-strong bg-white text-slate-700 hover:border-slate-600'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() => toggle(t)}
+                  data-testid={`room-service-type-${t}`}
+                  className="h-4 w-4 accent-brand-600"
+                />
+                {labelOf(t)}
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
 
-      {needs ? (
+      {selected.length > 0 ? (
         <>
           <div className="grid gap-3 sm:grid-cols-2">
             <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="room-service-guest" />
             <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="room-service-ez" />
           </div>
-
-          {/*
-            THE SAME COLUMN WIDTHS AS THE ROWS AROUND IT. "Bán phòng" has two
-            fields here (Hạng phòng, Số đêm) and gets two columns, like Tên
-            khách / Mã EZ above and Giá tiền / Ghi chú below; "Upgrade" has
-            three (Từ, Tới hạng phòng, Số đêm) and gets three. Two fields in a
-            three-column grid left them visibly narrower than their neighbours.
-          */}
-          {needs.roomClass || needs.upgrade || needs.nights ? (
-            <div
-              className={`grid gap-3 ${needs.upgrade ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}
-              data-testid="room-service-conditional"
-            >
-              {needs.roomClass ? (
-                <Input label="Hạng phòng" value={roomClass} onChange={(e) => setRoomClass(e.target.value)} data-testid="room-service-class" />
-              ) : null}
-              {needs.upgrade ? (
-                <>
-                  <Input
-                    label="Từ hạng phòng"
-                    value={fromRoomClass}
-                    onChange={(e) => setFromRoomClass(e.target.value)}
-                    data-testid="room-service-from"
-                  />
-                  <Input
-                    label="Tới hạng phòng"
-                    value={toRoomClass}
-                    onChange={(e) => setToRoomClass(e.target.value)}
-                    data-testid="room-service-to"
-                  />
-                </>
-              ) : null}
-              {needs.nights ? (
-                /*
-                  A whole number of nights, typed directly — the same numeric
-                  field as the review counts: a number keyboard on a phone,
-                  and anything but digits dropped as it is typed. The
-                  "at least 1" rule is unchanged (parseNights, and the server).
-                */
-                <Input
-                  label="Số đêm"
-                  type="number"
-                  inputMode="numeric"
-                  min={1}
-                  step={1}
-                  value={nights}
-                  onChange={(e) => setNights(e.target.value.replace(/\D/g, ''))}
-                  data-testid="room-service-nights"
-                />
-              ) : null}
-            </div>
-          ) : null}
-
-          {needs.review ? (
-            /*
-              "REVIEW" IS A COUNT: how many reviews the guest left on each site,
-              as the receptionist reports them. Whole numbers only — never
-              review text, never a price.
-            */
-            <div className="grid gap-3 sm:grid-cols-2" data-testid="room-service-review-counts">
-              <Input
-                label="Tripadvisor"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                step={1}
-                value={tripadvisor}
-                onChange={(e) => setTripadvisor(e.target.value.replace(/\D/g, ''))}
-                placeholder="0"
-                data-testid="room-service-tripadvisor"
-              />
-              <Input
-                label="Google"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                step={1}
-                value={google}
-                onChange={(e) => setGoogle(e.target.value.replace(/\D/g, ''))}
-                placeholder="0"
-                data-testid="room-service-google"
-              />
-            </div>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <MoneyInput label={ROOM_SERVICE_PRICE_LABEL} required value={price} onChange={setPrice} data-testid="room-service-price" />
-              <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="room-service-note" />
-            </div>
-          )}
+          {selected.map((t) => (
+            <ServiceFields key={t} label={labelOf(t)} type={t} draft={draftOf(t)} onField={(field, value) => setField(t, field, value)} />
+          ))}
         </>
       ) : (
         <p className="text-sm text-slate-500" data-testid="room-service-pick-first">
@@ -546,6 +487,101 @@ export function RoomServiceForm({
         </p>
       )}
     </FormShell>
+  );
+}
+
+/** One chosen service's block: exactly the fields it asks for. */
+function ServiceFields({
+  label,
+  type,
+  draft,
+  onField,
+}: {
+  label: string;
+  type: RoomServiceType;
+  draft: ServiceDraft;
+  onField: (field: keyof ServiceDraft, value: string) => void;
+}) {
+  const needs = roomServiceFields(type);
+  return (
+    <fieldset className="space-y-3 rounded-xl border border-line-subtle p-3" data-testid={`room-service-item-${type}`}>
+      <legend className="px-1 text-sm font-semibold text-slate-800">{label}</legend>
+      {/*
+        THE SAME COLUMN WIDTHS AS THE ROWS AROUND IT. "Bán phòng" has two
+        fields here (Hạng phòng, Số đêm) and gets two columns, like Tên
+        khách / Mã EZ above and Giá tiền / Ghi chú below; "Upgrade" has
+        three (Từ, Tới hạng phòng, Số đêm) and gets three.
+      */}
+      {needs.roomClass || needs.upgrade || needs.nights ? (
+        <div className={`grid gap-3 ${needs.upgrade ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`} data-testid="room-service-conditional">
+          {needs.roomClass ? (
+            <Input label="Hạng phòng" value={draft.roomClass} onChange={(e) => onField('roomClass', e.target.value)} data-testid="room-service-class" />
+          ) : null}
+          {needs.upgrade ? (
+            <>
+              <Input
+                label="Từ hạng phòng"
+                value={draft.fromRoomClass}
+                onChange={(e) => onField('fromRoomClass', e.target.value)}
+                data-testid="room-service-from"
+              />
+              <Input
+                label="Tới hạng phòng"
+                value={draft.toRoomClass}
+                onChange={(e) => onField('toRoomClass', e.target.value)}
+                data-testid="room-service-to"
+              />
+            </>
+          ) : null}
+          {needs.nights ? (
+            // A whole number of nights: a number keyboard on a phone, digits only ("at least 1": parseNights and the server).
+            <Input
+              label="Số đêm"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              step={1}
+              value={draft.nights}
+              onChange={(e) => onField('nights', e.target.value.replace(/\D/g, ''))}
+              data-testid="room-service-nights"
+            />
+          ) : null}
+        </div>
+      ) : null}
+
+      {needs.review ? (
+        // "REVIEW" IS A COUNT: how many reviews the guest left on each site — never text, never a price.
+        <div className="grid gap-3 sm:grid-cols-2" data-testid="room-service-review-counts">
+          <Input
+            label="Tripadvisor"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            step={1}
+            value={draft.tripadvisor}
+            onChange={(e) => onField('tripadvisor', e.target.value.replace(/\D/g, ''))}
+            placeholder="0"
+            data-testid="room-service-tripadvisor"
+          />
+          <Input
+            label="Google"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            step={1}
+            value={draft.google}
+            onChange={(e) => onField('google', e.target.value.replace(/\D/g, ''))}
+            placeholder="0"
+            data-testid="room-service-google"
+          />
+        </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <MoneyInput label={ROOM_SERVICE_PRICE_LABEL} required value={draft.price} onChange={(v) => onField('price', v)} data-testid="room-service-price" />
+          <Input label="Ghi chú" value={draft.note} onChange={(e) => onField('note', e.target.value)} data-testid="room-service-note" />
+        </div>
+      )}
+    </fieldset>
   );
 }
 

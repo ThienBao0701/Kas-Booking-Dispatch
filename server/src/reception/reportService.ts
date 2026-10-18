@@ -874,11 +874,28 @@ export async function createReport(
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ReportDetail> {
+  return (await createReports([input], { branchId: input.branchId }, actor, clock, client))[0]!;
+}
+
+/**
+ * SEVERAL ENTRIES AT ONCE — "Dịch vụ phòng" for one guest who used several
+ * services: one record per service, exactly as if each had been entered on its
+ * own (same writer, same shift, same instant, same validation), so every table,
+ * total and export reads them unchanged. ALL OR NONE: one transaction, so a
+ * refused second service never leaves the first one recorded alone.
+ */
+export async function createReports(
+  inputs: CreateReportInput[],
+  target: { branchId?: number },
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail[]> {
   let writer: WriterContext & { branchId: number };
   if (actor.role === 'RECEPTIONIST') {
     writer = await receptionistWriter(actor, client);
   } else if (isReceptionSupervisor(actor.role)) {
-    const branchId = assertBranchInScope(actor, input.branchId);
+    const branchId = assertBranchInScope(actor, target.branchId);
     const branch = await client.branch.findFirst({ where: { id: branchId, active: true }, select: { id: true } });
     if (!branch) throw ApiError.validation('Chi nhánh không hợp lệ hoặc đã ngừng hoạt động.');
     // The desk's open shift, if any: the record appears in its journal, marked.
@@ -900,17 +917,17 @@ export async function createReport(
     createdByUserId: actor.id,
     createdByNameSnapshot: writer.name,
     createdByRole: actor.role,
-    category: input.category,
     createdAt: now,
   };
 
-  const data: Prisma.ReceptionOperationalReportCreateInput = await buildCreateData(input, base, client);
-
-  const created = await client.receptionOperationalReport.create({
-    data,
-    include: REPORT_INCLUDE,
+  return client.$transaction(async (tx) => {
+    const created: ReportDetail[] = [];
+    for (const input of inputs) {
+      const data = await buildCreateData(input, { ...base, category: input.category }, tx);
+      created.push(await tx.receptionOperationalReport.create({ data, include: REPORT_INCLUDE }));
+    }
+    return created;
   });
-  return created;
 }
 
 async function buildCreateData(
@@ -2282,48 +2299,64 @@ export async function createLateReport(
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ReportDetail> {
+  return (await createLateReports([input], input, actor, clock, client))[0]!;
+}
+
+/** "Nhập bù" of several entries at once (several services of one guest) — all or none. */
+export async function createLateReports(
+  inputs: CreateReportInput[],
+  late: LateEntryInput,
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail[]> {
   assertCan(actor.role, 'reports.lateEntry', 'Bạn không có quyền nhập bù báo cáo.');
-  const reason = required(input.reason, 'lý do nhập bù');
+  const reason = required(late.reason, 'lý do nhập bù');
   if (reason.length > 1000) throw ApiError.validation('Lý do nhập bù quá dài.');
-  if (!LATE_ENTRY_CATEGORIES.includes(input.category)) {
+  if (inputs.some((input) => !LATE_ENTRY_CATEGORIES.includes(input.category))) {
     throw ApiError.validation('Sự cố cơ sở vật chất được nhập bù bằng biểu mẫu báo cáo sự cố.');
   }
-  const session = await lateEntrySession(input.shiftSessionId, actor, client);
+  const session = await lateEntrySession(late.shiftSessionId, actor, client);
   const now = clock.now();
-  const data = await buildCreateData(
-    input,
-    {
-      branchId: session.branchId,
-      shiftSessionId: session.id,
-      shiftType: session.shiftType,
-      createdByUserId: session.userId,
-      createdByNameSnapshot: session.receptionistName,
-      createdByRole: 'RECEPTIONIST',
-      category: input.category,
-      createdAt: now,
-      lateEntry: { userId: actor.id, name: actor.fullName, role: actor.role, reason },
-    },
-    client,
-  );
-  const id = await client.$transaction(async (tx) => {
-    const created = await tx.receptionOperationalReport.create({ data, select: { id: true } });
-    await tx.receptionReportAudit.create({
-      data: {
-        branchId: session.branchId,
-        reportId: created.id,
-        shiftSessionId: null,
-        action: 'LATE_ENTRY',
-        reason,
-        actorUserId: actor.id,
-        actorNameSnapshot: actor.fullName,
-        actorShiftType: null,
-        actorRole: actor.role,
-        createdAt: now,
-      },
-    });
-    return created.id;
+  const ids = await client.$transaction(async (tx) => {
+    const made: string[] = [];
+    for (const input of inputs) {
+      const data = await buildCreateData(
+        input,
+        {
+          branchId: session.branchId,
+          shiftSessionId: session.id,
+          shiftType: session.shiftType,
+          createdByUserId: session.userId,
+          createdByNameSnapshot: session.receptionistName,
+          createdByRole: 'RECEPTIONIST',
+          category: input.category,
+          createdAt: now,
+          lateEntry: { userId: actor.id, name: actor.fullName, role: actor.role, reason },
+        },
+        tx,
+      );
+      const created = await tx.receptionOperationalReport.create({ data, select: { id: true } });
+      await tx.receptionReportAudit.create({
+        data: {
+          branchId: session.branchId,
+          reportId: created.id,
+          shiftSessionId: null,
+          action: 'LATE_ENTRY',
+          reason,
+          actorUserId: actor.id,
+          actorNameSnapshot: actor.fullName,
+          actorShiftType: null,
+          actorRole: actor.role,
+          createdAt: now,
+        },
+      });
+      made.push(created.id);
+    }
+    return made;
   });
-  return client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+  const rows = await client.receptionOperationalReport.findMany({ where: { id: { in: ids } }, include: REPORT_INCLUDE });
+  return ids.map((id) => rows.find((r) => r.id === id)!);
 }
 
 /**

@@ -370,6 +370,24 @@ describe('"Thêm ca"', () => {
       // The record says its shift was added afterwards, and by whom.
       shiftBackfill: { backfilledByName: 'Quản lý CN1', reason: 'Lễ tân quên vào ca A' },
     });
+
+    // Several services of one guest in one "Nhập bù": each its own entry, each audited.
+    const services = await rm1.post('/api/reception/reports/late-entry').send({
+      shiftSessionId: stored.id,
+      reason: 'Lễ tân quên ghi dịch vụ',
+      category: 'ROOM_SERVICE',
+      roomServices: [
+        { serviceType: 'SMOKING', guestName: 'Khách Hút', price: 500000 },
+        { serviceType: 'LAUNDRY', guestName: 'Khách Hút', price: 60000 },
+      ],
+    });
+    expect(services.status).toBe(201);
+    expect(services.body.reports).toHaveLength(2);
+    for (const r of services.body.reports) {
+      expect(r).toMatchObject({ shiftDate: '2026-10-07', createdBy: { id: ids.letan1 }, lateEntry: { enteredBy: { id: ids.quanly1 } } });
+    }
+    const ids2 = services.body.reports.map((r: { id: string }) => r.id);
+    expect(await testPrisma.receptionReportAudit.count({ where: { reportId: { in: ids2 }, action: 'LATE_ENTRY' } })).toBe(2);
   });
 
   it('places an overnight Ca C on its own business date', async () => {

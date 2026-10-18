@@ -1158,7 +1158,7 @@ describe('dịch vụ phòng, KPI', () => {
     return screen.findByTestId('room-service-form');
   }
 
-  it('offers the six services in one "Chọn dịch vụ" select — not six buttons', async () => {
+  it('offers the six services in one "Chọn dịch vụ" group of ticks — any number of them for one guest', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
 
@@ -1170,19 +1170,16 @@ describe('dịch vụ phòng, KPI', () => {
     }
 
     await userEvent.click(screen.getByTestId('category-add'));
-    const select = await screen.findByLabelText('Chọn dịch vụ');
-    const options = within(select as HTMLElement)
-      .getAllByRole('option')
-      .map((o) => o.textContent)
-      .filter((t) => !t?.startsWith('—'));
-    expect(options).toEqual(['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác', 'Review']);
+    const group = await screen.findByRole('group', { name: 'Chọn dịch vụ' });
+    const boxes = within(group).getAllByRole('checkbox');
+    expect(boxes.map((b) => b.closest('label')?.textContent)).toEqual(['Bán phòng', 'Upgrade', 'Hút thuốc', 'Giặt ủi', 'Dịch vụ khác', 'Review']);
+    expect(group).toHaveTextContent('Có thể chọn nhiều dịch vụ cho cùng một khách');
   });
 
   it('shows exactly the fields each service asks for', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
     const form = await openAddService();
-    const select = within(form).getByTestId('room-service-type');
     const visible = () =>
       ['room-service-guest', 'room-service-ez', 'room-service-class', 'room-service-from', 'room-service-to', 'room-service-nights', 'room-service-price', 'room-service-note']
         .filter((id) => within(form).queryByTestId(id) !== null);
@@ -1190,7 +1187,7 @@ describe('dịch vụ phòng, KPI', () => {
     // Nothing to fill in until a service is chosen.
     expect(visible()).toEqual([]);
 
-    await userEvent.selectOptions(select, 'ROOM_SALE');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
     expect(visible()).toEqual([
       'room-service-guest',
       'room-service-ez',
@@ -1200,7 +1197,8 @@ describe('dịch vụ phòng, KPI', () => {
       'room-service-note',
     ]);
 
-    await userEvent.selectOptions(select, 'UPGRADE');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
+    await userEvent.click(within(form).getByTestId('room-service-type-UPGRADE'));
     expect(visible()).toEqual([
       'room-service-guest',
       'room-service-ez',
@@ -1211,8 +1209,11 @@ describe('dịch vụ phòng, KPI', () => {
       'room-service-note',
     ]);
 
+    let previous = 'UPGRADE';
     for (const simple of ['SMOKING', 'LAUNDRY', 'OTHER']) {
-      await userEvent.selectOptions(select, simple);
+      await userEvent.click(within(form).getByTestId(`room-service-type-${previous}`));
+      await userEvent.click(within(form).getByTestId(`room-service-type-${simple}`));
+      previous = simple;
       expect(visible(), simple).toEqual([
         'room-service-guest',
         'room-service-ez',
@@ -1230,9 +1231,8 @@ describe('dịch vụ phòng, KPI', () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
     const form = await openAddService();
-    const select = within(form).getByTestId('room-service-type');
 
-    await userEvent.selectOptions(select, 'ROOM_SALE');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
     const saleRow = within(form).getByTestId('room-service-conditional');
     expect(saleRow.className).toMatch(/\bsm:grid-cols-2\b/);
     expect(saleRow.className).not.toMatch(/\bsm:grid-cols-3\b/);
@@ -1243,7 +1243,8 @@ describe('dịch vụ phòng, KPI', () => {
     await userEvent.type(nights, '12');
     expect(nights).toHaveValue(12);
 
-    await userEvent.selectOptions(select, 'UPGRADE');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
+    await userEvent.click(within(form).getByTestId('room-service-type-UPGRADE'));
     expect(within(form).getByTestId('room-service-conditional').className).toMatch(/\bsm:grid-cols-3\b/);
     expect(within(form).getByTestId('room-service-nights')).toHaveAttribute('type', 'number');
   });
@@ -1255,7 +1256,7 @@ describe('dịch vụ phòng, KPI', () => {
     const add = within(form).getByTestId('room-service-form-add');
     expect(add).toBeDisabled();
 
-    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'ROOM_SALE');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
     await userEvent.type(within(form).getByTestId('room-service-guest'), 'K');
     await userEvent.type(within(form).getByTestId('room-service-price'), '500000');
     expect(add).toBeDisabled();
@@ -1277,13 +1278,13 @@ describe('dịch vụ phòng, KPI', () => {
     );
     renderApp('/app/reports');
     const form = await openAddService();
-    const select = within(form).getByTestId('room-service-type');
 
-    // Fill a sale's fields, then change to "Giặt ủi" and save that instead.
-    await userEvent.selectOptions(select, 'ROOM_SALE');
+    // Fill a sale's fields, then untick it, tick "Giặt ủi" and save that instead.
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
     await userEvent.type(within(form).getByTestId('room-service-class'), 'Deluxe');
     await userEvent.type(within(form).getByTestId('room-service-nights'), '3');
-    await userEvent.selectOptions(select, 'LAUNDRY');
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
+    await userEvent.click(within(form).getByTestId('room-service-type-LAUNDRY'));
     await userEvent.type(within(form).getByTestId('room-service-guest'), 'Khách Giặt');
     await userEvent.type(within(form).getByTestId('room-service-ez'), 'EZ55');
     await userEvent.type(within(form).getByTestId('room-service-price'), '120000');
@@ -1309,7 +1310,7 @@ describe('dịch vụ phòng, KPI', () => {
     );
     renderApp('/app/reports');
     const form = await openAddService();
-    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'UPGRADE');
+    await userEvent.click(within(form).getByTestId('room-service-type-UPGRADE'));
     await userEvent.type(within(form).getByTestId('room-service-guest'), 'Lê Upgrade');
     await userEvent.type(within(form).getByTestId('room-service-from'), 'Standard');
     await userEvent.type(within(form).getByTestId('room-service-to'), 'Deluxe');
@@ -1332,11 +1333,54 @@ describe('dịch vụ phòng, KPI', () => {
     });
   });
 
+  it('records several services of ONE guest together — each with its own fields, sent in one request', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'POST /api/reception/reports': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          const one = report({ category: 'ROOM_SERVICE', complaint: null, roomService: roomService() });
+          return { status: 201, body: { report: one, reports: [one, one] } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    const form = await openAddService();
+    await userEvent.click(within(form).getByTestId('room-service-type-ROOM_SALE'));
+    await userEvent.click(within(form).getByTestId('room-service-type-LAUNDRY'));
+    // One guest, asked once; one block per service.
+    expect(within(form).getAllByTestId('room-service-guest')).toHaveLength(1);
+    const sale = within(form).getByTestId('room-service-item-ROOM_SALE');
+    const laundry = within(form).getByTestId('room-service-item-LAUNDRY');
+    expect(within(laundry).queryByTestId('room-service-class')).not.toBeInTheDocument();
+    await userEvent.type(within(form).getByTestId('room-service-guest'), 'Khách Nhiều');
+    await userEvent.type(within(form).getByTestId('room-service-ez'), 'EZ9');
+    await userEvent.type(within(sale).getByTestId('room-service-class'), 'Deluxe');
+    await userEvent.type(within(sale).getByTestId('room-service-nights'), '2');
+    await userEvent.type(within(sale).getByTestId('room-service-price'), '900000');
+    const add = within(form).getByTestId('room-service-form-add');
+    // Every chosen service must be complete — the laundry has no price yet.
+    expect(add).toBeDisabled();
+    await userEvent.type(within(laundry).getByTestId('room-service-price'), '80000');
+    await userEvent.type(within(laundry).getByTestId('room-service-note'), '3 bộ');
+    expect(add).toBeEnabled();
+    await userEvent.click(add);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      category: 'ROOM_SERVICE',
+      roomServices: [
+        { serviceType: 'ROOM_SALE', guestName: 'Khách Nhiều', ezCode: 'EZ9', roomClass: 'Deluxe', nights: 2, price: 900000 },
+        { serviceType: 'LAUNDRY', guestName: 'Khách Nhiều', ezCode: 'EZ9', price: 80000, note: '3 bộ' },
+      ],
+    });
+  });
+
   it('shows the grouped amount while it is being typed', async () => {
     installApiMock(shellRoutes(RECEPTIONIST_USER));
     renderApp('/app/reports');
     const form = await openAddService();
-    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'SMOKING');
+    await userEvent.click(within(form).getByTestId('room-service-type-SMOKING'));
 
     const price = within(form).getByTestId('room-service-price');
     await userEvent.type(price, '3150000');
@@ -1484,7 +1528,7 @@ describe('dịch vụ phòng, KPI', () => {
     renderApp('/app/reports');
     const form = await openAddService();
 
-    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'REVIEW');
+    await userEvent.click(within(form).getByTestId('room-service-type-REVIEW'));
     expect(within(form).getByTestId('room-service-review-counts')).toBeInTheDocument();
     expect(within(form).queryByTestId('room-service-price')).not.toBeInTheDocument();
     expect(within(form).queryByTestId('room-service-note')).not.toBeInTheDocument();
@@ -1518,7 +1562,7 @@ describe('dịch vụ phòng, KPI', () => {
     renderApp('/app/reports');
     const form = await openAddService();
 
-    await userEvent.selectOptions(within(form).getByTestId('room-service-type'), 'REVIEW');
+    await userEvent.click(within(form).getByTestId('room-service-type-REVIEW'));
     const tripadvisor = within(form).getByTestId('room-service-tripadvisor');
     await userEvent.type(tripadvisor, '-3');
     expect(tripadvisor).toHaveValue(3);

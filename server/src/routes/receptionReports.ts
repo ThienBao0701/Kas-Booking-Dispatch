@@ -25,8 +25,9 @@ import {
   completeReport,
   countByCategory,
   createBackfillShift,
-  createLateReport,
-  createReport,
+  createLateReports,
+  createReports,
+  type CreateReportInput,
   lateEntryReceptionists,
   lateEntrySessions,
   listActiveJournal,
@@ -195,6 +196,28 @@ const createSchema = z.discriminatedUnion('category', [
   z.object({ category: z.literal('ROOM_SERVICE'), roomService: roomServiceSchema }),
   z.object({ category: z.literal('HOTEL_DELIVERY'), delivery: deliverySchema }),
 ]);
+
+/**
+ * "Dịch vụ phòng" for ONE guest who used SEVERAL services: one entry per
+ * service, saved together. Each service at most once in a submission.
+ */
+const roomServicesSchema = z.object({
+  category: z.literal('ROOM_SERVICE'),
+  roomServices: z
+    .array(roomServiceSchema)
+    .min(1, 'Vui lòng chọn ít nhất một dịch vụ.')
+    .max(6, 'Tối đa 6 dịch vụ trong một lần ghi.')
+    .refine((list) => new Set(list.map((s) => s.serviceType)).size === list.length, 'Mỗi dịch vụ chỉ được chọn một lần.'),
+});
+
+/** One entry — or, for "Dịch vụ phòng" with `roomServices`, one per service. */
+function parseCreateInputs(body: unknown): CreateReportInput[] {
+  const b = (body ?? {}) as { category?: unknown; roomServices?: unknown };
+  if (b.category === 'ROOM_SERVICE' && b.roomServices !== undefined) {
+    return roomServicesSchema.parse(b).roomServices.map((roomService) => ({ category: 'ROOM_SERVICE' as const, roomService }));
+  }
+  return [createSchema.parse(b)];
+}
 
 const updateSchema = z.object({
   payment: paymentSchema.partial().optional(),
@@ -444,15 +467,16 @@ export function createReceptionReportsRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/reception/reports — one journal entry.
+  // POST /api/reception/reports — one journal entry (several: one guest's services).
   router.post('/reception/reports', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
-      const input = createSchema.parse(req.body ?? {});
+      const inputs = parseCreateInputs(req.body);
       const { branchId } = targetSchema.parse(req.body ?? {});
       const clock = getClock();
-      const created = await createReport({ ...input, branchId }, actor(user), clock);
-      res.status(201).json({ report: serializeReport(created, clock.now()) });
+      const created = await createReports(inputs, { branchId }, actor(user), clock);
+      const reports = created.map((r) => serializeReport(r, clock.now()));
+      res.status(201).json({ report: reports[0], reports });
     })().catch(next);
   });
 
@@ -644,11 +668,12 @@ export function createReceptionReportsRouter(): Router {
     requireCapability('reports.lateEntry'),
     (req, res, next) => {
       (async () => {
-        const input = createSchema.parse(req.body ?? {});
+        const inputs = parseCreateInputs(req.body);
         const late = lateEntrySchema.parse(req.body ?? {});
         const clock = getClock();
-        const created = await createLateReport({ ...input, ...late }, actor(req.currentUser!), clock);
-        res.status(201).json({ report: serializeReport(created, clock.now()) });
+        const created = await createLateReports(inputs, late, actor(req.currentUser!), clock);
+        const reports = created.map((r) => serializeReport(r, clock.now()));
+        res.status(201).json({ report: reports[0], reports });
       })().catch(next);
     },
   );

@@ -751,3 +751,51 @@ describe('Technical "Đã hoàn thành" by completion date', () => {
     }
   });
 });
+
+describe('several room services of ONE guest', () => {
+  beforeEach(async () => {
+    at('2026-09-25', '09:00');
+    await checkIn(letanA, 'A', 'Đức');
+  });
+
+  const several = (roomServices: Record<string, unknown>[]) =>
+    letanA.post('/api/reception/reports').send({ category: 'ROOM_SERVICE', roomServices });
+
+  it('records one entry per service — same guest, shift and instant — exactly as if each were entered alone', async () => {
+    const res = await several([
+      { serviceType: 'ROOM_SALE', guestName: 'Khách Nhiều', ezCode: 'EZ9', roomClass: 'Deluxe', nights: 2, price: 900000 },
+      { serviceType: 'LAUNDRY', guestName: 'Khách Nhiều', ezCode: 'EZ9', price: 80000, note: '3 bộ' },
+      { serviceType: 'REVIEW', guestName: 'Khách Nhiều', ezCode: 'EZ9', tripadvisorCount: 1, googleCount: 1 },
+    ]);
+    expect(res.status).toBe(201);
+    expect(res.body.reports).toHaveLength(3);
+    expect(res.body.report.id).toBe(res.body.reports[0].id);
+    expect(res.body.reports.map((r: { roomService: { serviceType: string; price: number } }) => [r.roomService.serviceType, r.roomService.price])).toEqual([
+      ['ROOM_SALE', 900000],
+      ['LAUNDRY', 80000],
+      ['REVIEW', 0],
+    ]);
+    const rows = await testPrisma.receptionOperationalReport.findMany({ where: { category: 'ROOM_SERVICE' }, include: { roomService: true } });
+    expect(rows).toHaveLength(3);
+    expect(new Set(rows.map((r) => r.createdAt.toISOString()))).toEqual(new Set([hcm('2026-09-25', '09:00').toISOString()]));
+    expect(new Set(rows.map((r) => r.shiftSessionId)).size).toBe(1);
+    expect(rows.every((r) => r.roomService?.guestName === 'Khách Nhiều')).toBe(true);
+  });
+
+  it('records none of them when one is incomplete, and refuses the same service twice', async () => {
+    const res = await several([
+      { serviceType: 'LAUNDRY', guestName: 'Khách', price: 80000 },
+      // A sale without its nights: refused — and the laundry with it.
+      { serviceType: 'ROOM_SALE', guestName: 'Khách', roomClass: 'Deluxe', price: 900000 },
+    ]);
+    expect(res.status).toBe(422);
+    expect(await testPrisma.receptionOperationalReport.count()).toBe(0);
+    const twice = await several([
+      { serviceType: 'LAUNDRY', guestName: 'Khách', price: 1 },
+      { serviceType: 'LAUNDRY', guestName: 'Khách', price: 2 },
+    ]);
+    expect(twice.status).toBe(422);
+    expect((await several([])).status).toBe(422);
+    expect(await testPrisma.receptionOperationalReport.count()).toBe(0);
+  });
+});
