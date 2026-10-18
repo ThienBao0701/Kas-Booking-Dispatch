@@ -1822,8 +1822,8 @@ model Notification {
   /// Where a press on the notification goes — an in-app path ("/app/…"), never
   /// an external URL. Null on older rows (the bell falls back to `bookingId`).
   link      String?
-  /// Set ONLY on the operational assignments that are also sent as Web Push;
-  /// every other notification is in-app only and leaves it null.
+  /// Set ONLY on the operational assignments (pushed at once). Every notice is
+  /// sent as Web Push — the others by the push sweep, a few seconds later.
   kind      NotificationKind?
   /// THE IDEMPOTENCY KEY of the action that produced it (e.g. the assignment
   /// event's id): one real assignment is one notification, whatever retries.

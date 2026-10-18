@@ -10,6 +10,7 @@
  *   +   the wire format: RFC 8291's own test vector, and a verifiable VAPID token
  *   +   the configuration: a mismatched key pair is no configuration at all
  *   +   "Gửi thông báo thử": the caller's own devices only, nothing recorded
+ *   +   every department: any new notice is pushed once by the sweep — never the backlog
  */
 import { createECDH, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -21,7 +22,7 @@ import { ADMIN_PASSWORD, createAdmin, createUser, loginAgent } from './helpers/a
 import { resetClock, setClock } from '../src/lib/clock';
 import { workedRecentlyAt } from './helpers/workplace';
 import { serveAllBranches } from './helpers/issues';
-import { notifyOperational, pushNotification, setPushSender, settlePushes, vapidConfig } from '../src/push/pushService';
+import { notifyOperational, pushNotification, setPushSender, settlePushes, sweepPendingPushes, vapidConfig } from '../src/push/pushService';
 import { encryptPayload, generateVapidKeys, isPushServiceEndpoint, vapidAuthorization, vapidKeysMatch } from '../src/push/webPush';
 
 const app = createApp();
@@ -403,5 +404,32 @@ describe('"Gửi thông báo thử"', () => {
       if (saved.pub !== undefined) process.env.VAPID_PUBLIC_KEY = saved.pub;
       if (saved.priv !== undefined) process.env.VAPID_PRIVATE_KEY = saved.priv;
     }
+  });
+});
+
+describe('every department', () => {
+  it('pushes any new notice — a receptionist’s booking notice too — once, to its own devices, and never the backlog', async () => {
+    const reception = await person('letan1', 'Lễ tân Một', 'RECEPTIONIST', cn1);
+    expect((await reception.post('/api/push/subscriptions').send(device('letan-phone'))).status).toBe(201);
+    expect((await lan.post('/api/push/subscriptions').send(device('lan-phone'))).status).toBe(201);
+    const started = hcm(DAY, '08:00');
+    // History from before the server started: never pushed.
+    await testPrisma.notification.create({ data: { userId: ids.letan1!, title: 'Cũ', body: 'cũ', createdAt: hcm(DAY, '07:00') } });
+    await testPrisma.notification.create({ data: { userId: ids.letan1!, title: 'Đơn mới', body: 'Đơn ABC cần tạo', createdAt: started } });
+
+    expect(await sweepPendingPushes(started)).toBe(1);
+    await settlePushes();
+    expect(sent).toEqual([
+      {
+        endpoint: device('letan-phone').endpoint,
+        message: { title: 'Đơn mới', body: 'Đơn ABC cần tạo', url: '/app', tag: expect.stringMatching(/^kas-/) },
+      },
+    ]);
+    // Swept again: nothing twice.
+    expect(await sweepPendingPushes(started)).toBe(0);
+    await settlePushes();
+    expect(sent).toHaveLength(1);
+    // The old notice stays in the bell, unpushed.
+    expect(await testPrisma.notification.count({ where: { title: 'Cũ', pushedAt: null } })).toBe(1);
   });
 });

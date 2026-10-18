@@ -109,12 +109,13 @@ describe('NotificationBell — where a notice goes', () => {
     const user = userEvent.setup();
     renderApp('/app/new');
     await user.click(await screen.findByRole('button', { name: /Thông báo/ }));
+    // Every department's notices are pushed: Reception has "Bật thông báo" too
+    // (this test browser has no Web Push, and the control says so).
+    expect(await screen.findByTestId('push-unsupported')).toBeInTheDocument();
     await user.click(await screen.findByText('Công việc mới'));
     // The page heading carries no "VII." — it reads exactly as the menu does (the topbar repeats it).
     expect((await screen.findAllByRole('heading', { name: 'Báo cáo các vấn đề và tình hình quan trọng' })).length).toBeGreaterThan(0);
     expect(screen.queryByText(/VII\./)).not.toBeInTheDocument();
     expect(read).toEqual(['n9']);
-    // No push control for a role that is not sent pushes.
-    expect(screen.queryByTestId('push-control')).not.toBeInTheDocument();
   });
 });

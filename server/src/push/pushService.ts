@@ -17,6 +17,11 @@
  * the ONE account the notice is for — the recipient is decided by the
  * assignment on the server, never by the request.
  *
+ * EVERY OTHER NOTICE IS PUSHED TOO — every department's: bookings, incidents,
+ * reports, reminders… They are created in many places, so rather than touching
+ * each one, `startPushSweep` pushes whatever is new and not yet pushed, a few
+ * seconds later, under the same one-push claim.
+ *
  * WITHOUT VAPID KEYS NOTHING IS PUSHED, and nothing breaks: the bell still shows
  * the notice, which is also the fallback when a device has push turned off.
  */
@@ -178,15 +183,12 @@ export async function pushNotification(id: string, client: PrismaClient = prisma
   const send = activeSender();
   if (!send) return { sent: 0, revoked: 0 };
   const now = getClock().now();
-  const claimed = await client.notification.updateMany({
-    where: { id, pushedAt: null, kind: { not: null } },
-    data: { pushedAt: now },
-  });
+  const claimed = await client.notification.updateMany({ where: { id, pushedAt: null }, data: { pushedAt: now } });
   if (claimed.count === 0) return { sent: 0, revoked: 0 };
   const notice = await client.notification.findUniqueOrThrow({ where: { id } });
-  const payload = Buffer.from(
-    JSON.stringify({ title: notice.title, body: notice.body, url: notice.link ?? '/app', tag: `kas-${notice.id}` }),
-  );
+  // Where a press goes: the notice's own page, else its booking, else the app.
+  const url = notice.link ?? (notice.bookingId ? `/app/booking/${notice.bookingId}` : '/app');
+  const payload = Buffer.from(JSON.stringify({ title: notice.title, body: notice.body, url, tag: `kas-${notice.id}` }));
   const { sent, revoked } = await pushToDevices(notice.userId, payload, send, now, client);
   return { sent, revoked };
 }
@@ -233,6 +235,48 @@ async function pushToDevices(userId: number, payload: Buffer, send: PushSender, 
     }
   }
   return { devices: devices.length, sent, revoked, rejected, failed };
+}
+
+const SWEEP_MS = 5_000;
+const SWEEP_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Pushes the notices not pushed yet — created since `since` (the process's
+ * start) and within the last ten minutes, NEVER the backlog: a deploy must not
+ * wake every phone with weeks of history. Returns how many were dispatched.
+ */
+export async function sweepPendingPushes(since: Date, client: PrismaClient = prisma): Promise<number> {
+  if (!activeSender()) return 0;
+  const floor = new Date(Math.max(since.getTime(), getClock().now().getTime() - SWEEP_WINDOW_MS));
+  const rows = await client.notification.findMany({
+    where: { pushedAt: null, createdAt: { gte: floor } },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
+    take: 100,
+  });
+  dispatchPush(
+    rows.map((r) => r.id),
+    client,
+  );
+  return rows.length;
+}
+
+/** Starts the sweep (the server's entry point only); returns its stop. */
+export function startPushSweep(client: PrismaClient = prisma): () => void {
+  const since = getClock().now();
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    sweepPendingPushes(since, client)
+      // eslint-disable-next-line no-console
+      .catch((err: unknown) => console.warn('[push] sweep failed:', err instanceof Error ? err.message : err))
+      .finally(() => {
+        running = false;
+      });
+  }, SWEEP_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /**

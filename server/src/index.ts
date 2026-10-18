@@ -3,6 +3,7 @@ import { createApp } from './app';
 import { env } from './config/env';
 import { prisma } from './db/prisma';
 import { ensureInitialAdmin } from './auth/bootstrapAdmin';
+import { startPushSweep } from './push/pushService';
 
 async function start(): Promise<void> {
   // Fail fast: a server that cannot reach its database should not accept traffic.
@@ -30,6 +31,9 @@ async function start(): Promise<void> {
       `hotel-booking-dispatch server đang chạy tại http://localhost:${env.PORT} (${env.NODE_ENV})`,
     );
   });
+
+  // Every department's new notices reach its phones (see pushService).
+  startPushSweep();
 
   registerShutdown(server);
 }

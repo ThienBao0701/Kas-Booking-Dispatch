@@ -16,9 +16,6 @@ import { disablePush, enablePush, isIos, pushState, PushError, sendTestPush, typ
 */
 const POLL_MS = 20_000;
 
-/** The roles whose assignments are pushed to their devices (version 1). */
-const PUSH_ROLES = new Set(['TECHNICAL', 'HOUSEKEEPING']);
-
 /** Where a press on a notice goes: its own in-app link, else its booking. */
 function noticeTarget(n: NotificationItem): string | null {
   if (n.link && n.link.startsWith('/app')) return n.link;
@@ -221,7 +218,8 @@ export function NotificationBell() {
                 Đọc tất cả
               </button>
             </div>
-            {user && PUSH_ROLES.has(user.role) ? <PushControl /> : null}
+            {/* Every department's notices are pushed: "Bật thông báo" for every role. */}
+            {user ? <PushControl /> : null}
             <div className="max-h-96 overflow-y-auto">
               {list.isLoading ? (
                 <p className="px-4 py-6 text-center text-sm text-slate-400">Đang tải…</p>
