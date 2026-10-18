@@ -3,7 +3,10 @@ import {
   ShieldAlert,
   ConciergeBell,
   MessageSquareText,
+  Boxes,
+  Package,
   PackageCheck,
+  Shirt,
   Sparkles,
   ThumbsUp,
   Wallet,
@@ -63,27 +66,31 @@ const COMPLETED_GROUP: NavItem = {
 };
 
 /**
- * "QUẢN LÝ BUỒNG PHÒNG" — five focused screens over one branch's housekeeping.
- * Work is assigned inside "Tình trạng phòng", so there is no separate
- * "Phân công công việc" entry for this role. Every screen keeps its title here.
+ * "QUẢN LÝ BUỒNG PHÒNG" — the screens over one branch's housekeeping. Work is
+ * assigned inside "Công việc cá nhân", so there is no separate "Phân công công
+ * việc" entry for this role. Every screen keeps its title here. The three
+ * stores ("Kho …") are pages being prepared: no inventory exists behind them yet.
  */
 const HOUSEKEEPING_MANAGER_SCREENS: NavItem[] = [
-  { to: '/app/hk/overview', label: 'Tổng quan', icon: LayoutDashboard },
-  { to: '/app/hk/rooms', label: 'Tình trạng phòng', icon: BedDouble },
+  { to: '/app/hk/overview', label: 'Công việc chung', icon: LayoutDashboard },
+  { to: '/app/hk/rooms', label: 'Công việc cá nhân', icon: BedDouble },
   { to: '/app/hk/staff', label: 'Theo dõi nhân viên', icon: Users },
-  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', icon: Wallet },
+  { to: '/app/hk/kpi', label: 'KPI', icon: Wallet },
   { to: '/app/hk/report', label: 'Báo cáo', icon: FileText },
+  { to: '/app/hk/store/linens', label: 'Kho Linens', icon: Shirt },
+  { to: '/app/hk/store/amenities', label: 'Kho Amenities', icon: Package },
+  { to: '/app/hk/store/equipment', label: 'Kho đồ dùng, thiết bị', icon: Boxes },
 ];
 
 /**
  * Off the menu, not removed: "Theo dõi nhân viên" and "Báo cáo" are hidden from
  * the "Quản lý buồng phòng" menu (the manager's and the Admin's group alike).
- * Their pages, routes, permissions and data are unchanged — the links inside
- * "Tổng quan" and "Tình trạng phòng", and their addresses, still open them.
+ * Their pages, routes, permissions and data are unchanged — their addresses,
+ * and the links to them inside the screens, still open them.
  */
 const HIDDEN_FROM_MENU = new Set(['/app/hk/staff', '/app/hk/report']);
 
-/** The "Quản lý buồng phòng" menu: Tổng quan, Tình trạng phòng, KPI & Thu tiền. */
+/** The "Quản lý buồng phòng" menu: Công việc chung, Công việc cá nhân, KPI, then the three stores. */
 const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = HOUSEKEEPING_MANAGER_SCREENS.filter((item) => !HIDDEN_FROM_MENU.has(item.to));
 
 /** For the Admin, the same menu as one group (every branch). */

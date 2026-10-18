@@ -61,10 +61,10 @@ export function HkHeader({
 }: {
   title: string;
   description?: string;
-  /** "Chi nhánh 1 — 05 Trương Định", or the Admin's choice. */
-  branch: ReactNode;
+  /** "Chi nhánh 1 — 05 Trương Định", or the Admin's choice. With `period`: no strip without both. */
+  branch?: ReactNode;
   /** "Ngày nghiệp vụ: 04/10/2026" (with its weekday), or a report period. */
-  period: { label: string; value: string; weekday?: string };
+  period?: { label: string; value: string; weekday?: string };
   /** The date and (for the Admin) the branch picker. */
   controls?: ReactNode;
   actions?: ReactNode;
@@ -78,6 +78,7 @@ export function HkHeader({
         </div>
         {actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}
       </div>
+      {period ? (
       <section
         data-testid="hk-context"
         aria-label="Phạm vi đang xem"
@@ -121,6 +122,7 @@ export function HkHeader({
           </div>
         ) : null}
       </section>
+      ) : null}
     </header>
   );
 }

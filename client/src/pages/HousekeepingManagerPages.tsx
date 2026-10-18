@@ -16,11 +16,12 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowRight,
   BarChart3,
   BedDouble,
+  Boxes,
   Brush,
   CalendarClock,
   ChevronLeft,
@@ -44,7 +45,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  UserX,
   Users,
   Wallet,
   type LucideIcon,
@@ -99,7 +99,6 @@ import {
   HkSection,
   Meter,
   Metric,
-  ProgressBar,
   RateBar,
   ReviewCard,
   ROW_BUTTON,
@@ -380,41 +379,8 @@ function FailDialog({ task, staff, onClose, onDone }: { task: RoomTask; staff: {
 }
 
 /* ------------------------------------------------------------------ *
- * Tổng quan — monitoring only: nothing here creates, assigns or edits work
+ * Công việc chung — monitoring only: nothing here creates, assigns or edits work
  * ------------------------------------------------------------------ */
-
-const QUICK: { to: string; label: string; hint: string; icon: LucideIcon }[] = [
-  { to: '/app/hk/rooms', label: 'Tình trạng phòng', hint: 'Phòng theo tầng và công việc', icon: BedDouble },
-  { to: '/app/hk/staff', label: 'Theo dõi nhân viên', hint: 'Ca làm và tiến độ từng người', icon: Users },
-  { to: '/app/hk/kpi', label: 'KPI & Thu tiền', hint: 'Phát sinh và tiền đã thu', icon: Wallet },
-  { to: '/app/hk/report', label: 'Báo cáo', hint: 'Xuất PDF và Excel', icon: FileText },
-];
-
-function QuickLinks() {
-  return (
-    <nav aria-label="Truy cập nhanh" data-testid="hk-quick">
-      <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-slate-900">Truy cập nhanh</h2>
-      <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-        {QUICK.map(({ to, label, hint, icon: Icon }) => (
-          <Link
-            key={to}
-            to={to}
-            className={`${CARD} group flex min-h-[3.5rem] items-center gap-3 px-3.5 py-2.5 transition-colors hover:border-brand-300 hover:bg-brand-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600`}
-          >
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
-              <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-semibold text-slate-900">{label}</span>
-              <span className="block truncate text-xs text-slate-500">{hint}</span>
-            </span>
-            <ChevronRight className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-brand-600" aria-hidden="true" />
-          </Link>
-        ))}
-      </div>
-    </nav>
-  );
-}
 
 const GROUP_TONE: Record<WorkGroup['status']['code'], Tone> = {
   UNASSIGNED: 'amber',
@@ -486,185 +452,96 @@ function GroupSummary({ group }: { group: WorkGroup }) {
 const OVERVIEW_GROUPS = 4;
 
 export function HkOverviewPage() {
-  const [date, setDate] = useState(hcmToday());
   const scope = useScope(true);
-  const data = useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'overview', date, scope.branchId ?? null],
-    queryFn: () => roomWorkApi.overview({ date, branchId: scope.branchId }),
-    enabled: scope.ready,
-    refetchInterval: 30_000,
+  const isAdmin = scope.isAdmin;
+  const date = hcmToday();
+  // The manager watches its own branch. The Admin keeps its branch filter: one
+  // branch, or "Tất cả chi nhánh" — then every branch, one block each.
+  const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), enabled: isAdmin });
+  const everyBranch = isAdmin && scope.branchId === undefined;
+  const targets: { branchId?: number; label?: string }[] = everyBranch
+    ? (branches.data?.branches ?? []).map((b) => ({ branchId: b.id, label: branchLabel(b) }))
+    : [{ branchId: scope.branchId }];
+  const days = useQueries({
+    queries: targets.map((t) => ({
+      queryKey: [...ROOM_WORK_KEY, 'groups', date, t.branchId ?? null],
+      queryFn: () => roomWorkApi.workGroups({ date, branchId: t.branchId }),
+      refetchInterval: 30_000,
+    })),
   });
-  // The day's groups — one branch at a time (the Admin picks one to see them).
-  const groups = useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'groups', date, scope.branchId ?? null],
-    queryFn: () => roomWorkApi.workGroups({ date, branchId: scope.branchId }),
-    enabled: scope.branchId !== undefined,
-    refetchInterval: 30_000,
-  });
-  const o = data.data;
-  const everyBranch = scope.isAdmin && scope.branchId === undefined;
-  const dayGroups = (groups.data?.groups ?? []).filter((g) => g.counts.items > 0);
-  const progressOf = (userId: number) => o?.employees.find((e) => e.userId === userId);
+  const loading = branches.isLoading || days.some((d) => d.isLoading);
+  const failed = branches.error ?? days.find((d) => d.isError)?.error;
+  const blocks = targets
+    .map((t, i) => ({ ...t, groups: (days[i]?.data?.groups ?? []).filter((g) => g.counts.items > 0) }))
+    .filter((b) => b.groups.length > 0);
   return (
     <div>
       <HkHeader
-        title="Tổng quan"
-        description="Tình hình buồng phòng trong ngày"
-        branch={scope.label}
-        period={{ label: 'Ngày nghiệp vụ', value: formatDate(date), weekday: weekdayOf(date) }}
-        controls={
-          <>
-            <DateField date={date} onDate={setDate} />
-            {scope.picker}
-          </>
-        }
+        title="Công việc chung"
+        description={`Tiến độ công việc buồng phòng hôm nay, ${formatDate(date)} (${weekdayOf(date)})${everyBranch ? ' — mọi chi nhánh' : ''}.`}
+        actions={scope.picker}
       />
-      <QueryState isLoading={data.isLoading} isError={data.isError} error={data.error} onRetry={() => void data.refetch()}>
-        {o ? (
-          <div className="space-y-5" data-testid="hk-overview">
-            <section aria-label="Phòng trong ngày" data-testid="hk-overview-rooms" className="space-y-3">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-                <Metric icon={BedDouble} label="Phòng có công việc" value={o.rooms.total} hint="Phòng / khu vực trong ngày" />
-                <Metric icon={Clock} label="Chưa bắt đầu" value={o.rooms.notStarted} tone="gray" />
-                <Metric icon={ClipboardCheck} label="Đã kiểm tra" value={o.rooms.inspected ?? 0} tone="amber" />
-                <Metric icon={Brush} label="Đang dọn" value={o.rooms.inProgress} tone="blue" />
-                <Metric icon={CircleCheck} label="Hoàn thành" value={o.rooms.completed} tone="green" />
-                <Metric icon={UserX} label="Chưa giao" value={o.rooms.unassigned} tone={o.rooms.unassigned > 0 ? 'red' : 'gray'} />
-              </div>
-              <div className={`${CARD} flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4`}>
-                <div className="min-w-0 flex-1">
-                  <ProgressBar notStarted={o.rooms.notStarted + (o.rooms.inspected ?? 0)} inProgress={o.rooms.inProgress} completed={o.rooms.completed} testId="hk-overview-progress" />
-                </div>
-                <p className="shrink-0 text-sm text-slate-600">
-                  <span className="font-semibold tabular-nums text-slate-900">
-                    {o.rooms.completed}/{o.rooms.total}
-                  </span>{' '}
-                  phòng hoàn thành
-                  {o.rooms.total > 0 ? <span className="tabular-nums"> ({Math.round((o.rooms.completed / o.rooms.total) * 100)}%)</span> : null}
-                </p>
-              </div>
-            </section>
-
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
-              <HkSection
-                title="Tiến độ công việc hôm nay"
-                icon={ClipboardList}
-                testId="hk-overview-groups"
-                aside={
+      <HkSection
+        title="Tiến độ công việc hôm nay"
+        icon={ClipboardList}
+        testId="hk-overview-groups"
+        aside={
+          <Link to="/app/hk/rooms?view=groups" className={SECTION_LINK}>
+            Công việc cá nhân <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        }
+      >
+        {loading ? (
+          <p className="text-sm text-slate-500">Đang tải công việc…</p>
+        ) : failed ? (
+          <ErrorAlert>{toUserMessage(failed)}</ErrorAlert>
+        ) : blocks.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Chưa có công việc nào trong ngày{everyBranch ? ' ở các chi nhánh' : ''}. Công việc được tạo ở “Công việc cá nhân”.
+          </p>
+        ) : (
+          <div className="space-y-5">
+            {blocks.map((b) => (
+              <div key={b.branchId ?? 'own'} className="space-y-3" data-testid={b.branchId ? `overview-branch-${b.branchId}` : undefined}>
+                {b.label ? <h3 className="text-sm font-semibold text-slate-700">{b.label}</h3> : null}
+                {b.groups.slice(0, OVERVIEW_GROUPS).map((g) => (
+                  <GroupSummary key={g.id} group={g} />
+                ))}
+                {b.groups.length > OVERVIEW_GROUPS ? (
                   <Link to="/app/hk/rooms?view=groups" className={SECTION_LINK}>
-                    Tình trạng phòng <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                    Xem tất cả {b.groups.length} công việc <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
                   </Link>
-                }
-              >
-                {everyBranch ? (
-                  <p className="text-sm text-slate-500">Chọn một chi nhánh để xem từng công việc.</p>
-                ) : groups.isLoading ? (
-                  <p className="text-sm text-slate-500">Đang tải công việc…</p>
-                ) : groups.isError ? (
-                  <ErrorAlert>{toUserMessage(groups.error)}</ErrorAlert>
-                ) : dayGroups.length === 0 ? (
-                  <p className="text-sm text-slate-500">Chưa có công việc nào trong ngày. Công việc được tạo ở “Tình trạng phòng”.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {dayGroups.slice(0, OVERVIEW_GROUPS).map((g) => (
-                      <GroupSummary key={g.id} group={g} />
-                    ))}
-                    {dayGroups.length > OVERVIEW_GROUPS ? (
-                      <Link to="/app/hk/rooms?view=groups" className={SECTION_LINK}>
-                        Xem tất cả {dayGroups.length} công việc <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                      </Link>
-                    ) : null}
-                  </div>
-                )}
-              </HkSection>
-
-              <div className="min-w-0 space-y-5">
-                <HkSection
-                  title="Nhân viên trong ca"
-                  icon={Users}
-                  testId="hk-working"
-                  bodyClassName=""
-                  aside={<Badge tone={o.working.length > 0 ? 'green' : 'gray'}>{o.working.length} người</Badge>}
-                >
-                  {o.working.length === 0 ? (
-                    <p className="px-4 py-4 text-sm text-slate-500">Hiện chưa có nhân viên nào trong ca.</p>
-                  ) : (
-                    <ul className="divide-y divide-line-subtle">
-                      {o.working.map((w) => {
-                        const p = progressOf(w.userId);
-                        return (
-                          <li key={`${w.userId}-${w.since}`} className="flex items-center gap-3 px-4 py-2.5">
-                            <Avatar name={w.name} />
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-semibold text-slate-900">{w.name}</p>
-                              <p className="truncate text-xs text-slate-500">
-                                Vào ca {hhmm(w.since)}
-                                {everyBranch ? ` · CN ${w.branch.branchNumber}` : ''}
-                              </p>
-                            </div>
-                            <div className="w-24 shrink-0 text-right">
-                              {p && p.assigned > 0 ? (
-                                <>
-                                  <p className="text-xs tabular-nums text-slate-700">
-                                    {p.completed}/{p.assigned} xong
-                                  </p>
-                                  <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-slate-200" aria-hidden="true">
-                                    <span className="block h-full rounded-full bg-green-600" style={{ width: `${(p.completed / p.assigned) * 100}%` }} />
-                                  </span>
-                                </>
-                              ) : (
-                                <p className="text-xs text-slate-500">Chưa có việc</p>
-                              )}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                  <div className="border-t border-line-subtle px-4 py-2.5">
-                    <Link to="/app/hk/staff" className={SECTION_LINK}>
-                      Theo dõi nhân viên <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                    </Link>
-                  </div>
-                </HkSection>
-
-                <HkSection
-                  title="KPI & Thu tiền hôm nay"
-                  icon={BarChart3}
-                  testId="hk-overview-kpi"
-                  aside={
-                    <Link to="/app/hk/kpi" className={SECTION_LINK}>
-                      Xem chi tiết <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                    </Link>
-                  }
-                >
-                  <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <div>
-                      <dt className="text-xs text-slate-600">Lượt kiểm phòng</dt>
-                      <dd className="text-xl font-semibold tabular-nums text-slate-900">{o.inspections}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-slate-600">Phát sinh</dt>
-                      <dd className="text-xl font-semibold tabular-nums text-amber-700">{o.findings}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-slate-600">Đã thu</dt>
-                      <dd className="text-xl font-semibold tabular-nums text-green-700">{formatVnd(o.collectedAmount)}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-slate-600">Khoản chưa thu</dt>
-                      <dd className="text-xl font-semibold tabular-nums text-red-700">{o.pendingCollections}</dd>
-                      <dd className="text-[11px] text-slate-500">tính cả các ngày trước</dd>
-                    </div>
-                  </dl>
-                </HkSection>
+                ) : null}
               </div>
-            </div>
-
-            <QuickLinks />
+            ))}
           </div>
-        ) : null}
-      </QueryState>
+        )}
+      </HkSection>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * The stores — pages being prepared, nothing pretended
+ * ------------------------------------------------------------------ */
+
+const STORES = {
+  linens: { title: 'Kho Linens', what: 'đồ vải (ga, gối, khăn…)' },
+  amenities: { title: 'Kho Amenities', what: 'đồ dùng cho khách (amenities)' },
+  equipment: { title: 'Kho đồ dùng, thiết bị', what: 'đồ dùng và thiết bị buồng phòng' },
+} as const;
+
+/** A store's place in the menu, said honestly: no stock is kept here yet. */
+export function HkStorePage({ store }: { store: keyof typeof STORES }) {
+  const { title, what } = STORES[store];
+  return (
+    <div>
+      <HkHeader title={title} description={`Quản lý kho ${what}.`} />
+      <EmptyState
+        icon={<Boxes className="h-6 w-6" aria-hidden="true" />}
+        title="Đang được chuẩn bị"
+        message="Chức năng kho chưa được xây dựng: chưa có số lượng tồn, nhập hay xuất kho nào được ghi nhận ở đây."
+      />
     </div>
   );
 }
@@ -1064,7 +941,7 @@ export function HkRoomBoardPage() {
   return (
     <div>
       <HkHeader
-        title="Tình trạng phòng"
+        title="Công việc cá nhân"
         description="Tình trạng dọn phòng theo tầng và điều phối công việc buồng phòng trong ngày. Chọn một phòng để xem chi tiết và lịch sử."
         branch={scope.label}
         period={{ label: 'Ngày nghiệp vụ', value: formatDate(date), weekday: weekdayOf(date) }}
@@ -1794,7 +1671,7 @@ export function HkStaffPage() {
                     <p className="text-sm font-semibold text-amber-900">{waiting.length} công việc chưa có người nhận</p>
                     <p className="mt-0.5 text-xs text-slate-700">{waiting.map((g) => g.title).join(', ')}</p>
                     <Link to="/app/hk/rooms?view=groups" className={`${SECTION_LINK} mt-1.5 text-xs`}>
-                      Mở Tình trạng phòng <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                      Mở Công việc cá nhân <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
                     </Link>
                   </li>
                 ) : null}
@@ -2006,7 +1883,7 @@ export function HkKpiPage() {
   return (
     <div>
       <HkHeader
-        title="KPI & Thu tiền"
+        title="KPI"
         description="Lượt kiểm phòng, phát sinh mỗi nhân viên ghi nhận, và kết quả thu tiền của các phát sinh đó."
         branch={branch}
         period={context}

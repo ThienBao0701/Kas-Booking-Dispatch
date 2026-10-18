@@ -80,7 +80,7 @@ export function HousekeepingRoomPage() {
     <div className="mx-auto max-w-3xl pb-24">
       <Link to={manager ? '/app/hk/rooms' : '/app/inspections'} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        {manager ? 'Tình trạng phòng' : 'Danh sách công việc'}
+        {manager ? 'Công việc cá nhân' : 'Danh sách công việc'}
       </Link>
       <QueryState isLoading={task.isLoading || catalog.isLoading} isError={task.isError} error={task.error} onRetry={() => void task.refetch()}>
         {t && catalog.data ? (

@@ -43,6 +43,7 @@ import {
   HkKpiPage,
   HkOverviewPage,
   HkReportPage,
+  HkStorePage,
   HkRoomBoardPage,
   HkStaffPage,
 } from '../pages/HousekeepingManagerPages';
@@ -293,6 +294,9 @@ export function AppRoutes() {
           <Route path="hk/staff" element={<RequireRole role={HK_MANAGER_ROLES}><HkStaffPage /></RequireRole>} />
           <Route path="hk/kpi" element={<RequireRole role={HK_MANAGER_ROLES}><HkKpiPage /></RequireRole>} />
           <Route path="hk/report" element={<RequireRole role={HK_MANAGER_ROLES}><HkReportPage /></RequireRole>} />
+          <Route path="hk/store/linens" element={<RequireRole role={HK_MANAGER_ROLES}><HkStorePage store="linens" /></RequireRole>} />
+          <Route path="hk/store/amenities" element={<RequireRole role={HK_MANAGER_ROLES}><HkStorePage store="amenities" /></RequireRole>} />
+          <Route path="hk/store/equipment" element={<RequireRole role={HK_MANAGER_ROLES}><HkStorePage store="equipment" /></RequireRole>} />
           <Route path="room-collections" element={<RequireRole role="RECEPTIONIST"><RoomCollectionsPage /></RequireRole>} />
           {/* The old address of the supervisors' Buồng phòng: under "Báo cáo vấn đề" now. */}
           <Route path="housekeeping" element={<Navigate to="/app/reports/housekeeping" replace />} />

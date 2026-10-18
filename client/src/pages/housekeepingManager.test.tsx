@@ -214,8 +214,14 @@ function finding(id: string, createdAt: string, collectionStatus: 'COLLECTED' | 
   };
 }
 
+/** The "Quản lý buồng phòng" menu, exactly, in order. */
+const MENU = ['Công việc chung', 'Công việc cá nhân', 'KPI', 'Kho Linens', 'Kho Amenities', 'Kho đồ dùng, thiết bị'];
+const MENU_HREFS = ['/app/hk/overview', '/app/hk/rooms', '/app/hk/kpi', '/app/hk/store/linens', '/app/hk/store/amenities', '/app/hk/store/equipment'];
+/** What "Công việc chung" no longer shows. */
+const REMOVED = ['hk-context', 'hk-date', 'hk-overview-rooms', 'hk-overview-progress', 'hk-working', 'hk-overview-kpi', 'hk-quick'];
+
 describe('Quản lý buồng phòng — menu and overview', () => {
-  it('lands on "Tổng quan" with its three menu entries and its one branch, fixed — watching only, no "Tạo công việc"', async () => {
+  it('lands on "Công việc chung" with the six menu entries — only "Tiến độ công việc hôm nay", watching only, no "Tạo công việc"', async () => {
     installApiMock(
       shell(MANAGER, {
         [`GET /api/housekeeping/manager/overview?date=${TODAY}&branchId=1`]: () => ({
@@ -245,33 +251,19 @@ describe('Quản lý buồng phòng — menu and overview', () => {
       }),
     );
     renderApp('/app');
-    const overview = await screen.findByTestId('hk-overview');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    // "Theo dõi nhân viên" and "Báo cáo" are kept off the menu (their pages remain).
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Tổng quan', 'Tình trạng phòng', 'KPI & Thu tiền']);
-    // Quản lý buồng phòng · Chi nhánh · Ngày nghiệp vụ — then the page's title.
-    const context = screen.getByTestId('hk-context');
-    expect(context).toHaveTextContent('Quản lý buồng phòng');
-    // Its hotel by address — never a branch number.
-    expect(screen.getByTestId('manager-branch')).toHaveTextContent('05 Trương Định');
+    // Six entries; "Theo dõi nhân viên" and "Báo cáo" stay off the menu (their pages remain).
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(MENU);
+    expect(await within(screen.getByRole('main')).findByRole('heading', { level: 1, name: 'Công việc chung' })).toBeInTheDocument();
+    // Gone: the date / branch strip and its cards, the progress bar, "Nhân viên trong ca",
+    // "KPI & thu tiền hôm nay" and "Truy cập nhanh". The manager never had a branch filter.
+    for (const id of [...REMOVED, 'branch-select']) expect(screen.queryByTestId(id)).not.toBeInTheDocument();
+    expect(screen.queryByText('Truy cập nhanh')).not.toBeInTheDocument();
+    expect(screen.queryByText('Nhân viên trong ca')).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(/Chi nhánh \d/);
-    expect(screen.getByTestId('hk-period-value')).toHaveTextContent(TODAY.split('-').reverse().join('/'));
-    expect(within(screen.getByRole('main')).getByRole('heading', { level: 1, name: 'Tổng quan' })).toBeInTheDocument();
-    expect(screen.queryByTestId('branch-select')).not.toBeInTheDocument();
-    expect(overview).toHaveTextContent('Phòng có công việc12');
-    expect(overview).toHaveTextContent('Đang dọn3');
-    expect(overview).toHaveTextContent('4/12 phòng hoàn thành (33%)');
-    expect(within(screen.getByTestId('hk-quick')).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
-      '/app/hk/rooms',
-      '/app/hk/staff',
-      '/app/hk/kpi',
-      '/app/hk/report',
-    ]);
-    expect(overview).toHaveTextContent('500.000 ₫');
-    // On shift, with its own progress beside it.
-    const working = screen.getByTestId('hk-working');
-    expect(working).toHaveTextContent('Buồng phòng Một');
-    expect(working).toHaveTextContent('3/6 xong');
+    // Kept: the day's progress, and no dead "choose a branch" line.
+    expect(screen.getByTestId('hk-overview-groups')).toHaveTextContent('Tiến độ công việc hôm nay');
+    expect(screen.queryByText(/Chọn một chi nhánh/)).not.toBeInTheDocument();
     // The day's groups, read-only: who has it, its floors, each room's status.
     const group = await screen.findByTestId('overview-group-1');
     expect(group).toHaveTextContent('Công việc 1');
@@ -283,37 +275,59 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     expect(within(screen.getByRole('main')).queryByRole('button', { name: /Tạo công việc|Nhận công việc|Chỉnh sửa/ })).not.toBeInTheDocument();
   });
 
-  it('gives the Admin the same screens as one menu group', async () => {
+  it('gives the Admin the same six entries as one menu group, and keeps its branch filter on "Công việc chung"', async () => {
+    const CN2 = { id: 2, code: 'LTT', hotelName: 'KAS', address: '260 Lý Tự Trọng', branchNumber: 2 };
     installApiMock(
       shell(ADMIN_USER, {
-        [`GET /api/housekeeping/manager/overview?date=${TODAY}`]: () => ({
+        'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, CN2] } }),
+        [GROUPS_URL]: () => ({
           status: 200,
-          body: {
-            workDate: TODAY,
-            rooms: { total: 0, notStarted: 0, inProgress: 0, completed: 0, priority: 0, unassigned: 0 },
-            working: [],
-            employees: [],
-            inspections: 0,
-            findings: 0,
-            collectedAmount: 0,
-            pendingCollections: 0,
-          },
+          body: { groups: [workGroup('g1', 1, [task('a1', { roomNumber: '101', floor: '1', taskCodes: ['OUT'] })])] },
         }),
+        [`GET /api/housekeeping/manager/work-groups?date=${TODAY}&branchId=2`]: () => ({ status: 200, body: { groups: [] } }),
       }),
     );
     renderApp('/app/hk/overview');
-    // Every branch at once — no branch in the request.
-    expect(await screen.findByTestId('hk-overview')).toBeInTheDocument();
+    // "Tất cả chi nhánh" first: one block per branch with work today — none for an idle one.
+    expect(await screen.findByTestId('overview-branch-1')).toHaveTextContent('05 Trương Định');
+    expect(screen.getByTestId('overview-group-1')).toHaveTextContent('Phòng 101');
+    expect(screen.queryByTestId('overview-branch-2')).not.toBeInTheDocument();
+    for (const id of REMOVED) expect(screen.queryByTestId(id)).not.toBeInTheDocument();
+    // The Admin's branch filter stays: one branch shows its own day.
+    await userEvent.click(screen.getByTestId('branch-select'));
+    await userEvent.click(screen.getByTestId('branch-option-2'));
+    expect(await screen.findByText('Chưa có công việc nào trong ngày. Công việc được tạo ở “Công việc cá nhân”.')).toBeInTheDocument();
+    expect(screen.queryByTestId('overview-group-1')).not.toBeInTheDocument();
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     // Open, since the page is inside it.
     expect(within(nav).getByTestId('nav-group-Quản lý buồng phòng')).toHaveAttribute('aria-expanded', 'true');
     const group = within(nav).getByTestId('nav-group-Quản lý buồng phòng').parentElement!;
-    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/overview', '/app/hk/rooms', '/app/hk/kpi']);
+    expect(within(group).getAllByRole('link').map((l) => l.textContent)).toEqual(MENU);
+    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(MENU_HREFS);
     expect(within(nav).queryByRole('link', { name: 'Phân công công việc' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Theo dõi nhân viên' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Báo cáo' })).not.toBeInTheDocument();
     // The separate "Báo cáo vấn đề" menu is untouched.
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
+  });
+
+  it('opens each store as a page being prepared — no stock, no figures pretended', async () => {
+    installApiMock(shell(MANAGER));
+    const pages: [string, string][] = [
+      ['/app/hk/store/linens', 'Kho Linens'],
+      ['/app/hk/store/amenities', 'Kho Amenities'],
+      ['/app/hk/store/equipment', 'Kho đồ dùng, thiết bị'],
+    ];
+    for (const [path, title] of pages) {
+      const view = renderApp(path);
+      const main = await screen.findByRole('main');
+      expect(await within(main).findByRole('heading', { level: 1, name: title })).toBeInTheDocument();
+      expect(main).toHaveTextContent('Đang được chuẩn bị');
+      expect(main).toHaveTextContent('chưa có số lượng tồn');
+      // The topbar names it too.
+      expect(screen.getAllByRole('heading', { level: 1, name: title })).toHaveLength(2);
+      view.unmount();
+    }
   });
 
   it('keeps "Theo dõi nhân viên" and "Báo cáo" reachable by address — off the menu, not removed', async () => {
@@ -351,7 +365,7 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
       }),
     );
     renderApp('/app/hk/rooms');
-    expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Tình trạng phòng' })).toBeInTheDocument();
+    expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Công việc cá nhân' })).toBeInTheDocument();
     expect(screen.getByTestId('hk-period-value')).toHaveTextContent(TODAY.split('-').reverse().join('/'));
     await userEvent.click(screen.getByTestId('work-create-open'));
     const dialog = await screen.findByRole('dialog');
@@ -1004,7 +1018,7 @@ describe('Quản lý buồng phòng — Phân công công việc', () => {
     // The list of the day's items, in "Tình trạng phòng"; no separate assignment screen.
     expect(await screen.findByTestId('work-orders-table')).toBeInTheDocument();
     expect(screen.getByTestId('board-view-list')).toHaveAttribute('aria-pressed', 'true');
-    expect(within(screen.getByRole('main')).getByRole('heading', { level: 1, name: 'Tình trạng phòng' })).toBeInTheDocument();
+    expect(within(screen.getByRole('main')).getByRole('heading', { level: 1, name: 'Công việc cá nhân' })).toBeInTheDocument();
     expect(screen.queryByTestId('assign-table')).not.toBeInTheDocument();
     first.unmount();
 
