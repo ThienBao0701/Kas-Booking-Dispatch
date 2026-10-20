@@ -27,7 +27,7 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
+import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportDepartment, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
 import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
@@ -44,6 +44,7 @@ import {
   ARCHIVE_PAGE_SIZE,
   ARCHIVABLE_CATEGORIES,
   activeJournalWhere,
+  archiveCutoff,
   archivedJournalWhere,
 } from './completionArchive';
 import {
@@ -88,6 +89,26 @@ import { NO_HISTORY } from './lateEntryText';
  * (Admin, Quản lý lễ tân, Tổng quản lý lễ tân) acting on a branch in its scope.
  */
 export type ReportActor = ShiftActor & { managedBranchIds?: readonly number[] };
+
+/**
+ * BỘ PHẬN BUỒNG PHÒNG'S OWN "BÁO CÁO VẤN ĐỀ" — the same journal, the same forms
+ * and the same completion, kept apart by `originDepartment`: a housekeeping
+ * record is never in Reception's lists, totals or exports, and Reception's are
+ * never in Housekeeping's. The writer's role decides the department; the
+ * request never does.
+ */
+export function isHousekeepingReporter(role: UserRole): boolean {
+  return role === 'HOUSEKEEPING' || role === 'HOUSEKEEPING_MANAGER';
+}
+
+/**
+ * What Bộ phận buồng phòng records in the journal (VII, the private reports, is
+ * its own model). "Dịch vụ phòng, KPI" is Reception's only — its money and KPI
+ * are the desk's.
+ */
+export const HOUSEKEEPING_REPORT_CATEGORIES = ['GUEST_REQUEST', 'FACILITY_ISSUE', 'HOTEL_DELIVERY'] as const;
+
+const DEPARTMENT_LABELS: Record<ReportDepartment, string> = { RECEPTION: 'Lễ tân', HOUSEKEEPING: 'Buồng phòng' };
 
 /**
  * WHO IS WRITING, AND ON WHICH SHIFT — resolved on the server, never read from
@@ -291,7 +312,15 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
      * "Admin tạo" / "Quản lý lễ tân tạo" — set when a supervisor entered the
      * record, null for the desk's own. Text, so it never relies on a colour.
      */
-    sourceLabel: supervisorSourceLabel(row.createdByRole),
+    sourceLabel:
+      row.originDepartment === 'HOUSEKEEPING'
+        ? row.createdByRole === 'HOUSEKEEPING_MANAGER'
+          ? 'Quản lý buồng phòng'
+          : 'Buồng phòng'
+        : supervisorSourceLabel(row.createdByRole),
+    /** Which department's journal — "Lễ tân" or "Buồng phòng". */
+    originDepartment: row.originDepartment,
+    departmentLabel: DEPARTMENT_LABELS[row.originDepartment],
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     summary: reportSummary(row),
@@ -492,13 +521,22 @@ export type SerializedReport = ReturnType<typeof serializeReport>;
  */
 export function reportVisibilityWhere(
   actor: ReportActor,
-  filter: { branchId?: number; branchIds?: readonly number[] } = {},
+  filter: { branchId?: number; branchIds?: readonly number[]; department?: ReportDepartment } = {},
 ): Prisma.ReceptionOperationalReportWhereInput {
   if (actor.role === 'RECEPTIONIST') {
-    return { branchId: actor.branchId ?? -1 };
+    return { branchId: actor.branchId ?? -1, originDepartment: 'RECEPTION' };
   }
   if (isReceptionSupervisor(actor.role)) {
-    return scopedBranchFilter(actor, filter.branchIds ?? filter.branchId);
+    // Only the Admin reads Bộ phận buồng phòng's records, and only when it asks for them.
+    const department = actor.role === 'ADMIN' && filter.department === 'HOUSEKEEPING' ? 'HOUSEKEEPING' : 'RECEPTION';
+    return { ...scopedBranchFilter(actor, filter.branchIds ?? filter.branchId), originDepartment: department };
+  }
+  // Quản lý buồng phòng: its branch's housekeeping records. A housekeeper: its own.
+  if (actor.role === 'HOUSEKEEPING_MANAGER') {
+    return { branchId: actor.branchId ?? -1, originDepartment: 'HOUSEKEEPING' };
+  }
+  if (actor.role === 'HOUSEKEEPING') {
+    return { createdByUserId: actor.id, originDepartment: 'HOUSEKEEPING' };
   }
   throw ApiError.forbidden('Bạn không có quyền xem báo cáo vận hành lễ tân.');
 }
@@ -905,6 +943,14 @@ export async function createReports(
       select: { id: true, shiftType: true },
     });
     writer = { branchId, shiftSessionId: open?.id ?? null, shiftType: open?.shiftType ?? null, name: actor.fullName };
+  } else if (isHousekeepingReporter(actor.role)) {
+    // A housekeeper's branch is its open shift's; a manager's, its own. Never the request's.
+    if (actor.branchId === null) throw ApiError.conflict('Bạn cần "Vào ca" tại chi nhánh trước khi báo cáo.');
+    const allowed: readonly string[] = HOUSEKEEPING_REPORT_CATEGORIES;
+    if (inputs.some((i) => !allowed.includes(i.category))) {
+      throw ApiError.forbidden('Bộ phận buồng phòng không ghi được loại báo cáo này.');
+    }
+    writer = { branchId: actor.branchId, shiftSessionId: null, shiftType: null, name: actor.fullName };
   } else {
     throw ApiError.forbidden('Bạn không có quyền ghi báo cáo vận hành.');
   }
@@ -917,6 +963,7 @@ export async function createReports(
     createdByUserId: actor.id,
     createdByNameSnapshot: writer.name,
     createdByRole: actor.role,
+    originDepartment: (isHousekeepingReporter(actor.role) ? 'HOUSEKEEPING' : 'RECEPTION') as ReportDepartment,
     createdAt: now,
   };
 
@@ -939,6 +986,8 @@ async function buildCreateData(
     createdByUserId: number;
     createdByNameSnapshot: string;
     createdByRole: UserRole;
+    /** Reception's when absent. */
+    originDepartment?: ReportDepartment;
     category: CreateReportInput['category'];
     createdAt: Date;
     /** "Nhập bù" only: the manager who actually entered it, and why. */
@@ -961,6 +1010,7 @@ async function buildCreateData(
     createdBy: { connect: { id: base.createdByUserId } },
     createdByNameSnapshot: base.createdByNameSnapshot,
     createdByRole: base.createdByRole,
+    originDepartment: base.originDepartment ?? 'RECEPTION',
     category: base.category,
     createdAt: base.createdAt,
   } satisfies Omit<Prisma.ReceptionOperationalReportCreateInput, 'category'> & {
@@ -1060,6 +1110,8 @@ async function buildCreateData(
 
 export interface ListReportsFilter {
   branchId?: number;
+  /** The Admin's choice of journal; every other role reads its own department's. */
+  department?: ReportDepartment;
   /** Several branches at once (a supervisor's multi-branch report). */
   branchIds?: readonly number[];
   category?: CreateReportInput['category'];
@@ -1235,10 +1287,12 @@ export async function listArchivedJournal(
     branchId?: number;
     /** "Mức độ"; every level when absent. */
     severity?: IssueSeverity;
+    /** The Admin's choice of journal (Reception's when absent). */
+    department?: ReportDepartment;
   } = {},
   client: PrismaClient = prisma,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
-  const where = archivedJournalWhere(reportVisibilityWhere(actor, { branchId: options.branchId }), now);
+  const where = archivedJournalWhere(reportVisibilityWhere(actor, { branchId: options.branchId, department: options.department }), now);
   return pageByCategory(
     {
       AND: [
@@ -1260,6 +1314,79 @@ export async function listArchivedJournal(
     ARCHIVE_PAGE_SIZE,
     client,
   );
+}
+
+/**
+ * BỘ PHẬN BUỒNG PHÒNG'S LIVE JOURNAL — its guest requests still open or
+ * completed in the last 12 hours (after that, "Hoàn thành vấn đề"), newest first. Withdrawn records are not here. The Admin reads a branch's (or
+ * every branch's) by asking for the department.
+ */
+export async function listHousekeepingJournal(
+  actor: ReportActor,
+  now: Date,
+  options: { branchId?: number } = {},
+  client: PrismaClient = prisma,
+): Promise<ReportDetail[]> {
+  const scope = reportVisibilityWhere(actor, { branchId: options.branchId, department: 'HOUSEKEEPING' });
+  const rows = await client.receptionOperationalReport.findMany({
+    where: {
+      AND: [
+        scope,
+        { originDepartment: 'HOUSEKEEPING', voidedAt: null },
+        { category: 'GUEST_REQUEST', OR: [{ guestRequest: { is: { completedAt: null } } }, { createdAt: { gt: archiveCutoff(now) } }] },
+      ],
+    },
+    include: REPORT_INCLUDE,
+    orderBy: { createdAt: 'desc' },
+    take: ACTIVE_PAGE_SIZE,
+  });
+  return prioritiseJournal(rows);
+}
+
+/**
+ * "MÃ EZ" → THE GUEST'S NAME, from the journal itself: the newest record the
+ * reader may see that carries this Mã EZ and a name. KAS keeps no guest
+ * register — the PMS does — so the journal is the one place a name was ever
+ * typed against a code. Null when none was: the name is then typed.
+ */
+export async function guestByEz(
+  actor: ReportActor,
+  ezRaw: unknown,
+  options: { branchId?: number } = {},
+  client: PrismaClient = prisma,
+): Promise<{ guestName: string; ezCode: string; recordedAt: string } | null> {
+  const ezCode = typeof ezRaw === 'string' ? ezRaw.trim() : '';
+  if (!ezCode || ezCode.length > 100) return null;
+  const ez = { equals: ezCode, mode: 'insensitive' as const };
+  const named = { not: null, notIn: [''] };
+  const row = await client.receptionOperationalReport.findFirst({
+    where: {
+      AND: [
+        reportVisibilityWhere(actor, { branchId: options.branchId }),
+        { voidedAt: null },
+        {
+          OR: [
+            { roomService: { is: { ezCode: ez } } },
+            { guestRequest: { is: { ezCode: ez } } },
+            { complaint: { is: { ezCode: ez } } },
+            { payment: { is: { ezCode: ez, guestName: named } } },
+          ],
+        },
+      ],
+    },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      createdAt: true,
+      roomService: { select: { guestName: true, ezCode: true } },
+      guestRequest: { select: { guestName: true, ezCode: true } },
+      complaint: { select: { guestName: true, ezCode: true } },
+      payment: { select: { guestName: true, ezCode: true } },
+    },
+  });
+  const detail = row?.roomService ?? row?.guestRequest ?? row?.complaint ?? row?.payment;
+  const guestName = detail?.guestName?.trim();
+  if (!row || !detail || !guestName) return null;
+  return { guestName, ezCode: detail.ezCode ?? ezCode, recordedAt: row.createdAt.toISOString() };
 }
 
 export async function countReports(
@@ -1308,6 +1435,16 @@ async function loadOwn(
     include: REPORT_INCLUDE,
   });
   if (!row) throw ApiError.notFound('Không tìm thấy báo cáo.');
+  // Bộ phận buồng phòng: its own records (a manager, its branch's); never Reception's.
+  if (isHousekeepingReporter(actor.role)) {
+    const own = actor.role === 'HOUSEKEEPING_MANAGER' ? row.branchId === actor.branchId : row.createdByUserId === actor.id;
+    if (row.originDepartment !== 'HOUSEKEEPING' || !own) throw ApiError.forbidden('Báo cáo không thuộc phạm vi của bạn.');
+    return row;
+  }
+  // Reception touches Reception's records; only the Admin reaches both departments.
+  if (row.originDepartment !== 'RECEPTION' && actor.role !== 'ADMIN') {
+    throw ApiError.forbidden('Báo cáo này thuộc bộ phận khác.');
+  }
   if (actor.role === 'RECEPTIONIST') {
     if (row.branchId !== actor.branchId) {
       throw ApiError.branchAccessDenied('Báo cáo không thuộc chi nhánh của bạn.');

@@ -26,6 +26,7 @@ import {
   listWorkOrders,
   reassignAwaitingCleaning,
   reassignableStaff,
+  releaseForOthers,
   workList,
   getTask,
   inspectTask,
@@ -400,6 +401,14 @@ export function createHousekeepingWorkRouter(): Router {
     (async () => {
       const body = z.object({ reason: z.string().max(1000).optional() }).parse(req.body ?? {});
       res.json({ task: await requestNoClean(actorOf(req), req.params.id!, body, getClock()) });
+    })().catch(next);
+  });
+
+  // "Chưa dọn — chuyển người khác dọn": inspected, left for a colleague to clean.
+  router.post('/housekeeping/work/tasks/:id/release', ...gate, (req, res, next) => {
+    (async () => {
+      const body = z.object({ reason: z.string().max(1000).optional() }).parse(req.body ?? {});
+      res.json({ task: await releaseForOthers(actorOf(req), req.params.id!, body, getClock()) });
     })().catch(next);
   });
 

@@ -21,11 +21,13 @@ export function useDeliveries(
   branchId?: number,
   /** The shared report filter's "Ca". */
   shiftType?: string,
+  /** The Admin's "Buồng phòng" view. */
+  department?: 'HOUSEKEEPING',
 ) {
   return useQuery({
     // The period is part of the key: another period is another list.
-    queryKey: [...DELIVERIES_KEY, scope, received ?? null, branchId ?? null, shiftType ?? null],
-    queryFn: () => deliveriesApi.list(scope, { ...(received ?? {}), branchId, shiftType }),
+    queryKey: [...DELIVERIES_KEY, scope, received ?? null, branchId ?? null, shiftType ?? null, department ?? null],
+    queryFn: () => deliveriesApi.list(scope, { ...(received ?? {}), branchId, shiftType, department }),
     enabled,
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,

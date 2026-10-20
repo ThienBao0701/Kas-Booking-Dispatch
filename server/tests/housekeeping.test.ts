@@ -166,10 +166,10 @@ describe('recording an inspection', () => {
 });
 
 describe('what a housekeeping account may reach', () => {
+  // "/api/issues" is reachable now: its own branch's incidents, for its "Báo cáo vấn đề" (tests/housekeepingReports.test.ts).
   it.each([
     '/api/bookings/new',
     '/api/bookings/history',
-    '/api/issues',
     '/api/issues/summary',
     '/api/reception/reports',
     '/api/reception/shifts/cash',

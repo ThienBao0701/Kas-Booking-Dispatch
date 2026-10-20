@@ -36,6 +36,7 @@ const TITLE = 'Báo cáo các vấn đề và tình hình quan trọng';
  * receptionist; every active Admin).
  */
 const RECIPIENT_GROUPS: readonly { role: string; label: string }[] = [
+  { role: 'HOUSEKEEPING_MANAGER', label: 'Quản lý buồng phòng' },
   { role: 'RECEPTION_MANAGER', label: 'Quản lí lễ tân (Giám sát)' },
   { role: 'RECEPTION_GENERAL_MANAGER', label: 'Tổng quản lí lễ tân' },
   { role: 'ADMIN', label: 'Admin' },

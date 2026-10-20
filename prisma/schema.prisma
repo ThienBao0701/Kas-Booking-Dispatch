@@ -137,6 +137,9 @@ enum RoomTaskEventType {
   NO_CLEAN_REQUESTED
   NO_CLEAN_APPROVED
   NO_CLEAN_REJECTED
+  /// "Chưa dọn — chuyển người khác dọn": the housekeeper who inspected the room
+  /// released it, still to clean, to the branch's other housekeepers.
+  RELEASED
 }
 
 /// A reception work shift, in Asia/Ho_Chi_Minh wall-clock time. The clock times
@@ -687,6 +690,15 @@ model User {
   accountAuditsMade        AccountAudit[]                @relation("AccountAuditActor")
   adminOverrideSet         AdminOverrideCredential[]     @relation("AdminOverrideSetBy")
 
+  /// Housekeeping warehouses: who created, received, counted, moved, reported and reviewed.
+  inventoryItemsCreated   InventoryItem[]         @relation("InventoryItemCreator")
+  inventoryMovements      InventoryMovement[]     @relation("InventoryMovementActor")
+  inventoryReceipts       InventoryReceipt[]      @relation("InventoryReceiptCreator")
+  inventoryCounts         InventoryCount[]        @relation("InventoryCountCreator")
+  inventoryTransfers      InventoryTransfer[]     @relation("InventoryTransferCreator")
+  inventoryDamageReported InventoryDamageReport[] @relation("InventoryDamageReporter")
+  inventoryDamageReviewed InventoryDamageReport[] @relation("InventoryDamageReviewer")
+
   @@index([branchId])
   @@index([role])
 }
@@ -806,6 +818,14 @@ model Branch {
   housekeepingWorkGroups  HousekeepingWorkGroup[]
   confidentialReports     ConfidentialReport[]
   issueDispatches         HotelIssueDispatch[]
+
+  /// Its three housekeeping warehouses (Kho Linens / Amenities / đồ dùng, thiết bị).
+  inventoryItems         InventoryItem[]
+  inventoryMovements     InventoryMovement[]
+  inventoryReceipts      InventoryReceipt[]
+  inventoryCounts        InventoryCount[]
+  inventoryTransfers     InventoryTransfer[]
+  inventoryDamageReports InventoryDamageReport[]
 }
 
 /// A charge document ("Chứng từ"): evidence that a guest was, or was not,
@@ -2055,6 +2075,9 @@ model HotelIssue {
   @@index([voidedAt])
   @@index([reportVerdict])
   @@index([enteredByUserId])
+
+  /// Housekeeping damage reports that name this incident as their source.
+  inventoryDamage InventoryDamageReport[]
 }
 
 /// What a Chat box submission is ABOUT.
@@ -2696,6 +2719,13 @@ enum RoomServiceType {
 /// CREATE IS ABSENT ON PURPOSE. The report row already carries its creator,
 /// their name snapshot, their shift and the instant — an audit row saying the
 /// same thing again would be a second copy that can drift from the first.
+/// The department a journal record came from. Reception's screens read only
+/// RECEPTION records; Bộ phận buồng phòng's "Báo cáo vấn đề" reads only its own.
+enum ReportDepartment {
+  RECEPTION
+  HOUSEKEEPING
+}
+
 enum ReceptionReportAuditAction {
   /// A field was corrected. One row PER FIELD, with old and new values.
   EDIT
@@ -2757,6 +2787,9 @@ model ReceptionOperationalReport {
   /// / RECEPTION_GENERAL_MANAGER mark a record entered from the supervision
   /// screen ("Admin tạo"), which may carry no shift at all.
   createdByRole         UserRole?
+  /// Which department's journal this record belongs to — set by the server from
+  /// the writer's role. Every row written before it existed is Reception's.
+  originDepartment      ReportDepartment @default(RECEPTION)
 
   category OperationalReportCategory
 
@@ -2811,6 +2844,7 @@ model ReceptionOperationalReport {
   @@index([createdByUserId])
   @@index([voidedAt])
   @@index([enteredByUserId])
+  @@index([originDepartment, branchId, createdAt])
 }
 
 /// ONE PAYMENT ROW — "Thu tiền thanh toán".
@@ -3559,6 +3593,10 @@ model HousekeepingRoomTask {
   events       HousekeepingRoomTaskEvent[]
   workGroup    HousekeepingWorkGroup?      @relation(fields: [workGroupId], references: [id])
 
+  /// The stock its completed cleaning moved (clean linen and supplies out, dirty linen in).
+  inventoryMovements InventoryMovement[]
+  inventoryDamage    InventoryDamageReport[]
+
   @@unique([branchId, workDate, roomNumber, itemKey, cycleNumber])
   @@unique([groupId, groupIndex])
   @@index([branchId, workDate])
@@ -3868,4 +3906,319 @@ model HotelIssueDispatch {
   @@index([branchId, createdAt])
   @@index([assignedByUserId])
   @@index([completedByUserId])
+}
+
+/**
+ * ================================================================== *
+ * HOUSEKEEPING WAREHOUSES — Kho Linens, Kho Amenities, Kho đồ dùng, thiết bị
+ * ==================================================================
+ */
+
+/// The three warehouses of a branch.
+enum InventoryWarehouse {
+  /// Kho Linens — reusable linen: clean, dirty, at the laundry, damaged.
+  LINEN
+  /// Kho Amenities — guest supplies, consumed in the rooms.
+  AMENITY
+  /// Kho đồ dùng, thiết bị — housekeeping tools, equipment and supplies.
+  EQUIPMENT
+}
+
+/// Where a quantity of an item is. A balance exists per item and state.
+enum InventoryStockState {
+  /// Sạch / sẵn dùng.
+  AVAILABLE
+  /// Bẩn — linen collected from a room, waiting for the laundry.
+  DIRTY
+  /// Đang giặt — NO LONGER USED ("Giặt xong" brings dirty linen back to clean);
+  /// kept so the enum is never changed destructively.
+  IN_LAUNDRY
+  /// Đang sử dụng — equipment issued out.
+  ISSUED
+  /// Hỏng / không thể tái sử dụng — reported, out of the usable stock.
+  DAMAGED
+}
+
+/// Why a balance changed. Every change is one movement row.
+enum InventoryMovementType {
+  /// "Lưu phiếu nhập" — a delivery received.
+  RECEIPT
+  /// Clean linen / supplies put into a room by a completed cleaning.
+  ROOM_ISSUE
+  /// Dirty linen collected from a room by a completed cleaning.
+  DIRTY_COLLECTED
+  /// Dirty linen sent to the laundry.
+  LAUNDRY_SENT
+  /// Linen back from the laundry, clean.
+  LAUNDRY_RETURNED
+  /// Equipment issued out / returned.
+  STOCK_ISSUED
+  STOCK_RETURNED
+  /// "Báo hỏng" — out of its state into DAMAGED.
+  DAMAGE
+  /// A damage report the Admin rejected — back to where it came from.
+  DAMAGE_REVERSAL
+  /// "Kiểm kho" — the recorded balance set to the physical count.
+  COUNT_ADJUSTMENT
+}
+
+/// A move between states of the same items.
+enum InventoryTransferKind {
+  /// NO LONGER USED (there is no "đang giặt" stage); kept, never removed.
+  LAUNDRY_SEND
+  /// "Giặt xong": DIRTY → AVAILABLE
+  LAUNDRY_RETURN
+  /// AVAILABLE → ISSUED
+  STOCK_ISSUE
+  /// ISSUED → AVAILABLE
+  STOCK_RETURN
+}
+
+/// A damage report's review by the Admin.
+enum InventoryDamageStatus {
+  PENDING
+  /// Seen: the write-off stands.
+  ACKNOWLEDGED
+  /// Not damaged after all: reversed by a DAMAGE_REVERSAL movement.
+  REJECTED
+}
+
+/// ONE ITEM OF ONE BRANCH'S WAREHOUSE, and its variant — a King and a Queen
+/// bedsheet are two items, never one balance. Never deleted once used:
+/// `archivedAt` takes it out of receipts and issues and keeps its history.
+model InventoryItem {
+  id                    String             @id @default(cuid())
+  branchId              Int
+  warehouse             InventoryWarehouse
+  name                  String
+  /// Size / variant — "K" / "Q" / "T" (King / Queen / Twin) for bed linen; '' when none.
+  variant               String             @default("")
+  code                  String?
+  unit                  String
+  /// The "Dọn phòng" form field this item IS ("LINEN:BED_SHEET:K",
+  /// "QTY:BATH_TOWEL", "REPLACED:SHAMPOO"): a completed cleaning moves its stock.
+  catalogKey            String?
+  /// "Sắp hết" below this — only when a manager set one.
+  lowStockThreshold     Int?
+  note                  String?
+  archivedAt            DateTime?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  branch        Branch                  @relation(fields: [branchId], references: [id])
+  createdBy     User                    @relation("InventoryItemCreator", fields: [createdByUserId], references: [id])
+  balances      InventoryBalance[]
+  movements     InventoryMovement[]
+  receiptLines  InventoryReceiptLine[]
+  countLines    InventoryCountLine[]
+  transferLines InventoryTransferLine[]
+  damageReports InventoryDamageReport[]
+
+  @@index([branchId, warehouse])
+}
+
+/// THE CURRENT QUANTITY of one item in one state — a projection of its
+/// movements, written in the same transaction as each one. Never negative
+/// (a CHECK constraint, under every concurrent writer).
+model InventoryBalance {
+  itemId    String
+  state     InventoryStockState
+  quantity  Int                 @default(0)
+  updatedAt DateTime            @updatedAt
+
+  item InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, state])
+}
+
+/// THE LEDGER — every change of every balance, with its source. `sourceKey`
+/// names the action ("TASK:<id>", "RECEIPT:<id>", …): one row per action, item
+/// and state, so a retried action can never move stock twice.
+model InventoryMovement {
+  id                String                @id @default(cuid())
+  branchId          Int
+  itemId            String
+  warehouse         InventoryWarehouse
+  state             InventoryStockState
+  /// Signed: + into the state, − out of it.
+  delta             Int
+  balanceAfter      Int
+  type              InventoryMovementType
+  sourceKey         String
+  reason            String?
+  /// A room cleaning's room, task and business day.
+  roomNumber        String?
+  workDate          String?
+  taskId            String?
+  receiptId         String?
+  countId           String?
+  transferId        String?
+  damageReportId    String?
+  actorUserId       Int
+  actorNameSnapshot String
+  actorRole         UserRole
+  createdAt         DateTime              @default(now())
+
+  branch       Branch                 @relation(fields: [branchId], references: [id])
+  item         InventoryItem          @relation(fields: [itemId], references: [id])
+  task         HousekeepingRoomTask?  @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  receipt      InventoryReceipt?      @relation(fields: [receiptId], references: [id], onDelete: Restrict)
+  count        InventoryCount?        @relation(fields: [countId], references: [id], onDelete: Restrict)
+  transfer     InventoryTransfer?     @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  damageReport InventoryDamageReport? @relation(fields: [damageReportId], references: [id], onDelete: Restrict)
+  actor        User                   @relation("InventoryMovementActor", fields: [actorUserId], references: [id])
+
+  @@unique([sourceKey, itemId, state])
+  @@index([branchId, createdAt])
+  @@index([itemId, createdAt])
+  @@index([taskId])
+}
+
+/// "PHIẾU NHẬP" — one delivery, many items, saved whole or not at all.
+model InventoryReceipt {
+  id                    String             @id @default(cuid())
+  branchId              Int
+  warehouse             InventoryWarehouse
+  /// The client's key for this submission: a retried save finds this receipt.
+  requestId             String             @unique
+  receivedAt            DateTime
+  reference             String?
+  note                  String?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdAt             DateTime           @default(now())
+
+  branch    Branch                 @relation(fields: [branchId], references: [id])
+  createdBy User                   @relation("InventoryReceiptCreator", fields: [createdByUserId], references: [id])
+  lines     InventoryReceiptLine[]
+  movements InventoryMovement[]
+
+  @@index([branchId, createdAt])
+}
+
+model InventoryReceiptLine {
+  id        String  @id @default(cuid())
+  receiptId String
+  itemId    String
+  quantity  Int
+  note      String?
+
+  receipt InventoryReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  item    InventoryItem    @relation(fields: [itemId], references: [id])
+
+  @@unique([receiptId, itemId])
+}
+
+/// "KIỂM KHO" — a physical count: per line the recorded and the counted
+/// quantity, and the reason for any difference.
+model InventoryCount {
+  id                    String             @id @default(cuid())
+  branchId              Int
+  warehouse             InventoryWarehouse
+  requestId             String             @unique
+  /// "Khai báo tồn đầu kỳ": the first count of items with no stock history yet —
+  /// how a branch's opening balance is set, by a counted, audited document.
+  opening               Boolean            @default(false)
+  note                  String?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdByRole         UserRole
+  createdAt             DateTime           @default(now())
+
+  branch    Branch               @relation(fields: [branchId], references: [id])
+  createdBy User                 @relation("InventoryCountCreator", fields: [createdByUserId], references: [id])
+  lines     InventoryCountLine[]
+  movements InventoryMovement[]
+
+  @@index([branchId, createdAt])
+}
+
+model InventoryCountLine {
+  id              String              @id @default(cuid())
+  countId         String
+  itemId          String
+  state           InventoryStockState
+  systemQuantity  Int
+  countedQuantity Int
+  difference      Int
+  reason          String?
+
+  count InventoryCount @relation(fields: [countId], references: [id], onDelete: Cascade)
+  item  InventoryItem  @relation(fields: [itemId], references: [id])
+
+  @@unique([countId, itemId, state])
+}
+
+/// Linen to and from the laundry; equipment issued out and returned.
+model InventoryTransfer {
+  id                    String                @id @default(cuid())
+  branchId              Int
+  warehouse             InventoryWarehouse
+  kind                  InventoryTransferKind
+  requestId             String                @unique
+  note                  String?
+  createdByUserId       Int
+  createdByNameSnapshot String
+  createdAt             DateTime              @default(now())
+
+  branch    Branch                  @relation(fields: [branchId], references: [id])
+  createdBy User                    @relation("InventoryTransferCreator", fields: [createdByUserId], references: [id])
+  lines     InventoryTransferLine[]
+  movements InventoryMovement[]
+
+  @@index([branchId, createdAt])
+}
+
+model InventoryTransferLine {
+  id         String @id @default(cuid())
+  transferId String
+  itemId     String
+  quantity   Int
+
+  transfer InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  item     InventoryItem     @relation(fields: [itemId], references: [id])
+
+  @@unique([transferId, itemId])
+}
+
+/// "BÁO HỎNG / KHÔNG THỂ TÁI SỬ DỤNG" — reported by the Quản lý buồng phòng,
+/// reviewed by the Admin. Submitting moves the quantity into DAMAGED at once;
+/// a rejection moves it back by its own movement — history is never deleted.
+model InventoryDamageReport {
+  id                     String                @id @default(cuid())
+  branchId               Int
+  warehouse              InventoryWarehouse
+  itemId                 String
+  quantity               Int
+  /// The state the quantity was taken out of.
+  fromState              InventoryStockState
+  reason                 String
+  roomNumber             String?
+  /// The housekeeping work item it came from, if any — the same branch's, and
+  /// the same room as `roomNumber` (checked by the service).
+  taskId                 String?
+  /// The technical incident it relates to, if any — the same branch's.
+  issueId                String?
+  requestId              String                @unique
+  status                 InventoryDamageStatus @default(PENDING)
+  reportedByUserId       Int
+  reportedByNameSnapshot String
+  reportedAt             DateTime
+  reviewedByUserId       Int?
+  reviewedByNameSnapshot String?
+  reviewedAt             DateTime?
+  reviewNote             String?
+
+  branch     Branch                @relation(fields: [branchId], references: [id])
+  item       InventoryItem         @relation(fields: [itemId], references: [id])
+  task       HousekeepingRoomTask? @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  issue      HotelIssue?           @relation(fields: [issueId], references: [id], onDelete: Restrict)
+  reportedBy User                  @relation("InventoryDamageReporter", fields: [reportedByUserId], references: [id])
+  reviewedBy User?                 @relation("InventoryDamageReviewer", fields: [reviewedByUserId], references: [id])
+  movements  InventoryMovement[]
+
+  @@index([branchId, status, reportedAt])
+  @@index([issueId])
 }

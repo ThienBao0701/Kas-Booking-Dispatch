@@ -974,7 +974,7 @@ export function IncidentTable({
   const status: DataColumn<Issue> = {
     key: 'status',
     header: 'Trạng thái',
-    className: 'whitespace-nowrap',
+    className: 'w-[1%] whitespace-nowrap',
     render: statusCell,
   };
   /** "Người sửa" from the attempts themselves, never from the reporter. */
@@ -1040,7 +1040,7 @@ export function IncidentTable({
     { ...location, className: 'min-w-[5rem] sm:min-w-[7rem] font-medium text-slate-800' },
     {
       ...issue,
-      className: 'min-w-[6rem] sm:min-w-[9rem] max-w-[20rem]',
+      className: 'w-full min-w-[6rem] sm:min-w-[9rem]',
       // The fault in full — it is what the glance is for, so it wraps rather than clamps.
       render: (i) => (
         <>
@@ -1058,7 +1058,7 @@ export function IncidentTable({
   const severity: DataColumn<Issue> = {
     key: 'severity',
     header: 'Mức độ',
-    className: 'whitespace-nowrap',
+    className: 'w-[1%] whitespace-nowrap',
     render: (i) => <SeverityBadge severity={i.severity} label={i.severityLabel} />,
   };
   const baseColumns: DataColumn<Issue>[] = summary
@@ -1072,7 +1072,7 @@ export function IncidentTable({
           render: (_i, index) => index + 1,
         },
         { ...location, className: 'min-w-[7rem] font-medium text-slate-800' },
-        { ...issue, className: 'min-w-[9rem] max-w-[18rem]' },
+        { ...issue, className: 'w-full min-w-[9rem]' },
         cause,
         reportedAt,
         repairer,

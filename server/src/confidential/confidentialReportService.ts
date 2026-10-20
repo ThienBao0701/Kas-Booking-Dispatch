@@ -46,6 +46,8 @@ const ROLE_LABELS: Partial<Record<UserRole, string>> = {
   RECEPTIONIST: 'Lễ tân',
   RECEPTION_MANAGER: 'Quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý',
+  HOUSEKEEPING: 'Buồng phòng',
+  HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
 };
 
 /** The longest report one submission may carry. */
@@ -58,10 +60,13 @@ export interface ConfidentialActor {
   fullName: string;
 }
 
-/** The roles that report upward. The Admin has nobody above it. */
-const SENDER_ROLES: readonly UserRole[] = ['RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'];
+/** The roles that report upward — Reception and Bộ phận buồng phòng. The Admin has nobody above it. */
+const SENDER_ROLES: readonly UserRole[] = ['RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'];
 /** The roles with an inbox. */
-const READER_ROLES: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
+const READER_ROLES: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING_MANAGER', 'ADMIN'];
+
+/** The roles whose report names their branch (a manager of several branches names none). */
+const BRANCH_SENDERS: readonly UserRole[] = ['RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'];
 
 export function canSend(role: UserRole): boolean {
   return SENDER_ROLES.includes(role);
@@ -72,7 +77,7 @@ export function canRead(role: UserRole): boolean {
 }
 
 /** The order the sender reads them in: the nearest superior first. */
-const UPWARD_ORDER: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
+const UPWARD_ORDER: readonly UserRole[] = ['HOUSEKEEPING_MANAGER', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
 
 /**
  * THE ROLES A SENDER MAY ADDRESS, nearest first — whether or not an account of
@@ -80,7 +85,10 @@ const UPWARD_ORDER: readonly UserRole[] = ['RECEPTION_MANAGER', 'RECEPTION_GENER
  * receptionist always sees "Quản lí lễ tân" even when its branch has none yet.
  */
 export function allowedRecipientRoles(role: UserRole): UserRole[] {
-  if (role === 'RECEPTIONIST') return [...UPWARD_ORDER];
+  if (role === 'RECEPTIONIST') return ['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'];
+  // Bộ phận buồng phòng reports to its branch's Quản lý buồng phòng and the Admin; the manager, to the Admin.
+  if (role === 'HOUSEKEEPING') return ['HOUSEKEEPING_MANAGER', 'ADMIN'];
+  if (role === 'HOUSEKEEPING_MANAGER') return ['ADMIN'];
   if (role === 'RECEPTION_MANAGER') return ['RECEPTION_GENERAL_MANAGER', 'ADMIN'];
   if (role === 'RECEPTION_GENERAL_MANAGER') return ['ADMIN'];
   return [];
@@ -109,6 +117,9 @@ export async function allowedRecipients(actor: ConfidentialActor) {
     );
   } else if (actor.role === 'RECEPTION_MANAGER') {
     superiors.push({ role: 'RECEPTION_GENERAL_MANAGER' });
+  } else if (actor.role === 'HOUSEKEEPING') {
+    // Its shift's branch's manager only — never another branch's.
+    superiors.push({ role: 'HOUSEKEEPING_MANAGER', branchId: actor.branchId ?? -1 });
   }
   const users = await prisma.user.findMany({
     where: { AND: [{ OR: superiors }, { active: true, id: { not: actor.id } }] },
@@ -158,7 +169,7 @@ export async function createConfidentialReport(actor: ConfidentialActor, input: 
       senderUserId: actor.id,
       senderNameSnapshot: actor.fullName,
       senderRole: actor.role,
-      senderBranchId: actor.role === 'RECEPTIONIST' ? actor.branchId : null,
+      senderBranchId: BRANCH_SENDERS.includes(actor.role) ? actor.branchId : null,
       category: input.category,
       content,
       createdAt: getClock().now(),

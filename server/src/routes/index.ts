@@ -21,6 +21,7 @@ import { createIssuesRouter } from './issues';
 import { createHotelDeliveriesRouter } from './hotelDeliveries';
 import { createHousekeepingRouter } from './housekeeping';
 import { createHousekeepingWorkRouter } from './housekeepingWork';
+import { createInventoryRouter } from './inventory';
 import { createReceptionShiftsRouter } from './receptionShifts';
 import { createReceptionReportsRouter } from './receptionReports';
 import { createDevTestRouter } from './devTest';
@@ -66,6 +67,7 @@ export function createApiRouter(): Router {
   router.use(createHotelDeliveriesRouter());
   // The daily room work, KPI and report — before the older housekeeping routes.
   router.use(createHousekeepingWorkRouter());
+  router.use(createInventoryRouter());
   router.use(createHousekeepingRouter());
   router.use(createDevTestRouter());
 

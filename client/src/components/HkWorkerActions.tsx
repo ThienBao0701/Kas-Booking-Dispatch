@@ -101,6 +101,61 @@ export function OwnAction({ task: t, busy, onStep }: { task: RoomTask; busy: boo
  * phòng's queue: the room stays in the work ("Chờ Quản lý xác nhận") until the
  * manager approves it — only then is it taken out. Nothing here decides.
  */
+/**
+ * "CHƯA DỌN — CHUYỂN NGƯỜI KHÁC DỌN" — the inspection stays, the cleaning goes
+ * to whichever colleague of the branch takes the room ("Nhận"). Not "Không cần
+ * dọn": the room still has to be cleaned.
+ */
+export function ReleaseRoomDialog({ task: t, onClose, onReleased }: { task: RoomTask; onClose: () => void; onReleased: () => void }) {
+  const queryClient = useQueryClient();
+  const [reason, setReason] = useState('');
+  const send = useMutation({
+    mutationFn: () => roomWorkApi.release(t.id, reason.trim() || undefined),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
+      onReleased();
+    },
+  });
+  return (
+    <Modal
+      open
+      title="Chưa dọn — chuyển người khác dọn"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={send.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => send.mutate()} loading={send.isPending} disabled={send.isPending} data-testid="release-send">
+            Chuyển người khác dọn
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3" data-testid="release-dialog">
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900">{placeText(t)}</p>
+        <p className="text-sm text-slate-600">
+          Kết quả kiểm tra của bạn được giữ lại. Phòng chưa dọn — nhân viên buồng phòng khác của chi nhánh sẽ nhận và dọn.
+        </p>
+        <label className="block text-sm font-medium text-slate-700" htmlFor="release-reason">
+          Lý do (nếu có)
+          <textarea
+            id="release-reason"
+            className="mt-1 w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            rows={2}
+            maxLength={1000}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Ví dụ: Hết ca, nhờ người khác dọn"
+            data-testid="release-reason"
+          />
+        </label>
+        {send.isError ? <ErrorAlert>{toUserMessage(send.error)}</ErrorAlert> : null}
+      </div>
+    </Modal>
+  );
+}
+
 export function NoCleanRequestDialog({ task: t, onClose, onSent }: { task: RoomTask; onClose: () => void; onSent: (task: RoomTask) => void }) {
   const queryClient = useQueryClient();
   const [reason, setReason] = useState('');

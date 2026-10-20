@@ -223,10 +223,13 @@ describe('one record, four views', () => {
     expect((await booking.get('/api/hotel-deliveries')).status).toBe(403);
   });
 
-  it('lets none of the reading departments write — and the Admin only for a named branch', async () => {
+  it('lets Technical write none, Housekeeping only into its own journal — and the Admin only for a named branch', async () => {
     const body = { category: 'HOTEL_DELIVERY', delivery: { department: 'TECHNICAL', itemName: 'X', quantity: 1 } };
     expect((await tech.post('/api/reception/reports').send(body)).status).toBe(403);
-    expect((await housekeeping.post('/api/reception/reports').send(body)).status).toBe(403);
+    // Bộ phận buồng phòng records its own hand-over — kept out of Reception's lists and counts.
+    const own = await housekeeping.post('/api/reception/reports').send(body);
+    expect(own.status).toBe(201);
+    expect(own.body.report.originDepartment).toBe('HOUSEKEEPING');
     // The Admin enters a record for one specific branch, never "Tất cả".
     expect((await admin.post('/api/reception/reports').send(body)).status).toBe(422);
   });

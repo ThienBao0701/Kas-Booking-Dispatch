@@ -30,6 +30,8 @@ export interface RoomWorkCatalog {
   linenSizes: CatalogItem[];
   quantities: CatalogItem[];
   replacements: CatalogItem[];
+  /** The linen whose used pieces are taken out — "Đồ bẩn thu về". */
+  collectable?: string[];
   /** "Ghi nhận đặc biệt": L/B, SO, DND, OOO, OS, LNL. */
   specialStatuses: (CatalogItem & { short: string })[];
   maxQuantity: number;
@@ -38,7 +40,10 @@ export interface RoomWorkCatalog {
 export interface CleaningForm {
   /** Per linen item: ONE type (K / Q / T) and how many — null only on a save from before counts. */
   linen: Record<string, { size: string; quantity: number | null }>;
+  /** The clean pieces put into the room — "Đồ sạch cấp cho phòng". */
   quantities: Record<string, number>;
+  /** "Đồ bẩn thu về" — the used linen taken out (an explicit 0: none). */
+  collected?: Record<string, number>;
   replaced: string[];
   /** The "Ghi nhận đặc biệt" ticked. */
   special: string[];
@@ -137,6 +142,8 @@ export interface RoomTask {
     decidedByName: string | null;
     decisionNote: string | null;
   } | null;
+  /** "Chưa dọn — chuyển người khác dọn": who left it to be cleaned, while nobody has taken it. */
+  handoff?: { byId: number; byName: string; at: string; reason: string | null } | null;
   phase?: WorkPhase;
   phaseLabel?: string;
   acceptedAt?: string | null;
@@ -431,6 +438,8 @@ export const roomWorkApi = {
   acceptGroup: (id: string) => api.post<{ group: WorkGroup }>(`/housekeeping/work/groups/${id}/accept`, {}),
   /** "Không cần dọn" for one room, with the reason. */
   requestNoClean: (id: string, reason: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/no-clean`, { reason }),
+  /** "Chưa dọn — chuyển người khác dọn": inspected, left for a colleague of the branch to clean. */
+  release: (id: string, reason?: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/release`, reason ? { reason } : {}),
   /** The housekeeper's own finished work of a day. */
   workerHistory: (date: string) => api.get<WorkerHistory>(`/housekeeping/work/history?date=${date}`),
   /** "Nhận" (an item created before work groups): exactly these items, all or none. */

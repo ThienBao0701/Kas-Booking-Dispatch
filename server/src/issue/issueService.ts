@@ -84,6 +84,10 @@ export function issueVisibilityWhere(actor: Actor, requestedBranchId?: number): 
   switch (actor.role) {
     case 'RECEPTIONIST':
       return { branchId: actor.branchId ?? -1 };
+    // Bộ phận buồng phòng follows its branch's incidents (its shift's; a manager's own branch).
+    case 'HOUSEKEEPING':
+    case 'HOUSEKEEPING_MANAGER':
+      return { branchId: actor.branchId ?? -1 };
     case 'ADMIN':
     case 'RECEPTION_GENERAL_MANAGER':
     case 'RECEPTION_MANAGER':
@@ -831,7 +835,8 @@ export async function createIssue(
   if (lateEntry) {
     if (!can(actor.role, 'reports.lateEntry')) throw ApiError.forbidden('Bạn không có quyền nhập bù báo cáo.');
     branchId = assertBranchInScope(actor, lateEntry.branchId);
-  } else if (actor.role === 'RECEPTIONIST') {
+  } else if (actor.role === 'RECEPTIONIST' || actor.role === 'HOUSEKEEPING' || actor.role === 'HOUSEKEEPING_MANAGER') {
+    // The desk's branch; Bộ phận buồng phòng's shift branch (a manager's own) — never the request's.
     branchId = actor.branchId;
   } else if (isReceptionSupervisor(actor.role)) {
     // A supervisor names ONE branch of its scope — never "all", never another's.
@@ -997,7 +1002,8 @@ export async function findSimilarIssues(
     category?: IssueCategory;
   },
 ): Promise<{ open: IssueDetail[]; recent: IssueDetail[] }> {
-  const branchId = actor.role === 'RECEPTIONIST' ? actor.branchId ?? -1 : q.branchId;
+  const ownBranch = actor.role === 'RECEPTIONIST' || actor.role === 'HOUSEKEEPING' || actor.role === 'HOUSEKEEPING_MANAGER';
+  const branchId = ownBranch ? actor.branchId ?? -1 : q.branchId;
   if (branchId === undefined) throw ApiError.validation('Vui lòng chọn chi nhánh.');
   const areaCategory = q.areaCategory ?? 'ROOM';
   const rules = AREA_FIELDS[areaCategory];
@@ -1011,7 +1017,7 @@ export async function findSimilarIssues(
     return { open: [], recent: [] };
   }
   const base: Prisma.HotelIssueWhereInput = {
-    AND: [issueVisibilityWhere(actor, actor.role === 'RECEPTIONIST' ? undefined : branchId)],
+    AND: [issueVisibilityWhere(actor, ownBranch ? undefined : branchId)],
     ...incidentKeyWhere(branchId, { areaCategory, ...location }, q.category ?? null),
   };
   const since = new Date(getClock().now().getTime() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);

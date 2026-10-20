@@ -28,6 +28,8 @@ import {
   createLateReports,
   createReports,
   type CreateReportInput,
+  guestByEz,
+  listHousekeepingJournal,
   lateEntryReceptionists,
   lateEntrySessions,
   listActiveJournal,
@@ -310,6 +312,8 @@ const archiveSchema = z
     shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
     verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
     severity: SEVERITY.optional(),
+    // The Admin's "Buồng phòng" archive; every other role reads its own department's.
+    department: z.enum(['RECEPTION', 'HOUSEKEEPING']).optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -338,16 +342,25 @@ function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
 const requireReception = requireRole('RECEPTIONIST');
 
 /**
- * WHO MAY WRITE A JOURNAL RECORD: the desk on its open shift, and the reception
+ * WHO MAY WRITE A JOURNAL RECORD: the desk on its open shift, the reception
  * supervisors (Admin, Quản lý lễ tân, Tổng quản lý lễ tân) on a branch of their
- * scope. The service decides the branch and the shift; this only admits the roles.
+ * scope, and Bộ phận buồng phòng in its own department's journal. The service
+ * decides the branch, the shift and the department; this only admits the roles.
  */
 const requireJournalWriter = requireRole(
   'RECEPTIONIST',
   'ADMIN',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
+  'HOUSEKEEPING',
+  'HOUSEKEEPING_MANAGER',
 );
+
+/** Bộ phận buồng phòng's journal, and the Admin reading it. */
+const requireHousekeepingJournal = requireRole('ADMIN', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER');
+
+/** "Hoàn thành": the desk, and Bộ phận buồng phòng on its own records (the service checks whose). */
+const requireCompleter = requireRole('RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER');
 
 /** A supervisor names its target branch; a receptionist's is its shift's. */
 const targetSchema = z.object({ branchId: z.number().int().positive().optional() });
@@ -457,6 +470,7 @@ export function createReceptionReportsRouter(): Router {
         verdict: q.verdict,
         branchId: q.branchId,
         severity: q.severity,
+        department: q.department,
       });
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),
@@ -464,6 +478,31 @@ export function createReceptionReportsRouter(): Router {
         range: q.from && q.to ? { from: q.from, to: q.to } : null,
         archiveAfterHours: COMPLETION_ARCHIVE_HOURS,
       });
+    })().catch(next);
+  });
+
+  /*
+    GET /api/reception/reports/housekeeping — Bộ phận buồng phòng's live
+    journal: its open (and recently completed) guest requests. Its own
+    department's only, whatever the role; the Admin may name a branch.
+  */
+  router.get('/reception/reports/housekeeping', requireAuth, requirePasswordChanged, requireHousekeepingJournal, (req, res, next) => {
+    (async () => {
+      const q = z.object({ branchId: z.coerce.number().int().positive().optional() }).parse(req.query);
+      const now = getClock().now();
+      const reports = await listHousekeepingJournal(actor(req.currentUser!), now, { branchId: q.branchId });
+      res.json({ reports: reports.map((r) => serializeReport(r, now)), archiveAfterHours: COMPLETION_ARCHIVE_HOURS });
+    })().catch(next);
+  });
+
+  /*
+    GET /api/reception/reports/guest?ez=… — "Mã EZ" → the guest's name, from the
+    newest record the reader may see that carries it. `guest` null: none did.
+  */
+  router.get('/reception/reports/guest', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
+    (async () => {
+      const q = z.object({ ez: z.string().max(100), branchId: z.coerce.number().int().positive().optional() }).parse(req.query);
+      res.json({ guest: await guestByEz(actor(req.currentUser!), q.ez, { branchId: q.branchId }) });
     })().catch(next);
   });
 
@@ -685,7 +724,7 @@ export function createReceptionReportsRouter(): Router {
     The body carries only the optional handling text; who, when and on which
     shift come from the session and the server clock.
   */
-  router.post('/reception/reports/:id/complete', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  router.post('/reception/reports/:id/complete', requireAuth, requirePasswordChanged, requireCompleter, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = completeSchema.parse(req.body ?? {});

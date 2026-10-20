@@ -19,13 +19,14 @@
 import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
-import { getClock, type Clock } from '../lib/clock';
+import { getClock, hcmDateOnly, type Clock } from '../lib/clock';
 import { branchScopeOf, scopeIncludes, type BranchScope } from '../auth/branchScope';
 import { catalogRoom } from '../room/branchRooms';
 import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch, openSegmentFor } from './workShiftService';
+import { applyCleaningStock } from './inventoryLedger';
 import { can } from '../auth/capabilities';
 import {
   AREA_KIND_LABELS,
@@ -71,6 +72,7 @@ const EVENT_LABELS: Record<TaskRow['events'][number]['type'], string> = {
   NO_CLEAN_REQUESTED: 'Báo không cần dọn',
   NO_CLEAN_APPROVED: 'Duyệt không cần dọn',
   NO_CLEAN_REJECTED: 'Từ chối không cần dọn',
+  RELEASED: 'Chưa dọn — chuyển người khác dọn',
 };
 
 const REVIEWED_LOCKED = 'Phòng này đã được đánh giá — lần dọn đã đánh giá không thể thay đổi.';
@@ -184,6 +186,17 @@ export function assertAssignee(row: TaskRow, actor: HousekeepingActor): void {
   if (row.voidedAt) throw ApiError.conflict('Công việc phòng này đã bị xóa.');
 }
 
+/**
+ * WORK IS DONE ON ITS DAY. Tomorrow's rooms ("Phân công việc ngày hôm sau")
+ * may be read and accepted today, never inspected or cleaned before their day.
+ */
+export function assertWorkDayStarted(row: { workDate: string }, clock: Clock): void {
+  if (row.workDate > hcmDateOnly(clock.now())) {
+    const [y, m, d] = row.workDate.split('-');
+    throw ApiError.conflict(`Công việc của ngày ${d}/${m}/${y} — chưa thể bắt đầu trước ngày đó.`);
+  }
+}
+
 /** How far back a shift at a branch still makes a housekeeper one of its staff. */
 const BRANCH_STAFF_DAYS = 30;
 
@@ -275,6 +288,8 @@ export function serializeTask(row: TaskRow, opts: { money: boolean; now?: Date }
           decisionNote: row.noCleanDecisionNote,
         }
       : null,
+    /** "Chưa dọn — chuyển người khác dọn": the latest release, while nobody has taken the room since. */
+    handoff: handoffOf(row),
     /** Where the item stands, in the work's own order (see workAreas.workPhase). */
     phase: workPhase(row),
     phaseLabel: WORK_PHASE_LABELS[workPhase(row)],
@@ -349,6 +364,15 @@ export function serializeTask(row: TaskRow, opts: { money: boolean; now?: Date }
 }
 
 export type SerializedRoomTask = ReturnType<typeof serializeTask>;
+
+/** The open handoff: released by its inspector and not taken by anyone yet. */
+function handoffOf(row: TaskRow) {
+  if (row.assigneeUserId !== null) return null;
+  const last = [...row.events].reverse().find((e) => e.type === 'RELEASED');
+  if (!last) return null;
+  const detail = (last.detail ?? {}) as { reason?: string | null };
+  return { byId: last.actorUserId, byName: last.actorNameSnapshot, at: last.createdAt.toISOString(), reason: detail.reason ?? null };
+}
 
 /* ------------------------------------------------------------------ *
  * The manager's board
@@ -803,6 +827,7 @@ export async function inspectTask(
   const row = await loadTask(id, client);
   assertAssignee(row, actor);
   assertNotWaitingNoClean(row);
+  assertWorkDayStarted(row, clock);
   if (row.state !== 'NOT_STARTED' || row.inspectionId) throw ApiError.conflict('Phòng này đã được kiểm.');
   if (row.areaKind !== 'ROOM') return inspectArea(actor, row, input, clock, client);
   await createInspection({ roomNumber: row.roomNumber, issues: input.issues }, actor, clock, client, {
@@ -839,6 +864,7 @@ export async function startTask(actor: HousekeepingActor, id: string, clock: Clo
   const row = await loadTask(id, client);
   assertAssignee(row, actor);
   assertNotWaitingNoClean(row);
+  assertWorkDayStarted(row, clock);
   if (row.state === 'NOT_STARTED') throw ApiError.conflict('Cần "Kiểm phòng" trước khi bắt đầu dọn.');
   if (row.state === 'IN_PROGRESS') throw ApiError.conflict('Phòng đang được dọn.');
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong.');
@@ -871,6 +897,9 @@ async function writeCleaning(
   const form = parseCleaningForm(raw);
   const now = clock.now();
   const stored = { ...form, savedAt: now.toISOString(), savedByUserId: actor.id, savedByName: actor.fullName };
+  // The Quản lý buồng phòng's OWN cleaning is not reviewed by itself: it is
+  // recorded "Đạt" as it completes (and says so in its history).
+  const selfReviewed = complete && actor.role === 'HOUSEKEEPING_MANAGER';
   await client.$transaction(async (tx) => {
     const durationSeconds = Math.max(0, Math.round((now.getTime() - row.startedAt!.getTime()) / 1000));
     const { count } = await tx.housekeepingRoomTask.updateMany({
@@ -883,6 +912,9 @@ async function writeCleaning(
             durationSeconds,
             cleanedByUserId: actor.id,
             cleanedByNameSnapshot: actor.fullName,
+            ...(selfReviewed
+              ? { reviewResult: 'PASSED' as const, reviewedAt: now, reviewedByUserId: actor.id, reviewedByNameSnapshot: actor.fullName }
+              : {}),
           }
         : { cleaning: stored },
     });
@@ -890,10 +922,15 @@ async function writeCleaning(
     await recordEvent(tx, id, complete ? 'COMPLETED' : 'CLEANING_SAVED', actor, now, {
       linen: Object.keys(form.linen).length,
       quantities: Object.keys(form.quantities).length,
+      collected: Object.keys(form.collected).length,
       replaced: form.replaced.length,
       special: form.special.length,
       ...(complete ? { durationSeconds } : {}),
     });
+    if (!complete) return;
+    if (selfReviewed) await recordEvent(tx, id, 'REVIEWED', actor, now, { result: 'PASSED', selfCleaned: true, reason: null, recleanRequested: false });
+    // The stock moves with the completion — the same transaction, so never one without the other, never twice.
+    await applyCleaningStock(tx, { id, branchId: row.branchId, roomNumber: row.roomNumber, workDate: row.workDate }, form, actor, now);
   });
   return serializeTask(await loadTask(id, client), { money: false });
 }
@@ -957,13 +994,92 @@ export async function workList(actor: HousekeepingActor, workDateRaw: unknown, c
       state: { not: 'COMPLETED' },
       // Items of a work group are listed — and accepted — with their group.
       workGroupId: null,
-      OR: [{ assigneeUserId: actor.id }, { assigneeUserId: null, state: 'NOT_STARTED', reviewResult: null }],
+      OR: [{ assigneeUserId: actor.id }, { assigneeUserId: null, ...CLAIMABLE }],
     },
     include: TASK_INCLUDE,
     orderBy: [{ priority: 'desc' }, { floor: 'asc' }, { roomNumber: 'asc' }, { createdAt: 'asc' }],
   });
   const now = getClock().now();
   return { working: true, tasks: rows.map((r) => serializeTask(r, { money: false, now })) };
+}
+
+/**
+ * WHAT A HOUSEKEEPER MAY TAKE ("Nhận"), besides its owner being nobody: an item
+ * nothing has happened to yet, or one its inspector released with "Chưa dọn —
+ * chuyển người khác dọn" — inspected, not started, not waiting for "Không cần dọn".
+ */
+const CLAIMABLE = {
+  OR: [
+    { state: 'NOT_STARTED' as const, reviewResult: null },
+    { state: 'INSPECTED' as const, startedAt: null, workGroupId: null, OR: [{ noCleanStatus: null }, { noCleanStatus: { not: 'PENDING' as const } }] },
+  ],
+} satisfies Prisma.HousekeepingRoomTaskWhereInput;
+
+/**
+ * "CHƯA DỌN — CHUYỂN NGƯỜI KHÁC DỌN" — the housekeeper who inspected the room
+ * leaves the cleaning to a colleague of the same branch.
+ *
+ * NOT "Không cần dọn" and NOT a completion: the room stays "Chờ dọn phòng", its
+ * inspection (and inspector) untouched, nothing is cleaned and no stock moves.
+ * It only loses its owner — and its work group, which stays the inspector's —
+ * so it shows on the branch's list for "Nhận"; the first housekeeper to take it
+ * cleans it, with the same guarded claim as any free item. Who released it,
+ * when and why is the item's history (RELEASED); who cleaned it, its completion.
+ */
+export async function releaseForOthers(
+  actor: HousekeepingActor,
+  id: string,
+  input: { reason?: unknown },
+  clock: Clock = getClock(),
+  client: PrismaClient = defaultPrisma,
+) {
+  // The manager gives a room to someone with "Giao lại"; this is the housekeeper's own act.
+  if (actor.role !== 'HOUSEKEEPING') throw ApiError.forbidden('Chỉ nhân viên buồng phòng mới chuyển phòng cho người khác dọn.');
+  const row = await loadTask(id, client);
+  assertAssignee(row, actor);
+  assertNotWaitingNoClean(row);
+  assertWorkDayStarted(row, clock);
+  await workingSegment(actor, row.branchId, client);
+  if (row.state === 'NOT_STARTED') throw ApiError.conflict('Cần "Kiểm phòng" trước khi chuyển phòng cho người khác dọn.');
+  if (row.state !== 'INSPECTED' || row.startedAt) throw ApiError.conflict('Phòng đã bắt đầu dọn — không thể chuyển cho người khác.');
+  const reason = text(input.reason, 1000, 'Lý do');
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.housekeepingRoomTask.updateMany({
+      where: { id, voidedAt: null, state: 'INSPECTED', startedAt: null, assigneeUserId: actor.id },
+      data: { assigneeUserId: null, assigneeNameSnapshot: null, acceptedAt: null, workGroupId: null },
+    });
+    if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    await recordEvent(tx, id, 'RELEASED', actor, now, {
+      reason,
+      fromId: actor.id,
+      fromName: actor.fullName,
+      group: row.workGroup?.number ?? null,
+      inspectionId: row.inspectionId,
+    });
+  });
+  // The colleagues on shift there now, and the branch's manager: a room waits for a cleaner.
+  const [onShift, managers, branch] = await Promise.all([
+    client.user.findMany({
+      where: { role: 'HOUSEKEEPING', active: true, id: { not: actor.id }, housekeepingSessions: { some: { endedAt: null, segments: { some: { branchId: row.branchId, endedAt: null } } } } },
+      select: { id: true },
+    }),
+    client.user.findMany({ where: { role: 'HOUSEKEEPING_MANAGER', active: true, branchId: row.branchId }, select: { id: true } }),
+    client.branch.findUnique({ where: { id: row.branchId }, select: { branchNumber: true } }),
+  ]);
+  const place = placeLabel(row.areaKind, row.areaKind === 'ROOM' ? row.roomNumber : null, row.floor);
+  await notifyOperational(
+    [...onShift.map((u) => ({ ...u, link: '/app/inspections' })), ...managers.map((u) => ({ ...u, link: '/app/hk/rooms' }))].map((u) => ({
+      userId: u.id,
+      kind: 'HOUSEKEEPING_ASSIGNED' as const,
+      title: `Cần người dọn — ${place}`,
+      body: `CN ${branch?.branchNumber ?? ''} · Đã kiểm tra bởi ${actor.fullName}, chưa dọn.${reason ? `\nLý do: ${reason}` : ''}`,
+      link: u.link,
+      dedupeKey: `HOUSEKEEPING_RELEASED:${id}:${u.id}:${now.toISOString()}`,
+    })),
+    client,
+  );
+  return serializeTask(await loadTask(id, client), { money: false });
 }
 
 /**
@@ -1004,7 +1120,7 @@ export async function claimTasks(
     await client.$transaction(async (tx) => {
       for (const id of ids) {
         const { count } = await tx.housekeepingRoomTask.updateMany({
-          where: { id, branchId: segment.branchId, assigneeUserId: null, voidedAt: null, state: 'NOT_STARTED', reviewResult: null },
+          where: { id, branchId: segment.branchId, assigneeUserId: null, voidedAt: null, ...CLAIMABLE },
           data: { assigneeUserId: actor.id, assigneeNameSnapshot: actor.fullName, acceptedAt: now },
         });
         if (count === 0) lost.push(id);
@@ -1037,6 +1153,7 @@ export async function claimTasks(
 export async function beginInspection(actor: HousekeepingActor, id: string, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   const row = await loadTask(id, client);
   assertAssignee(row, actor);
+  assertWorkDayStarted(row, clock);
   await workingSegment(actor, row.branchId, client);
   if (row.state !== 'NOT_STARTED') throw ApiError.conflict('Công việc này đã được kiểm tra.');
   if (row.inspectionStartedAt) return serializeTask(row, { money: false });

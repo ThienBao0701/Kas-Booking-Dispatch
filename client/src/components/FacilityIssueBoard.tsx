@@ -54,7 +54,10 @@ export function FacilityIssueBoard({
   compact,
   section,
   severity,
+  readOnly = false,
 }: {
+  /** Bộ phận buồng phòng and the Admin's read of it: report and follow — no correcting, returning or deleting here. */
+  readOnly?: boolean;
   onLogged: () => void | Promise<void>;
   onToast: (message: string) => void;
   /** "+ Báo cáo sự cố", owned by the category header above this board. */
@@ -123,7 +126,10 @@ export function FacilityIssueBoard({
         onRetry={() => void issues.refetch()}
         emptyTitle="Không có sự cố nào đang chờ xử lý"
         emptyMessage="Mọi sự cố cơ sở vật chất của chi nhánh đã được xử lý xong."
-        actions={(issue) =>
+        actions={
+          readOnly
+            ? undefined
+            : (issue) =>
           // A finished incident is a closed record: nothing left to correct.
           issue.status !== 'NEW' && issue.status !== 'IN_PROGRESS' ? (
             <span className="text-xs text-slate-300">—</span>

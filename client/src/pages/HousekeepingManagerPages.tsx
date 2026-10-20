@@ -21,9 +21,9 @@ import {
   ArrowRight,
   BarChart3,
   BedDouble,
-  Boxes,
   Brush,
   CalendarClock,
+  CalendarPlus,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
@@ -34,7 +34,6 @@ import {
   Clock,
   Download,
   FileSpreadsheet,
-  FileText,
   Hand,
   Hourglass,
   Info,
@@ -97,7 +96,6 @@ import {
   CodeTag,
   HkHeader,
   HkSection,
-  Meter,
   Metric,
   RateBar,
   ReviewCard,
@@ -109,7 +107,7 @@ import {
 } from '../components/HkManagerUi';
 import { initialReportFilter, reportBranchId, reportPeriod, type BranchChoice, type ReportFilterValue } from '../lib/reportFilter';
 import { formatVnd } from '../lib/money';
-import { formatDate, formatDateTime, hcmTimeOfDay, hcmToday } from '../lib/format';
+import { formatDate, formatDateTime, hcmTimeOfDay, hcmToday, hcmTomorrow } from '../lib/format';
 
 const FIELD =
   'mt-1 min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600';
@@ -153,7 +151,7 @@ function useScope(allowAll: boolean) {
   return { isAdmin, branchId, ready, picker, label };
 }
 
-function DateField({ date, onDate }: { date: string; onDate: (d: string) => void }) {
+function DateField({ date, onDate, max }: { date: string; onDate: (d: string) => void; max?: string }) {
   return (
     // The label on its own line, a modest gap, then the field — the KAS form rhythm.
     // `min-w-0 max-w-full appearance-none`: a native date input otherwise keeps
@@ -163,6 +161,7 @@ function DateField({ date, onDate }: { date: string; onDate: (d: string) => void
       <input
         type="date"
         value={date}
+        max={max}
         onChange={(e) => e.target.value && onDate(e.target.value)}
         data-testid="hk-date"
         className={`${FIELD} !mt-0 min-w-0 max-w-full appearance-none sm:w-44`}
@@ -522,26 +521,59 @@ export function HkOverviewPage() {
 }
 
 /* ------------------------------------------------------------------ *
- * The stores — pages being prepared, nothing pretended
+ * "Dọn phòng" — the manager's own rooms, worked like any housekeeper's
  * ------------------------------------------------------------------ */
 
-const STORES = {
-  linens: { title: 'Kho Linens', what: 'đồ vải (ga, gối, khăn…)' },
-  amenities: { title: 'Kho Amenities', what: 'đồ dùng cho khách (amenities)' },
-  equipment: { title: 'Kho đồ dùng, thiết bị', what: 'đồ dùng và thiết bị buồng phòng' },
-} as const;
-
-/** A store's place in the menu, said honestly: no stock is kept here yet. */
-export function HkStorePage({ store }: { store: keyof typeof STORES }) {
-  const { title, what } = STORES[store];
+/**
+ * THE MANAGER CLEANS TOO: its shift, today's free work groups to take, and its
+ * own rooms with their next step — the very worker flow ("Kiểm tra", "Bắt đầu
+ * dọn", the "Dọn phòng" form), on the same APIs. Its own cleaning needs no
+ * review: it is recorded "Đạt" as it completes, and moves the stock like anyone's.
+ */
+export function HkCleaningPage() {
+  const date = hcmToday();
+  const { user } = useAuth();
+  const [toast, setToast] = useState<string | null>(null);
+  const [accepting, setAccepting] = useState<WorkGroup | null>(null);
+  const myShift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift() });
+  const groups = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'groups', date, user?.branch?.id ?? null],
+    queryFn: () => roomWorkApi.workGroups({ date, branchId: user?.branch?.id }),
+    refetchInterval: 30_000,
+  });
+  const step = useWorkStep(() => void groups.refetch());
+  const dayGroups = (groups.data?.groups ?? []).filter((g) => g.counts.items > 0);
+  const own = dayGroups
+    .flatMap((g) => g.items)
+    .filter((t) => t.assignee?.id === user?.id && !t.voided && t.phase !== 'COMPLETED' && t.phase !== 'NO_CLEAN_PENDING');
   return (
     <div>
-      <HkHeader title={title} description={`Quản lý kho ${what}.`} />
-      <EmptyState
-        icon={<Boxes className="h-6 w-6" aria-hidden="true" />}
-        title="Đang được chuẩn bị"
-        message="Chức năng kho chưa được xây dựng: chưa có số lượng tồn, nhập hay xuất kho nào được ghi nhận ở đây."
-      />
+      <HkHeader title="Dọn phòng" description={`Phòng bạn tự dọn hôm nay, ${formatDate(date)} (${weekdayOf(date)}) — làm như nhân viên buồng phòng, không cần đánh giá sau dọn.`} />
+      <QueryState isLoading={groups.isLoading} isError={groups.isError} error={groups.error} onRetry={() => void groups.refetch()}>
+        <ManagerWorkPanel
+          shift={myShift.data?.shift ?? null}
+          loading={myShift.isLoading}
+          groups={dayGroups}
+          ownItems={own}
+          onAccept={setAccepting}
+          onStep={(t) => step.mutate(t)}
+          stepping={step.isPending ? (step.variables?.id ?? null) : null}
+          onChanged={setToast}
+        />
+      </QueryState>
+      {accepting ? (
+        <AcceptGroupDialog
+          group={accepting}
+          onClose={() => setAccepting(null)}
+          onAccepted={(g) => {
+            setAccepting(null);
+            setToast(`Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
+          }}
+          onRefresh={() => void groups.refetch()}
+        />
+      ) : null}
+      {step.isError ? <Toast message={toUserMessage(step.error)} onDone={() => step.reset()} /> : null}
+      <Toast message={toast} onDone={() => setToast(null)} />
     </div>
   );
 }
@@ -788,13 +820,19 @@ function OlderTaskCard({ task: t, onOpen }: { task: RoomTask; onOpen: () => void
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
           <p className="text-sm font-bold text-slate-900">
-            {placeText(t)} <span className="text-xs font-medium text-slate-500">(giao trước khi có nhóm công việc)</span>
+            {placeText(t)}{' '}
+            <span className="text-xs font-medium text-slate-500">{t.handoff ? '(chưa dọn — chờ người nhận)' : '(giao trước khi có nhóm công việc)'}</span>
             {t.reclean ? <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">Cần dọn lại</span> : null}
           </p>
           <p className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
             <span>{t.assignee ? `Người làm: ${t.assignee.name}` : 'Chưa giao'}</span>
             <PhaseBadge task={t} />
           </p>
+          {t.handoff ? (
+            <p className="text-xs text-amber-900" data-testid={`older-task-handoff-${t.roomNumber}`}>
+              Đã kiểm tra bởi {t.handoff.byName}, chuyển người khác dọn{t.handoff.reason ? ` · ${t.handoff.reason}` : ''}
+            </p>
+          ) : null}
           <CodeChips task={t} />
         </div>
         <Button variant="secondary" onClick={onOpen} aria-label={`Xem chi tiết phòng ${t.roomNumber}`} data-testid={`older-task-open-${t.roomNumber}`}>
@@ -808,8 +846,18 @@ function OlderTaskCard({ task: t, onOpen }: { task: RoomTask; onOpen: () => void
 type BoardView = 'floors' | 'groups' | 'list';
 const BOARD_VIEWS: BoardView[] = ['floors', 'groups', 'list'];
 
-export function HkRoomBoardPage() {
-  const [date, setDate] = useState(hcmToday());
+/**
+ * "Phân công ca, việc làm" — and, with `planTomorrow`, "Phân công việc ngày hôm
+ * sau": the same board and the same work-group service on TOMORROW's business
+ * day — its own day, never today's active work (the server holds each room once
+ * per day and refuses to start a day's work before that day).
+ */
+export function HkRoomBoardPage({ planTomorrow = false }: { planTomorrow?: boolean }) {
+  const [date, setDate] = useState(() => (planTomorrow ? hcmTomorrow() : hcmToday()));
+  const today = hcmToday();
+  // "Phân công ca, việc làm" is today and the days before it; a later day is prepared on its own page.
+  const future = !planTomorrow && date > today;
+  const pastDay = !planTomorrow && date < today;
   const scope = useScope(false);
   const [params, setParams] = useSearchParams();
   const view: BoardView = BOARD_VIEWS.includes(params.get('view') as BoardView) ? (params.get('view') as BoardView) : 'floors';
@@ -869,14 +917,7 @@ export function HkRoomBoardPage() {
   const withWork = tiles.filter((t) => t.task).length;
   // Approved "Không cần dọn" only — a pending request has its own queue above.
   const noCleanDone = tiles.filter((t) => t.task?.phase === 'NO_CLEAN').length;
-  // A Quản lý buồng phòng may also take a group and do the work itself — on a
-  // shift at its own branch (the server checks the role, branch, shift and owner).
-  const worksToo = user?.role === 'HOUSEKEEPING_MANAGER';
-  const myShift = useQuery({ queryKey: HOUSEKEEPING_SHIFT_KEY, queryFn: () => housekeepingApi.shift(), enabled: worksToo });
-  const onShift = Boolean(myShift.data?.shift?.current);
-  const [accepting, setAccepting] = useState<WorkGroup | null>(null);
-  const step = useWorkStep(() => void groups.refetch());
-  const mine = (t: RoomTask) => worksToo && t.assignee?.id === user?.id && !t.voided && t.phase !== 'COMPLETED' && t.phase !== 'NO_CLEAN_PENDING';
+  // This page gives out the work; the manager takes and cleans its own rooms on "Dọn phòng".
   const refreshing = tasks.isFetching || groups.isFetching;
   const refresh = () => {
     void tasks.refetch();
@@ -903,26 +944,8 @@ export function HkRoomBoardPage() {
               key={g.id}
               group={g}
               onEdit={() => setEditing(g)}
-              headerAction={
-                !worksToo ? null : !g.assignee ? (
-                  <Button
-                    onClick={() => setAccepting(g)}
-                    disabled={!onShift}
-                    title={onShift ? undefined : 'Vào ca làm việc để nhận công việc'}
-                    data-testid={`group-accept-${g.number}`}
-                  >
-                    <Hand className="h-4 w-4" aria-hidden="true" />
-                    Nhận công việc
-                  </Button>
-                ) : g.assignee.id === user?.id ? (
-                  <span className="self-center rounded-full bg-brand-100 px-3 py-1 text-sm font-semibold text-brand-800" data-testid={`group-mine-${g.number}`}>
-                    Công việc của bạn
-                  </span>
-                ) : null
-              }
               itemAction={(t) => (
                 <>
-                  {mine(t) ? <OwnAction task={t} busy={step.isPending && step.variables?.id === t.id} onStep={() => step.mutate(t)} /> : null}
                   <Button variant="ghost" onClick={() => setOpen(t)} aria-label={`Chi tiết ${placeText(t)}`} data-testid={`group-item-open-${t.id}`}>
                     Chi tiết
                   </Button>
@@ -941,23 +964,30 @@ export function HkRoomBoardPage() {
   return (
     <div>
       <HkHeader
-        title="Công việc cá nhân"
-        description="Tình trạng dọn phòng theo tầng và điều phối công việc buồng phòng trong ngày. Chọn một phòng để xem chi tiết và lịch sử."
+        title={planTomorrow ? 'Phân công việc ngày hôm sau' : 'Phân công ca, việc làm'}
+        description={
+          planTomorrow
+            ? 'Chuẩn bị công việc buồng phòng cho ngày mai: nhân viên xem và nhận trước, làm vào đúng ngày.'
+            : 'Tình trạng dọn phòng theo tầng và điều phối công việc buồng phòng trong ngày. Chọn một phòng để xem chi tiết và lịch sử.'
+        }
         branch={scope.label}
-        period={{ label: 'Ngày nghiệp vụ', value: formatDate(date), weekday: weekdayOf(date) }}
+        period={{ label: planTomorrow ? 'Ngày làm việc (ngày mai)' : 'Ngày nghiệp vụ', value: formatDate(date), weekday: weekdayOf(date) }}
         controls={
           <>
-            <DateField date={date} onDate={setDate} />
+            {planTomorrow ? null : <DateField date={date} onDate={setDate} max={today} />}
             {scope.picker}
           </>
         }
         actions={
           scope.branchId !== undefined ? (
             <>
-              <Button onClick={() => setCreating(true)} data-testid="work-create-open">
-                <Plus className="h-4 w-4" aria-hidden="true" />
-                Tạo công việc dọn phòng
-              </Button>
+              {/* Work is given out for today here (tomorrow on its own page); a past day is only read. */}
+              {future || pastDay ? null : (
+                <Button onClick={() => setCreating(true)} data-testid="work-create-open">
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  Tạo công việc dọn phòng
+                </Button>
+              )}
               <Button variant="secondary" onClick={refresh} loading={refreshing} data-testid="board-refresh">
                 <RefreshCw className="h-4 w-4" aria-hidden="true" />
                 Làm mới
@@ -966,21 +996,34 @@ export function HkRoomBoardPage() {
           ) : undefined
         }
       />
-      {scope.branchId === undefined ? (
+      {future ? (
+        <section className={`${CARD} space-y-3 px-4 py-4`} data-testid="board-future">
+          <p className="text-base font-semibold text-slate-900">Ngày {formatDate(date)} chưa tới.</p>
+          <p className="text-sm text-slate-600">
+            Trang này dành cho công việc hôm nay và các ngày đã qua. Công việc của ngày mai được chuẩn bị ở “Phân công việc ngày hôm sau”.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              to="/app/hk/tomorrow"
+              className="inline-flex min-h-[2.75rem] items-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white hover:bg-brand-700"
+              data-testid="board-future-link"
+            >
+              <CalendarPlus className="h-4 w-4" aria-hidden="true" />
+              Phân công việc ngày hôm sau
+            </Link>
+            <Button variant="secondary" onClick={() => setDate(today)} data-testid="board-future-today">
+              Về hôm nay
+            </Button>
+          </div>
+        </section>
+      ) : scope.branchId === undefined ? (
         <PickBranchFirst />
       ) : (
         <div className="space-y-5">
-          {worksToo ? (
-            <ManagerWorkPanel
-              shift={myShift.data?.shift ?? null}
-              loading={myShift.isLoading}
-              groups={dayGroups}
-              ownItems={[...dayGroups.flatMap((g) => g.items), ...olderActive].filter(mine)}
-              onAccept={setAccepting}
-              onStep={(t) => step.mutate(t)}
-              stepping={step.isPending ? (step.variables?.id ?? null) : null}
-              onChanged={setToast}
-            />
+          {pastDay ? (
+            <p className="rounded-xl border border-line bg-slate-50 px-3 py-2 text-sm text-slate-700" data-testid="board-past">
+              Đang xem công việc của ngày đã qua ({formatDate(date)}), không phải công việc hôm nay.
+            </p>
           ) : null}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5" data-testid="board-summary">
             <Metric
@@ -1148,28 +1191,15 @@ export function HkRoomBoardPage() {
             </div>
 
             <aside className="min-w-0 space-y-5 xl:col-start-2" aria-label="Thông tin phụ">
-              <HkSection title="Chú thích trạng thái" icon={Info}>
-                <StatusLegend />
-              </HkSection>
-              <HkSection title="Liên quan" icon={ArrowRight} bodyClassName="p-2">
-                <ul className="space-y-1">
-                  {[
-                    { to: '/app/hk/staff', label: 'Tiến độ theo nhân viên', icon: Users },
-                    { to: '/app/hk/report', label: 'Báo cáo dọn phòng', icon: FileText },
-                  ].map(({ to, label, icon: Icon }) => (
-                    <li key={to}>
-                      <Link
-                        to={to}
-                        className="flex min-h-[2.5rem] items-center gap-2.5 rounded-lg px-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-                      >
-                        <Icon className="h-4 w-4 text-brand-600" aria-hidden="true" />
-                        {label}
-                        <ChevronRight className="ml-auto h-4 w-4 text-slate-400" aria-hidden="true" />
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </HkSection>
+              <details className={`${CARD} px-4 py-3`} data-testid="board-legend">
+                <summary className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-800">
+                  <Info className="h-4 w-4 text-brand-600" aria-hidden="true" />
+                  Chú thích trạng thái
+                </summary>
+                <div className="mt-3">
+                  <StatusLegend />
+                </div>
+              </details>
             </aside>
           </div>
         </div>
@@ -1195,18 +1225,6 @@ export function HkRoomBoardPage() {
           }}
         />
       ) : null}
-      {accepting ? (
-        <AcceptGroupDialog
-          group={accepting}
-          onClose={() => setAccepting(null)}
-          onAccepted={(g) => {
-            setAccepting(null);
-            setToast(`Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
-          }}
-          onRefresh={() => void groups.refetch()}
-        />
-      ) : null}
-      {step.isError ? <Toast message={toUserMessage(step.error)} onDone={() => step.reset()} /> : null}
       {editing ? <WorkGroupEditor group={editing} staff={staff.data?.staff ?? []} onClose={() => setEditing(null)} onChanged={setToast} /> : null}
       {reassigning ? (
         <ReassignDialog
@@ -1845,7 +1863,6 @@ export function HkKpiPage() {
   const needle = search.trim().toLocaleLowerCase('vi');
   const rows = (kpi.data?.rows ?? []).filter((r) => !needle || r.fullName.toLocaleLowerCase('vi').includes(needle));
   const chart = scope && kpi.data ? findingBuckets(kpi.data.findings, scope.from, scope.to) : null;
-  const counted = totals ? totals.collectedCount + totals.pendingCount + totals.uncollectibleCount : 0;
   const columns: DataColumn<KpiRow>[] = [
     {
       key: 'name',
@@ -1928,37 +1945,26 @@ export function HkKpiPage() {
             <Metric icon={Clock} label="Chưa thu" value={formatVnd(totals.pendingAmount)} tone="red" hint={`${totals.pendingCount} khoản`} />
             <Metric icon={CircleMinus} label="Không thu được" value={`${totals.uncollectibleCount} khoản`} tone="slate" />
           </div>
-          <div className="mb-5 grid gap-5 xl:grid-cols-[22rem_minmax(0,1fr)]">
-            <HkSection title="Tổng quan thu tiền" icon={Wallet} testId="kpi-collection">
-              <div className="space-y-4">
-                <Meter label="Đã thu" value={formatVnd(totals.collectedAmount)} share={totals.collectedCount} total={counted} barClass="bg-[#15803d]" />
-                <Meter label="Chưa thu" value={formatVnd(totals.pendingAmount)} share={totals.pendingCount} total={counted} barClass="bg-[#d97706]" />
-                <Meter label="Không thu được" value={`${totals.uncollectibleCount} khoản`} share={totals.uncollectibleCount} total={counted} barClass="bg-[#be123c]" />
-                <p className="text-xs text-slate-500">Tỷ lệ tính theo số khoản phát sinh ({counted} khoản), không theo số tiền.</p>
-              </div>
-            </HkSection>
-            <HkSection
-              title={chart?.unit === 'hour' ? 'Phát sinh theo giờ' : chart?.unit === 'month' ? 'Phát sinh theo tháng' : 'Phát sinh theo ngày'}
-              icon={BarChart3}
-              testId="kpi-chart"
-            >
-              {chart && kpi.data && kpi.data.findings.length > 0 ? (
-                <>
-                  <BarChart
-                    buckets={chart.buckets}
-                    series={COLLECTION_SERIES}
-                    mode="stacked"
-                    unit="khoản"
-                    label="Số phát sinh theo thời gian, chia theo trạng thái thu tiền"
-                    testId="kpi-chart-bars"
-                  />
-                  <p className="mt-2 text-xs text-slate-500">Mỗi phát sinh tính một lần, tại thời điểm ghi nhận; màu là trạng thái thu tiền hiện tại.</p>
-                </>
-              ) : (
-                <p className="py-8 text-center text-sm text-slate-500">Chưa có phát sinh trong khoảng này.</p>
-              )}
-            </HkSection>
-          </div>
+          {/* The chart is for a wide screen; a phone reads the figures above and the table below. */}
+          <HkSection
+            title={chart?.unit === 'hour' ? 'Phát sinh theo giờ' : chart?.unit === 'month' ? 'Phát sinh theo tháng' : 'Phát sinh theo ngày'}
+            icon={BarChart3}
+            testId="kpi-chart"
+            className="mb-5 hidden sm:block"
+          >
+            {chart && kpi.data && kpi.data.findings.length > 0 ? (
+              <BarChart
+                buckets={chart.buckets}
+                series={COLLECTION_SERIES}
+                mode="stacked"
+                unit="khoản"
+                label="Số phát sinh theo thời gian, chia theo trạng thái thu tiền"
+                testId="kpi-chart-bars"
+              />
+            ) : (
+              <p className="py-8 text-center text-sm text-slate-500">Chưa có phát sinh trong khoảng này.</p>
+            )}
+          </HkSection>
         </>
       ) : null}
       <DataTable

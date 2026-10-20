@@ -34,6 +34,8 @@ const querySchema = z
   .object({
     scope: z.enum(['active', 'archived']).default('active'),
     branchId: z.coerce.number().int().positive().optional(),
+    // The Admin's "Buồng phòng" view; every other role reads what its rule allows.
+    department: z.enum(['RECEPTION', 'HOUSEKEEPING']).optional(),
     // BUSINESS dates (the shared report period) and an optional shift. A window
     // narrows a list; it never admits a row the rule keeps on the other side.
     from: isoDay.optional(),
@@ -52,25 +54,28 @@ const querySchema = z
 /** Who may read which deliveries — the whole authorization rule, in one function. */
 export function deliveryVisibilityWhere(
   user: { role: UserRole; branchId: number | null; managedBranchIds?: number[] },
-  filter: { branchId?: number },
+  filter: { branchId?: number; department?: 'RECEPTION' | 'HOUSEKEEPING' },
 ): Prisma.ReceptionOperationalReportWhereInput {
   switch (user.role) {
     // Reception's view of its branches — every department's deliveries — for
     // the managers: assigned branches, or all eight; another branch is refused.
+    // Reception's own records: Bộ phận buồng phòng's journal is its own.
     case 'RECEPTION_MANAGER':
     case 'RECEPTION_GENERAL_MANAGER':
-      return scopedBranchFilter(user, filter.branchId);
+      return { ...scopedBranchFilter(user, filter.branchId), originDepartment: 'RECEPTION' };
     case 'RECEPTIONIST':
       // `?? -1` matches no branch: an unassigned account sees nothing, and the
       // key is never left out — leaving it out would widen the query.
-      return { branchId: user.branchId ?? -1 };
+      return { branchId: user.branchId ?? -1, originDepartment: 'RECEPTION' };
     case 'ADMIN':
-      return filter.branchId !== undefined ? { branchId: filter.branchId } : {};
+      return { ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}), originDepartment: filter.department ?? 'RECEPTION' };
+    // Bộ phận buồng phòng: what Reception handed to it, and what it recorded itself.
     case 'HOUSEKEEPING':
+    case 'HOUSEKEEPING_MANAGER':
       return {
         branchId: user.branchId ?? -1,
         voidedAt: null,
-        delivery: { is: { department: 'HOUSEKEEPING' } },
+        OR: [{ originDepartment: 'RECEPTION', delivery: { is: { department: 'HOUSEKEEPING' } } }, { originDepartment: 'HOUSEKEEPING' }],
       };
     case 'TECHNICAL':
       return {
@@ -91,7 +96,7 @@ export function createHotelDeliveriesRouter(): Router {
       const user = req.currentUser!;
       const q = querySchema.parse(req.query);
       const now = getClock().now();
-      const visible = deliveryVisibilityWhere(user, { branchId: q.branchId });
+      const visible = deliveryVisibilityWhere(user, { branchId: q.branchId, department: q.department });
       // Visibility is `visible`; the period only resolves the shifts.
       const period =
         q.from && q.to

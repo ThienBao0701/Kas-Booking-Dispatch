@@ -43,7 +43,7 @@ export function createConfidentialReportsRouter(): Router {
     '/confidential-reports',
     requireAuth,
     requirePasswordChanged,
-    requireRole('RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN'),
+    requireRole('RECEPTIONIST', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'ADMIN', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'),
   );
 
   // GET /api/confidential-reports/options — the four kinds and MY allowed superiors.

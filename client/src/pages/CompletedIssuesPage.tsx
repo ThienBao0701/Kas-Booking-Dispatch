@@ -60,7 +60,9 @@ const noop = async () => undefined;
 
 const EMPTY_IN_RANGE = 'Không có vấn đề hoàn thành trong khoảng thời gian này.';
 
-export function CompletedIssuesPage() {
+export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING' } = {}) {
+  // Bộ phận buồng phòng's archive: its own records (the Admin's read of them names the department).
+  const housekeeping = department === 'HOUSEKEEPING';
   const queryClient = useQueryClient();
   const today = hcmToday();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -71,8 +73,8 @@ export function CompletedIssuesPage() {
   }, [searchParams, setSearchParams]);
 
   const { user } = useAuth();
-  // A supervisor picks a branch: the Admin any of them, a manager its own.
-  const supervisor = !!user && isReceptionSupervisor(user.role);
+  // A supervisor picks a branch: the Admin any of them, a manager its own. In the housekeeping archive, only the Admin.
+  const supervisor = !!user && (housekeeping ? user.role === 'ADMIN' : isReceptionSupervisor(user.role));
   const [filter, setFilter] = useState<ReportFilterValue>(() =>
     initialReportFilter(today, {
       mode: 'RANGE',
@@ -101,8 +103,8 @@ export function CompletedIssuesPage() {
   };
 
   const journal = useQuery({
-    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict, severity],
-    queryFn: () => reportsApi.archive({ ...scope, verdict, severity: severity || undefined }),
+    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict, severity, department ?? null],
+    queryFn: () => reportsApi.archive({ ...scope, verdict, severity: severity || undefined, ...(housekeeping && user?.role === 'ADMIN' ? { department } : {}) }),
     enabled: period !== null,
     refetchOnWindowFocus: true,
   });
@@ -121,6 +123,7 @@ export function CompletedIssuesPage() {
     period !== null && showDeliveries,
     branchId,
     shiftType,
+    housekeeping && user?.role === 'ADMIN' ? department : undefined,
   );
 
   const reports = journal.data?.reports ?? [];
@@ -150,10 +153,10 @@ export function CompletedIssuesPage() {
         title={title}
         description={`Hoàn thành vấn đề · ${
           verdict === 'INCORRECT' ? 'báo cáo được xác định là sai, kèm lý do' : 'vấn đề có thật đã được xử lý'
-        } · từ ${hours} giờ trở lên kể từ lúc lễ tân tiếp nhận.`}
+        } · từ ${hours} giờ trở lên kể từ lúc ${housekeeping ? 'báo cáo' : 'lễ tân tiếp nhận'}.`}
         actions={
           <div className="flex flex-wrap gap-2">
-            {supervisor && period
+            {supervisor && period && !housekeeping
               ? [
                   // Supervisors export the same period, branch and shift through the one report engine.
                   [operationalPdfUrl(scope), 'Xuất PDF', 'completed-export-pdf'],
@@ -236,6 +239,8 @@ export function CompletedIssuesPage() {
             <MoreNote shown={issues.length} total={incidents.data?.pagination.total} />
           </div>
 
+          {/* "Vấn đề về chất lượng và dịch vụ" is Reception's category only. */}
+          {housekeeping ? null : (
           <div>
             <ServiceQualityTable
               rows={quality}
@@ -252,6 +257,7 @@ export function CompletedIssuesPage() {
             />
             <MoreNote shown={quality.length} total={journal.data?.totals.CUSTOMER_COMPLAINT} />
           </div>
+          )}
 
           {showDeliveries ? (
             <div>

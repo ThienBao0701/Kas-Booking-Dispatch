@@ -48,6 +48,9 @@ export async function resetBookingData(): Promise<void> {
  * directly keeps that ordering knowledge in one place.
  */
 export async function resetIssueData(): Promise<void> {
+  // A damage report may name an incident (RESTRICT): it goes first, with its movements.
+  await testPrisma.inventoryMovement.deleteMany({ where: { damageReport: { issueId: { not: null } } } });
+  await testPrisma.inventoryDamageReport.deleteMany({ where: { issueId: { not: null } } });
   // A reception journal entry can REFERENCE an incident, and that FK is RESTRICT
   // on purpose — the journal entry must not vanish because an incident was
   // removed. So the journal goes first or `hotelIssue.deleteMany()` throws P2003
@@ -70,6 +73,14 @@ export async function resetIssueData(): Promise<void> {
  * RESTRICT reference to Branch or User, so `resetAll` calls this before either.
  */
 export async function resetHousekeepingData(): Promise<void> {
+  // The warehouses first: their movements and damage reports hold RESTRICT
+  // references to room tasks, items, branches and accounts.
+  await testPrisma.inventoryMovement.deleteMany();
+  await testPrisma.inventoryDamageReport.deleteMany();
+  await testPrisma.inventoryReceipt.deleteMany();
+  await testPrisma.inventoryCount.deleteMany();
+  await testPrisma.inventoryTransfer.deleteMany();
+  await testPrisma.inventoryItem.deleteMany();
   // The daily room work first: its items hold references to inspections and accounts.
   await testPrisma.housekeepingRoomTaskEvent.deleteMany();
   await testPrisma.housekeepingRoomTask.deleteMany();

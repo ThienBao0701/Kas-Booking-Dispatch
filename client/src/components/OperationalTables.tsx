@@ -233,7 +233,7 @@ export function GuestRequestTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
+      className: 'w-[1%] min-w-[5.5rem] max-w-[9rem] sm:max-w-[11rem] break-words font-medium text-slate-800',
       render: (r) => (
         <>
           {r.guestRequest?.guestName ?? '—'}
@@ -245,20 +245,20 @@ export function GuestRequestTable({
     {
       key: 'severity',
       header: 'Mức độ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
     },
-    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
+    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'w-[1%] whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
     {
       key: 'content',
       header: 'Nội dung',
-      className: 'sm:min-w-[10rem] max-w-md',
+      className: 'w-full sm:min-w-[12rem]',
       render: (r) => <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{r.guestRequest?.content || '—'}</span>,
     },
     {
       key: 'status',
       header: 'Trạng thái',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r) => summaryStatus(r.guestRequest?.completed),
     },
   ];
@@ -269,7 +269,7 @@ export function GuestRequestTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'min-w-[7rem] font-medium text-slate-800',
+      className: 'w-[1%] min-w-[6rem] max-w-[11rem] break-words font-medium text-slate-800',
       render: (r) => (
         <>
           {r.guestRequest?.guestName ?? '—'}
@@ -282,13 +282,13 @@ export function GuestRequestTable({
     {
       key: 'severity',
       header: 'Mức độ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
     },
     {
       key: 'ez',
       header: 'Mã EZ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r) => r.guestRequest?.ezCode || '—',
     },
     /*
@@ -300,7 +300,7 @@ export function GuestRequestTable({
     {
       key: 'content',
       header: 'Nội dung',
-      className: 'min-w-[10rem] max-w-xs',
+      className: 'w-full min-w-[12rem]',
       render: (r) => <span className="whitespace-pre-wrap break-words">{r.guestRequest?.content || '—'}</span>,
     },
     {
@@ -455,7 +455,7 @@ export function ServiceQualityTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'min-w-[5.5rem] sm:min-w-[7rem] font-medium text-slate-800',
+      className: 'w-[1%] min-w-[5.5rem] max-w-[9rem] sm:max-w-[11rem] break-words font-medium text-slate-800',
       render: (r) => (
         <>
           {r.complaint?.guestName ?? '—'}
@@ -467,20 +467,20 @@ export function ServiceQualityTable({
     {
       key: 'severity',
       header: 'Mức độ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
     },
-    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'whitespace-nowrap', render: (r) => r.complaint?.ezCode || '—' },
+    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'w-[1%] whitespace-nowrap', render: (r) => r.complaint?.ezCode || '—' },
     {
       key: 'description',
       header: 'Mô tả',
-      className: 'sm:min-w-[12rem] max-w-xl',
+      className: 'w-full sm:min-w-[12rem]',
       render: (r) => <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{r.complaint?.description ?? '—'}</span>,
     },
     {
       key: 'status',
       header: 'Trạng thái',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r) => summaryStatus(r.complaint?.completed),
     },
   ];
@@ -490,7 +490,7 @@ export function ServiceQualityTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'min-w-[7rem] font-medium text-slate-800',
+      className: 'w-[1%] min-w-[6rem] max-w-[11rem] break-words font-medium text-slate-800',
       render: (r) => (
         <>
           {r.complaint?.guestName ?? '—'}
@@ -503,20 +503,20 @@ export function ServiceQualityTable({
     {
       key: 'severity',
       header: 'Mức độ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r: OperationalReport) => <SeverityBadge severity={r.complaint?.severity} label={r.complaint?.severityLabel} />,
     },
     {
       key: 'ez',
       header: 'Mã EZ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r) => r.complaint?.ezCode || '—',
     },
     {
       key: 'description',
       header: 'Mô tả',
       // The one column that must breathe: it is the whole content of the record.
-      className: 'min-w-[14rem] max-w-xl',
+      className: 'w-full min-w-[14rem]',
       render: (r) => <span className="whitespace-pre-wrap break-words">{r.complaint?.description ?? '—'}</span>,
     },
     {
@@ -645,7 +645,7 @@ export function RoomServiceTable({
     {
       key: 'guest',
       header: 'Tên khách',
-      className: 'min-w-[7rem] font-medium text-slate-800',
+      className: 'w-[1%] min-w-[6rem] max-w-[11rem] break-words font-medium text-slate-800',
       render: (r) => (
         <>
           {r.roomService?.guestName ?? '—'}
@@ -658,7 +658,7 @@ export function RoomServiceTable({
     {
       key: 'ez',
       header: 'Mã EZ',
-      className: 'whitespace-nowrap',
+      className: 'w-[1%] whitespace-nowrap',
       render: (r) => text(r.roomService?.ezCode),
     },
     // A floor under the room-class columns, so a short class ("Std") does not

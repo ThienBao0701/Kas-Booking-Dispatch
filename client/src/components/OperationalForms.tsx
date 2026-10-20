@@ -13,13 +13,14 @@
  * "Sự cố cơ sở vật chất đang xử lý" has NO form here — it is a monitoring board, not
  * an entry category. See `FacilityIssueBoard.tsx`.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { SeverityPicker } from './Severity';
 import { DEFAULT_SEVERITY } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
 import { useReportSubmitOverride } from '../lib/reportSubmit';
-import { useMutation } from '@tanstack/react-query';
-import { Plus } from 'lucide-react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Plus, Trash2 } from 'lucide-react';
+import { useDebounced } from '../hooks/useDebounced';
 import {
   reportsApi,
   type DeliveryDepartment,
@@ -368,21 +369,48 @@ function serviceBody(type: RoomServiceType, d: ServiceDraft, guestName: string, 
   };
 }
 
+/** What one chosen service still needs, in the words of its fields. */
+function draftMissing(type: RoomServiceType, d: ServiceDraft): string[] {
+  const needs = roomServiceFields(type);
+  if (needs.review) {
+    const t = parseCount(d.tripadvisor);
+    const g = parseCount(d.google);
+    return t !== null && g !== null && t + g > 0 ? [] : ['số review (Tripadvisor hoặc Google)'];
+  }
+  return [
+    ...(parseVnd(d.price) === null ? [ROOM_SERVICE_PRICE_LABEL.toLowerCase()] : []),
+    ...(needs.roomClass && !d.roomClass.trim() ? ['hạng phòng'] : []),
+    ...(needs.upgrade && !(d.fromRoomClass.trim() && d.toRoomClass.trim()) ? ['từ / tới hạng phòng'] : []),
+    ...(needs.nights && parseNights(d.nights) === null ? ['số đêm'] : []),
+  ];
+}
+
+/** One service row as typed: which service (none chosen yet: ''), and its own fields. */
+interface ServiceRow {
+  key: number;
+  type: RoomServiceType | '';
+  draft: ServiceDraft;
+}
+
+const blankRow = (key: number): ServiceRow => ({ key, type: '', draft: EMPTY_DRAFT });
+
 /**
  * ONE GUEST, ONE OR SEVERAL SERVICES — a guest may buy a room night, smoke and
  * send laundry in the same stay.
  *
- * "Chọn dịch vụ" ticks any number of the six; Tên khách and Mã EZ are asked
- * once, and each ticked service gets its own block with exactly its own fields
- * (from `roomServiceFields`, the table the tables and the correction dialog
- * read). Each service is still recorded as ONE entry of its own, so every
- * table, total, KPI and export reads it unchanged; several are saved together,
- * all or none.
+ * THE GUEST FIRST: "Mã EZ" and "Tên khách", once. A Mã EZ already in the
+ * journal fills an EMPTY name with the name it was recorded with; a name already
+ * typed is never replaced — a different recorded name is offered, not imposed.
+ * An unknown code is simply typed with its name.
  *
- * A HIDDEN FIELD IS NEVER SENT. Typing a room class, unticking "Bán phòng" and
- * saving submits no room class: each body is built from its service's own
- * fields, not from every box that ever had text in it. The server applies the
- * same rule again on its side.
+ * THEN ONE ROW PER SERVICE: each row chooses its service and shows exactly that
+ * service's fields (from `roomServiceFields`, the table the tables and the
+ * correction dialog read); "+ Thêm dịch vụ" adds a row, the bin removes one.
+ * Each row is still recorded as ONE entry of its own, so every table, total,
+ * KPI and export reads it unchanged; several are saved together, all or none.
+ *
+ * A HIDDEN FIELD IS NEVER SENT: each body is built from its own service's
+ * fields only, and the server applies the same rule again.
  */
 export function RoomServiceForm({
   options,
@@ -398,33 +426,49 @@ export function RoomServiceForm({
   /** A supervisor's target branch; omitted for Reception (its shift decides). */
   branchId?: number;
 }) {
-  const [selected, setSelected] = useState<RoomServiceType[]>([]);
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
-  const [drafts, setDrafts] = useState<Partial<Record<RoomServiceType, ServiceDraft>>>({});
+  const [rows, setRows] = useState<ServiceRow[]>([blankRow(1)]);
 
   const { mutation, error } = useCreateReport(async () => {
-    setSelected([]);
     setGuestName('');
     setEzCode('');
-    setDrafts({});
+    setRows([blankRow(1)]);
     await onCreated();
   }, branchId);
 
+  // "Mã EZ" → the name it was recorded with (the reader's own scope, on the server).
+  const ez = useDebounced(ezCode.trim(), 400);
+  const lookup = useQuery({
+    queryKey: ['reception', 'reports', 'guest', ez, branchId ?? null],
+    queryFn: () => reportsApi.guest(ez, { branchId }),
+    enabled: ez.length > 0,
+    staleTime: 60_000,
+  });
+  const known = ez.length > 0 && ez === ezCode.trim() ? (lookup.data?.guest ?? null) : null;
+  // Fill an empty name once per code — never over what was typed.
+  const filledFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (known && filledFor.current !== known.ezCode && guestName.trim() === '') {
+      filledFor.current = known.ezCode;
+      setGuestName(known.guestName);
+    }
+  }, [known, guestName]);
+  const differs = known !== null && guestName.trim() !== '' && guestName.trim() !== known.guestName;
+
   const labelOf = (t: RoomServiceType) =>
     options?.roomServiceTypes.find((x) => x.code === t)?.label ?? ROOM_SERVICE_FALLBACK_LABELS[t];
-  const draftOf = (t: RoomServiceType) => drafts[t] ?? EMPTY_DRAFT;
-  const setField = (t: RoomServiceType, field: keyof ServiceDraft, value: string) =>
-    setDrafts((prev) => ({ ...prev, [t]: { ...(prev[t] ?? EMPTY_DRAFT), [field]: value } }));
-  // Always in the selector's own order, whatever order they were ticked in.
-  const toggle = (t: RoomServiceType) =>
-    setSelected((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : ROOM_SERVICE_ORDER.filter((x) => x === t || prev.includes(x))));
+  const setRow = (key: number, patch: Partial<ServiceRow>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const setField = (key: number, field: keyof ServiceDraft, value: string) =>
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, draft: { ...r.draft, [field]: value } } : r)));
 
-  const ready = selected.length > 0 && guestName.trim().length > 0 && selected.every((t) => draftReady(t, draftOf(t)));
+  const chosen = rows.filter((r): r is ServiceRow & { type: RoomServiceType } => r.type !== '');
+  const ready =
+    guestName.trim().length > 0 && rows.length > 0 && chosen.length === rows.length && chosen.every((r) => draftReady(r.type, r.draft));
 
   const submit = () => {
     if (!ready) return;
-    const bodies = selected.map((t) => serviceBody(t, draftOf(t), guestName.trim(), ezCode.trim()));
+    const bodies = chosen.map((r) => serviceBody(r.type, r.draft, guestName.trim(), ezCode.trim()));
     // One service: the single entry, exactly as before. Several: saved together.
     mutation.mutate(
       bodies.length === 1
@@ -444,48 +488,93 @@ export function RoomServiceForm({
       error={error}
       onSubmit={submit}
     >
-      <fieldset className="space-y-2" data-testid="room-service-type">
-        <legend className="text-sm font-medium text-slate-700">Chọn dịch vụ</legend>
-        <p className="text-xs text-slate-500">Có thể chọn nhiều dịch vụ cho cùng một khách — mỗi dịch vụ được ghi thành một dòng riêng.</p>
-        <div className="flex flex-wrap gap-2">
-          {ROOM_SERVICE_ORDER.map((t) => {
-            const on = selected.includes(t);
-            return (
-              <label
-                key={t}
-                className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
-                  on ? 'border-brand-600 bg-brand-50 font-medium text-brand-800' : 'border-line-strong bg-white text-slate-700 hover:border-slate-600'
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  onChange={() => toggle(t)}
-                  data-testid={`room-service-type-${t}`}
-                  className="h-4 w-4 accent-brand-600"
-                />
-                {labelOf(t)}
-              </label>
-            );
-          })}
+      <fieldset className="space-y-2" data-testid="room-service-guest-block">
+        <legend className="text-sm font-semibold text-slate-800">Khách</legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} autoComplete="off" data-testid="room-service-ez" />
+          <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="room-service-guest" />
         </div>
+        {ez.length > 0 && lookup.isFetching ? <p className="text-xs text-slate-500">Đang tìm khách theo mã EZ…</p> : null}
+        {differs ? (
+          <p className="flex flex-wrap items-center gap-2 text-xs text-amber-900" data-testid="room-service-ez-differs">
+            Mã EZ này đã ghi với tên “{known.guestName}”.
+            <button type="button" className="font-semibold underline" onClick={() => setGuestName(known.guestName)} data-testid="room-service-ez-use">
+              Dùng tên này
+            </button>
+          </p>
+        ) : known ? (
+          <p className="text-xs text-emerald-800" data-testid="room-service-ez-found">
+            Đã tìm thấy khách theo mã EZ.
+          </p>
+        ) : ez.length > 0 && lookup.isSuccess && ez === ezCode.trim() ? (
+          <p className="text-xs text-slate-500" data-testid="room-service-ez-unknown">
+            Chưa có khách nào với mã EZ này — nhập tên khách.
+          </p>
+        ) : null}
       </fieldset>
 
-      {selected.length > 0 ? (
-        <>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="room-service-guest" />
-            <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="room-service-ez" />
-          </div>
-          {selected.map((t) => (
-            <ServiceFields key={t} label={labelOf(t)} type={t} draft={draftOf(t)} onField={(field, value) => setField(t, field, value)} />
-          ))}
-        </>
-      ) : (
-        <p className="text-sm text-slate-500" data-testid="room-service-pick-first">
-          Chọn dịch vụ để nhập thông tin.
+      <ul className="space-y-3" data-testid="room-service-rows">
+        {rows.map((r, i) => {
+          const missing = r.type ? draftMissing(r.type, r.draft) : [];
+          return (
+            <li key={r.key} className="space-y-3 rounded-xl border border-line-subtle p-3" data-testid={`room-service-row-${i}`}>
+              <div className="flex items-end gap-2">
+                <label className="block min-w-0 flex-1">
+                  <span className="mb-1 block text-sm font-medium text-slate-700">Dịch vụ {i + 1}</span>
+                  <select
+                    value={r.type}
+                    onChange={(e) => setRow(r.key, { type: e.target.value as RoomServiceType | '' })}
+                    className="block min-h-[2.75rem] w-full rounded-lg border border-line-strong bg-white px-3 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+                    data-testid={`room-service-select-${i}`}
+                  >
+                    <option value="">Chọn dịch vụ…</option>
+                    {/* One entry per service for a guest: a service chosen on another row is not offered twice. */}
+                    {ROOM_SERVICE_ORDER.map((t) => (
+                      <option key={t} value={t} disabled={rows.some((o) => o.key !== r.key && o.type === t)}>
+                        {labelOf(t)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-red-700"
+                  aria-label={`Bỏ dịch vụ ${i + 1}`}
+                  data-testid={`room-service-remove-${i}`}
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+              {r.type ? (
+                <ServiceFields label={labelOf(r.type)} type={r.type} draft={r.draft} onField={(field, value) => setField(r.key, field, value)} />
+              ) : (
+                <p className="text-xs text-slate-500">Chọn dịch vụ để nhập thông tin.</p>
+              )}
+              {missing.length > 0 ? (
+                <p className="text-xs text-red-700" data-testid={`room-service-missing-${i}`}>
+                  Còn thiếu: {missing.join(', ')}.
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => setRows((rs) => [...rs, blankRow(rs.length === 0 ? 1 : Math.max(...rs.map((x) => x.key)) + 1)])}
+          data-testid="room-service-add-row"
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          Thêm dịch vụ
+        </Button>
+        <p className="text-sm text-slate-600" data-testid="room-service-count">
+          {rows.length === 0 ? 'Chưa có dịch vụ nào' : `${rows.length} dịch vụ`}
+          {!guestName.trim() && rows.length > 0 ? ' · cần nhập tên khách' : ''}
         </p>
-      )}
+      </div>
     </FormShell>
   );
 }

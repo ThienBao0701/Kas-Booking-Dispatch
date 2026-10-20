@@ -143,10 +143,12 @@ describe('who may be addressed', () => {
     // The Tổng quản lý cannot address a manager below it.
     expect((await send(general, { recipientIds: [ids.rm1] })).status).toBe(403);
     expect((await send(admin, {})).status).toBe(403);
-    // Departments outside the reception hierarchy have no part in it.
-    expect((await send(hk, {})).status).toBe(403);
+    // Bộ phận buồng phòng reports up its own line (its Quản lý buồng phòng, the Admin) —
+    // never to Reception's managers; departments outside both lines have no part in it.
+    expect((await send(hk, { recipientIds: [ids.rm1] })).status).toBe(403);
+    expect((await send(hk, {})).status).toBe(201);
     expect((await send(tech, {})).status).toBe(403);
-    expect(await testPrisma.confidentialReport.count()).toBe(3);
+    expect(await testPrisma.confidentialReport.count()).toBe(4);
     // Exactly the four kinds.
     expect((await send(letan1, { category: 'SALARY' })).status).toBe(422);
   });
@@ -258,7 +260,9 @@ describe('who may read', () => {
       expect((await agent.post(`/api/confidential-reports/${id}/read`)).status).toBe(404);
     }
     expect((await inbox(rm2)).reports).toEqual([]);
-    for (const agent of [hk, tech]) expect((await agent.get(`/api/confidential-reports/${id}`)).status).toBe(403);
+    // A housekeeper has no inbox (not found, like any reader it was not sent to); Technical is refused outright.
+    expect((await hk.get(`/api/confidential-reports/${id}`)).status).toBe(404);
+    expect((await tech.get(`/api/confidential-reports/${id}`)).status).toBe(403);
     // It is not a reception journal entry and appears in no journal.
     expect(await testPrisma.receptionOperationalReport.count()).toBe(0);
   });

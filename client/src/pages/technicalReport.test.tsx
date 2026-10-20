@@ -200,7 +200,11 @@ describe('"Báo cáo vấn đề" in the menu', () => {
 
     const here = await within(nav).findByRole('link', { name: 'Kỹ thuật' });
     expect(here).toHaveAttribute('aria-current', 'page');
-    expect(within(nav).getByRole('link', { name: 'Buồng phòng' })).toHaveAttribute('href', '/app/reports/housekeeping');
+    // "Buồng phòng" is a group of its own: the department's own reports, the collection, its KPI.
+    await userEvent.click(within(nav).getByTestId('nav-group-Buồng phòng'));
+    expect(within(nav).getByRole('link', { name: 'Phát hiện & thu tiền' })).toHaveAttribute('href', '/app/reports/housekeeping');
+    expect(within(nav).getByRole('link', { name: 'Báo cáo vấn đề buồng phòng' })).toHaveAttribute('href', '/app/hk/reports');
+    expect(within(nav).getByRole('link', { name: 'KPI buồng phòng' })).toHaveAttribute('href', '/app/hk/kpi');
     // Lễ tân stays folded until opened; then each category is its own address.
     expect(within(nav).queryByRole('link', { name: 'Tổng' })).not.toBeInTheDocument();
     await userEvent.click(within(nav).getByTestId('nav-group-Lễ tân'));

@@ -662,8 +662,9 @@ describe('J. the Quản lý buồng phòng takes a group and does the work itsel
     expect((await manager1.post(`${url(hallway!.id)}/inspect`).send({ issues: [], note: 'Sàn sạch' })).status).toBe(201);
     // "Không cần dọn" stays the housekeeper's to ask and the manager's to decide.
     expect((await manager1.post(`${url(hallway!.id)}/no-clean`).send({ reason: 'x' })).status).toBe(403);
-    // Its manager powers are unchanged: it still reviews the room it cleaned.
-    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/review`).send({ result: 'PASSED' })).status).toBe(200);
+    // Its own cleaning needs no review of its own: recorded "Đạt" as it completed.
+    expect(await task(p101!.id)).toMatchObject({ reviewResult: 'PASSED', reviewedByNameSnapshot: 'QL qlbp1' });
+    expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/review`).send({ result: 'PASSED' })).status).toBe(409);
   });
 
   it('never gives one group to both a manager and a housekeeper pressing at the same moment', async () => {
@@ -728,22 +729,21 @@ describe('K. a place in an open item is not given to a second group — until it
   });
 
   it('offers the room again once its work is resolved: reviewed, "Không cần dọn" approved, or removed — not before', async () => {
-    // 1. Cleaned: held while it waits for "Đạt / Không đạt", free once reviewed.
+    // 1. Cleaned by a housekeeper: held while it waits for "Đạt / Không đạt", free once reviewed.
     const g1 = await group([room('101', ['OUT'])]);
-    await manager1.post('/api/housekeeping/shift/start').send({});
-    expect((await accept(manager1, g1.id)).status).toBe(200);
+    await startShiftAt(lan, cn1);
+    expect((await accept(lan, g1.id)).status).toBe(200);
     const [p101] = g1.items;
-    expect((await manager1.post(`${url(p101!.id)}/begin-inspection`)).status).toBe(200);
-    expect((await manager1.post(`${url(p101!.id)}/inspect`).send({ issues: [] })).status).toBe(201);
-    expect((await manager1.post(`${url(p101!.id)}/start`)).status).toBe(200);
-    expect((await manager1.post(`${url(p101!.id)}/complete`).send({})).status).toBe(200);
+    expect((await lan.post(`${url(p101!.id)}/begin-inspection`)).status).toBe(200);
+    expect((await lan.post(`${url(p101!.id)}/inspect`).send({ issues: [] })).status).toBe(201);
+    expect((await lan.post(`${url(p101!.id)}/start`)).status).toBe(200);
+    expect((await lan.post(`${url(p101!.id)}/complete`).send({})).status).toBe(200);
     expect((await createGroup([room('101', ['VC'])])).status).toBe(409);
     expect((await manager1.post(`/api/housekeeping/manager/tasks/${p101!.id}/review`).send({ result: 'PASSED' })).status).toBe(200);
     expect((await createGroup([room('101', ['VC'])])).status).toBe(201);
 
     // 2. "Không cần dọn": held while it waits for the manager, free once approved.
     const g2 = await group([room('102', ['OC'])]);
-    await startShiftAt(lan, cn1);
     expect((await accept(lan, g2.id)).status).toBe(200);
     const [p102] = g2.items;
     expect((await lan.post(`${url(p102!.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' })).status).toBe(200);
@@ -756,5 +756,90 @@ describe('K. a place in an open item is not given to a second group — until it
     expect((await createGroup([room('103', ['OUT'])])).status).toBe(409);
     expect((await manager1.post(`/api/housekeeping/manager/tasks/${g3.items[0]!.id}/void`).send({ reason: 'Khách ở thêm' })).status).toBe(200);
     expect((await createGroup([room('103', ['OUT'])])).status).toBe(201);
+  });
+});
+
+describe('L. "Chưa dọn — chuyển người khác dọn" and the manager told of "Không cần dọn"', () => {
+  async function inspectedByLan() {
+    const g = await group([room('101', ['OUT']), room('102', ['OC'])]);
+    await startShiftAt(lan, cn1);
+    await accept(lan, g.id);
+    const p101 = g.items[0]!;
+    expect((await lan.post(`${url(p101.id)}/inspect`).send({ issues: [] })).status).toBe(201);
+    return { g, p101 };
+  }
+  const managerId = async () => (await testPrisma.user.findUniqueOrThrow({ where: { username: 'qlbp1' } })).id;
+
+  it('releases an inspected room to the branch — inspection kept, nothing cleaned, no stock moved', async () => {
+    const { p101 } = await inspectedByLan();
+    await startShiftAt(hoa, cn1);
+    const released = await lan.post(`${url(p101.id)}/release`).send({ reason: 'Hết ca' });
+    expect(released.status, JSON.stringify(released.body)).toBe(200);
+    expect(released.body.task).toMatchObject({ state: 'INSPECTED', phase: 'AWAITING_CLEANING', assignee: null, workGroup: null, handoff: { byName: 'Chị Lan', reason: 'Hết ca' } });
+    const row = await task(p101.id);
+    expect(row).toMatchObject({ assigneeUserId: null, workGroupId: null, startedAt: null, completedAt: null, voidedAt: null, noCleanStatus: null });
+    // Chị Lan's inspection stays hers.
+    expect((await testPrisma.roomInspection.findUniqueOrThrow({ where: { id: row.inspectionId! } })).createdByUserId).toBe(lanId);
+    expect((await eventsOf(p101.id)).map((e) => e.type)).toEqual(['CREATED', 'ACCEPTED', 'INSPECTED', 'RELEASED']);
+    expect(await testPrisma.inventoryMovement.count({ where: { taskId: p101.id } })).toBe(0);
+    // The colleague on shift there and the branch's manager are told; Chị Lan's other room stays hers.
+    expect(await testPrisma.notification.count({ where: { userId: hoaId, title: { contains: 'Cần người dọn' } } })).toBe(1);
+    expect(await testPrisma.notification.count({ where: { userId: await managerId(), title: { contains: 'Cần người dọn' } } })).toBe(1);
+    expect(await testPrisma.notification.count({ where: { userId: maiId } })).toBe(0);
+    // It no longer opens for Chị Lan; the room is still taken for the day.
+    expect((await lan.get(url(p101.id))).status).toBe(403);
+    expect((await createGroup([room('101', ['OC'])])).status).toBe(409);
+  });
+
+  it('lets ONE colleague of the branch take it, who then cleans it — and records who did what', async () => {
+    const { p101 } = await inspectedByLan();
+    await lan.post(`${url(p101.id)}/release`).send({});
+    await startShiftAt(hoa, cn1);
+    await startShiftAt(mai, cn1);
+    const list = (await hoa.get(`/api/housekeeping/work/items?date=${DAY}`)).body.tasks as (Task & { handoff: { byName: string } | null })[];
+    expect(list.find((t) => t.id === p101.id)).toMatchObject({ assignee: null, handoff: { byName: 'Chị Lan' } });
+    const [a, b] = await Promise.all([
+      hoa.post('/api/housekeeping/work/claim').send({ taskIds: [p101.id] }),
+      mai.post('/api/housekeeping/work/claim').send({ taskIds: [p101.id] }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const [winner, winnerId] = a.status === 200 ? [hoa, hoaId] : [mai, maiId];
+    const loser = a.status === 200 ? b : a;
+    expect(loser.body.error.message).toContain('vừa được người khác nhận');
+    expect((await winner.post(`${url(p101.id)}/start`)).status).toBe(200);
+    expect((await winner.post(`${url(p101.id)}/complete`).send({})).status).toBe(200);
+    const done = await task(p101.id);
+    expect(done).toMatchObject({ state: 'COMPLETED', cleanedByUserId: winnerId, assigneeUserId: winnerId });
+    expect((await testPrisma.roomInspection.findUniqueOrThrow({ where: { id: done.inspectionId! } })).createdByUserId).toBe(lanId);
+    // The test clock stands still, so the history is checked by what it holds, not by its order.
+    const events = await eventsOf(p101.id);
+    const count = (type: string) => events.filter((e) => e.type === type).length;
+    expect([count('RELEASED'), count('ACCEPTED'), count('CLAIM_REJECTED'), count('STARTED'), count('COMPLETED')]).toEqual([1, 2, 1, 1, 1]);
+    expect(events.find((e) => e.type === 'RELEASED')).toMatchObject({ actorUserId: lanId });
+    expect(events.filter((e) => e.type === 'ACCEPTED').map((e) => e.actorUserId).sort()).toEqual([lanId, winnerId].sort());
+  });
+
+  it('refuses a release before the inspection, by another, by the manager, once cleaning began, or while "Không cần dọn" waits', async () => {
+    const { g, p101 } = await inspectedByLan();
+    const p102 = g.items[1]!;
+    expect((await lan.post(`${url(p102.id)}/release`).send({})).status).toBe(409);
+    await startShiftAt(hoa, cn1);
+    expect((await hoa.post(`${url(p101.id)}/release`).send({})).status).toBe(403);
+    expect((await manager1.post(`${url(p101.id)}/release`).send({})).status).toBe(403);
+    await lan.post(`${url(p102.id)}/inspect`).send({ issues: [] });
+    await lan.post(`${url(p102.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' });
+    expect((await lan.post(`${url(p102.id)}/release`).send({})).status).toBe(409);
+    expect((await lan.post(`${url(p101.id)}/start`)).status).toBe(200);
+    expect((await lan.post(`${url(p101.id)}/release`).send({})).status).toBe(409);
+    expect((await task(p101.id)).assigneeUserId).toBe(lanId);
+  });
+
+  it('tells the branch\'s Quản lý buồng phòng of a "Không cần dọn" request — and no other branch\'s', async () => {
+    const { p101 } = await inspectedByLan();
+    expect((await lan.post(`${url(p101.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' })).status).toBe(200);
+    const told = await testPrisma.notification.findMany({ where: { title: { contains: 'Duyệt không cần dọn' } }, select: { userId: true, body: true, link: true } });
+    expect(told).toEqual([{ userId: await managerId(), body: expect.stringContaining('Khách không muốn dọn'), link: '/app/hk/rooms' }]);
+    // Asked once: a second request while it waits is refused.
+    expect((await lan.post(`${url(p101.id)}/no-clean`).send({ reason: 'Lần nữa' })).status).toBe(409);
   });
 });

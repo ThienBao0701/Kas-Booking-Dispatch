@@ -238,6 +238,20 @@ const requireInspector = requireCapability('technical.confirmCompletion');
 const requireReporter = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
 
 /**
+ * Who FILES a new incident (and is warned of a likely duplicate first): the
+ * reporters above, and Bộ phận buồng phòng at its own branch ("Báo cáo vấn đề"
+ * of Buồng phòng). Correcting a report stays the reporters' (`requireReporter`).
+ */
+const requireIncidentFiler = requireRole(
+  'RECEPTIONIST',
+  'ADMIN',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+  'HOUSEKEEPING',
+  'HOUSEKEEPING_MANAGER',
+);
+
+/**
  * Who GIVES an incident to a technician: the Admin and the reception supervisors,
  * each within its branch scope (checked against the incident by the service).
  */
@@ -297,7 +311,7 @@ export function createIssuesRouter(): Router {
   const router = Router();
 
   // POST /api/issues — create a report (receptionist own branch, admin any branch).
-  router.post('/issues', requireAuth, requirePasswordChanged, requireReporter, proofUpload(), (req, res, next) => {
+  router.post('/issues', requireAuth, requirePasswordChanged, requireIncidentFiler, proofUpload(), (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = createSchema.parse(req.body ?? {});
@@ -520,7 +534,7 @@ export function createIssuesRouter(): Router {
     repeat). A WARNING for the form, never a block — a genuine new occurrence is
     still reported. Read through the caller's own visibility.
   */
-  router.get('/issues/similar', requireAuth, requirePasswordChanged, requireReporter, (req, res, next) => {
+  router.get('/issues/similar', requireAuth, requirePasswordChanged, requireIncidentFiler, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const q = similarSchema.parse(req.query);

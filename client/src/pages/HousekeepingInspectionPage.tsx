@@ -39,7 +39,7 @@ import { useWorkStep } from '../api/useWorkStep';
 import { placeText } from '../lib/workPlaces';
 import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
-import { formatDate, formatDateTime, hcmToday } from '../lib/format';
+import { formatDate, formatDateTime, hcmToday, hcmTomorrow } from '../lib/format';
 
 export function HousekeepingInspectionPage() {
   const today = hcmToday();
@@ -61,9 +61,19 @@ export function HousekeepingInspectionPage() {
     enabled: current !== null,
   });
   const olderItems = items.data?.tasks ?? [];
+  // Tomorrow's work, prepared by the manager: read and accepted today, worked tomorrow.
+  const tomorrow = hcmTomorrow();
+  const nextDay = useQuery({
+    queryKey: [...ROOM_WORK_KEY, 'worker-groups', tomorrow],
+    queryFn: () => roomWorkApi.workerGroups(tomorrow),
+    refetchInterval: 60_000,
+    enabled: current !== null,
+  });
+  const tomorrowGroups = nextDay.data?.groups ?? [];
   const refresh = () => {
     void groups.refetch();
     void items.refetch();
+    void nextDay.refetch();
   };
 
   return (
@@ -94,10 +104,19 @@ export function HousekeepingInspectionPage() {
           </QueryState>
           {olderItems.length > 0 ? (
             <div className="space-y-2" data-testid="older-items">
-              <h3 className="text-sm font-semibold text-slate-700">Phòng giao trước khi có nhóm công việc</h3>
+              <h3 className="text-sm font-semibold text-slate-700">Phòng lẻ — nhận từng phòng</h3>
               <WorkItemList tasks={olderItems} meId={me?.id} onChanged={refresh} />
             </div>
           ) : null}
+        </section>
+      ) : null}
+      {current && tomorrowGroups.length > 0 ? (
+        <section className="mt-5 space-y-3" aria-labelledby="work-groups-tomorrow-title" data-testid="worker-tomorrow">
+          <h2 id="work-groups-tomorrow-title" className="text-lg font-bold text-slate-900">
+            Công việc ngày mai {formatDate(tomorrow)}
+          </h2>
+          <p className="text-sm text-slate-600">Xem và nhận trước. Kiểm tra và dọn phòng bắt đầu vào đúng ngày {formatDate(tomorrow)}.</p>
+          <WorkGroupList groups={tomorrowGroups} meId={me?.id} onChanged={refresh} hasOlder={false} future />
         </section>
       ) : null}
       <WorkHistory meId={me?.id} />
@@ -112,7 +131,20 @@ export function HousekeepingInspectionPage() {
  * colleague's shows who works it and cannot be taken. On one's own group, each
  * room carries its next step and "Không cần dọn".
  */
-function WorkGroupList({ groups, meId, onChanged, hasOlder }: { groups: WorkGroup[]; meId?: number; onChanged: () => void; hasOlder: boolean }) {
+function WorkGroupList({
+  groups,
+  meId,
+  onChanged,
+  hasOlder,
+  future = false,
+}: {
+  groups: WorkGroup[];
+  meId?: number;
+  onChanged: () => void;
+  hasOlder: boolean;
+  /** A later day's work: accepted now, no room step before its day. */
+  future?: boolean;
+}) {
   const [accepting, setAccepting] = useState<WorkGroup | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const step = useWorkStep(onChanged);
@@ -127,7 +159,7 @@ function WorkGroupList({ groups, meId, onChanged, hasOlder }: { groups: WorkGrou
     );
   }
   return (
-    <div className="space-y-3" data-testid="worker-groups">
+    <div className="space-y-3" data-testid={future ? 'worker-groups-tomorrow' : 'worker-groups'}>
       {message ? (
         <p className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900" role="status" data-testid="accept-done">
           {message}
@@ -157,7 +189,7 @@ function WorkGroupList({ groups, meId, onChanged, hasOlder }: { groups: WorkGrou
               )
             }
             itemAction={(t) =>
-              t.assignee?.id === meId ? (
+              !future && t.assignee?.id === meId ? (
                 <OwnGroupItemActions task={t} busy={step.isPending && step.variables?.id === t.id} onStep={() => step.mutate(t)} />
               ) : null
             }
@@ -170,7 +202,7 @@ function WorkGroupList({ groups, meId, onChanged, hasOlder }: { groups: WorkGrou
           onClose={() => setAccepting(null)}
           onAccepted={(g) => {
             setAccepting(null);
-            setMessage(`Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
+            setMessage(future ? `Đã nhận ${g.title} cho ngày mai.` : `Đã nhận ${g.title}. Bấm “Kiểm tra” ở từng phòng để bắt đầu.`);
           }}
           onRefresh={onChanged}
         />
@@ -279,7 +311,9 @@ function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: nu
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [confirming, setConfirming] = useState<RoomTask[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const claimable = tasks.filter((t) => !t.assignee && t.phase === 'UNCLAIMED');
+  // Free: nobody's yet — never started, or inspected and left for someone else to clean.
+  const isFree = (t: RoomTask) => !t.assignee && (t.phase === 'UNCLAIMED' || (t.phase === 'AWAITING_CLEANING' && !!t.handoff));
+  const claimable = tasks.filter(isFree);
   // Only items still on screen and still free stay selected.
   const picked = claimable.filter((t) => selected.has(t.id));
   const mine = useMemo(() => tasks.filter((t) => t.assignee?.id === meId), [tasks, meId]);
@@ -316,7 +350,7 @@ function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: nu
       ) : null}
       <ul className="space-y-2" data-testid="work-items">
         {tasks.map((t) => {
-          const free = !t.assignee && t.phase === 'UNCLAIMED';
+          const free = isFree(t);
           const own = t.assignee?.id === meId;
           return (
             <li
@@ -359,6 +393,12 @@ function WorkItemList({ tasks, meId, onChanged }: { tasks: RoomTask[]; meId?: nu
                     <PhaseBadge task={t} />
                     <span>{t.assignee ? `Người thực hiện: ${own ? 'Bạn' : t.assignee.name}` : 'Chưa có người nhận'}</span>
                   </p>
+                  {t.handoff ? (
+                    <p className="text-sm text-amber-900" data-testid={`work-handoff-${t.id}`}>
+                      Cần người dọn — đã kiểm tra bởi {t.handoff.byName}
+                      {t.handoff.reason ? ` · ${t.handoff.reason}` : ''}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
                   {free ? (

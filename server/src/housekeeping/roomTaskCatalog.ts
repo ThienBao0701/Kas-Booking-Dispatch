@@ -83,6 +83,12 @@ export const QUANTITY_ITEMS = [
   { code: 'LAUNDRY_BAG', label: 'Laundrybag' },
 ] as const;
 
+/** The counted items that are LINEN (reused, laundered); the others are consumed supplies. */
+export const LINEN_QUANTITY_CODES: readonly string[] = ['PILLOWCASE', 'PILLOW_PROTECTOR', 'BATH_TOWEL', 'HAND_TOWEL', 'BATH_MAT', 'BATHROBE'];
+
+/** The linen whose used pieces are taken out of the room — "Đồ bẩn thu về". */
+export const COLLECTABLE_CODES: readonly string[] = [...LINEN_ITEMS.map((i) => i.code as string), ...LINEN_QUANTITY_CODES];
+
 /** "Đánh dấu nếu đồ được thay thế" — ✓ when replaced: the six items, exactly as named. */
 export const REPLACEMENT_ITEMS = [
   { code: 'COMB_COTTON_CAP', label: 'Lược, tăm bông, chụp tóc' },
@@ -118,8 +124,13 @@ export const MAX_QUANTITY = 999;
 export interface CleaningForm {
   /** Per linen item: its one type (K / Q / T — King / Queen / Twin) and how many. */
   linen: Record<string, { size: string; quantity: number }>;
-  /** Per counted item, how many (0 is left out). */
+  /** Per counted item, how many (0 is left out) — the clean pieces put into the room. */
   quantities: Record<string, number>;
+  /**
+   * "Đồ bẩn thu về" — per linen item, the used pieces taken out of the room
+   * (an explicit 0: none). Bed linen is collected in the size recorded for it.
+   */
+  collected: Record<string, number>;
   /** The replacement items ticked ✓. */
   replaced: string[];
   /** The "Ghi nhận đặc biệt" ticked. */
@@ -144,6 +155,7 @@ export function roomWorkCatalog() {
     linenSizes: LINEN_SIZES,
     quantities: QUANTITY_ITEMS,
     replacements: REPLACEMENT_ITEMS,
+    collectable: COLLECTABLE_CODES,
     specialStatuses: SPECIAL_STATUSES,
     maxQuantity: MAX_QUANTITY,
   };
@@ -171,7 +183,7 @@ function codesOf(raw: unknown, codes: readonly string[], message: string): strin
  * Each linen item is ONE type and a count — never a list of types.
  */
 export function parseCleaningForm(raw: unknown): CleaningForm {
-  const input = (raw ?? {}) as { linen?: unknown; quantities?: unknown; replaced?: unknown; special?: unknown; note?: unknown };
+  const input = (raw ?? {}) as { linen?: unknown; quantities?: unknown; collected?: unknown; replaced?: unknown; special?: unknown; note?: unknown };
   const linen: CleaningForm['linen'] = {};
   const linenCodes = LINEN_ITEMS.map((i) => i.code as string);
   for (const [code, entry] of Object.entries((input.linen ?? {}) as Record<string, unknown>)) {
@@ -189,11 +201,20 @@ export function parseCleaningForm(raw: unknown): CleaningForm {
     if (!isCount(value)) throw ApiError.validation(`Số lượng phải là số nguyên từ 0 đến ${MAX_QUANTITY}.`);
     if (value > 0) quantities[code] = value;
   }
+  const collected: Record<string, number> = {};
+  for (const [code, value] of Object.entries((input.collected ?? {}) as Record<string, unknown>)) {
+    if (!COLLECTABLE_CODES.includes(code)) throw ApiError.validation('Đồ bẩn thu về không hợp lệ.');
+    if (!isCount(value)) throw ApiError.validation(`Số lượng phải là số nguyên từ 0 đến ${MAX_QUANTITY}.`);
+    // Bed linen is collected in a size: the one chosen for it on the form.
+    if (value > 0 && linenCodes.includes(code) && !linen[code]) throw ApiError.validation('Chọn loại King, Queen hoặc Twin cho đồ bẩn thu về.');
+    // An explicit 0 is kept: "nothing collected" is an answer, not a blank.
+    collected[code] = value;
+  }
   const replaced = codesOf(input.replaced, REPLACEMENT_CODES, 'Đồ thay thế không hợp lệ.');
   const special = codesOf(input.special, SPECIAL_CODES, 'Ghi nhận đặc biệt không hợp lệ.');
   const note = typeof input.note === 'string' && input.note.trim() ? input.note.trim() : null;
   if (note && note.length > 2000) throw ApiError.validation('Ghi chú quá dài.');
-  return { linen, quantities, replaced, special, note };
+  return { linen, quantities, collected, replaced, special, note };
 }
 
 /**
@@ -220,6 +241,8 @@ export function readCleaning(raw: unknown): StoredCleaning | null {
   return {
     linen,
     quantities: r.quantities && typeof r.quantities === 'object' ? (r.quantities as Record<string, number>) : {},
+    // Saved before "Đồ bẩn thu về" existed: nothing recorded as collected.
+    collected: r.collected && typeof r.collected === 'object' ? (r.collected as Record<string, number>) : {},
     replaced: REPLACEMENT_CODES.filter((c) => replaced.includes(c)),
     special: SPECIAL_CODES.filter((c) => special.includes(c)),
     note: typeof r.note === 'string' ? r.note : null,
@@ -230,7 +253,7 @@ export function readCleaning(raw: unknown): StoredCleaning | null {
 }
 
 /** A room with nothing saved yet. */
-export const EMPTY_CLEANING: StoredCleaning = { linen: {}, quantities: {}, replaced: [], special: [], note: null };
+export const EMPTY_CLEANING: StoredCleaning = { linen: {}, quantities: {}, collected: {}, replaced: [], special: [], note: null };
 
 const labelOf = (list: readonly { code: string; label: string }[], code: string) => list.find((i) => i.code === code)?.label ?? code;
 

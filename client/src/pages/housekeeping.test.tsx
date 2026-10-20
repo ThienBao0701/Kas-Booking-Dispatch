@@ -32,7 +32,7 @@ import {
   installApiMock,
   renderApp,
 } from '../test/utils';
-import { hcmToday } from '../lib/format';
+import { hcmToday, hcmTomorrow } from '../lib/format';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -205,6 +205,7 @@ const CATALOG = {
     { code: 'OS', short: 'OS', label: 'Phòng ngưng tạm' },
     { code: 'LNL', short: 'LNL', label: 'Hàng thất lạc' },
   ],
+  collectable: ['BED_SHEET', 'DUVET_COVER', 'MATTRESS_PROTECTOR', 'BATH_TOWEL'],
   maxQuantity: 999,
 };
 
@@ -257,6 +258,30 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
       ...extra,
     });
 
+  it('shows tomorrow’s prepared work apart from today’s — to accept now, with no room step before its day', async () => {
+    const tomorrowMine = group('t2', 2, [item('n2', { roomNumber: '305', floor: '3', assignee: MINE, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+      workDate: hcmTomorrow(),
+      assignee: MINE,
+      status: { code: 'ACCEPTED', label: 'Đã nhận' },
+    });
+    const tomorrowFree = group('t1', 1, [item('n1', { roomNumber: '205', floor: '2' })], { workDate: hcmTomorrow() });
+    installApiMock(
+      routes({
+        [`GET /api/housekeeping/work/groups?date=${hcmTomorrow()}`]: () => ({ status: 200, body: { working: true, groups: [tomorrowFree, tomorrowMine] } }),
+      }),
+    );
+    renderApp('/app');
+    const next = await screen.findByTestId('worker-tomorrow');
+    expect(next).toHaveTextContent(`Công việc ngày mai ${hcmTomorrow().split('-').reverse().join('/')}`);
+    expect(next).toHaveTextContent('Kiểm tra và dọn phòng bắt đầu vào đúng ngày');
+    // A free group is accepted ahead; one's own shows no step before its day.
+    expect(within(next).getByTestId('group-accept-1')).toBeInTheDocument();
+    expect(within(next).getByTestId('group-mine-2')).toBeInTheDocument();
+    expect(within(next).queryByTestId('work-step-n2')).not.toBeInTheDocument();
+    // Today's list is today's alone.
+    expect(within(await screen.findByTestId('worker-groups')).queryByTestId('group-card-1')).toHaveTextContent('Tầng 1 buổi sáng');
+  });
+
   it('lands on the numbered work groups: who holds each, and the next step on one’s own rooms', async () => {
     installApiMock(routes());
     renderApp('/app');
@@ -266,7 +291,10 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(within(current).getByTestId('shift-hotel')).toHaveTextContent('Khách sạn: 05 Trương Định');
     expect(document.body).not.toHaveTextContent(/Chi nhánh \d/);
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng', 'KPI & Thu tiền']);
+    // Its work, then its own reports (with its KPI) and its completed issues — folded groups.
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng']);
+    expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
+    expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
 
     const list = await screen.findByTestId('worker-groups');
     expect(within(list).getAllByRole('article').map((a) => a.getAttribute('data-testid'))).toEqual(['group-card-1', 'group-card-2', 'group-card-3']);
@@ -463,6 +491,66 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(await within(header).findByTestId('room-no-clean-waiting')).toHaveTextContent('Chờ Quản lý xác nhận');
     expect(within(header).queryByTestId('room-no-clean-open')).not.toBeInTheDocument();
     expect(screen.getByTestId('room-no-clean-pending')).toHaveTextContent('Khách không muốn dọn');
+  });
+
+  it('"Chưa dọn — chuyển người khác dọn" leaves an inspected room to a colleague, keeping the inspection', async () => {
+    const released: unknown[] = [];
+    const inspected = {
+      ...(G2.items[0] as Record<string, unknown>),
+      workGroup: { id: 'g2', number: 2, name: null },
+      state: 'INSPECTED',
+      stateLabel: 'Đã kiểm tra',
+      phase: 'AWAITING_CLEANING',
+      phaseLabel: 'Chờ dọn phòng',
+      inspection: { id: 'i1', createdAt: '2026-10-05T02:00:00.000Z', inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] },
+    };
+    installApiMock(
+      routes({
+        'GET /api/housekeeping/work/tasks/w4': () => ({ status: 200, body: { task: inspected } }),
+        'POST /api/housekeeping/work/tasks/w4/release': (init) => {
+          released.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { task: { ...inspected, assignee: null, workGroup: null } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections/room/w4');
+    const panel = await screen.findByTestId('cleaning-start-panel');
+    // Not "Không cần dọn": the room still has to be cleaned — by someone else.
+    await userEvent.click(within(panel).getByTestId('cleaning-release'));
+    const dialog = await screen.findByTestId('release-dialog');
+    expect(dialog).toHaveTextContent('Kết quả kiểm tra của bạn được giữ lại');
+    await userEvent.type(within(dialog).getByTestId('release-reason'), 'Hết ca');
+    await userEvent.click(screen.getByTestId('release-send'));
+    await waitFor(() => expect(released).toEqual([{ reason: 'Hết ca' }]));
+    // Back on the list: the room is no longer this housekeeper's.
+    expect(await screen.findByTestId('worker-groups')).toBeInTheDocument();
+  });
+
+  it('offers a room a colleague inspected and left — saying who — for "Nhận"', async () => {
+    const claimed: unknown[] = [];
+    const left = item('r1', {
+      roomNumber: '102',
+      floor: '1',
+      state: 'INSPECTED',
+      stateLabel: 'Đã kiểm tra',
+      phase: 'AWAITING_CLEANING',
+      phaseLabel: 'Chờ dọn phòng',
+      handoff: { byId: 9, byName: 'Chị Hoa', at: '2026-10-05T03:00:00.000Z', reason: 'Hết ca' },
+    });
+    installApiMock(
+      routes({
+        [ITEMS]: () => ({ status: 200, body: { working: true, tasks: [left] } }),
+        'POST /api/housekeeping/work/claim': (init) => {
+          claimed.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { tasks: [{ ...left, assignee: MINE, handoff: null }] } };
+        },
+      }),
+    );
+    renderApp('/app/inspections');
+    expect(await screen.findByTestId('work-handoff-r1')).toHaveTextContent('Cần người dọn — đã kiểm tra bởi Chị Hoa · Hết ca');
+    await userEvent.click(screen.getByTestId('work-claim-r1'));
+    await userEvent.click(await screen.findByTestId('claim-confirm'));
+    await waitFor(() => expect(claimed).toEqual([{ taskIds: ['r1'] }]));
   });
 
   it('"Kiểm tra" begins the inspection of one’s own room and opens it', async () => {
@@ -700,6 +788,9 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     const summary = await screen.findByTestId('cleaning-summary');
     expect(within(summary).getByTestId('summary-linen')).toHaveTextContent('Ga giường: Queen × 2');
     expect(within(summary).getByTestId('summary-quantities')).toHaveTextContent('Khăn tắm: 2');
+    // The used linen taken out: as many as were put in, unless changed.
+    expect(within(summary).getByTestId('summary-collected')).toHaveTextContent('Ga giường: 2');
+    expect(within(summary).getByTestId('summary-collected')).toHaveTextContent('Khăn tắm: 2');
     expect(within(summary).getByTestId('summary-replaced')).toHaveTextContent('Dầu gội');
     expect(within(summary).getByTestId('summary-special')).toHaveTextContent('L/B : Khách có hành lý gọn nhẹ');
     expect(within(summary).getByTestId('summary-special')).toHaveTextContent('DND : Không làm phiền');
@@ -719,6 +810,7 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
         {
           linen: { BED_SHEET: { size: 'Q', quantity: 2 } },
           quantities: { BATH_TOWEL: 2 },
+          collected: { BED_SHEET: 2, BATH_TOWEL: 2 },
           replaced: ['SHAMPOO'],
           special: ['LB', 'DND'],
           note: 'Rèm hơi bẩn',
@@ -1000,7 +1092,7 @@ describe('Admin — buồng phòng', () => {
     // The old address lands under "Báo cáo vấn đề", whose group opens on it.
     renderApp('/app/housekeeping');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(await within(nav).findByRole('link', { name: 'Buồng phòng' })).toHaveAttribute('href', '/app/reports/housekeeping');
+    expect(await within(nav).findByRole('link', { name: 'Phát hiện & thu tiền' })).toHaveAttribute('href', '/app/reports/housekeeping');
 
     const branch = await screen.findByTestId('housekeeping-branch');
     await waitFor(() =>

@@ -70,58 +70,50 @@ export function HkHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="mb-5 space-y-4">
+    <header className="mb-4 space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3 md:flex-nowrap">
         <div className="min-w-0 md:flex-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">{title}</h1>
-          {description ? <p className="mt-1 max-w-3xl text-sm text-slate-500">{description}</p> : null}
+          <h1 className="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">{title}</h1>
+          {/* A phone shows the title alone; the one-line description is for wider screens. */}
+          {description ? <p className="mt-1 hidden max-w-3xl text-sm text-slate-500 sm:block">{description}</p> : null}
         </div>
-        {actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}
+        {actions ? <div className="flex w-full shrink-0 flex-wrap gap-2 sm:w-auto">{actions}</div> : null}
       </div>
       {period ? (
-      <section
-        data-testid="hk-context"
-        aria-label="Phạm vi đang xem"
-        className={`${CARD} flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between`}
-      >
-        <dl className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-0 sm:divide-x sm:divide-line-subtle">
-          <div className="flex min-w-0 items-center gap-3 sm:pr-5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700" aria-hidden="true">
-              <Building2 className="h-[18px] w-[18px]" />
-            </span>
-            <div className="min-w-0">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">Quản lý buồng phòng</dt>
-              <dd className="truncate text-sm font-semibold text-slate-900" data-testid="manager-branch">
+        /* WHERE AND WHEN, ON ONE LINE — the hotel and the day; the date field and (for the Admin) the branch beside it. */
+        <section
+          data-testid="hk-context"
+          aria-label="Phạm vi đang xem"
+          className={`${CARD} flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between`}
+        >
+          <p className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-700">
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <Building2 className="h-4 w-4 shrink-0 text-brand-600" aria-hidden="true" />
+              <span className="sr-only">Quản lý buồng phòng: </span>
+              <span className="truncate font-semibold text-slate-900" data-testid="manager-branch">
                 {branch}
-              </dd>
-            </div>
-          </div>
-          <div className="flex min-w-0 items-center gap-3 sm:pl-5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700" aria-hidden="true">
-              <CalendarDays className="h-[18px] w-[18px]" />
+              </span>
             </span>
-            <div className="min-w-0">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{period.label}</dt>
-              <dd className="text-sm text-slate-900">
-                <span className="font-semibold tabular-nums" data-testid="hk-period-value">
-                  {period.value}
-                </span>
-                {period.weekday ? <span className="text-slate-500"> ({period.weekday})</span> : null}
-              </dd>
+            <span className="inline-flex items-center gap-1.5">
+              <CalendarDays className="h-4 w-4 shrink-0 text-brand-600" aria-hidden="true" />
+              <span className="sr-only">{period.label}: </span>
+              <span className="font-semibold tabular-nums text-slate-900" data-testid="hk-period-value">
+                {period.value}
+              </span>
+              {period.weekday ? <span className="text-slate-500">({period.weekday})</span> : null}
+            </span>
+          </p>
+          {/*
+            `min-w-0` + full width on phones: without them this flex column keeps
+            its children's intrinsic width (a native date input has one), and the
+            date field ran past the right edge at 320–390px.
+          */}
+          {controls ? (
+            <div className="flex w-full min-w-0 flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-end" data-testid="hk-controls">
+              {controls}
             </div>
-          </div>
-        </dl>
-        {/*
-          `min-w-0` + full width on phones: without them this flex column keeps
-          its children's intrinsic width (a native date input has one), and the
-          date field ran past the right edge at 320–390px.
-        */}
-        {controls ? (
-          <div className="flex w-full min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end lg:w-auto" data-testid="hk-controls">
-            {controls}
-          </div>
-        ) : null}
-      </section>
+          ) : null}
+        </section>
       ) : null}
     </header>
   );

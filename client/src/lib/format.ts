@@ -43,6 +43,11 @@ export function hcmToday(now: Date = new Date()): string {
   return new Date(now.getTime() + HCM_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+/** Tomorrow's calendar date in Asia/Ho_Chi_Minh — "Phân công việc ngày hôm sau". */
+export function hcmTomorrow(now: Date = new Date()): string {
+  return hcmToday(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+}
+
 /** Today's date in Asia/Ho_Chi_Minh as "DD/MM" (no year) — for the PMS note. */
 /**
  * "13:15" — the wall-clock time in Asia/Ho_Chi_Minh.

@@ -694,6 +694,23 @@ export async function requestNoClean(
     if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
     await recordEvent(tx, taskId, 'NO_CLEAN_REQUESTED', actor, now, { reason, state: row.state });
   });
+  // The branch's Quản lý buồng phòng decides — told at once, on its phone too.
+  const [managers, branch] = await Promise.all([
+    client.user.findMany({ where: { role: 'HOUSEKEEPING_MANAGER', active: true, branchId: row.branchId }, select: { id: true } }),
+    client.branch.findUnique({ where: { id: row.branchId }, select: { branchNumber: true } }),
+  ]);
+  const place = placeLabel(row.areaKind, row.roomNumber, row.floor);
+  await notifyOperational(
+    managers.map((m) => ({
+      userId: m.id,
+      kind: 'HOUSEKEEPING_ASSIGNED' as const,
+      title: `Duyệt không cần dọn — ${place}`,
+      body: `CN ${branch?.branchNumber ?? ''} · ${actor.fullName} báo không cần dọn.\nLý do: ${reason}`,
+      link: '/app/hk/rooms',
+      dedupeKey: `HOUSEKEEPING_NO_CLEAN_REQUEST:${taskId}:${m.id}:${now.toISOString()}`,
+    })),
+    client,
+  );
   return serializeTask(await loadTask(taskId, client), { money: false });
 }
 

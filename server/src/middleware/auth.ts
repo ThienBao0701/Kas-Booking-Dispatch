@@ -138,6 +138,21 @@ function supervisorMayReach(req: Request): boolean {
  * `/auth` is here so it can sign in, read its own profile and change its
  * password; `/nav-badges` and `/notifications` are per-user and empty for it.
  */
+/**
+ * Bộ phận buồng phòng's own "Báo cáo vấn đề" (both housekeeping roles): its
+ * journal records (create, its list, complete, the EZ lookup, the archive), the
+ * branch's incidents (follow and report — not correct), and VII. Each service
+ * then keeps it to its own department and branch.
+ */
+const HOUSEKEEPING_REPORT_ROUTES = [
+  /^\/api\/reception\/reports$/,
+  /^\/api\/reception\/reports\/(options|housekeeping|guest|archive)$/,
+  /^\/api\/reception\/reports\/[^/]+\/complete$/,
+  /^\/api\/issues$/,
+  /^\/api\/issues\/similar$/,
+  /^\/api\/confidential-reports(\/|$)/,
+];
+
 const HOUSEKEEPING_ROUTES = [
   /^\/api\/auth(\/|$)/,
   /^\/api\/housekeeping(\/|$)/,
@@ -148,6 +163,7 @@ const HOUSEKEEPING_ROUTES = [
   // The room catalog and the branch of its own account.
   /^\/api\/branches\/\d+\/rooms$/,
   /^\/api\/branches$/,
+  ...HOUSEKEEPING_REPORT_ROUTES,
 ];
 
 /**
@@ -163,6 +179,8 @@ const HOUSEKEEPING_MANAGER_ROUTES = [
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
   /^\/api\/push(\/|$)/,
+  /^\/api\/hotel-deliveries(\/|$)/,
+  ...HOUSEKEEPING_REPORT_ROUTES,
 ];
 
 function housekeepingMayReach(req: Request): boolean {

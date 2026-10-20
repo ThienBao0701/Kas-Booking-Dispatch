@@ -450,9 +450,19 @@ export const reportsApi = {
       shiftType?: string;
       verdict?: 'CORRECT' | 'INCORRECT';
       severity?: Severity;
+      /** The Admin's "Buồng phòng" archive; every other role reads its own department's. */
+      department?: 'HOUSEKEEPING';
     } = {},
   ) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
+
+  /** Bộ phận buồng phòng's live journal — its requests still open (or just completed) and its room services. */
+  housekeeping: (params: { branchId?: number } = {}) =>
+    api.get<{ reports: OperationalReport[]; archiveAfterHours: number }>(`/reception/reports/housekeeping${query(params)}`),
+
+  /** "Mã EZ" → the guest's name, from the newest record carrying it; `guest` null when none does. */
+  guest: (ez: string, params: { branchId?: number } = {}) =>
+    api.get<{ guest: { guestName: string; ezCode: string; recordedAt: string } | null }>(`/reception/reports/guest${query({ ez, ...params })}`),
 
   /**
    * One record. `branchId` is read ONLY for a supervisor (Admin, Quản lý lễ tân,
@@ -523,7 +533,7 @@ export const reportsApi = {
  * the working list; `archived` is "Hoàn thành vấn đề".
  */
 export const deliveriesApi = {
-  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string; shiftType?: string } = {}) =>
+  list: (scope: 'active' | 'archived', params: { branchId?: number; from?: string; to?: string; shiftType?: string; department?: 'HOUSEKEEPING' } = {}) =>
     api.get<{ scope: 'active' | 'archived'; deliveries: OperationalReport[]; total?: number }>(
       `/hotel-deliveries${query({ scope, ...params })}`,
     ),
