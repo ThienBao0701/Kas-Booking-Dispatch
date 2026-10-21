@@ -263,3 +263,48 @@ describe('F. "Báo cáo các vấn đề và tình hình quan trọng" from Bộ
     expect((await qlbp2.get('/api/confidential-reports')).body.reports).toEqual([]);
   });
 });
+
+describe('G. completed records stay reachable by the Admin — and by no one outside their scope', () => {
+  it('shows the Admin Housekeeping’s hand-overs in its housekeeping view — Reception’s to it, and its own — active and archived', async () => {
+    await checkIn(letan1);
+    const toHk = (await letan1.post('/api/reception/reports').send({ category: 'HOTEL_DELIVERY', delivery: { department: 'HOUSEKEEPING', itemName: 'Ga giường', quantity: 20 } })).body.report.id as string;
+    const toTech = (await letan1.post('/api/reception/reports').send({ category: 'HOTEL_DELIVERY', delivery: { department: 'TECHNICAL', itemName: 'Bóng đèn', quantity: 2 } })).body.report.id as string;
+    await startShiftAt(lan, cn1);
+    const own = (await lan.post('/api/reception/reports').send({ category: 'HOTEL_DELIVERY', delivery: { department: 'RECEPTION', itemName: 'Khăn', quantity: 5 } })).body.report.id as string;
+    const ids = async (agent: Agent, query: string) => ((await agent.get(`/api/hotel-deliveries?${query}`)).body.deliveries as { id: string }[]).map((d) => d.id).sort();
+    // The housekeeping view is what Bộ phận buồng phòng itself sees.
+    expect(await ids(admin, 'scope=active&department=HOUSEKEEPING')).toEqual([toHk, own].sort());
+    expect(await ids(qlbp1, 'scope=active')).toEqual([toHk, own].sort());
+    expect(await ids(admin, `scope=active&department=HOUSEKEEPING&branchId=${cn2}`)).toEqual([]);
+    // Reception's view: Reception's records, every department they went to.
+    expect(await ids(admin, 'scope=active')).toEqual([toHk, toTech].sort());
+    // Twelve hours on: "Hoàn thành vấn đề", the same split.
+    at('2026-10-05', '22:00');
+    expect(await ids(admin, 'scope=archived&department=HOUSEKEEPING')).toEqual([toHk, own].sort());
+    expect(await ids(admin, 'scope=archived')).toEqual([toHk, toTech].sort());
+    expect(await ids(qlbp2, 'scope=archived')).toEqual([]);
+  });
+
+  it('keeps every completed request in the Admin’s "Hoàn thành vấn đề" of its department — never in another branch’s or department’s', async () => {
+    await checkIn(letan1);
+    const desk = (await guestRequest(letan1, 'Khách Lễ tân')).body.report.id as string;
+    expect((await letan1.post(`/api/reception/reports/${desk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    await startShiftAt(lan, cn1);
+    const hk = (await guestRequest(lan, 'Khách Buồng')).body.report.id as string;
+    expect((await qlbp1.post(`/api/reception/reports/${hk}/complete`).send({ verdict: 'INCORRECT', incorrectReason: 'Khách đã tự xử lý' })).status).toBe(200);
+    at('2026-10-05', '22:00');
+    const archive = async (agent: Agent, query = '') => ((await agent.get(`/api/reception/reports/archive${query}`)).body.reports as { id: string }[]).map((r) => r.id);
+    // The Admin: Reception's by default, Housekeeping's on request — each under its verdict.
+    expect(await archive(admin, '?verdict=CORRECT')).toEqual([desk]);
+    expect(await archive(admin, '?verdict=INCORRECT')).toEqual([]);
+    expect(await archive(admin, '?department=HOUSEKEEPING&verdict=INCORRECT')).toEqual([hk]);
+    expect(await archive(admin, `?department=HOUSEKEEPING&branchId=${cn2}`)).toEqual([]);
+    // Each department's own; never the other's, never another branch's.
+    expect(await archive(letan1)).toEqual([desk]);
+    expect(await archive(letan2)).toEqual([]);
+    expect(await archive(qlbp1)).toEqual([hk]);
+    expect(await archive(qlbp2)).toEqual([]);
+    // A department named by a non-Admin is not read.
+    expect(await archive(letan1, '?department=HOUSEKEEPING')).toEqual([desk]);
+  });
+});

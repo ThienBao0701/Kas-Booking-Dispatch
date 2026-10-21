@@ -60,6 +60,7 @@ function request(over: Record<string, unknown> = {}) {
     updatedAt: '2026-10-05T02:00:00.000Z',
     summary: 'Thêm gối',
     voided: false,
+    audits: [],
     payment: null,
     guestRequest: {
       guestName: 'Khách 301',
@@ -204,6 +205,57 @@ describe('"Hoàn thành vấn đề" of Bộ phận buồng phòng', () => {
     expect(screen.queryByTestId('completed-export-pdf')).not.toBeInTheDocument();
     // The manager's own department is the server's to decide — never asked for.
     expect(asked.every((u) => !u.includes('department='))).toBe(true);
+  });
+});
+
+describe('the Admin’s "Hoàn thành vấn đề" of Bộ phận buồng phòng', () => {
+  it('asks for the housekeeping department — its requests and the hand-overs Reception made to it', async () => {
+    const asked: string[] = [];
+    const delivery = request({
+      id: 'd1',
+      category: 'HOTEL_DELIVERY',
+      categoryLabel: 'Giao nhận hàng hóa của khách sạn',
+      originDepartment: 'RECEPTION',
+      departmentLabel: 'Lễ tân',
+      sourceLabel: null,
+      createdByRole: 'RECEPTIONIST',
+      createdByName: 'Lễ tân Một',
+      guestRequest: null,
+      delivery: {
+        department: 'HOUSEKEEPING',
+        departmentLabel: 'Buồng phòng',
+        itemName: 'Ga giường',
+        quantity: 20,
+        note: null,
+        status: 'COMPLETED',
+        statusLabel: 'Đã hoàn thành',
+        completedAt: '2026-10-05T02:00:00.000Z',
+        archived: true,
+      },
+    });
+    const fetchMock = installApiMock(shell(ADMIN_USER));
+    fetchMock.mockImplementation(async (url: string | URL, init: RequestInit = {}) => {
+      const key = `${(init.method ?? 'GET').toUpperCase()} ${String(url)}`;
+      asked.push(key);
+      const routes = shell(ADMIN_USER);
+      const res = key.startsWith('GET /api/reception/reports/archive')
+        ? { status: 200, body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, range: null, archiveAfterHours: 12 } }
+        : key.startsWith('GET /api/issues?')
+          ? { status: 200, body: { issues: [], pagination: { total: 0 } } }
+          : key.startsWith('GET /api/hotel-deliveries')
+            ? { status: 200, body: { scope: 'archived', deliveries: [delivery], total: 1 } }
+            : routes[key]
+              ? routes[key]!(init)
+              : { status: 404, body: { error: { code: 'NOT_FOUND', message: key } } };
+      return new Response(JSON.stringify(res.body), { status: res.status, headers: { 'Content-Type': 'application/json' } });
+    });
+    renderApp('/app/hk/completed?verdict=CORRECT');
+    const table = await screen.findByTestId('completed-delivery-table');
+    await waitFor(() => expect(table).toHaveTextContent('Ga giường'));
+    await waitFor(() => expect(asked.some((u) => u.startsWith('GET /api/reception/reports/archive') && u.includes('department=HOUSEKEEPING'))).toBe(true));
+    expect(asked.some((u) => u.startsWith('GET /api/hotel-deliveries') && u.includes('department=HOUSEKEEPING'))).toBe(true);
+    // Reception's "Vấn đề về chất lượng và dịch vụ" is not part of it.
+    expect(screen.getByTestId('completed-issues')).not.toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
   });
 });
 

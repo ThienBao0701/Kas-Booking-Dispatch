@@ -216,7 +216,6 @@ function finding(id: string, createdAt: string, collectionStatus: 'COLLECTED' | 
 
 /** The "Quản lý buồng phòng" menu, exactly, in order. */
 const MENU = ['Công việc chung', 'Công việc cá nhân', 'Kho Linens', 'Kho Amenities', 'Kho đồ dùng, thiết bị'];
-const MENU_LINKS = ['/app/hk/overview', '/app/hk/store/linens', '/app/hk/store/amenities', '/app/hk/store/equipment'];
 /** "Công việc cá nhân", opened: its four pages. */
 const PERSONAL = ['Dọn phòng', 'Kiểm kho', 'Phân công ca, việc làm', 'Phân công việc ngày hôm sau'];
 /** What "Công việc chung" no longer shows. */
@@ -294,7 +293,7 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     expect(within(screen.getByRole('main')).queryByRole('button', { name: /Tạo công việc|Nhận công việc|Chỉnh sửa/ })).not.toBeInTheDocument();
   });
 
-  it('gives the Admin the same six entries as one menu group, and keeps its branch filter on "Công việc chung"', async () => {
+  it('gives the Admin three entries — Công việc chung, Điều phối công việc, Kho & tồn kho — and keeps its branch filter on "Công việc chung"', async () => {
     const CN2 = { id: 2, code: 'LTT', hotelName: 'KAS', address: '260 Lý Tự Trọng', branchNumber: 2 };
     installApiMock(
       shell(ADMIN_USER, {
@@ -321,13 +320,27 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     // Open, since the page is inside it.
     expect(within(nav).getByTestId('nav-group-Quản lý buồng phòng')).toHaveAttribute('aria-expanded', 'true');
     const group = within(nav).getByTestId('nav-group-Quản lý buồng phòng').parentElement!;
-    // The Admin's group ends with its own "Tồn kho & Báo hỏng".
-    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([...MENU_LINKS, '/app/inventory']);
-    const personal = within(group).getByTestId('nav-group-Công việc cá nhân');
-    await userEvent.click(personal);
-    expect(within(personal.parentElement!).getAllByRole('link').map((l) => l.textContent)).toEqual(PERSONAL.filter((p) => p !== 'Dọn phòng'));
+    // Three rows: one link, two folded groups.
+    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/overview']);
+    const dispatch = within(group).getByTestId('nav-group-Điều phối công việc');
+    const stores = within(group).getByTestId('nav-group-Kho & tồn kho');
+    expect(within(group).queryByTestId('nav-group-Công việc cá nhân')).not.toBeInTheDocument();
+    await userEvent.click(dispatch);
+    // Giving out work — never "Dọn phòng": the Admin works no shift and cleans no room.
+    expect(within(dispatch.parentElement!).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/rooms', '/app/hk/tomorrow']);
+    expect(within(nav).queryByRole('link', { name: 'Dọn phòng' })).not.toBeInTheDocument();
+    await userEvent.click(stores);
+    expect(within(stores.parentElement!).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
+      '/app/hk/store/linens',
+      '/app/hk/store/amenities',
+      '/app/hk/store/equipment',
+      '/app/hk/stock-count',
+      '/app/inventory',
+    ]);
     // "Tồn kho & Báo hỏng": inside "Quản lý buồng phòng", nowhere else.
     expect(within(group).getByRole('link', { name: 'Tồn kho & Báo hỏng' })).toHaveAttribute('href', '/app/inventory');
+    // Its reports are under "Báo cáo vấn đề", not here.
+    expect(within(group).queryByRole('link', { name: /KPI/ })).not.toBeInTheDocument();
     expect(within(nav).getAllByRole('link', { name: 'Tồn kho & Báo hỏng' })).toHaveLength(1);
     expect(within(nav).queryByRole('link', { name: 'Phân công công việc' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Theo dõi nhân viên' })).not.toBeInTheDocument();

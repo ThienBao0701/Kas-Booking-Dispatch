@@ -1,5 +1,7 @@
 import {
+  AlertTriangle,
   BarChart3,
+  CalendarCheck,
   ShieldAlert,
   ConciergeBell,
   MessageSquareText,
@@ -147,7 +149,7 @@ const HOUSEKEEPING_MANAGER_SCREENS: NavItem[] = [
 
 /**
  * Off the menu, not removed: "Theo dõi nhân viên" and "Báo cáo" are hidden from
- * the "Quản lý buồng phòng" menu (the manager's and the Admin's group alike).
+ * the "Quản lý buồng phòng" menu (the manager's; the Admin's has its own list).
  * Their pages, routes, permissions and data are unchanged — their addresses,
  * and the links to them inside the screens, still open them.
  */
@@ -157,36 +159,68 @@ const HIDDEN_FROM_MENU = new Set(['/app/hk/staff', '/app/hk/report', '/app/hk/kp
 const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = HOUSEKEEPING_MANAGER_SCREENS.filter((item) => !HIDDEN_FROM_MENU.has(item.to));
 
 /**
- * For the Admin, the same menu as one group (every branch) — without "Dọn
- * phòng" (the Admin works no shift and cleans no room), and with "Tồn kho &
- * Báo hỏng", every branch's stock and the damage reports to review.
+ * THE ADMIN'S "QUẢN LÝ BUỒNG PHÒNG" — three entries, its OWN list (the
+ * manager's menu above is not derived from it, nor it from the manager's):
+ *
+ *   Công việc chung        the overview, every branch
+ *   Điều phối công việc    today's work, and tomorrow's
+ *   Kho & tồn kho          the three warehouses, "Kiểm kho" (the Admin
+ *                          reconciles), every branch's stock and damage reports
+ *
+ * No "Dọn phòng": the Admin works no shift and cleans no room. Its reports —
+ * KPI, inspections, completed issues — are under "Báo cáo vấn đề → Buồng phòng".
  */
-const HOUSEKEEPING_MANAGER_GROUP: NavItem = {
+const ADMIN_HOUSEKEEPING_GROUP: NavItem = {
   to: '/app/hk',
   label: 'Quản lý buồng phòng',
   icon: BedDouble,
   children: [
-    ...HOUSEKEEPING_MANAGER_ITEMS.map((item) =>
-      item === PERSONAL_WORK ? { ...item, children: item.children!.filter((c) => c.to !== '/app/hk/clean') } : item,
-    ),
-    // Every branch's housekeeping stock and the damage reports to review — the Admin's own.
-    { to: '/app/inventory', label: 'Tồn kho & Báo hỏng', icon: Boxes },
+    { to: '/app/hk/overview', label: 'Công việc chung', icon: LayoutDashboard },
+    {
+      to: '/app/hk#dispatch',
+      label: 'Điều phối công việc',
+      icon: CalendarCheck,
+      children: [
+        { to: '/app/hk/rooms', label: 'Phân công ca, việc làm', icon: BedDouble },
+        { to: '/app/hk/tomorrow', label: 'Phân công việc ngày hôm sau', icon: CalendarPlus },
+      ],
+    },
+    {
+      to: '/app/hk#stores',
+      label: 'Kho & tồn kho',
+      icon: Boxes,
+      children: [
+        { to: '/app/hk/store/linens', label: 'Kho Linens', icon: Shirt },
+        { to: '/app/hk/store/amenities', label: 'Kho Amenities', icon: Package },
+        { to: '/app/hk/store/equipment', label: 'Kho đồ dùng, thiết bị', icon: Boxes },
+        { to: '/app/hk/stock-count', label: 'Kiểm kho', icon: ClipboardList },
+        // Every branch's stock, the count differences and the damage reports to review — the Admin's own.
+        { to: '/app/inventory', label: 'Tồn kho & Báo hỏng', icon: AlertTriangle },
+      ],
+    },
   ],
 };
 
 /** "VII" — its full name, as the category is called everywhere. */
 const CONFIDENTIAL_TITLE = 'Báo cáo các vấn đề và tình hình quan trọng';
 
-/** The Admin's "Buồng phòng" under "Báo cáo vấn đề": the department's own journal, its findings' collection, its inspections and KPI. */
+/**
+ * The Admin's "Buồng phòng" under "Báo cáo vấn đề" — every report of the
+ * department in ONE place: its own journal by category, its completed issues,
+ * its room inspections and KPI, and the collection on its findings. VII is one
+ * inbox for every department, under "Lễ tân" — not repeated here.
+ */
 const ADMIN_HOUSEKEEPING_REPORTS: NavItem = {
   to: '/app/reports#housekeeping',
   label: 'Buồng phòng',
   icon: BedDouble,
   children: [
-    { to: '/app/hk/reports', label: 'Báo cáo vấn đề buồng phòng', icon: NotebookPen },
-    { to: '/app/reports/housekeeping', label: 'Phát hiện & thu tiền', icon: Wallet },
+    { to: '/app/hk/reports?category=GUEST_REQUEST', label: GUEST_REQUEST_TITLE, icon: MessageSquareText },
+    { to: '/app/hk/reports?category=FACILITY_ISSUE', label: CATEGORY_FALLBACK_LABELS.FACILITY_ISSUE, icon: Wrench },
+    { to: '/app/hk/reports?category=HOTEL_DELIVERY', label: HOTEL_DELIVERY_TITLE, icon: PackageCheck },
+    { to: '/app/hk/completed', label: 'Hoàn thành vấn đề', icon: CheckCircle2 },
     ...HOUSEKEEPING_KPI_GROUP.children!,
-    { to: '/app/hk/completed', label: 'Hoàn thành vấn đề buồng phòng', icon: CheckCircle2 },
+    { to: '/app/reports/housekeeping', label: 'Phát hiện & thu tiền', icon: Wallet },
   ],
 };
 
@@ -235,7 +269,7 @@ export const ADMIN_NAV: NavItem[] = [
   // "Đã xác nhận đúng" is gone too (its address redirects to "Lịch sử"), and
   // "Chat box" is the bubble in the corner of every page, not a menu entry.
   ADMIN_REPORT_GROUP,
-  HOUSEKEEPING_MANAGER_GROUP,
+  ADMIN_HOUSEKEEPING_GROUP,
   // The 12-hour completion archive, every branch.
   COMPLETED_GROUP,
   { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },

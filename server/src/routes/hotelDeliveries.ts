@@ -51,6 +51,12 @@ const querySchema = z
     path: ['from'],
   });
 
+/** Bộ phận buồng phòng's deliveries: what Reception handed to it, and what it recorded itself. */
+const HOUSEKEEPING_DELIVERIES = {
+  voidedAt: null,
+  OR: [{ originDepartment: 'RECEPTION', delivery: { is: { department: 'HOUSEKEEPING' } } }, { originDepartment: 'HOUSEKEEPING' }],
+} satisfies Prisma.ReceptionOperationalReportWhereInput;
+
 /** Who may read which deliveries — the whole authorization rule, in one function. */
 export function deliveryVisibilityWhere(
   user: { role: UserRole; branchId: number | null; managedBranchIds?: number[] },
@@ -67,16 +73,17 @@ export function deliveryVisibilityWhere(
       // `?? -1` matches no branch: an unassigned account sees nothing, and the
       // key is never left out — leaving it out would widen the query.
       return { branchId: user.branchId ?? -1, originDepartment: 'RECEPTION' };
+    // The Admin's two views: Reception's journal, or Housekeeping's — exactly what
+    // Bộ phận buồng phòng itself sees (Reception's hand-overs to it, and its own).
     case 'ADMIN':
-      return { ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}), originDepartment: filter.department ?? 'RECEPTION' };
+      return {
+        ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}),
+        ...(filter.department === 'HOUSEKEEPING' ? HOUSEKEEPING_DELIVERIES : { originDepartment: 'RECEPTION' as const }),
+      };
     // Bộ phận buồng phòng: what Reception handed to it, and what it recorded itself.
     case 'HOUSEKEEPING':
     case 'HOUSEKEEPING_MANAGER':
-      return {
-        branchId: user.branchId ?? -1,
-        voidedAt: null,
-        OR: [{ originDepartment: 'RECEPTION', delivery: { is: { department: 'HOUSEKEEPING' } } }, { originDepartment: 'HOUSEKEEPING' }],
-      };
+      return { branchId: user.branchId ?? -1, ...HOUSEKEEPING_DELIVERIES };
     case 'TECHNICAL':
       return {
         ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}),

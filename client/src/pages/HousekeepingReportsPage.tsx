@@ -13,7 +13,7 @@
  * Reception's here. A housekeeper sees what it reported; the Quản lý buồng
  * phòng, its branch's; the Admin reads any branch's, without writing.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronRight, Plus, RefreshCw, ShieldAlert } from 'lucide-react';
@@ -65,6 +65,10 @@ export function HousekeepingReportsPage() {
   const wanted = params.get('category');
   const category: HkCategory = CATEGORIES.find((c) => c === wanted) ?? 'GUEST_REQUEST';
   const pick = (c: HkCategory) => setParams({ category: c }, { replace: true });
+  // The bare address opens the first category; say so in the address, so the menu marks it.
+  useEffect(() => {
+    if (!wanted) setParams({ category: 'GUEST_REQUEST' }, { replace: true });
+  }, [wanted, setParams]);
   const [adding, setAdding] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   // The Admin reads one branch, or every branch; it does not write here.

@@ -202,9 +202,20 @@ describe('"Báo cáo vấn đề" in the menu', () => {
     expect(here).toHaveAttribute('aria-current', 'page');
     // "Buồng phòng" is a group of its own: the department's own reports, the collection, its KPI.
     await userEvent.click(within(nav).getByTestId('nav-group-Buồng phòng'));
-    expect(within(nav).getByRole('link', { name: 'Phát hiện & thu tiền' })).toHaveAttribute('href', '/app/reports/housekeeping');
-    expect(within(nav).getByRole('link', { name: 'Báo cáo vấn đề buồng phòng' })).toHaveAttribute('href', '/app/hk/reports');
-    expect(within(nav).getByRole('link', { name: 'KPI buồng phòng' })).toHaveAttribute('href', '/app/hk/kpi');
+    // Every report of the department in one place — each destination once.
+    const hk = within(nav).getByTestId('nav-group-Buồng phòng').parentElement!;
+    expect(within(hk).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
+      '/app/hk/reports?category=GUEST_REQUEST',
+      '/app/hk/reports?category=FACILITY_ISSUE',
+      '/app/hk/reports?category=HOTEL_DELIVERY',
+      '/app/hk/completed',
+      '/app/hk/kpi',
+      '/app/hk/report',
+      '/app/reports/housekeeping',
+    ]);
+    for (const href of ['/app/hk/completed', '/app/hk/kpi', '/app/hk/report', '/app/reports/housekeeping']) {
+      expect(within(nav).getAllByRole('link').filter((l) => l.getAttribute('href') === href)).toHaveLength(1);
+    }
     // Lễ tân stays folded until opened; then each category is its own address.
     expect(within(nav).queryByRole('link', { name: 'Tổng' })).not.toBeInTheDocument();
     await userEvent.click(within(nav).getByTestId('nav-group-Lễ tân'));
