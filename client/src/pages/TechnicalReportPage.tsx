@@ -9,15 +9,15 @@
  * reads every branch, a Quản lý lễ tân / Quản lý kỹ thuật its ticked ones, the
  * Tổng quản lý lễ tân all — the SERVER scopes every row and every action.
  *
- * THE SHARED REPORT FILTER (business dates, branch, shift) plus the technical
- * filters — room, type, technician, "Mức độ" — all go to the server; the status
+ * THREE FILTERS, all sent to the server: "Chi nhánh", "Vấn đề còn tồn đọng"
+ * (the incident lifecycle's outstanding states) and "Mức độ". The status
  * buckets are read from the loaded rows, because they are the server's own
  * assignment state and overlap on purpose ("Đã giao lại" is also "Đã giao").
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Download, Eye, Forward, HardHat, RefreshCw, Undo2, Trash2, UserPlus, Wrench } from 'lucide-react';
-import { ISSUE_CATEGORIES, issueCategoryLabel, issuesApi, type Issue, type IssueCategory } from '../api/issues';
+import { issueCategoryLabel, issuesApi, type Issue } from '../api/issues';
 import { branchesApi } from '../api/bookings';
 import { adminBranchesApi } from '../api/adminBranches';
 import { operationalPdfUrl, operationalXlsxUrl } from '../api/receptionReports';
@@ -28,18 +28,17 @@ import { CompleteExternalDialog, ExternalDispatchDialog, GiveWorkDialog } from '
 import { ConfirmCompletionDialog } from '../components/ConfirmCompletionDialog';
 import { mayConfirmCompletion } from '../lib/completionConfirmation';
 import { formatVnd } from '../lib/money';
-import { useBranchRooms } from '../hooks/useBranchRooms';
 import { useIssueSummary } from '../hooks/useIssueSummary';
 import { EmptyState } from '../components/EmptyState';
 import { IssueLifecycleDetail, IssueStageBadge, IssueStageTimeline } from '../components/IssueViews';
 import { DeleteIssueDialog, UnassignIssueDialog } from '../components/IssueManageDialogs';
 import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
-import { ReportFilterBar } from '../components/ReportFilter';
+import { BranchPicker } from '../components/ReportFilter';
 import { RoomAssignDialog } from '../components/RoomAssignDialog';
 import { Toast } from '../components/Toast';
 import { groupIssuesByBranchRoom, type RoomGroup } from '../lib/issueGroups';
-import { initialReportFilter, reportBranchId, reportPeriod, type ReportFilterValue } from '../lib/reportFilter';
+import type { BranchChoice } from '../lib/reportFilter';
 import { formatDateTime, hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
 import { SeverityBadge } from '../components/Severity';
@@ -104,18 +103,10 @@ export function TechnicalReportPage() {
   const isAdmin = user?.role === 'ADMIN';
   const today = hcmToday();
 
-  /*
-    THE LAST 30 DAYS BY DEFAULT: a technical workspace is about what is open,
-    and a fault reported last week and still waiting must be on screen.
-  */
-  const [filter, setFilter] = useState<ReportFilterValue>(() =>
-    initialReportFilter(today, { mode: 'RANGE', range: { from: daysBefore(today, 29), to: today }, branch: 'ALL' }),
-  );
-  const period = reportPeriod(filter, today);
-  const branchId = reportBranchId(filter);
-  const [room, setRoom] = useState('');
-  const [category, setCategory] = useState<IssueCategory | ''>('');
-  const [technicianId, setTechnicianId] = useState<number | ''>('');
+  const [branch, setBranch] = useState<BranchChoice>('ALL');
+  const branchId = typeof branch === 'number' ? branch : undefined;
+  /** "Vấn đề còn tồn đọng (chưa xử lý)": only what the lifecycle still counts as open. */
+  const [unresolved, setUnresolved] = useState(false);
   const [bucket, setBucket] = useState<Bucket | ''>('');
   /** "Mức độ" — one level, filtered by the server. */
   const [severity, setSeverity] = useState<Severity | ''>('');
@@ -136,29 +127,17 @@ export function TechnicalReportPage() {
   });
   const issueSummary = useIssueSummary();
   const unresolvedByBranch = new Map((issueSummary.data?.summary.byBranch ?? []).map((b) => [b.branchId, b.totalUnresolved]));
-  const technicians = useQuery({
-    queryKey: ['issues', 'technicians'],
-    queryFn: () => issuesApi.technicians(),
-    staleTime: 60_000,
-  });
-  const { rooms } = useBranchRooms(branchId ?? null);
-
   const filters = {
     branchId,
-    roomNumber: branchId !== undefined && room ? room : undefined,
-    category: category || undefined,
-    technicianUserId: technicianId === '' ? undefined : technicianId,
     severity: severity || undefined,
-    from: period?.from,
-    to: period?.to,
-    shiftType: filter.shiftType || undefined,
+    outstanding: unresolved || undefined,
   };
   const list = useQuery({
     queryKey: ['issues', 'technical-report', filters],
     // ponytail: one page of 500; paginate when a scope outgrows it.
     queryFn: () => issuesApi.list({ ...filters, pageSize: 500 }),
     refetchInterval: POLL_MS,
-    enabled: period !== null && filter.branch !== null,
+    enabled: branch !== null,
   });
   const all = useMemo(() => list.data?.issues ?? [], [list.data]);
   const buckets: readonly { key: Bucket; label: string }[] =
@@ -166,17 +145,18 @@ export function TechnicalReportPage() {
   const shown = useMemo(() => (bucket ? all.filter((i) => inBucket(i, bucket, user?.id)) : all), [all, bucket, user?.id]);
   const groups = useMemo(() => groupIssuesByBranchRoom(shown), [shown]);
 
+  // The exported report is a period: the last 30 days of the chosen branch.
   const exportScope = {
-    from: period?.from ?? today,
-    to: period?.to ?? today,
+    from: daysBefore(today, 29),
+    to: today,
     branchId,
-    shiftType: filter.shiftType || undefined,
     section: 'TECHNICAL' as const,
   };
   const exportLink = (href: string, text: string, testId: string) => (
     <a
       href={href}
       data-testid={testId}
+      title="30 ngày gần nhất"
       className="inline-flex items-center gap-2 rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
     >
       <Download className="h-4 w-4" aria-hidden="true" />
@@ -205,67 +185,14 @@ export function TechnicalReportPage() {
         }
       />
 
-      <ReportFilterBar
-        value={filter}
-        onChange={(next) => {
-          if (next.branch !== filter.branch) setRoom('');
-          setFilter(next);
-        }}
-        today={today}
-        branches={branches.data?.branches ?? []}
-        branchCounts={unresolvedByBranch}
-        testId="tr-filter"
-      />
-
-      <section aria-label="Bộ lọc kỹ thuật" className="mb-4 grid gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-sm sm:grid-cols-2 lg:grid-cols-5">
-        <label className="block text-sm font-medium text-slate-700">
-          Phòng
-          <select className={FIELD} value={room} disabled={!rooms} data-testid="tr-room" onChange={(e) => setRoom(e.target.value)}>
-            <option value="">{branchId ? 'Tất cả phòng' : 'Chọn một chi nhánh trước'}</option>
-            {(rooms ?? []).map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Loại sự cố
-          <select className={FIELD} value={category} data-testid="tr-category" onChange={(e) => setCategory(e.target.value as IssueCategory | '')}>
-            <option value="">Tất cả loại</option>
-            {ISSUE_CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Kỹ thuật viên
-          <select
-            className={FIELD}
-            value={technicianId}
-            data-testid="tr-technician"
-            onChange={(e) => setTechnicianId(e.target.value === '' ? '' : Number(e.target.value))}
-          >
-            <option value="">Tất cả</option>
-            {(technicians.data?.technicians ?? []).map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.fullName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Tình trạng
-          <select className={FIELD} value={bucket} data-testid="tr-status" onChange={(e) => setBucket(e.target.value as Bucket | '')}>
-            <option value="">Tất cả</option>
-            {buckets.map((b) => (
-              <option key={b.key} value={b.key}>
-                {b.label}
-              </option>
-            ))}
-          </select>
+      <section aria-label="Bộ lọc kỹ thuật" className="mb-4 grid items-end gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-sm sm:grid-cols-3">
+        <div className="text-sm font-medium text-slate-700">
+          <span className="mb-1 block">Chi nhánh</span>
+          <BranchPicker value={branch} onChange={setBranch} branches={branches.data?.branches ?? []} counts={unresolvedByBranch} testId="tr-branch" />
+        </div>
+        <label className="flex min-h-[2.75rem] cursor-pointer items-center gap-2.5 rounded-xl border border-line-strong bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-600">
+          <input type="checkbox" checked={unresolved} onChange={(e) => setUnresolved(e.target.checked)} className="h-4 w-4 accent-brand-600" data-testid="tr-unresolved" />
+          Vấn đề còn tồn đọng (chưa xử lý)
         </label>
         <label className="block text-sm font-medium text-slate-700">
           Mức độ
@@ -301,11 +228,7 @@ export function TechnicalReportPage() {
         ))}
       </div>
 
-      {period === null ? (
-        <p className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900">
-          Hãy chọn đủ ngày bắt đầu và ngày kết thúc.
-        </p>
-      ) : filter.branch === null ? (
+      {branch === null ? (
         <EmptyState icon={<Wrench className="h-6 w-6" aria-hidden="true" />} title="Chọn chi nhánh" message="Chọn một chi nhánh hoặc tất cả chi nhánh để xem sự cố." />
       ) : (
         <QueryState isLoading={list.isLoading} isError={list.isError} error={list.error} onRetry={() => void list.refetch()}>

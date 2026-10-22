@@ -449,8 +449,9 @@ describe('a Quản lý lễ tân has Reception’s whole picture of its branches
     expect(ok.status).toBe(200);
     expect(ok.body.issue.collectionStatus).toBe('COLLECTED');
     expect((await settle(theirs)).status).toBe(403);
-    // The void stays the Admin's.
-    expect((await manager.post(`/api/housekeeping/issues/${mine}/void`).send({ reason: 'x' })).status).toBe(403);
+    // "Xóa" (a void, with its reason): its own branches' findings — never another branch's.
+    expect((await manager.post(`/api/housekeeping/issues/${theirs}/void`).send({ reason: 'x' })).status).toBe(403);
+    expect((await manager.post(`/api/housekeeping/issues/${mine}/void`).send({ reason: 'x' })).status).toBe(200);
   });
 
   it('exports its branches — whole day, one shift, PDF and Excel — and never another branch', async () => {

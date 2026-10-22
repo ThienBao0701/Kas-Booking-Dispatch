@@ -11,6 +11,17 @@ import type { OperationalReport } from '../api/receptionReports';
 import { can } from '../auth/capabilities';
 import type { AuthUser } from '../auth/types';
 
+/**
+ * Bộ phận buồng phòng's records are its own to act on: Reception (and the
+ * Admin) follow them, read-only — the server refuses anything else.
+ */
+export function isForeignRecord(
+  row: Pick<OperationalReport, 'originDepartment'>,
+  user: Pick<AuthUser, 'role'> | null | undefined,
+): boolean {
+  return row.originDepartment === 'HOUSEKEEPING' && user?.role !== 'HOUSEKEEPING' && user?.role !== 'HOUSEKEEPING_MANAGER';
+}
+
 export function mayVoidRecord(
   row: Pick<OperationalReport, 'voided' | 'createdBy' | 'shiftClosed' | 'shiftSessionId' | 'lateEntry'>,
   user: Pick<AuthUser, 'id' | 'role'> | null | undefined,

@@ -314,9 +314,7 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
      */
     sourceLabel:
       row.originDepartment === 'HOUSEKEEPING'
-        ? row.createdByRole === 'HOUSEKEEPING_MANAGER'
-          ? 'Quản lý buồng phòng'
-          : 'Buồng phòng'
+        ? `${row.createdByRole === 'HOUSEKEEPING_MANAGER' ? 'Quản lý buồng phòng' : 'Buồng phòng'} · ${row.createdByNameSnapshot}`
         : supervisorSourceLabel(row.createdByRole),
     /** Which department's journal — "Lễ tân" or "Buồng phòng". */
     originDepartment: row.originDepartment,
@@ -523,13 +521,15 @@ export function reportVisibilityWhere(
   actor: ReportActor,
   filter: { branchId?: number; branchIds?: readonly number[]; department?: ReportDepartment } = {},
 ): Prisma.ReceptionOperationalReportWhereInput {
+  // Reception follows its branch's records of BOTH departments — Housekeeping's
+  // are marked as such and stay Housekeeping's to act on (`loadOwn`).
   if (actor.role === 'RECEPTIONIST') {
-    return { branchId: actor.branchId ?? -1, originDepartment: 'RECEPTION' };
+    return { branchId: actor.branchId ?? -1 };
   }
   if (isReceptionSupervisor(actor.role)) {
-    // Only the Admin reads Bộ phận buồng phòng's records, and only when it asks for them.
-    const department = actor.role === 'ADMIN' && filter.department === 'HOUSEKEEPING' ? 'HOUSEKEEPING' : 'RECEPTION';
-    return { ...scopedBranchFilter(actor, filter.branchIds ?? filter.branchId), originDepartment: department };
+    // The Admin's housekeeping view narrows to that department's records.
+    const housekeepingOnly = actor.role === 'ADMIN' && filter.department === 'HOUSEKEEPING';
+    return { ...scopedBranchFilter(actor, filter.branchIds ?? filter.branchId), ...(housekeepingOnly ? { originDepartment: 'HOUSEKEEPING' as const } : {}) };
   }
   // Quản lý buồng phòng: its branch's housekeeping records. A housekeeper: its own.
   if (actor.role === 'HOUSEKEEPING_MANAGER') {
@@ -1287,8 +1287,10 @@ export async function listArchivedJournal(
     branchId?: number;
     /** "Mức độ"; every level when absent. */
     severity?: IssueSeverity;
-    /** The Admin's choice of journal (Reception's when absent). */
+    /** The Admin's choice of journal (both departments when absent). */
     department?: ReportDepartment;
+    /** "Loại vấn đề": one of the archived categories; both when absent. */
+    category?: ArchivableCategory;
   } = {},
   client: PrismaClient = prisma,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
@@ -1299,6 +1301,7 @@ export async function listArchivedJournal(
         where,
         ...(options.period ? [journalPeriodWhere(options.period)] : []),
         ...(options.severity ? [severityWhere(options.severity)] : []),
+        ...(options.category ? [{ category: options.category }] : []),
         ...(options.verdict
           ? [
               {

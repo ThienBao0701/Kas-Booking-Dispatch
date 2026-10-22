@@ -3,7 +3,8 @@
  * Reception's.
  *
  *   Vấn đề khách yêu cầu · Sự cố cơ sở vật chất · Giao nhận hàng hóa — one
- *   category at a time, its "+ Thêm" on top, its list below; "Báo cáo các vấn
+ *   category at a time, chosen in the side menu (no second set of buttons
+ *   here), its "+ Thêm" on top, its list below; "Báo cáo các vấn
  *   đề và tình hình quan trọng" is its own page. ("Dịch vụ phòng, KPI" is
  *   Reception's only.)
  *
@@ -43,11 +44,6 @@ const TITLES: Record<HkCategory, string> = {
   FACILITY_ISSUE: CATEGORY_FALLBACK_LABELS.FACILITY_ISSUE,
   HOTEL_DELIVERY: HOTEL_DELIVERY_TITLE,
 };
-const SHORT: Record<HkCategory, string> = {
-  GUEST_REQUEST: 'Khách yêu cầu',
-  FACILITY_ISSUE: 'Sự cố',
-  HOTEL_DELIVERY: 'Giao nhận',
-};
 const ADD: Record<HkCategory, string> = {
   GUEST_REQUEST: 'Thêm yêu cầu',
   FACILITY_ISSUE: 'Báo cáo sự cố',
@@ -64,7 +60,6 @@ export function HousekeepingReportsPage() {
   const [params, setParams] = useSearchParams();
   const wanted = params.get('category');
   const category: HkCategory = CATEGORIES.find((c) => c === wanted) ?? 'GUEST_REQUEST';
-  const pick = (c: HkCategory) => setParams({ category: c }, { replace: true });
   // The bare address opens the first category; say so in the address, so the menu marks it.
   useEffect(() => {
     if (!wanted) setParams({ category: 'GUEST_REQUEST' }, { replace: true });
@@ -123,28 +118,6 @@ export function HousekeepingReportsPage() {
           <BranchPicker value={branch} onChange={setBranch} branches={branches.data?.branches ?? []} testId="hk-reports-branch" />
         </div>
       ) : null}
-
-      {/* One category at a time — a row of large tabs that scrolls sideways on a phone. */}
-      <div role="tablist" aria-label="Mục báo cáo" className="-mx-4 mb-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0" data-testid="hk-report-tabs">
-        {CATEGORIES.map((c) => (
-          <button
-            key={c}
-            type="button"
-            role="tab"
-            aria-selected={category === c}
-            onClick={() => {
-              pick(c);
-              setAdding(false);
-            }}
-            data-testid={`hk-report-tab-${c}`}
-            className={`min-h-[2.75rem] shrink-0 rounded-xl border px-3.5 text-sm font-semibold ${
-              category === c ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line bg-white text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            {SHORT[c]}
-          </button>
-        ))}
-      </div>
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-bold text-slate-900" data-testid="hk-report-title">

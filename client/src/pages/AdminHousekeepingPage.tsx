@@ -7,26 +7,22 @@
  * applied by the SERVER, and the totals above the table cover EVERY matching
  * issue, not just the rows on screen (the list itself is capped, and says so).
  *
- * The Admin may settle any issue, as Reception does, and is the only role that
- * can void a mistaken one (with a reason; it stays on file). Quản lý lễ tân and
- * Tổng quản lý lễ tân work the same page over their own branches, as Reception
- * does: they read and settle the collection; the void stays the Admin's. The
- * server scopes the list and checks the branch of every settlement.
+ * The Admin may settle any issue, as Reception does, and "Xóa" a mistaken one —
+ * a void with a reason: the finding stays on file, with who, when and why, and
+ * its collection, inspection and the rest are untouched. Quản lý lễ tân and
+ * Tổng quản lý lễ tân work the same page over their own branches: they read,
+ * settle and void there. The server scopes the list and checks the role and
+ * branch of every settlement and void.
  *
  * "Báo cáo vấn đề → Buồng phòng": the findings read Branch → Room → inspection
  * (one table per branch, rooms in order), the housekeeping workdays sit below
  * them ("Ca buồng phòng"), and the same period exports as PDF or Excel.
  *
- * "Các công việc trong ngày" closes the page: one row per housekeeping work
- * item of a day, over the reader's branches. Quản lý lễ tân (and the Admin) may
- * "Giao lại" an item that is inspected and waiting for cleaning to another
- * housekeeper of its branch; the server checks the role, branch and state.
+ * The day's work items are not on this page: they are worked on the
+ * housekeeping board ("Phân công ca, việc làm"); their API is unchanged.
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ROOM_WORK_KEY, roomWorkApi, type RoomTask } from '../api/roomWork';
-import { can } from '../auth/capabilities';
-import { ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
 import { Download, RefreshCw } from 'lucide-react';
 import {
   ROOM_COLLECTION_STATUSES,
@@ -46,7 +42,7 @@ import { adminBranchesApi } from '../api/adminBranches';
 import { branchesApi } from '../api/bookings';
 import { useAuth } from '../auth/AuthProvider';
 import { Button } from '../components/Button';
-import { DateRangeField, type DateRangeValue } from '../components/DateRangeField';
+import { ReportFilterBar } from '../components/ReportFilter';
 import { PageHeader } from '../components/PageState';
 import {
   CollectionDialog,
@@ -56,16 +52,24 @@ import {
 } from '../components/RoomIssueViews';
 import { Toast } from '../components/Toast';
 import { branchOptionLabel } from '../lib/branchTone';
-import { formatDate, formatDateTime, hcmToday } from '../lib/format';
+import { formatDateTime, hcmToday } from '../lib/format';
 import { daysBefore } from '../lib/shiftGroups';
+import { initialReportFilter, reportPeriod, type ReportFilterValue } from '../lib/reportFilter';
 
 const selectClass =
   'min-h-[2.75rem] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600';
 
 export function AdminHousekeepingPage() {
   const today = hcmToday();
-  const isAdmin = useAuth().user?.role === 'ADMIN';
-  const [range, setRange] = useState<DateRangeValue>({ from: daysBefore(today, 29), to: today });
+  const role = useAuth().user?.role;
+  const isAdmin = role === 'ADMIN';
+  // "Xóa" (a void, with a reason): the Admin, and the reception managers over their branches — the server checks both.
+  const mayVoid = isAdmin || role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER';
+  // "Hôm nay", "Ngày cụ thể" or "Khoảng ngày" — the last 30 days to begin with, as before.
+  const [period, setPeriod] = useState<ReportFilterValue>(() =>
+    initialReportFilter(today, { mode: 'RANGE', range: { from: daysBefore(today, 29), to: today } }),
+  );
+  const range = reportPeriod(period, today) ?? { from: '', to: '' };
   const [branchId, setBranchId] = useState<number | ''>('');
   const [type, setType] = useState<RoomIssueType | ''>('');
   const [status, setStatus] = useState<RoomCollectionStatus | ''>('');
@@ -158,7 +162,7 @@ export function AdminHousekeepingPage() {
         </p>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3 px-4 py-3">
           <div className="min-w-[17rem]">
-            <DateRangeField legend="Khoảng thời gian" value={range} onChange={setRange} max={today} testId="housekeeping-range" />
+            <ReportFilterBar value={period} onChange={setPeriod} today={today} showShifts={false} framed={false} testId="housekeeping-period" />
           </div>
           <label className="block min-w-[14rem] flex-1 text-xs font-medium text-slate-500">
             Chi nhánh
@@ -240,7 +244,7 @@ export function AdminHousekeepingPage() {
                 title={`${branchLabel(rows[0]!.branch)} — ${rows.length} vấn đề`}
                 issues={rows}
                 onCollect={setCollecting}
-                onVoid={isAdmin ? setVoiding : undefined}
+                onVoid={mayVoid ? setVoiding : undefined}
               />
             ))
           )}
@@ -265,8 +269,6 @@ export function AdminHousekeepingPage() {
           />
         </>
       )}
-
-      <WorkOrdersPanel branchId={branchId === '' ? undefined : branchId} onToast={setToast} />
 
       {collecting ? (
         <CollectionDialog
@@ -313,66 +315,3 @@ const SEGMENT_COLUMNS: DataColumn<{ day: WorkShift; seg: WorkSegment }>[] = [
     render: (r) => r.seg.byType.map((t) => `${t.label}: ${t.count}`).join(' · ') || '—',
   },
 ];
-
-/**
- * "CÁC CÔNG VIỆC TRONG NGÀY" for the supervisors — the day's housekeeping work
- * items of their branches (the page's branch, when one is chosen), and "Giao
- * lại" for an item waiting for cleaning.
- */
-function WorkOrdersPanel({ branchId, onToast }: { branchId?: number; onToast: (message: string) => void }) {
-  const today = hcmToday();
-  const role = useAuth().user?.role;
-  const [date, setDate] = useState(today);
-  const [reassigning, setReassigning] = useState<RoomTask | null>(null);
-  const orders = useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'work-orders', date, branchId ?? null],
-    queryFn: () => roomWorkApi.workOrders({ date, branchId }),
-    refetchInterval: 30_000,
-  });
-  const staff = useQuery({
-    queryKey: [...ROOM_WORK_KEY, 'work-orders', 'staff', reassigning?.branchId ?? null],
-    queryFn: () => roomWorkApi.workOrderStaff(reassigning!.branchId),
-    enabled: reassigning !== null,
-  });
-  return (
-    <section className="mt-6 space-y-3" aria-labelledby="hk-work-orders-title" data-testid="supervisor-work-orders">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h2 id="hk-work-orders-title" className="text-lg font-bold text-slate-900">
-          Các công việc trong ngày {formatDate(date)}
-        </h2>
-        <label className="text-sm font-medium text-slate-700">
-          Ngày
-          <input
-            type="date"
-            className="ml-2 min-h-[2.5rem] rounded-xl border border-line-strong bg-white px-3 py-1.5 text-sm"
-            value={date}
-            max={today}
-            onChange={(e) => e.target.value && setDate(e.target.value)}
-            data-testid="work-orders-date"
-          />
-        </label>
-      </div>
-      <WorkOrderTable
-        tasks={orders.data?.tasks ?? []}
-        isLoading={orders.isLoading}
-        isError={orders.isError}
-        error={orders.error}
-        onRetry={() => void orders.refetch()}
-        onReassign={setReassigning}
-        canReassign={can(role, 'housekeeping.reassignAwaitingCleaning')}
-        showBranch={branchId === undefined}
-      />
-      {reassigning && staff.data ? (
-        <ReassignDialog
-          task={reassigning}
-          staff={staff.data.staff}
-          onClose={() => setReassigning(null)}
-          onDone={(message) => {
-            setReassigning(null);
-            onToast(message);
-          }}
-        />
-      ) : null}
-    </section>
-  );
-}

@@ -7,12 +7,9 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, TECHNICAL_MANAGER_USER, installApiMock, renderApp } from '../test/utils';
 import { withLifecycle } from '../test/issueFixtures';
-import { hcmToday } from '../lib/format';
-import { daysBefore } from '../lib/shiftGroups';
 
 /** The report's default period: the last 30 days. */
-const TODAY = hcmToday();
-const LIST = `GET /api/issues?from=${daysBefore(TODAY, 29)}&to=${TODAY}&pageSize=500`;
+const LIST = `GET /api/issues?pageSize=500`;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -230,7 +227,7 @@ describe('"Mức độ" on the technical report', () => {
     const high = issue('a', { severity: 'HIGH', severityLabel: 'Cao' });
     installApiMock(
       routes(ADMIN_USER, {
-        [`GET /api/issues?severity=HIGH&from=${daysBefore(TODAY, 29)}&to=${TODAY}&pageSize=500`]: () => ({
+        [`GET /api/issues?severity=HIGH&pageSize=500`]: () => ({
           status: 200,
           body: { issues: [high], pagination: { page: 1, pageSize: 500, total: 1, totalPages: 1 } },
         }),
@@ -246,14 +243,37 @@ describe('"Mức độ" on the technical report', () => {
     await waitFor(() => expect(screen.queryByTestId('tr-branch-2')).not.toBeInTheDocument());
     const row = screen.getByTestId('tr-issue-a');
     expect(within(row).getByTestId('severity-badge')).toHaveTextContent('Cao');
-    // The accepted layout: the filter is a fifth select in the same grid.
+    // The approved layout: branch, "Vấn đề còn tồn đọng", "Mức độ" — nothing else.
     const filters = screen.getByRole('region', { name: 'Bộ lọc kỹ thuật' });
-    expect(within(filters).getAllByRole('combobox').map((c) => c.getAttribute('data-testid'))).toEqual([
-      'tr-room',
-      'tr-category',
-      'tr-technician',
-      'tr-status',
-      'tr-severity',
-    ]);
+    expect(within(filters).getAllByRole('combobox').map((c) => c.getAttribute('data-testid'))).toEqual(['tr-severity']);
+    expect(within(filters).getByTestId('tr-unresolved')).not.toBeChecked();
+    expect(within(filters).getByText('Chi nhánh')).toBeInTheDocument();
+    for (const gone of ['tr-room', 'tr-category', 'tr-technician', 'tr-status', 'tr-filter']) expect(screen.queryByTestId(gone)).not.toBeInTheDocument();
+    for (const gone of ['Hôm nay', 'Ngày cụ thể', 'Khoảng ngày']) expect(screen.queryByRole('button', { name: gone })).not.toBeInTheDocument();
+    // The status chips stay.
+    expect(screen.getByTestId('tr-count-UNASSIGNED')).toBeInTheDocument();
+  });
+
+  it('asks the server for the unresolved incidents only — with the level, and the status chips still filter them', async () => {
+    const open = issue('a', { severity: 'HIGH', severityLabel: 'Cao' });
+    const asked: string[] = [];
+    const fetchMock = installApiMock(
+      routes(ADMIN_USER, {
+        [`GET /api/issues?severity=HIGH&pageSize=500&outstanding=true`]: () => ({
+          status: 200,
+          body: { issues: [open], pagination: { page: 1, pageSize: 500, total: 1, totalPages: 1 } },
+        }),
+      }),
+    );
+    renderApp('/app/reports/technical');
+    await screen.findByTestId('tr-branch-2');
+    await userEvent.click(screen.getByTestId('tr-unresolved'));
+    await userEvent.selectOptions(screen.getByTestId('tr-severity'), 'HIGH');
+    await waitFor(() => expect(screen.queryByTestId('tr-branch-2')).not.toBeInTheDocument());
+    expect(screen.getByTestId('tr-issue-a')).toBeInTheDocument();
+    for (const [u] of fetchMock.mock.calls) asked.push(String(u));
+    expect(asked).toContain('/api/issues?severity=HIGH&pageSize=500&outstanding=true');
+    // No date, shift, type or technician is ever sent.
+    expect(asked.filter((u) => u.startsWith('/api/issues?')).some((u) => /from=|shiftType=|category=|technicianUserId=/.test(u))).toBe(false);
   });
 });

@@ -1160,41 +1160,44 @@ describe('Admin — buồng phòng', () => {
     await waitFor(() => expect(posted).toEqual([{ reason: 'Nhập nhầm phòng' }]));
   });
 
-  it('lists "Các công việc trong ngày" over every branch and reassigns an item waiting for cleaning', async () => {
-    const reassigned: unknown[] = [];
-    const waiting = roomTask('w9', {
-      roomNumber: '502',
-      areaKind: 'ROOM',
-      areaLabel: 'Phòng - 502',
-      taskLabel: 'OC',
-      state: 'INSPECTED',
-      stateLabel: 'Đã kiểm tra',
-      phase: 'AWAITING_CLEANING',
-      phaseLabel: 'Chờ dọn phòng',
-      assignee: { id: 6, name: 'Buồng phòng Một' },
-    });
+  it('no longer carries "Các công việc trong ngày" — and asks the server for "Hôm nay", one day or a range', async () => {
+    const fetchMock = installApiMock(routes(anyIssuesRoute(list())));
+    renderApp('/app/reports/housekeeping');
+    await screen.findByTestId('room-issue-table-1');
+    expect(screen.queryByTestId('supervisor-work-orders')).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('Các công việc trong ngày');
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/work-orders'))).toBe(false);
+    // The three periods, on the server's query; the branch filter is still there.
+    const today = new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
+    const filters = screen.getByTestId('housekeeping-filters');
+    await userEvent.click(within(filters).getByRole('button', { name: 'Hôm nay' }));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/housekeeping/issues?from=${today}&to=${today}`)).toBe(true),
+    );
+    await userEvent.click(within(filters).getByRole('button', { name: 'Ngày cụ thể' }));
+    expect(within(filters).getByRole('button', { name: 'Khoảng ngày' })).toBeInTheDocument();
+    expect(screen.getByTestId('housekeeping-branch')).toBeInTheDocument();
+  });
+
+  it('lets a Quản lý lễ tân "Xóa" a finding of its branch too — the same confirmation and reason', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const manager = { id: 3, username: 'qlletan', fullName: 'Quản lý lễ tân', role: 'RECEPTION_MANAGER' as const, branch: null, active: true, mustChangePassword: false, managedBranchIds: [1] };
     installApiMock(
-      routes({
-        ...anyIssuesRoute(list()),
-        [`GET /api/housekeeping/work-orders?date=${hcmToday()}`]: () => ({ status: 200, body: { tasks: [waiting] } }),
-        'GET /api/housekeeping/work-orders/staff?branchId=1': () => ({ status: 200, body: { staff: [{ id: 6, fullName: 'Buồng phòng Một' }, { id: 7, fullName: 'Buồng phòng Hai' }] } }),
-        'POST /api/housekeeping/work-orders/w9/reassign': (init) => {
-          reassigned.push(JSON.parse(String(init.body)));
-          return { status: 200, body: { task: { ...waiting, assignee: { id: 7, name: 'Buồng phòng Hai' } } } };
+      shell(manager, {
+        'GET /api/branches': () => ({ status: 200, body: { branches: [{ ...BRANCH, active: true }] } }),
+        ...anyIssuesRoute(() => ({ status: 200, body: { issues: [roomIssue('a')], total: 1, truncated: false, summary: SUMMARY } })),
+        'POST /api/housekeeping/issues/a/void': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { issue: roomIssue('a', { voided: true }) } };
         },
       }),
     );
     renderApp('/app/reports/housekeeping');
-    const panel = await screen.findByTestId('supervisor-work-orders');
-    expect(await within(panel).findByTestId('phase-w9')).toHaveTextContent('Chờ dọn phòng');
-    await userEvent.click(within(panel).getByTestId('work-reassign-w9'));
-    const target = await screen.findByTestId('reassign-target');
-    await userEvent.selectOptions(target, '7');
-    await userEvent.click(screen.getByTestId('reassign-next'));
-    expect(screen.getByTestId('reassign-summary')).toHaveTextContent('từ Buồng phòng Một cho Buồng phòng Hai');
-    await userEvent.click(screen.getByTestId('reassign-confirm'));
-    await waitFor(() => expect(reassigned).toEqual([{ assigneeUserId: 7 }]));
-    expect(await screen.findByText('Đã giao lại Phòng - 502 · OC cho Buồng phòng Hai.')).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId('void-room-a'));
+    const dialog = await screen.findByRole('dialog', { name: /Hủy vấn đề — Phòng/ });
+    await userEvent.type(within(dialog).getByTestId('void-room-reason'), 'Ghi trùng');
+    await userEvent.click(within(dialog).getByTestId('void-room-confirm'));
+    await waitFor(() => expect(posted).toEqual([{ reason: 'Ghi trùng' }]));
   });
 
   it('can settle an issue too, exactly as Reception does', async () => {

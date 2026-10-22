@@ -25,7 +25,7 @@ import { type OperationalReport, type RoomServiceType } from '../api/receptionRe
 import { DataTable, RowAction, type DataColumn } from './DataTable';
 import { Actions } from './RecordRowActions';
 import { useAuth } from '../auth/AuthProvider';
-import { mayVoidRecord } from '../lib/deskVoid';
+import { isForeignRecord, mayVoidRecord } from '../lib/deskVoid';
 import { ReportSection, type SectionFrame } from './ReportSection';
 import {
   CompleteRecordDialog,
@@ -163,6 +163,10 @@ function RequestHandling({
   const request = row.guestRequest;
   const { user } = useAuth();
   if (row.voided || !request) return <span className="text-xs text-slate-300">—</span>;
+  // Bộ phận buồng phòng's request: followed here, completed by Housekeeping.
+  if (isForeignRecord(row, user)) {
+    return <p className="whitespace-pre-wrap break-words text-slate-700">{request.completed ? completionText(request) || '—' : 'Buồng phòng xử lý'}</p>;
+  }
   return (
     <div className="space-y-1.5">
       {request.completed ? (

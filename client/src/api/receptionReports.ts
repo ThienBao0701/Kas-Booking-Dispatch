@@ -217,8 +217,10 @@ export interface OperationalReport {
   createdByName: string;
   /** The creator's role at creation; null on older rows (all Reception). */
   createdByRole?: string | null;
-  /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor entered it; null for the desk's own. */
+  /** "Admin tạo" / "Quản lý lễ tân tạo" when a supervisor entered it, "Buồng phòng · <name>" for Housekeeping's; null for the desk's own. */
   sourceLabel?: string | null;
+  /** Which department's journal it belongs to. */
+  originDepartment?: 'RECEPTION' | 'HOUSEKEEPING';
   createdAt: string;
   updatedAt: string;
   summary: string;
@@ -452,6 +454,8 @@ export const reportsApi = {
       severity?: Severity;
       /** The Admin's "Buồng phòng" archive; every other role reads its own department's. */
       department?: 'HOUSEKEEPING';
+      /** "Loại vấn đề": one archived category; both when absent. */
+      category?: 'GUEST_REQUEST' | 'CUSTOMER_COMPLAINT';
     } = {},
   ) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),

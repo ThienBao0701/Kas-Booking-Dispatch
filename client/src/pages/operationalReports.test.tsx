@@ -504,6 +504,37 @@ describe('the overview', () => {
    * left unfinished is on this shift's "Vấn đề khách yêu cầu thực hiện" screen
    * to be completed — and a row this shift withdrew stays there, struck through.
    */
+  it('shows the desk Housekeeping’s requests of its branch — marked with who sent them — to follow, not to act on', async () => {
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({
+          status: 200,
+          body: {
+            reports: [
+              requestRow(
+                { id: 'g-hk', shiftSessionId: null, originDepartment: 'HOUSEKEEPING', createdByRole: 'HOUSEKEEPING', createdByName: 'Chị Lan', sourceLabel: 'Buồng phòng · Chị Lan' },
+                { guestName: 'Khách phòng 301' },
+              ),
+              requestRow({ id: 'g-desk' }, { guestName: 'Khách lễ tân' }),
+            ],
+            totals: { GUEST_REQUEST: 2, CUSTOMER_COMPLAINT: 0 },
+            archiveAfterHours: 12,
+          },
+        }),
+      }),
+    );
+    renderApp('/app/reports?category=GUEST_REQUEST');
+    const requests = await screen.findByTestId('guest-request-table');
+    const hk = await within(requests).findByTestId('row-g-hk');
+    expect(await within(hk).findByText('Khách phòng 301')).toBeInTheDocument();
+    expect(hk).toHaveTextContent('Buồng phòng · Chị Lan');
+    expect(hk).toHaveTextContent('Buồng phòng xử lý');
+    expect(within(hk).queryByTestId('complete-g-hk')).not.toBeInTheDocument();
+    expect(within(hk).queryByTestId('edit-g-hk')).not.toBeInTheDocument();
+    // The desk's own request is still the desk's to complete.
+    expect(within(within(requests).getByTestId('row-g-desk')).getByTestId('complete-g-desk')).toBeInTheDocument();
+  });
+
   it('lists the last shift’s unfinished records on the category screens, where they can be completed', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {

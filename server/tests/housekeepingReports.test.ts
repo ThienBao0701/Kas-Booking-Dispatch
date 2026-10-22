@@ -1,11 +1,12 @@
 /**
- * BỘ PHẬN BUỒNG PHÒNG'S OWN "BÁO CÁO VẤN ĐỀ" — the same journal, kept apart.
+ * BỘ PHẬN BUỒNG PHÒNG'S OWN "BÁO CÁO VẤN ĐỀ" — the same journal, its records its own.
  *
  *   A. What it may record: guest requests, incidents, deliveries — at its own
  *      branch, stamped with its department; never payments, service quality or
  *      "Dịch vụ phòng, KPI" (Reception's).
- *   B. Separation: Reception's lists, totals and actions never see it; it never
- *      sees Reception's; the Admin reads it only when it asks for it.
+ *   B. Reception follows it (marked with the department and the reporter) and
+ *      cannot act on it; Housekeeping never sees Reception's; the Admin reads
+ *      both, or Housekeeping's alone on request.
  *   C. Who sees and completes what: a housekeeper its own; the manager its
  *      branch's; never another branch's. "Hoàn thành vấn đề" after 12 hours.
  *   D. Deliveries and incidents through their existing workflows.
@@ -95,7 +96,7 @@ describe('A. what Bộ phận buồng phòng records', () => {
       branchId: cn1,
       originDepartment: 'HOUSEKEEPING',
       departmentLabel: 'Buồng phòng',
-      sourceLabel: 'Buồng phòng',
+      sourceLabel: 'Buồng phòng · Chị Lan',
       createdByName: 'Chị Lan',
       createdByRole: 'HOUSEKEEPING',
       shiftSessionId: null,
@@ -104,7 +105,7 @@ describe('A. what Bộ phận buồng phòng records', () => {
     const named = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', branchId: cn2, guestRequest: { guestName: 'K', note: 'x' } });
     expect(named.body.report.branchId).toBe(cn1);
     // The manager records at its own branch.
-    expect((await guestRequest(qlbp1)).body.report).toMatchObject({ branchId: cn1, sourceLabel: 'Quản lý buồng phòng', createdByRole: 'HOUSEKEEPING_MANAGER' });
+    expect((await guestRequest(qlbp1)).body.report).toMatchObject({ branchId: cn1, sourceLabel: 'Quản lý buồng phòng · QL Buồng 1', createdByRole: 'HOUSEKEEPING_MANAGER' });
   });
 
   it('refuses payments, service quality and "Dịch vụ phòng, KPI" — Reception’s categories', async () => {
@@ -122,18 +123,19 @@ describe('A. what Bộ phận buồng phòng records', () => {
   });
 });
 
-describe('B. kept apart from Reception', () => {
-  it('never shows Reception a housekeeping record, nor lets it act on one — and the other way round', async () => {
+describe('B. Reception follows Housekeeping’s records — it does not act on them', () => {
+  it('shows Reception its branch’s housekeeping records, marked, read-only — and Housekeeping never Reception’s', async () => {
     await startShiftAt(lan, cn1);
     const hk = (await guestRequest(lan, 'Khách Buồng')).body.report.id as string;
     await checkIn(letan1);
     const desk = (await guestRequest(letan1, 'Khách Lễ tân')).body.report.id as string;
-    // Reception's journal, its active list and its counts.
-    const active = (await letan1.get('/api/reception/reports/active')).body.reports.map((r: { id: string }) => r.id);
-    expect(active).toEqual([desk]);
-    const listed = (await letan1.get('/api/reception/reports')).body;
-    expect(listed.reports.map((r: { id: string }) => r.id)).toEqual([desk]);
-    expect(listed.counts.GUEST_REQUEST).toBe(1);
+    // Reception's active list: both — the housekeeping one says where it came from and who sent it.
+    const active = (await letan1.get('/api/reception/reports/active')).body.reports as { id: string; originDepartment: string; sourceLabel: string | null; createdByName: string }[];
+    expect(active.map((r) => r.id).sort()).toEqual([desk, hk].sort());
+    expect(active.find((r) => r.id === hk)).toMatchObject({ originDepartment: 'HOUSEKEEPING', sourceLabel: 'Buồng phòng · Chị Lan', createdByName: 'Chị Lan' });
+    expect(active.find((r) => r.id === desk)).toMatchObject({ originDepartment: 'RECEPTION' });
+    // Another branch's desk: neither.
+    expect((await letan2.get('/api/reception/reports/active')).body.reports).toEqual([]);
     // Reception cannot complete or correct it, even at the same branch.
     expect((await letan1.post(`/api/reception/reports/${hk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
     expect((await letan1.patch(`/api/reception/reports/${hk}`).send({ guestRequest: { note: 'Sửa' } })).status).toBe(403);
@@ -142,12 +144,12 @@ describe('B. kept apart from Reception', () => {
     expect((await hkJournal(qlbp1)).map((r) => r.id)).toEqual([hk]);
     expect((await qlbp1.post(`/api/reception/reports/${desk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
     expect((await letan1.get('/api/reception/reports/housekeeping')).status).toBe(403);
-    // The Admin's reception report is Reception's; its housekeeping view is asked for.
+    // The Admin reads both, each with its department; its housekeeping view narrows to Housekeeping's.
     const adminRes = await admin.get(`/api/admin/reports/operational?branchId=${cn1}`);
     expect(adminRes.status).toBe(200);
-    const adminReception = (adminRes.body.reports as { id: string }[]).map((r) => r.id);
-    expect(adminReception).toContain(desk);
-    expect(adminReception).not.toContain(hk);
+    const adminReports = adminRes.body.reports as { id: string; originDepartment: string }[];
+    expect(adminReports.map((r) => r.id).sort()).toEqual([desk, hk].sort());
+    expect(adminReports.find((r) => r.id === hk)!.originDepartment).toBe('HOUSEKEEPING');
     expect((await hkJournal(admin, `?branchId=${cn1}`)).map((r) => r.id)).toEqual([hk]);
     expect(await hkJournal(admin, `?branchId=${cn2}`)).toEqual([]);
   });
@@ -169,13 +171,14 @@ describe('C. who sees and completes what', () => {
     expect(done.body.report.guestRequest).toMatchObject({ completed: true, completedByName: 'QL Buồng 1' });
     // Completed once.
     expect((await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(409);
-    // Twelve hours after it was received: "Hoàn thành vấn đề" — housekeeping's, never Reception's.
+    // Twelve hours after it was received: "Hoàn thành vấn đề" — Housekeeping's own; Reception and the Admin follow it.
     at('2026-10-05', '22:00');
     const archived = (await qlbp1.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id);
     expect(archived).toEqual([mine]);
     expect((await hkJournal(qlbp1)).map((r) => r.id)).toEqual([hers]);
-    expect((await letan1.get('/api/reception/reports/archive')).body.reports).toEqual([]);
-    expect((await admin.get('/api/reception/reports/archive')).body.reports).toEqual([]);
+    expect((await letan1.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
+    expect((await letan2.get('/api/reception/reports/archive')).body.reports).toEqual([]);
+    expect((await admin.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
     expect((await admin.get('/api/reception/reports/archive?department=HOUSEKEEPING')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
     // A housekeeper's archive is its own.
     expect((await hoa.get('/api/reception/reports/archive')).body.reports).toEqual([]);
@@ -183,14 +186,15 @@ describe('C. who sees and completes what', () => {
 });
 
 describe('D. deliveries and incidents, through their own workflows', () => {
-  it('keeps a housekeeping delivery out of Reception’s list, in the department’s own', async () => {
+  it('shows a housekeeping delivery to its branch’s Reception and in the department’s own list — no other branch', async () => {
     await startShiftAt(lan, cn1);
     const res = await lan.post('/api/reception/reports').send({ category: 'HOTEL_DELIVERY', delivery: { department: 'RECEPTION', itemName: 'Ga giường', quantity: 10 } });
     expect(res.status).toBe(201);
     const id = res.body.report.id as string;
     const ids = async (agent: Agent, query = '') => ((await agent.get(`/api/hotel-deliveries?scope=active${query}`)).body.deliveries as { id: string }[]).map((d) => d.id);
-    expect(await ids(letan1)).toEqual([]);
-    expect(await ids(admin)).toEqual([]);
+    expect(await ids(letan1)).toEqual([id]);
+    expect(await ids(letan2)).toEqual([]);
+    expect(await ids(admin)).toEqual([id]);
     expect(await ids(admin, '&department=HOUSEKEEPING')).toEqual([id]);
     expect(await ids(qlbp1)).toEqual([id]);
     expect(await ids(qlbp2)).toEqual([]);
@@ -276,12 +280,12 @@ describe('G. completed records stay reachable by the Admin — and by no one out
     expect(await ids(admin, 'scope=active&department=HOUSEKEEPING')).toEqual([toHk, own].sort());
     expect(await ids(qlbp1, 'scope=active')).toEqual([toHk, own].sort());
     expect(await ids(admin, `scope=active&department=HOUSEKEEPING&branchId=${cn2}`)).toEqual([]);
-    // Reception's view: Reception's records, every department they went to.
-    expect(await ids(admin, 'scope=active')).toEqual([toHk, toTech].sort());
+    // The Admin's whole view: every department's.
+    expect(await ids(admin, 'scope=active')).toEqual([toHk, toTech, own].sort());
     // Twelve hours on: "Hoàn thành vấn đề", the same split.
     at('2026-10-05', '22:00');
     expect(await ids(admin, 'scope=archived&department=HOUSEKEEPING')).toEqual([toHk, own].sort());
-    expect(await ids(admin, 'scope=archived')).toEqual([toHk, toTech].sort());
+    expect(await ids(admin, 'scope=archived')).toEqual([toHk, toTech, own].sort());
     expect(await ids(qlbp2, 'scope=archived')).toEqual([]);
   });
 
@@ -294,17 +298,114 @@ describe('G. completed records stay reachable by the Admin — and by no one out
     expect((await qlbp1.post(`/api/reception/reports/${hk}/complete`).send({ verdict: 'INCORRECT', incorrectReason: 'Khách đã tự xử lý' })).status).toBe(200);
     at('2026-10-05', '22:00');
     const archive = async (agent: Agent, query = '') => ((await agent.get(`/api/reception/reports/archive${query}`)).body.reports as { id: string }[]).map((r) => r.id);
-    // The Admin: Reception's by default, Housekeeping's on request — each under its verdict.
+    // The Admin: both departments by default, Housekeeping's on request — each under its verdict.
     expect(await archive(admin, '?verdict=CORRECT')).toEqual([desk]);
-    expect(await archive(admin, '?verdict=INCORRECT')).toEqual([]);
+    expect(await archive(admin, '?verdict=INCORRECT')).toEqual([hk]);
     expect(await archive(admin, '?department=HOUSEKEEPING&verdict=INCORRECT')).toEqual([hk]);
     expect(await archive(admin, `?department=HOUSEKEEPING&branchId=${cn2}`)).toEqual([]);
-    // Each department's own; never the other's, never another branch's.
-    expect(await archive(letan1)).toEqual([desk]);
+    // Reception follows its branch's (both departments'); Housekeeping only its own; never another branch's.
+    expect((await archive(letan1)).sort()).toEqual([desk, hk].sort());
     expect(await archive(letan2)).toEqual([]);
     expect(await archive(qlbp1)).toEqual([hk]);
     expect(await archive(qlbp2)).toEqual([]);
     // A department named by a non-Admin is not read.
-    expect(await archive(letan1, '?department=HOUSEKEEPING')).toEqual([desk]);
+    expect((await archive(letan1, '?department=HOUSEKEEPING')).sort()).toEqual([desk, hk].sort());
+    // "Loại vấn đề": one archived category at a time, on the server.
+    expect((await archive(admin, '?category=GUEST_REQUEST')).sort()).toEqual([desk, hk].sort());
+    expect(await archive(admin, '?category=CUSTOMER_COMPLAINT')).toEqual([]);
+    expect((await admin.get('/api/reception/reports/archive?category=PAYMENT')).status).toBe(422);
+  });
+});
+
+describe('H. who may give an incident to a technician', () => {
+  it('lets the Admin, the Quản lý lễ tân and the Quản lý kỹ thuật assign — never the desk, Housekeeping or a technician', async () => {
+    const app2 = createApp();
+    const techId = (await createUser({ username: 'kythuat_h', password: PASSWORD, fullName: 'Kỹ thuật H', role: 'TECHNICAL' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: techId, branchId: cn1 } });
+    const tech = (await loginAgent(app2, 'kythuat_h', PASSWORD)).agent;
+    const rmId = (await createUser({ username: 'qllt_h', password: PASSWORD, fullName: 'QL Lễ tân H', role: 'RECEPTION_MANAGER' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: rmId, branchId: cn1 } });
+    const rm = (await loginAgent(app2, 'qllt_h', PASSWORD)).agent;
+    const tmId = (await createUser({ username: 'qlkt_h', password: PASSWORD, fullName: 'QL Kỹ thuật H', role: 'TECHNICAL_MANAGER' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: tmId, branchId: cn1 } });
+    const tm = (await loginAgent(app2, 'qlkt_h', PASSWORD)).agent;
+    const tm2Id = (await createUser({ username: 'qlkt_h2', password: PASSWORD, fullName: 'QL Kỹ thuật CN2', role: 'TECHNICAL_MANAGER' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: tm2Id, branchId: cn2 } });
+    const tm2 = (await loginAgent(app2, 'qlkt_h2', PASSWORD)).agent;
+    const report = async () => {
+      const res = await letan1.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '301', category: 'WATER', description: 'Vòi sen rò nước' });
+      expect(res.status).toBe(201);
+      return res.body.issue.id as string;
+    };
+    await startShiftAt(lan, cn1);
+    const id = await report();
+    const assign = (agent: Agent, issueId: string) => agent.post(`/api/issues/${issueId}/assign`).send({ technicianUserId: techId });
+    for (const agent of [letan1, lan, qlbp1, tech]) expect((await assign(agent, id)).status).toBe(403);
+    // Another branch's Quản lý kỹ thuật: not its incident.
+    expect([403, 404]).toContain((await assign(tm2, id)).status);
+    expect((await testPrisma.hotelIssue.findUniqueOrThrow({ where: { id } })).assignedTechnicianUserId).toBeNull();
+    // The three authorised roles, each on an incident of its scope.
+    expect((await assign(admin, id)).status).toBe(200);
+    expect((await assign(rm, await report())).status).toBe(200);
+    expect((await assign(tm, await report())).status).toBe(200);
+  });
+});
+
+describe('I. "Xóa" a room finding on "Phát hiện & thu tiền"', () => {
+  it('voids it — Admin and the reception managers of its branch only — keeping it, its reason, its collection and its inspection', async () => {
+    const app2 = createApp();
+    const rmId = (await createUser({ username: 'qllt_i', password: PASSWORD, fullName: 'QL Lễ tân I', role: 'RECEPTION_MANAGER' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: rmId, branchId: cn1 } });
+    const rm = (await loginAgent(app2, 'qllt_i', PASSWORD)).agent;
+    const rm2Id = (await createUser({ username: 'qllt_i2', password: PASSWORD, fullName: 'QL Lễ tân CN2', role: 'RECEPTION_MANAGER' })).id;
+    await testPrisma.userBranchAssignment.create({ data: { userId: rm2Id, branchId: cn2 } });
+    const rm2 = (await loginAgent(app2, 'qllt_i2', PASSWORD)).agent;
+    await startShiftAt(lan, cn1);
+    const inspected = await lan.post('/api/housekeeping/inspections').send({ roomNumber: '101', issues: [{ type: 'SMOKING', note: 'Mùi thuốc' }, { type: 'ODOR' }] });
+    expect(inspected.status, JSON.stringify(inspected.body)).toBe(201);
+    const found = await testPrisma.roomInspectionIssue.findMany({ select: { id: true, type: true } });
+    const smoking = found.find((i) => i.type === 'SMOKING')?.id;
+    const odor = found.find((i) => i.type === 'ODOR')?.id;
+    await checkIn(letan1);
+    expect((await letan1.put(`/api/housekeeping/issues/${smoking}/collection`).send({ status: 'COLLECTED', amount: 500000, method: 'CASH' })).status).toBe(200);
+    const voidOf = (agent: Agent, id: string, reason = 'Ghi trùng') => agent.post(`/api/housekeeping/issues/${id}/void`).send({ reason });
+    // Neither the desk nor Housekeeping; not another branch's manager; never without a reason.
+    for (const agent of [letan1, lan, qlbp1]) expect((await voidOf(agent, smoking!)).status).toBe(403);
+    expect((await voidOf(rm2, smoking!)).status).toBe(403);
+    expect((await voidOf(rm, smoking!, '  ')).status).toBe(422);
+    expect(await testPrisma.roomInspectionIssue.count({ where: { voidedAt: { not: null } } })).toBe(0);
+    // Its branch's Quản lý lễ tân: done — kept, with who, when and why.
+    const done = await voidOf(rm, smoking!);
+    expect(done.status).toBe(200);
+    const row = await testPrisma.roomInspectionIssue.findUniqueOrThrow({ where: { id: smoking }, include: { collection: true, inspection: true } });
+    expect(row).toMatchObject({ voidedByUserId: rmId, voidedByNameSnapshot: 'QL Lễ tân I', voidReason: 'Ghi trùng' });
+    expect(row.voidedAt).not.toBeNull();
+    // The money collected and the inspection stay exactly as they were.
+    expect(row.collection).toMatchObject({ status: 'COLLECTED', amount: 500000 });
+    expect(row.inspection).not.toBeNull();
+    expect(await testPrisma.roomInspectionIssue.count()).toBe(2);
+    // Once only; the Admin voids another.
+    expect((await voidOf(admin, smoking!)).status).toBe(409);
+    expect((await voidOf(admin, odor!)).status).toBe(200);
+  });
+});
+
+describe('J. the technical report: branch, "Vấn đề còn tồn đọng" and "Mức độ" together', () => {
+  it('returns only the open incidents of that level at that branch', async () => {
+    const make = async (agent: Agent, severity: string, extra: Record<string, unknown> = {}) => {
+      const res = await agent.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '301', category: 'WATER', description: 'Rò nước', severity, ...extra });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body.issue.id as string;
+    };
+    const openHigh = await make(letan1, 'HIGH');
+    const openLow = await make(letan1, 'LOW');
+    const doneHigh = await make(letan1, 'HIGH');
+    await testPrisma.hotelIssue.update({ where: { id: doneHigh }, data: { status: 'COMPLETED' } });
+    const otherBranch = await make(admin, 'HIGH', { branchId: cn2, roomNumber: '201' });
+    const ids = async (query: string) => ((await admin.get(`/api/issues?${query}&pageSize=500`)).body.issues as { id: string }[]).map((i) => i.id).sort();
+    expect(await ids(`branchId=${cn1}&outstanding=true&severity=HIGH`)).toEqual([openHigh]);
+    expect(await ids(`branchId=${cn1}&outstanding=true`)).toEqual([openHigh, openLow].sort());
+    expect(await ids(`branchId=${cn1}&severity=HIGH`)).toEqual([openHigh, doneHigh].sort());
+    expect(await ids(`outstanding=true&severity=HIGH`)).toEqual([openHigh, otherBranch].sort());
   });
 });

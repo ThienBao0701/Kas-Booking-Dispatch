@@ -24,6 +24,8 @@ import { RecordEditDialog, VoidDialog, VoidedNote } from './RecordDialogs';
 import { Actions } from './RecordRowActions';
 import { formatDateTime } from '../lib/format';
 import { HOTEL_DELIVERY_TITLE } from '../lib/reportCategories';
+import { isForeignRecord } from '../lib/deskVoid';
+import { useAuth } from '../auth/AuthProvider';
 
 const statusBadge = (label: string) => (
   <span className="inline-flex whitespace-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
@@ -66,6 +68,7 @@ export function DeliveryTable({
   emptyMessage?: string;
 }) {
   const [editing, setEditing] = useState<OperationalReport | null>(null);
+  const { user } = useAuth();
   const [voiding, setVoiding] = useState<string | null>(null);
 
   // The shared correction fields — the same list the supervisors' dialog uses.
@@ -153,7 +156,9 @@ export function DeliveryTable({
         emptyMessage={emptyMessage}
         actions={
           canEdit
-            ? (row) => <Actions row={row} canEdit onEdit={() => setEditing(row)} onVoid={() => setVoiding(row.id)} />
+            ? (row) =>
+                // Bộ phận buồng phòng's hand-over: read-only here.
+                isForeignRecord(row, user) ? null : <Actions row={row} canEdit onEdit={() => setEditing(row)} onVoid={() => setVoiding(row.id)} />
             : undefined
         }
       />

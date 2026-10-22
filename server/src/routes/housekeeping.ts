@@ -220,8 +220,8 @@ export function createHousekeepingRouter(): Router {
     })().catch(next);
   });
 
-  // POST /api/housekeeping/issues/:id/void — Admin only, with a reason.
-  router.post('/housekeeping/issues/:id/void', requireRole('ADMIN'), (req, res, next) => {
+  // POST /api/housekeeping/issues/:id/void — the Admin and the reception managers (their branches), with a reason.
+  router.post('/housekeeping/issues/:id/void', requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'), (req, res, next) => {
     (async () => {
       const { reason } = voidSchema.parse(req.body ?? {});
       const issue = await voidRoomIssue(req.params.id!, reason, actorOf(req), getClock());

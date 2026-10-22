@@ -312,8 +312,10 @@ const archiveSchema = z
     shiftType: z.enum(['A', 'B', 'C', 'A4', 'C4']).optional(),
     verdict: z.enum(['CORRECT', 'INCORRECT']).optional(),
     severity: SEVERITY.optional(),
-    // The Admin's "Buồng phòng" archive; every other role reads its own department's.
+    // The Admin's "Buồng phòng" archive; every other role reads what its rule allows.
     department: z.enum(['RECEPTION', 'HOUSEKEEPING']).optional(),
+    // "Loại vấn đề": the archived journal categories.
+    category: z.enum(['GUEST_REQUEST', 'CUSTOMER_COMPLAINT']).optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -471,6 +473,7 @@ export function createReceptionReportsRouter(): Router {
         branchId: q.branchId,
         severity: q.severity,
         department: q.department,
+        category: q.category,
       });
       res.json({
         reports: reports.map((r) => serializeReport(r, now)),

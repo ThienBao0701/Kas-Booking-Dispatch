@@ -29,8 +29,6 @@
  * THE ADMIN reads every branch; A RECEPTION MANAGER its branches (all eight for
  * the general manager); Reception its own. The server scopes every read.
  */
-import { SeverityFilter } from '../components/Severity';
-import type { Severity } from '../api/receptionReports';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -60,6 +58,15 @@ const noop = async () => undefined;
 
 const EMPTY_IN_RANGE = 'Không có vấn đề hoàn thành trong khoảng thời gian này.';
 
+/** "Loại vấn đề": the sections of the archive, each its own record type. */
+type IssueKind = 'GUEST_REQUEST' | 'FACILITY_ISSUE' | 'CUSTOMER_COMPLAINT' | 'HOTEL_DELIVERY';
+const KINDS: { code: IssueKind; label: string }[] = [
+  { code: 'GUEST_REQUEST', label: GUEST_REQUEST_TITLE },
+  { code: 'FACILITY_ISSUE', label: 'Sự cố cơ sở vật chất' },
+  { code: 'CUSTOMER_COMPLAINT', label: 'Vấn đề về chất lượng và dịch vụ' },
+  { code: 'HOTEL_DELIVERY', label: HOTEL_DELIVERY_TITLE },
+];
+
 export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING' } = {}) {
   // Bộ phận buồng phòng's archive: its own records (the Admin's read of them names the department).
   const housekeeping = department === 'HOUSEKEEPING';
@@ -84,8 +91,11 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
   );
   const period = reportPeriod(filter, today);
   const branchId = reportBranchId(filter);
-  /** "Mức độ" — narrows II, III and IV (the server filters); deliveries have none. */
-  const [severity, setSeverity] = useState<Severity | ''>('');
+  /** "Loại vấn đề" — one section, asked of the server alone; every section when empty. */
+  const [kind, setKind] = useState<IssueKind | ''>('');
+  const kinds = KINDS.filter((k) => !(housekeeping && k.code === 'CUSTOMER_COMPLAINT'));
+  const shows = (k: IssueKind) => kind === '' || kind === k;
+  const journalCategory = kind === 'GUEST_REQUEST' || kind === 'CUSTOMER_COMPLAINT' ? kind : undefined;
   const shiftType = filter.shiftType || undefined;
 
   // The reader's branches from the server's scope (every active one for the Admin).
@@ -103,20 +113,20 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
   };
 
   const journal = useQuery({
-    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict, severity, department ?? null],
-    queryFn: () => reportsApi.archive({ ...scope, verdict, severity: severity || undefined, ...(housekeeping && user?.role === 'ADMIN' ? { department } : {}) }),
-    enabled: period !== null,
+    queryKey: [...ARCHIVED_REPORTS_KEY, scope, verdict, journalCategory ?? null, department ?? null],
+    queryFn: () => reportsApi.archive({ ...scope, verdict, category: journalCategory, ...(housekeeping && user?.role === 'ADMIN' ? { department } : {}) }),
+    enabled: period !== null && (shows('GUEST_REQUEST') || shows('CUSTOMER_COMPLAINT')),
     refetchOnWindowFocus: true,
   });
   const incidents = useQuery({
-    queryKey: [...FACILITY_BOARD_KEY, 'archive', scope, verdict, severity],
-    queryFn: () => issuesApi.list({ scope: 'archive', ...scope, verdict, severity: severity || undefined, pageSize: 100 }),
-    enabled: period !== null,
+    queryKey: [...FACILITY_BOARD_KEY, 'archive', scope, verdict],
+    queryFn: () => issuesApi.list({ scope: 'archive', ...scope, verdict, pageSize: 100 }),
+    enabled: period !== null && shows('FACILITY_ISSUE'),
     refetchOnWindowFocus: true,
   });
 
   // "Giao nhận hàng hóa" is never "reported wrong": it belongs to the "đúng" view.
-  const showDeliveries = verdict === 'CORRECT';
+  const showDeliveries = verdict === 'CORRECT' && shows('HOTEL_DELIVERY');
   const deliveries = useDeliveries(
     'archived',
     period ? { from: period.from, to: period.to } : null,
@@ -159,8 +169,8 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
             {supervisor && period && !housekeeping
               ? [
                   // Supervisors export the same period, branch and shift through the one report engine.
-                  [operationalPdfUrl(scope), 'Xuất PDF', 'completed-export-pdf'],
-                  [operationalXlsxUrl(scope), 'Xuất Excel', 'completed-export-xlsx'],
+                  [operationalPdfUrl({ ...scope, ...(kind ? { category: kind } : {}) }), 'Xuất PDF', 'completed-export-pdf'],
+                  [operationalXlsxUrl({ ...scope, ...(kind ? { category: kind } : {}) }), 'Xuất Excel', 'completed-export-xlsx'],
                 ].map(([href, text, testId]) => (
                   <a
                     key={testId}
@@ -192,7 +202,22 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
         branchCounts={supervisor ? unresolvedByBranch : undefined}
         testId="completed-filters"
       />
-      <SeverityFilter value={severity} onChange={setSeverity} testId="completed-severity" className="mb-4 sm:w-60" />
+      <label className="mb-4 block text-sm font-medium text-slate-700 sm:w-72">
+        <span className="mb-1.5 block">Loại vấn đề</span>
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value as IssueKind | '')}
+          data-testid="completed-kind"
+          className="block min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-normal text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        >
+          <option value="">Tất cả</option>
+          {kinds.map((k) => (
+            <option key={k.code} value={k.code}>
+              {k.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {period === null ? (
         <p
@@ -203,6 +228,7 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
         </p>
       ) : (
         <div className="space-y-4" data-testid="completed-issues">
+          {shows('GUEST_REQUEST') ? (
           <div>
             <GuestRequestTable
               rows={requests}
@@ -219,7 +245,9 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
             />
             <MoreNote shown={requests.length} total={journal.data?.totals.GUEST_REQUEST} />
           </div>
+          ) : null}
 
+          {shows('FACILITY_ISSUE') ? (
           <div>
             <IncidentTable
               testId="completed-facility"
@@ -238,9 +266,10 @@ export function CompletedIssuesPage({ department }: { department?: 'HOUSEKEEPING
             />
             <MoreNote shown={issues.length} total={incidents.data?.pagination.total} />
           </div>
+          ) : null}
 
           {/* "Vấn đề về chất lượng và dịch vụ" is Reception's category only. */}
-          {housekeeping ? null : (
+          {housekeeping || !shows('CUSTOMER_COMPLAINT') ? null : (
           <div>
             <ServiceQualityTable
               rows={quality}

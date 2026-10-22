@@ -63,22 +63,22 @@ export function deliveryVisibilityWhere(
   filter: { branchId?: number; department?: 'RECEPTION' | 'HOUSEKEEPING' },
 ): Prisma.ReceptionOperationalReportWhereInput {
   switch (user.role) {
-    // Reception's view of its branches — every department's deliveries — for
-    // the managers: assigned branches, or all eight; another branch is refused.
-    // Reception's own records: Bộ phận buồng phòng's journal is its own.
+    // Reception's view of its branches — every department's deliveries, its
+    // own and Bộ phận buồng phòng's (marked) — for the managers: assigned
+    // branches, or all eight; another branch is refused.
     case 'RECEPTION_MANAGER':
     case 'RECEPTION_GENERAL_MANAGER':
-      return { ...scopedBranchFilter(user, filter.branchId), originDepartment: 'RECEPTION' };
+      return scopedBranchFilter(user, filter.branchId);
     case 'RECEPTIONIST':
       // `?? -1` matches no branch: an unassigned account sees nothing, and the
       // key is never left out — leaving it out would widen the query.
-      return { branchId: user.branchId ?? -1, originDepartment: 'RECEPTION' };
-    // The Admin's two views: Reception's journal, or Housekeeping's — exactly what
+      return { branchId: user.branchId ?? -1 };
+    // The Admin's two views: every department's, or Housekeeping's — exactly what
     // Bộ phận buồng phòng itself sees (Reception's hand-overs to it, and its own).
     case 'ADMIN':
       return {
         ...(filter.branchId !== undefined ? { branchId: filter.branchId } : {}),
-        ...(filter.department === 'HOUSEKEEPING' ? HOUSEKEEPING_DELIVERIES : { originDepartment: 'RECEPTION' as const }),
+        ...(filter.department === 'HOUSEKEEPING' ? HOUSEKEEPING_DELIVERIES : {}),
       };
     // Bộ phận buồng phòng: what Reception handed to it, and what it recorded itself.
     case 'HOUSEKEEPING':

@@ -12,6 +12,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ADMIN_USER, HOUSEKEEPING_USER, installApiMock, renderApp } from '../test/utils';
 import type { AuthUser } from '../auth/types';
+import { GUEST_REQUEST_TITLE } from '../lib/reportCategories';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -101,8 +102,19 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
   it('offers its three categories only — the guest requests open first, from its own list', async () => {
     installApiMock(shell(HOUSEKEEPING_USER));
     renderApp('/app/hk/reports');
-    const tabs = await screen.findByTestId('hk-report-tabs');
-    expect(within(tabs).getAllByRole('tab').map((t) => t.textContent)).toEqual(['Khách yêu cầu', 'Sự cố', 'Giao nhận']);
+    expect(await screen.findByTestId('hk-report-title')).toHaveTextContent('Vấn đề khách yêu cầu');
+    // One way to choose a category: the side menu — no second row of buttons on the page.
+    expect(screen.queryByTestId('hk-report-tabs')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    const reports = within(nav).getByTestId('nav-group-Báo cáo vấn đề').parentElement!;
+    expect(within(reports).getAllByRole('link').map((l) => l.getAttribute('href')).slice(0, 4)).toEqual([
+      '/app/hk/reports?category=GUEST_REQUEST',
+      '/app/hk/reports?category=FACILITY_ISSUE',
+      '/app/hk/reports?category=HOTEL_DELIVERY',
+      '/app/reports/confidential',
+    ]);
+    expect(within(reports).getByRole('link', { name: GUEST_REQUEST_TITLE }).getAttribute('aria-current')).toBe('page');
     expect(document.body).not.toHaveTextContent('Dịch vụ phòng');
     expect(document.body).not.toHaveTextContent('Thu tiền thanh toán');
     expect(document.body).not.toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
@@ -205,6 +217,66 @@ describe('"Hoàn thành vấn đề" of Bộ phận buồng phòng', () => {
     expect(screen.queryByTestId('completed-export-pdf')).not.toBeInTheDocument();
     // The manager's own department is the server's to decide — never asked for.
     expect(asked.every((u) => !u.includes('department='))).toBe(true);
+  });
+});
+
+describe('"Hoàn thành vấn đề" — "Loại vấn đề" instead of "Mức độ"', () => {
+  function recording(user: unknown) {
+    const asked: string[] = [];
+    const fetchMock = installApiMock(shell(user));
+    fetchMock.mockImplementation(async (url: string | URL, init: RequestInit = {}) => {
+      const key = `${(init.method ?? 'GET').toUpperCase()} ${String(url)}`;
+      asked.push(key);
+      const routes = shell(user);
+      const res = key.startsWith('GET /api/reception/reports/archive')
+        ? { status: 200, body: { reports: [], totals: { GUEST_REQUEST: 0, CUSTOMER_COMPLAINT: 0 }, range: null, archiveAfterHours: 12 } }
+        : key.startsWith('GET /api/issues?')
+          ? { status: 200, body: { issues: [], pagination: { total: 0 } } }
+          : key.startsWith('GET /api/hotel-deliveries')
+            ? { status: 200, body: { scope: 'archived', deliveries: [], total: 0 } }
+            : routes[key]
+              ? routes[key]!(init)
+              : { status: 404, body: { error: { code: 'NOT_FOUND', message: key } } };
+      return new Response(JSON.stringify(res.body), { status: res.status, headers: { 'Content-Type': 'application/json' } });
+    });
+    return asked;
+  }
+
+  it('offers every type of the view, keeps the dates and the shift, and asks the server for the chosen type alone', async () => {
+    const asked = recording(ADMIN_USER);
+    renderApp('/app/completed-issues?verdict=CORRECT');
+    const kind = await screen.findByTestId('completed-kind');
+    expect(within(kind).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'Tất cả',
+      GUEST_REQUEST_TITLE,
+      'Sự cố cơ sở vật chất',
+      'Vấn đề về chất lượng và dịch vụ',
+      'Giao nhận hàng hóa của khách sạn',
+    ]);
+    // "Mức độ" is gone; the dates and the shift stay.
+    expect(screen.queryByTestId('completed-severity')).not.toBeInTheDocument();
+    for (const mode of ['Hôm nay', 'Ngày cụ thể', 'Khoảng ngày']) expect(screen.getAllByRole('button', { name: mode }).length).toBeGreaterThan(0);
+    await waitFor(() => expect(asked.some((u) => u.startsWith('GET /api/issues?'))).toBe(true));
+    await userEvent.selectOptions(kind, 'GUEST_REQUEST');
+    asked.length = 0;
+    await userEvent.selectOptions(kind, 'CUSTOMER_COMPLAINT');
+    await waitFor(() => expect(asked.some((u) => u.startsWith('GET /api/reception/reports/archive') && u.includes('category=CUSTOMER_COMPLAINT'))).toBe(true));
+    // Only that type's section, and no other type's request.
+    expect(asked.some((u) => u.startsWith('GET /api/issues?') || u.startsWith('GET /api/hotel-deliveries'))).toBe(false);
+    expect(screen.getByTestId('completed-issues')).not.toHaveTextContent('Sự cố cơ sở vật chất');
+    expect(screen.queryByTestId('completed-facility')).not.toBeInTheDocument();
+    // An incident type asks for incidents only.
+    asked.length = 0;
+    await userEvent.selectOptions(kind, 'FACILITY_ISSUE');
+    expect(await screen.findByTestId('completed-facility')).toBeInTheDocument();
+    expect(asked.some((u) => u.startsWith('GET /api/reception/reports/archive'))).toBe(false);
+  });
+
+  it('offers Bộ phận buồng phòng its own types only', async () => {
+    recording(HOUSEKEEPING_USER);
+    renderApp('/app/hk/completed?verdict=CORRECT');
+    const kind = await screen.findByTestId('completed-kind');
+    expect(within(kind).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tất cả', GUEST_REQUEST_TITLE, 'Sự cố cơ sở vật chất', 'Giao nhận hàng hóa của khách sạn']);
   });
 });
 
