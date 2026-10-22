@@ -1,16 +1,12 @@
 import fs from 'node:fs';
+import { fixtureBranches } from './helpers/branchFixtures';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseBooking } from '../src/booking/parser';
-import { BRANCHES } from '../src/db/branches';
-import type { MatchableBranch, ParsedBooking } from '../src/booking/types';
+import type { ParsedBooking } from '../src/booking/types';
 
-const branches: MatchableBranch[] = BRANCHES.map((b, i) => ({
-  id: i + 1,
-  code: b.code,
-  hotelName: b.hotelName,
-  address: b.address,
-}));
+// Seeded branches WITH their current platform identities (see helper).
+const branches = fixtureBranches;
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'booking');
 

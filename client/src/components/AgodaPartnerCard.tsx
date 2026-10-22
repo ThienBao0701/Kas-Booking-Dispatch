@@ -65,8 +65,8 @@ export function AgodaPartnerCard({ agoda }: { agoda: AgodaPartnerExtras }) {
 
       <div className="mt-4">
         <div className="mb-1.5 flex items-center justify-between gap-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ghi chú tạo đơn (Agoda)</p>
-          {agoda.pmsNote ? <CopyButton value={agoda.pmsNote} label="Sao chép ghi chú" /> : null}
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">PMS Note (Agoda)</p>
+          {agoda.pmsNote ? <CopyButton value={agoda.pmsNote} label="Sao chép PMS Note" /> : null}
         </div>
         {agoda.pmsNote ? (
           <pre className="whitespace-pre-wrap rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-800">

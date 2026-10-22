@@ -163,7 +163,7 @@ npx prisma studio --schema prisma/schema.prisma   # Booking / HotelIssue / Notif
 ## 9. Creating real receptionists later
 
 Production receptionists are created **manually, after** go-live, from Admin →
-*Quản lý tài khoản* → **Thêm lễ tân**, each assigned to exactly one real branch. Do
+*Quản lý tài khoản* → **Thêm bộ phận**, each assigned to exactly one real branch. Do
 not reuse `reception_test` for real operations.
 
 ## 10. Backups

@@ -50,16 +50,20 @@ describe('business type — extraction & persistence', () => {
     expect(stored.businessTypeManuallyConfirmed).toBe(false);
   });
 
-  it('extract detects and persists PARTNER from explicit partner-rate text', async () => {
+  it('extract detects PARTNER from explicit partner-rate text', async () => {
+    /*
+      Detection is unchanged; only WHEN it is written moved. Extraction reports
+      the type in the preview so the Admin sees it during review, and the
+      dispatch re-runs the same detector when the booking is created — see
+      `bookingComDispatch.test.ts` for the persisted half of this behaviour.
+    */
     const res = await adminAgent.post('/api/bookings/extract').send({ rawText: PARTNER_TEXT });
     expect(res.status).toBe(201);
     expect(res.body.businessType).toBe('PARTNER');
     expect(res.body.businessTypeRequiresAdminConfirmation).toBe(false);
-    expect(res.body.booking.businessType).toBe('PARTNER');
 
-    const stored = await testPrisma.booking.findUniqueOrThrow({ where: { id: res.body.booking.id } });
-    expect(stored.businessType).toBe('PARTNER');
-    expect(stored.businessTypeManuallyConfirmed).toBe(false);
+    // Detected, not recorded: reviewing is not an act of record.
+    expect(await testPrisma.booking.count()).toBe(0);
   });
 
   it('extract detects DIRECT for a normal retail booking', async () => {
@@ -68,10 +72,20 @@ describe('business type — extraction & persistence', () => {
   });
 });
 
+/*
+  The `/business-type` endpoint operates on a booking that EXISTS. It is not
+  Booking.com's review surface any more — the Admin's choice now travels in the
+  dispatch payload (`bookingComDispatch.test.ts`, Test 9) — but the endpoint is
+  unchanged and still reachable, so its rules stay covered here.
+
+  The fixture is seeded directly rather than extracted, because extraction no
+  longer produces a booking to override. That is the only change to this block:
+  every assertion below is the original one.
+*/
 describe('business type — admin override', () => {
   async function draft() {
-    const res = await adminAgent.post('/api/bookings/extract').send({ rawText: DIRECT_TEXT });
-    return res.body.booking.id as string;
+    const b = await createDraftBooking({ branchId: ownBranchId, bookingCode: '6312474567' });
+    return b.id;
   }
 
   it('lets an admin mark a booking as PARTNER (manual, overrides detection)', async () => {

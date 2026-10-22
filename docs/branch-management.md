@@ -260,6 +260,14 @@ Lễ tân nhận **403** ở mọi route trên, kể cả các route đọc.
 
 ---
 
+## 14b. Hạng phòng theo chi nhánh (C.3.8)
+
+Mỗi chi nhánh còn có **danh sách hạng phòng và mã PMS riêng**, quản lý bằng bản
+nháp có phiên bản, tách hoàn toàn khỏi tên khách sạn trên nền tảng ở trên. Xem
+[room-class-mapping.md](room-class-mapping.md).
+
+Truy cập: *Khách sạn & chi nhánh* → dòng chi nhánh → **Hạng phòng**.
+
 ## 15. Giới hạn đã biết
 
 - **Stable code là bất biến.** Đổi code cần một luồng migration riêng (chưa có).

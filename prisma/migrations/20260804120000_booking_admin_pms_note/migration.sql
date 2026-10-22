@@ -1,0 +1,33 @@
+-- ===========================================================================
+-- KAS — who created the PMS reservation, and what payment the Admin reviewed
+--
+-- ADDITIVE ONLY. Two nullable columns on Booking. Nothing is dropped, renamed,
+-- re-typed or back-filled. Every existing booking reads NULL for both, which is
+-- honest: nobody recorded who created those reservations, and inventing a name
+-- for them would put a person's name against work they may not have done.
+--
+-- WHY TWO COLUMNS RATHER THAN REUSING WHAT IS THERE:
+--
+--   `adminPmsNote` could not be `specialRequest` — that is the GUEST's request,
+--   read by the parser and printed into the PMS note. It could not be
+--   `completionNote` either: that is the RECEPTIONIST's claim that they created
+--   the reservation, written when a proof is submitted. Both already mean
+--   something, and overloading either would corrupt data the pilot depends on.
+--
+--   `reviewedPaymentMode` could not be `paymentType`. That column records what
+--   the OTA MAIL SAID — audit data, exposed as such since the operational
+--   record was surfaced. This records what a HUMAN ACCEPTED in the review
+--   screen. They agree most of the time and disagree exactly when it matters,
+--   so conflating them would destroy the distinction at the moment it is worth
+--   having.
+--
+-- WHAT ENFORCES THE REQUIREMENT:
+-- the columns are NULLABLE at the database level on purpose. The OTA dispatch
+-- endpoint refuses a missing note, so new OTA bookings always carry one; making
+-- the column NOT NULL would instead have required back-filling every historical
+-- row with a fabricated value, and would have broken the Booking.com path,
+-- which by decision does not collect a note at all.
+-- ===========================================================================
+
+ALTER TABLE "Booking" ADD COLUMN "adminPmsNote" TEXT;
+ALTER TABLE "Booking" ADD COLUMN "reviewedPaymentMode" TEXT;

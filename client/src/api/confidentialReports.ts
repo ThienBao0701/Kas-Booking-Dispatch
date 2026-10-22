@@ -1,0 +1,53 @@
+import { api } from './client';
+
+export type ConfidentialCategory = 'WORK_ENVIRONMENT' | 'PROCESS_RULES' | 'COLLEAGUES' | 'OTHER_IMPORTANT';
+
+export interface ConfidentialRecipient {
+  id: number;
+  fullName: string;
+  role: string;
+  roleLabel: string;
+  /** The Admin: always a recipient, whether the sender ticks it or not. */
+  always: boolean;
+}
+
+export interface ConfidentialOptions {
+  title: string;
+  categories: { code: ConfidentialCategory; label: string }[];
+  /** Whether this account reports upward (Lễ tân, Quản lý lễ tân, Tổng quản lý). */
+  canSend: boolean;
+  /** Whether this account has an inbox (the managers and the Admin). */
+  canRead: boolean;
+  /** THIS account's superiors, nearest first — the server's list, the Admin always among them. */
+  recipients: ConfidentialRecipient[];
+  /** The role groups "Gửi đến" shows, nearest first — present even with no account. */
+  recipientRoles: string[];
+}
+
+export interface ConfidentialReport {
+  id: string;
+  category: ConfidentialCategory;
+  categoryLabel: string;
+  sender: { id: number; name: string; role: string; roleLabel: string };
+  branch: { id: number; branchNumber: number; address: string } | null;
+  createdAt: string;
+  preview: string;
+  /** Present on the opened report only. */
+  content?: string;
+  /** Who it was sent to — the chosen superiors, then the Admin (always). */
+  recipients: { id: number; name: string; roleLabel: string; always: boolean }[];
+  /** THIS reader's state. */
+  read: boolean;
+  readAt: string | null;
+}
+
+export const confidentialApi = {
+  options: () => api.get<ConfidentialOptions>('/confidential-reports/options'),
+  send: (input: { category: ConfidentialCategory; content: string; recipientIds: number[] }) =>
+    api.post<{ report: { id: string; createdAt: string } }>('/confidential-reports', input),
+  inbox: (state?: 'UNREAD' | 'READ') =>
+    api.get<{ reports: ConfidentialReport[]; counts: { unread: number; read: number } }>(
+      `/confidential-reports${state ? `?state=${state}` : ''}`,
+    ),
+  open: (id: string) => api.post<{ report: ConfidentialReport }>(`/confidential-reports/${id}/read`),
+};

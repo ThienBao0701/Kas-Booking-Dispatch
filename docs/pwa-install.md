@@ -2,10 +2,38 @@
 
 Kas có thể cài như một ứng dụng độc lập trên Windows bằng Chrome hoặc Edge.
 
+## ⚠️ Yêu cầu bắt buộc: kết nối bảo mật (https)
+
+Chrome và Edge **chỉ cho phép cài ứng dụng** khi trang được mở qua:
+
+- `https://…` (có chứng chỉ hợp lệ), hoặc
+- `http://localhost` / `http://127.0.0.1` (ngay trên chính máy chủ).
+
+Địa chỉ LAN dạng `http://192.168.1.10:3001` **không** thoả điều kiện này. Trên
+địa chỉ đó trình duyệt không chạy service worker, nên **không có nút “Cài ứng
+dụng”** trong Kas và **cũng không có biểu tượng cài đặt** trên thanh địa chỉ.
+Đây là quy định của trình duyệt, không phải lỗi cấu hình của Kas — không có
+thay đổi nào trong manifest hay icon khắc phục được.
+
+Khi mở bằng địa chỉ `http://` LAN, Kas sẽ hiển thị dòng giải thích ở góc dưới
+bên trái thay vì im lặng.
+
+**Cách khắc phục:** phục vụ Kas qua `https://<tên-miền>` theo
+[production-deployment.md](production-deployment.md), hoặc cài trực tiếp trên
+máy chủ bằng `http://localhost:3001`.
+
+### Cách nhanh nhất trên máy chủ: `Kas.cmd`
+
+Nhấn đúp **`Kas.cmd`** ở thư mục gốc của Kas. Trình khởi động sẽ kiểm tra
+Node/cổng/bản build/cấu hình, khởi động máy chủ nếu chưa chạy, rồi mở trình
+duyệt tại **`http://localhost:3001`** — đúng địa chỉ mà Chrome và Edge cho phép
+cài ứng dụng. Nếu Kas đã chạy sẵn, trình khởi động chỉ mở trình duyệt chứ không
+khởi động thêm tiến trình nào. Nhật ký nằm ở `logs/launcher.log`.
+
 ## Cài đặt
 
-1. Mở Kas trong **Chrome** hoặc **Edge** (địa chỉ máy chủ Admin, ví dụ
-   `http://192.168.1.10:3001`).
+1. Mở Kas trong **Chrome** hoặc **Edge** bằng địa chỉ **`https://`** của máy chủ
+   (xem mục cảnh báo ở trên).
 2. Đăng nhập một lần để chắc chắn trang tải đúng.
 3. Cài đặt:
    - **Chrome:** biểu tượng **Cài đặt** (màn hình có mũi tên) ở cuối thanh địa

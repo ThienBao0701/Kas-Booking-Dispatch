@@ -23,6 +23,12 @@ function toApiError(err: unknown): ApiError {
     if (err.code === 'P2025') {
       return ApiError.notFound('Không tìm thấy bản ghi.');
     }
+    // A table or column the code needs does not exist: the database is behind
+    // the code — a migration was not applied. Still a server error, but one
+    // that says what to do instead of an anonymous "lỗi hệ thống".
+    if (err.code === 'P2021' || err.code === 'P2022') {
+      return ApiError.internal('Cơ sở dữ liệu chưa được cập nhật. Chạy: npm run db:migrate rồi khởi động lại máy chủ.');
+    }
   }
 
   // Malformed JSON bodies surface as a SyntaxError from express.json().

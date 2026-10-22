@@ -1,0 +1,148 @@
+# KAS hotel booking dispatch — production stack.
+#
+#   caddy  : the ONLY container that publishes ports (80/443). Terminates TLS
+#            with an automatically issued certificate and reverse-proxies to app.
+#   app    : Express API + built React client on one internal port. Never
+#            published to the host, so it is unreachable except through Caddy.
+#
+# There is still NO database container. Since Phase D.1 the database is
+# PostgreSQL 17 installed directly on the Windows host, which is the supported
+# production path (docs/postgresql-migration.md). Docker remains an optional
+# secondary deployment path and connects OUT to that host PostgreSQL through
+# `host.docker.internal`; it never runs its own database, so there is exactly
+# one copy of the data and exactly one thing to back up.
+#
+# DATABASE_URL therefore carries a password and CANNOT be written here. It is
+# supplied as a Docker secret file, like every other secret in this stack.
+#
+#   docker compose -f compose.production.yml config      # validate
+#   docker compose -f compose.production.yml up -d       # start
+
+name: kas
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kas-app:${APP_IMAGE_TAG:-local}
+    restart: unless-stopped
+    # No published ports: reachable only on the internal network, via Caddy.
+    expose:
+      - "3001"
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      SERVE_CLIENT: "true"
+      # PostgreSQL 17 on the host. The URL contains a password, so it arrives as
+      # a secret FILE (DATABASE_URL_FILE) rather than an environment value —
+      # keeping it out of `docker inspect` and out of this repository.
+      DATABASE_URL_FILE: /run/secrets/database_url
+      APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required, e.g. https://dispatch.example.com}
+      # Exactly one proxy (caddy) sits in front of this process.
+      TRUST_PROXY: "1"
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_MAX_AGE_HOURS: ${SESSION_MAX_AGE_HOURS:-12}
+      # Secrets arrive as files, so their values never appear in `docker inspect`
+      # or in this file. See scripts/production/deploy.sh.
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-}
+      INITIAL_ADMIN_FULL_NAME: ${INITIAL_ADMIN_FULL_NAME:-}
+      INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
+      PROOF_UPLOAD_DIR: /data/uploads/booking-proofs
+      ISSUE_UPLOAD_DIR: /data/uploads/issue-photos
+      BACKUP_DIR: /data/backups
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-10}
+      LOGIN_RATE_LIMIT_WINDOW_MINUTES: ${LOGIN_RATE_LIMIT_WINDOW_MINUTES:-15}
+      # Developer tooling is refused outright in production (the app will not
+      # boot with this set to true) — stated here so it is impossible to miss.
+      ENABLE_DEV_TEST_TOOLS: "false"
+      PROOF_OCR_ENABLED: ${PROOF_OCR_ENABLED:-false}
+      APP_RELEASE_REF: ${APP_RELEASE_REF:-unknown}
+    secrets:
+      - session_secret
+      - initial_admin_password
+      - database_url
+    # The database lives on the host, so the app container reaches it through
+    # the Docker host gateway rather than over the internal network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - kas-uploads:/data/uploads
+      - kas-backups:/data/backups
+    networks:
+      - kas-internal
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # The only externally reachable ports in the whole stack.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required, e.g. dispatch.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # issued certificates — losing this re-issues them
+      - caddy-config:/config
+    networks:
+      - kas-internal
+    depends_on:
+      app:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  # Private bridge: containers reach each other by service name, and nothing
+  # here is addressable from outside the host.
+  kas-internal:
+    driver: bridge
+
+volumes:
+  kas-uploads:
+  kas-backups:
+  caddy-data:
+  caddy-config:
+
+secrets:
+  session_secret:
+    file: ./secrets/session_secret
+  initial_admin_password:
+    file: ./secrets/initial_admin_password
+  # ONE line holding the PostgreSQL connection URL, in this shape:
+  #   scheme "postgresql", user "kas_app", the URL-encoded password,
+  #   host "host.docker.internal", port 5432, database "kas".
+  # No credential-shaped URL is written in this repository on purpose — see
+  # docs/postgresql-migration.md for the exact literal to put in the file.
+  # Reserved characters in the password (@ : / ? # % [ ] & and space) MUST be
+  # percent-encoded or the URL resolves to a different host or database.
+  database_url:
+    file: ./secrets/database_url

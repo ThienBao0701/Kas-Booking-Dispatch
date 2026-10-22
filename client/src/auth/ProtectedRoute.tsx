@@ -39,12 +39,22 @@ export function RequirePasswordChange({ children }: { children: ReactNode }) {
 }
 
 /**
- * Role gate for admin-only pages. The frontend shows a forbidden state; the
+ * Role gate for restricted pages. The frontend shows a forbidden state; the
  * backend remains the real security boundary.
+ *
+ * Accepts one role or several — Chứng từ is reachable by two — so a page never
+ * has to be wrapped twice or guarded by hand.
  */
-export function RequireRole({ role, children }: { role: UserRole; children: ReactNode }) {
+export function RequireRole({
+  role,
+  children,
+}: {
+  role: UserRole | readonly UserRole[];
+  children: ReactNode;
+}) {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
-  if (user.role !== role) return <ForbiddenPage />;
+  const allowed = Array.isArray(role) ? role : [role as UserRole];
+  if (!allowed.includes(user.role)) return <ForbiddenPage />;
   return <>{children}</>;
 }

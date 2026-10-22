@@ -2,15 +2,15 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { PROOF_UPLOAD_DIR } from '../config/env';
+import { MAX_UPLOAD_BYTES, PROOF_UPLOAD_DIR } from '../config/env';
 import { ApiError } from '../lib/errors';
 
 /** The only proof image types Kas accepts. */
 export const ALLOWED_PROOF_MIME = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export type ProofMime = (typeof ALLOWED_PROOF_MIME)[number];
 
-/** Maximum proof image size in bytes (10 MB). */
-export const MAX_PROOF_BYTES = 10 * 1024 * 1024;
+/** Maximum proof image size in bytes — MAX_UPLOAD_MB (10 MB by default). */
+export const MAX_PROOF_BYTES = MAX_UPLOAD_BYTES;
 
 const EXTENSION: Record<ProofMime, string> = {
   'image/png': 'png',

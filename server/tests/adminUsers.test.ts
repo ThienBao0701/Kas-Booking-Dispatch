@@ -82,7 +82,11 @@ describe('POST /api/admin/users', () => {
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
 
-  it('always creates the RECEPTIONIST role even if the client asks for ADMIN', async () => {
+  it('refuses to create an ADMIN, rather than silently downgrading the request', async () => {
+    // `role` is a real field since Bộ phận đặt phòng exists, so an ADMIN
+    // request is now REJECTED instead of quietly producing a receptionist —
+    // the caller learns their request was refused. Either way no admin is
+    // ever minted here; an administrator is bootstrapped.
     const res = await adminAgent
       .post('/api/admin/users')
       .send({
@@ -92,8 +96,42 @@ describe('POST /api/admin/users', () => {
         branchId: branchA,
         role: 'ADMIN',
       });
+    expect(res.status).toBe(422);
+    expect(await testPrisma.user.count({ where: { username: 'sneaky' } })).toBe(0);
+  });
+
+  it('creates a BOOKING_DEPARTMENT account, which is global and has no branch', async () => {
+    const res = await adminAgent.post('/api/admin/users').send({
+      username: 'datphong',
+      fullName: 'Bộ phận đặt phòng',
+      temporaryPassword: TEMP_PASSWORD,
+      role: 'BOOKING_DEPARTMENT',
+    });
     expect(res.status).toBe(201);
-    expect(res.body.user.role).toBe('RECEPTIONIST');
+    expect(res.body.user.role).toBe('BOOKING_DEPARTMENT');
+    expect(res.body.user.branch).toBeNull();
+  });
+
+  it('refuses a branch on a BOOKING_DEPARTMENT account', async () => {
+    // A branch would imply a scope this role does not have.
+    const res = await adminAgent.post('/api/admin/users').send({
+      username: 'datphong2',
+      fullName: 'Bộ phận đặt phòng',
+      temporaryPassword: TEMP_PASSWORD,
+      role: 'BOOKING_DEPARTMENT',
+      branchId: branchA,
+    });
+    expect(res.status).toBe(422);
+  });
+
+  it('still requires a branch for a receptionist', async () => {
+    const res = await adminAgent.post('/api/admin/users').send({
+      username: 'nobranch',
+      fullName: 'No Branch',
+      temporaryPassword: TEMP_PASSWORD,
+      role: 'RECEPTIONIST',
+    });
+    expect(res.status).toBe(422);
   });
 });
 
@@ -218,5 +256,40 @@ describe('GET /api/admin/users', () => {
     const usernames = search.body.users.map((u: { username: string }) => u.username);
     expect(usernames).toContain('alpha');
     expect(usernames).not.toContain('beta');
+  });
+
+  /*
+    The account screen's "Admin / Quản trị" section. Opt-in, read-only: the
+    default list is unchanged, and an admin listed here still cannot be locked.
+  */
+  it('lists admins too, only when asked, and still refuses to lock one', async () => {
+    await createReceptionist(branchA, { username: 'alpha', fullName: 'Alpha' });
+
+    const withAdmins = await adminAgent.get('/api/admin/users?includeAdmins=true');
+    expect(withAdmins.status).toBe(200);
+    const admin = withAdmins.body.users.find((u: { username: string }) => u.username === 'admin');
+    expect(admin).toMatchObject({ role: 'ADMIN' });
+    expect(withAdmins.body.users.some((u: { username: string }) => u.username === 'alpha')).toBe(true);
+    expect(JSON.stringify(withAdmins.body)).not.toContain('passwordHash');
+
+    // Without the flag, byte for byte the list it always was.
+    const plain = await adminAgent.get('/api/admin/users');
+    expect(plain.body.users.some((u: { role: string }) => u.role === 'ADMIN')).toBe(false);
+
+    // Listing grants nothing.
+    const lock = await adminAgent.post(`/api/admin/users/${admin.id}/disable`);
+    expect(lock.status).toBe(403);
+    expect((await testPrisma.user.findUniqueOrThrow({ where: { id: admin.id } })).active).toBe(true);
+  });
+
+  it('rejects any other value for includeAdmins', async () => {
+    const res = await adminAgent.get('/api/admin/users?includeAdmins=yes');
+    expect(res.status).toBe(422);
+  });
+
+  it('is refused to a receptionist, flag or not', async () => {
+    await createReceptionist(branchA, { username: 'nosy' });
+    const { agent } = await loginAgent(app, 'nosy', RECEPTIONIST_PASSWORD);
+    expect((await agent.get('/api/admin/users?includeAdmins=true')).status).toBe(403);
   });
 });

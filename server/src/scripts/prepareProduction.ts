@@ -2,26 +2,19 @@
  * CLI wrapper for the official-launch reset (`npm run data:prepare-production`).
  *
  * It requires an interactive confirmation phrase and, in production, an explicit
- * `--allow-production` flag. It backs up the SQLite DB + uploads before deleting
- * ALL operational data, preserving the schema, the 8 branches, the Admin account
- * and configuration. NEVER run this against data you want to keep.
+ * `--allow-production` flag. It takes a pg_dump archive of the database + a copy
+ * of the uploads before deleting ALL operational data, preserving the schema,
+ * the 8 branches, the Admin account and configuration. NEVER run this against
+ * data you want to keep.
  */
 import path from 'node:path';
 import readline from 'node:readline';
 import { prisma } from '../db/prisma';
-import { env, isProduction, PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR } from '../config/env';
+import { isProduction, PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR } from '../config/env';
 import { prepareForProduction } from '../devtest/prepareProduction';
 import { OFFICIAL_RESET_PHRASE } from '../devtest/constants';
 
 const repoRoot = path.resolve(__dirname, '../../..');
-
-/** Resolve the SQLite file path from DATABASE_URL (file: URLs are relative to prisma/). */
-function dbFilePath(): string | null {
-  const url = env.DATABASE_URL;
-  if (!url.startsWith('file:')) return null;
-  const rel = url.slice('file:'.length);
-  return path.resolve(repoRoot, 'prisma', rel);
-}
 
 function ask(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -57,7 +50,7 @@ async function main(): Promise<void> {
 
   const manifest = await prepareForProduction({
     confirmed: true,
-    dbFilePath: dbFilePath(),
+    // Defaults to env.DATABASE_URL; pg_dump takes the pre-reset archive.
     uploadDirs: [PROOF_UPLOAD_DIR, ISSUE_UPLOAD_DIR],
     backupRoot: path.join(repoRoot, 'backups'),
     doBackup: true,

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Windows tile metadata, read by Edge and the Windows Start menu when the site
+  is pinned outside the PWA install flow.
+
+  The tiles use the MASKABLE artwork because Windows crops a tile to a square
+  and would clip the corners off the standard mark, which has transparent
+  corners by design.
+-->
+<browserconfig>
+  <msapplication>
+    <tile>
+      <square70x70logo src="/icons/mstile-70.png"/>
+      <square150x150logo src="/icons/mstile-150.png"/>
+      <square310x310logo src="/icons/mstile-310.png"/>
+      <TileColor>#2563eb</TileColor>
+    </tile>
+  </msapplication>
+</browserconfig>

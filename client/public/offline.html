@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#2563eb" />
+    <title>Mất kết nối — Kas</title>
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <!--
+      Everything is inline. This page is shown precisely when the network is
+      unavailable, so a linked stylesheet would be one more request that cannot
+      succeed and would leave the operator staring at unstyled text.
+    -->
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: calc(1.5rem + env(safe-area-inset-top)) 1.5rem calc(1.5rem + env(safe-area-inset-bottom));
+        background: #f1f5f9;
+        color: #0f172a;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .card {
+        max-width: 26rem;
+        width: 100%;
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 1rem;
+        padding: 2rem;
+        text-align: center;
+        box-shadow: 0 1px 3px rgb(15 23 42 / 0.1);
+      }
+      h1 { margin: 0 0 0.5rem; font-size: 1.25rem; }
+      p { margin: 0 0 1.5rem; color: #475569; font-size: 0.9375rem; line-height: 1.5; }
+      button {
+        min-height: 2.75rem;
+        padding: 0 1.25rem;
+        border: 0;
+        border-radius: 0.75rem;
+        background: #2563eb;
+        color: #fff;
+        font-size: 0.875rem;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button:hover { background: #1d4ed8; }
+      button:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+      .status { margin-top: 1rem; font-size: 0.8125rem; color: #64748b; min-height: 1.25rem; }
+      .online { color: #15803d; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Mất kết nối mạng</h1>
+      <p>
+        Kas không liên lạc được với máy chủ. Dữ liệu đặt phòng luôn được lấy trực tiếp
+        từ máy chủ nên không thể hiển thị khi ngoại tuyến.
+      </p>
+      <button type="button" id="retry">Thử lại</button>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <script>
+      (function () {
+        var status = document.getElementById('status');
+        var retry = document.getElementById('retry');
+
+        function reload() {
+          window.location.replace('/');
+        }
+
+        // Reconnect detection: the browser tells us the moment the interface is
+        // back, which is faster and cheaper than polling.
+        window.addEventListener('online', function () {
+          status.textContent = 'Đã có mạng trở lại. Đang tải…';
+          status.className = 'status online';
+          reload();
+        });
+
+        retry.addEventListener('click', function () {
+          if (navigator.onLine) {
+            reload();
+            return;
+          }
+          status.textContent = 'Vẫn chưa có kết nối. Hãy kiểm tra mạng rồi thử lại.';
+          status.className = 'status';
+        });
+
+        if (navigator.onLine) {
+          status.textContent = 'Có vẻ đã có mạng — bấm Thử lại.';
+        }
+      })();
+    </script>
+  </body>
+</html>

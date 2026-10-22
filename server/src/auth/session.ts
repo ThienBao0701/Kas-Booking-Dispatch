@@ -20,6 +20,14 @@ declare module 'express-session' {
      * dedicated test receptionist. Cleared on logout.
      */
     activeTestBranchId?: number | null;
+    /**
+     * Set when this session was opened with the Admin Override Password rather
+     * than the account's own password. Authorization is unchanged — the session
+     * is the account's — and it ends when the override password is changed or
+     * turned off. The override is never accepted as the account's current
+     * password, so the account's own password cannot be changed with it.
+     */
+    adminOverride?: boolean;
   }
 }
 

@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { resolveBranchIdentity } from '../src/booking/identityResolver';
 import { createApp } from '../src/app';
 import { backfillBranchAliases, seedBranches } from '../src/db/seed';
 import { BRANCHES } from '../src/db/branches';
-import { resetAll, testPrisma, utcDate } from './helpers/db';
+import { resetAll, resetIssueData, testPrisma, utcDate } from './helpers/db';
 import {
   ADMIN_PASSWORD,
   RECEPTIONIST_PASSWORD,
@@ -58,7 +59,7 @@ async function restoreBranches(): Promise<void> {
   await testPrisma.notification.deleteMany({});
   await testPrisma.bookingStatusHistory.deleteMany({});
   await testPrisma.booking.deleteMany({});
-  await testPrisma.hotelIssue.deleteMany({});
+  await resetIssueData();
   await testPrisma.demoDataBatch.deleteMany({});
   await testPrisma.branchChangeLog.deleteMany({});
   await testPrisma.branchSourceAlias.deleteMany({});
@@ -313,43 +314,48 @@ describe('branch management — activation', () => {
 /* ================================================================== */
 
 describe('branch management — platform names', () => {
-  it('16. adds a Booking.com alias that then resolves to the branch', async () => {
+  it('16. sets a Booking.com identity that then resolves EXACTLY to the branch', async () => {
     const created = await createNinth();
     const id = created.body.branch.id as number;
     const res = await adminAgent
-      .post(`/api/admin/branches/${id}/aliases`)
-      .send({ source: 'BOOKING_COM', alias: 'Nguyen Hue Grand Hotel', matchMode: 'SIMILARITY' });
-    expect(res.status).toBe(201);
+      .put(`/api/admin/branches/${id}/platform-identities/BOOKING_COM`)
+      .send({ name: 'Nguyen Hue Grand Hotel' });
+    expect(res.status).toBe(200);
 
     const configs = await loadBranchConfigs(testPrisma);
-    expect(matchBranch('Nguyen Hue Grand Hotel', configs)?.branch.code).toBe('NGUYEN_HUE_12');
+    const resolved = resolveBranchIdentity('Nguyen Hue Grand Hotel', 'BOOKING_COM', configs);
+    expect(resolved.branchCode).toBe('NGUYEN_HUE_12');
+    expect(resolved.reason).toBe('EXACT_PLATFORM_IDENTITY');
+    expect(resolved.requiresManualBranch).toBe(false);
   });
 
-  it('17. adds an Agoda alias that then resolves to the branch', async () => {
+  it('17. sets an Agoda identity; case and spacing are normalised, meaning is not', async () => {
     const created = await createNinth();
     const id = created.body.branch.id as number;
     await adminAgent
-      .post(`/api/admin/branches/${id}/aliases`)
-      .send({ source: 'AGODA', alias: 'KAS Nguyen Hue Hotel' });
+      .put(`/api/admin/branches/${id}/platform-identities/AGODA`)
+      .send({ name: 'KAS Nguyen Hue Hotel' });
 
     const configs = await loadBranchConfigs(testPrisma);
-    expect(resolveAgodaBranch('KAS Nguyen Hue Hotel', configs)?.code).toBe('NGUYEN_HUE_12');
-    expect(resolveAgodaBranch('kas  nguyen hue hotel', configs)?.code).toBe('NGUYEN_HUE_12');
+    expect(resolveBranchIdentity('KAS Nguyen Hue Hotel', 'AGODA', configs).branchCode).toBe('NGUYEN_HUE_12');
+    // Case / repeated whitespace are safe to fold — they do not change identity.
+    expect(resolveBranchIdentity('kas  nguyen hue hotel', 'AGODA', configs).branchCode).toBe('NGUYEN_HUE_12');
   });
 
-  it('18. an Agoda alias is exact-match only, even if SIMILARITY is requested', async () => {
+  it('18. a near miss is SUGGESTED, never assigned — on every platform', async () => {
     const created = await createNinth();
     const id = created.body.branch.id as number;
-    const res = await adminAgent
-      .post(`/api/admin/branches/${id}/aliases`)
-      .send({ source: 'AGODA', alias: 'KAS Nguyen Hue Hotel', matchMode: 'SIMILARITY' });
-    expect(res.body.branch.aliases.find((a: { source: string }) => a.source === 'AGODA').matchMode).toBe('EXACT');
+    await adminAgent
+      .put(`/api/admin/branches/${id}/platform-identities/AGODA`)
+      .send({ name: 'KAS Nguyen Hue Hotel' });
 
     const configs = await loadBranchConfigs(testPrisma);
-    // A near miss stays unresolved rather than being guessed.
-    expect(resolveAgodaBranch('KAS Nguyen Hue', configs)).toBeNull();
-    expect(resolveAgodaBranch('KAS Hotel', configs)).toBeNull();
-    expect(resolveBranchForSource('KAS Nguyen Hue', 'AGODA', configs).reason).toBe('UNKNOWN');
+    for (const near of ['KAS Nguyen Hue', 'KAS Hotel']) {
+      const resolved = resolveBranchIdentity(near, 'AGODA', configs);
+      expect(resolved.branchId, near).toBeNull();
+      expect(resolved.requiresManualBranch, near).toBe(true);
+      expect(resolved.reason, near).toBe('UNKNOWN');
+    }
   });
 
   it('19. a Booking.com alias keeps the existing truncation-tolerant matching', async () => {
@@ -373,58 +379,92 @@ describe('branch management — platform names', () => {
     expect(res.status).toBe(409);
   });
 
-  it('21. rejects an alias that collides with another branch', async () => {
+  it('21. rejects an identity already owned by another branch on that platform', async () => {
     const created = await createNinth();
     const id = created.body.branch.id as number;
+    const owner = await testPrisma.branch.findUniqueOrThrow({ where: { code: 'BUI_THI_XUAN_40' } });
+    const taken = await testPrisma.branchPlatformIdentity.findFirstOrThrow({
+      where: { branchId: owner.id, platform: 'AGODA' },
+    });
+
     const res = await adminAgent
-      .post(`/api/admin/branches/${id}/aliases`)
-      .send({ source: 'AGODA', alias: 'KAS Sonata Luxury Hotel' });
+      .put(`/api/admin/branches/${id}/platform-identities/AGODA`)
+      .send({ name: taken.name });
     expect(res.status).toBe(409);
-    expect(res.body.error.message).toContain('40-42 Bùi Thị Xuân');
+    expect(res.body.error.message).toContain(taken.name);
 
-    // …and the same rule applies when a whole branch is created with aliases.
-    const withClash = await adminAgent.post('/api/admin/branches').send({
-      ...NEW_BRANCH, branchNumber: 10, code: 'LE_LOI_1', address: '1 Lê Lợi',
-      aliases: [{ source: 'AGODA', alias: 'KAS Dilly Hotel' }],
+    // The rightful owner is untouched — a rejected claim changes nothing.
+    const still = await testPrisma.branchPlatformIdentity.findFirstOrThrow({
+      where: { platform: 'AGODA', normalizedName: taken.normalizedName },
     });
-    expect(withClash.status).toBe(409);
-    expect(await testPrisma.branch.findUnique({ where: { code: 'LE_LOI_1' } })).toBeNull();
+    expect(still.branchId).toBe(owner.id);
   });
 
-  it('22. renames an alias; the branch address and history are untouched', async () => {
+  it('22. editing an identity replaces it and changes recognition immediately', async () => {
     const branch = await testPrisma.branch.findUniqueOrThrow({ where: { code: 'NGUYEN_THAI_BINH_170' } });
-    const alias = await testPrisma.branchSourceAlias.findFirstOrThrow({
-      where: { branchId: branch.id, alias: 'Kaliee Nata Hotel' },
+    const previous = await testPrisma.branchPlatformIdentity.findFirstOrThrow({
+      where: { branchId: branch.id, platform: 'BOOKING_COM' },
     });
+
     const res = await adminAgent
-      .patch(`/api/admin/branches/${branch.id}/aliases/${alias.id}`)
-      .send({ alias: 'Kaliee Nata Saigon Hotel' });
+      .put(`/api/admin/branches/${branch.id}/platform-identities/BOOKING_COM`)
+      .send({ name: 'Kaliee Nata Saigon Hotel' });
     expect(res.status).toBe(200);
-    expect(res.body.branch.address).toBe('170-172-174 Nguyễn Thái Bình');
+
+    // Exactly one current row survives, and it is the new value.
+    const rows = await testPrisma.branchPlatformIdentity.findMany({
+      where: { branchId: branch.id, platform: 'BOOKING_COM' },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.name).toBe('Kaliee Nata Saigon Hotel');
 
     const configs = await loadBranchConfigs(testPrisma);
-    expect(matchBranch('Kaliee Nata Saigon Hotel', configs)?.branch.code).toBe('NGUYEN_THAI_BINH_170');
+    expect(resolveBranchIdentity('Kaliee Nata Saigon Hotel', 'BOOKING_COM', configs).branchCode).toBe(
+      'NGUYEN_THAI_BINH_170',
+    );
+    // The replaced name stops assigning anything.
+    expect(resolveBranchIdentity(previous.name, 'BOOKING_COM', configs).branchId).toBeNull();
+    // The branch itself is untouched.
+    expect(res.body.identities).toBeDefined();
+    const reloaded = await testPrisma.branch.findUniqueOrThrow({ where: { id: branch.id } });
+    expect(reloaded.address).toBe('170-172-174 Nguyễn Thái Bình');
   });
 
-  it('23. deactivates an alias, which stops routing it but keeps the row', async () => {
+  it('23. deleting an identity stops recognition but keeps the audit trail', async () => {
     const branch = await testPrisma.branch.findUniqueOrThrow({ where: { code: 'LY_TU_TRONG_260' } });
-    const alias = await testPrisma.branchSourceAlias.findFirstOrThrow({
-      where: { branchId: branch.id, alias: 'Bamboo Water Hotel' },
+    const current = await testPrisma.branchPlatformIdentity.findFirstOrThrow({
+      where: { branchId: branch.id, platform: 'BOOKING_COM' },
     });
-    await adminAgent
-      .patch(`/api/admin/branches/${branch.id}/aliases/${alias.id}`)
-      .send({ active: false });
+
+    const res = await adminAgent.delete(
+      `/api/admin/branches/${branch.id}/platform-identities/BOOKING_COM`,
+    );
+    expect(res.status).toBe(200);
 
     const configs = await loadBranchConfigs(testPrisma);
-    const resolved = resolveBranchForSource('Bamboo Water Hotel', 'BOOKING_COM', configs);
-    expect(resolved.reason).toBe('UNKNOWN');
-    expect(await testPrisma.branchSourceAlias.findUnique({ where: { id: alias.id } })).not.toBeNull();
+    expect(resolveBranchIdentity(current.name, 'BOOKING_COM', configs).branchId).toBeNull();
+    expect(
+      await testPrisma.branchPlatformIdentity.findFirst({
+        where: { branchId: branch.id, platform: 'BOOKING_COM' },
+      }),
+    ).toBeNull();
+
+    // The removed value survives where an operator can still find it.
+    const events = await testPrisma.branchPlatformIdentityEvent.findMany({
+      where: { branchId: branch.id, action: 'IDENTITY_DELETED' },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.oldValue).toBe(current.name);
 
     // Another branch may now claim the freed name.
     const other = await testPrisma.branch.findUniqueOrThrow({ where: { code: 'BUI_THI_XUAN_13' } });
     expect(
-      (await adminAgent.post(`/api/admin/branches/${other.id}/aliases`).send({ source: 'BOOKING_COM', alias: 'Bamboo Water Hotel' })).status,
-    ).toBe(201);
+      (
+        await adminAgent
+          .put(`/api/admin/branches/${other.id}/platform-identities/BOOKING_COM`)
+          .send({ name: current.name })
+      ).status,
+    ).toBe(200);
   });
 
   it('24. the hotel name stored with an old booking survives a rename', async () => {
@@ -610,7 +650,6 @@ describe('branch management — developer tools stay dynamic', () => {
       confirmed: true,
       backupRoot,
       doBackup: false,
-      dbFilePath: null,
       uploadDirs: [],
       client: testPrisma,
     });
@@ -637,7 +676,7 @@ describe('branch management — developer tools stay dynamic', () => {
 /* ================================================================== */
 
 describe('branch management — audit history', () => {
-  it('36. records creation, edits, alias changes and activation with the actor', async () => {
+  it('36. records creation, edits and activation with the actor', async () => {
     const created = await createNinth();
     const id = created.body.branch.id as number;
 
@@ -647,12 +686,14 @@ describe('branch management — audit history', () => {
       address: '14 Nguyễn Huệ',
       breakfastIncluded: false,
     });
-    const withAlias = await adminAgent
-      .post(`/api/admin/branches/${id}/aliases`)
-      .send({ source: 'BOOKING_COM', alias: 'Nguyen Hue Test Hotel' });
-    const aliasId = withAlias.body.branch.aliases[0].id as number;
-    await adminAgent.patch(`/api/admin/branches/${id}/aliases/${aliasId}`).send({ alias: 'Nguyen Hue New Hotel' });
-    await adminAgent.patch(`/api/admin/branches/${id}/aliases/${aliasId}`).send({ active: false });
+    // Platform names now have their OWN audit trail; the branch trail keeps
+    // recording branch-level configuration only.
+    await adminAgent
+      .put(`/api/admin/branches/${id}/platform-identities/BOOKING_COM`)
+      .send({ name: 'Nguyen Hue Test Hotel' });
+    await adminAgent
+      .put(`/api/admin/branches/${id}/platform-identities/BOOKING_COM`)
+      .send({ name: 'Nguyen Hue New Hotel' });
     await adminAgent.post(`/api/admin/branches/${id}/deactivate`);
     await adminAgent.post(`/api/admin/branches/${id}/activate`);
 
@@ -661,8 +702,7 @@ describe('branch management — audit history', () => {
     const actions = res.body.history.map((h: { action: string }) => h.action);
     for (const action of [
       'BRANCH_CREATED', 'BRANCH_NUMBER_CHANGED', 'BRANCH_NAME_CHANGED', 'BRANCH_ADDRESS_CHANGED',
-      'BRANCH_BREAKFAST_CHANGED', 'ALIAS_ADDED', 'ALIAS_RENAMED', 'ALIAS_DISABLED',
-      'BRANCH_DEACTIVATED', 'BRANCH_ACTIVATED',
+      'BRANCH_BREAKFAST_CHANGED', 'BRANCH_DEACTIVATED', 'BRANCH_ACTIVATED',
     ]) {
       expect(actions, action).toContain(action);
     }

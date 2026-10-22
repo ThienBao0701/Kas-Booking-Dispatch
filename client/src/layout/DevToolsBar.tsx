@@ -19,7 +19,7 @@ export function DevToolsBar() {
 
   return (
     <div className="border-b border-amber-300 bg-amber-50">
-      <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-6">
+      <div className="mx-auto flex max-w-[120rem] flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-6">
         <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-amber-800">
           <FlaskConical className="h-4 w-4" aria-hidden="true" />
           CHẾ ĐỘ DỮ LIỆU TEST ĐANG BẬT

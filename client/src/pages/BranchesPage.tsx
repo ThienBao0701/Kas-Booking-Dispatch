@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, Plus, Tags, Trash2 } from 'lucide-react';
+import { BedDouble, Building2, Plus, Tags } from 'lucide-react';
 import {
-  ALIAS_SOURCE_LABEL,
+  PLATFORM_LABEL,
   adminBranchesApi,
   type AdminBranch,
-  type AliasSource,
   type CreateBranchInput,
-  type NewAliasInput,
+  type OtaPlatform,
 } from '../api/adminBranches';
 import { toUserMessage } from '../api/errors';
 import { Card } from '../components/Card';
@@ -15,6 +14,7 @@ import { Button } from '../components/Button';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { Modal } from '../components/Modal';
 import { PageHeader, QueryState } from '../components/PageState';
+import { RoomClassManager } from '../components/RoomClassManager';
 import { Toast } from '../components/Toast';
 
 const inputClass =
@@ -43,20 +43,17 @@ function suggestCode(address: string): string {
   return [...words, ...(houseNumber ? [houseNumber] : [])].join('_').slice(0, 60);
 }
 
-function aliasesOf(branch: AdminBranch, source: AliasSource) {
-  return branch.aliases.filter((a) => a.source === source);
-}
-
 /**
  * Admin-only hotel & branch management: branch numbers, internal names,
- * addresses, breakfast, contact details, activation, and the Booking.com / Agoda
- * hotel names that route pasted text to each branch.
+ * addresses, breakfast, contact details, activation, and the ONE current hotel
+ * name each branch is listed under on every supported platform.
  */
 export function BranchesPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<AdminBranch | null>(null);
   const [managingAliases, setManagingAliases] = useState<AdminBranch | null>(null);
+  const [managingRooms, setManagingRooms] = useState<AdminBranch | null>(null);
   const [confirming, setConfirming] = useState<AdminBranch | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -115,7 +112,7 @@ export function BranchesPage() {
                     <td className="px-4 py-3 text-slate-600">{b.address}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{b.code}</td>
                     <td className="px-4 py-3 text-xs text-slate-600">
-                      <AliasSummary branch={b} />
+                      <IdentitySummary branchId={b.id} />
                     </td>
                     <td className="px-4 py-3 text-slate-600">
                       {b.breakfastIncluded ? 'Có ăn sáng' : 'Không ăn sáng'}
@@ -134,6 +131,10 @@ export function BranchesPage() {
                         <Button variant="secondary" onClick={() => setManagingAliases(b)}>
                           <Tags className="h-4 w-4" aria-hidden="true" />
                           Quản lý tên trên nền tảng
+                        </Button>
+                        <Button variant="secondary" onClick={() => setManagingRooms(b)}>
+                          <BedDouble className="h-4 w-4" aria-hidden="true" />
+                          Hạng phòng
                         </Button>
                         <Button
                           variant={b.active ? 'danger' : 'primary'}
@@ -178,11 +179,18 @@ export function BranchesPage() {
           setToast(message);
         }}
       />
-      <AliasModal
+      <IdentityModal
         branch={managingAliases}
         onClose={() => setManagingAliases(null)}
         onChanged={invalidate}
       />
+      {managingRooms ? (
+        <RoomClassManager
+          branchId={managingRooms.id}
+          branchLabel={`Chi nhánh ${managingRooms.branchNumber} — ${managingRooms.address}`}
+          onClose={() => setManagingRooms(null)}
+        />
+      ) : null}
       <ActivationModal
         branch={confirming}
         onClose={() => setConfirming(null)}
@@ -198,17 +206,37 @@ export function BranchesPage() {
   );
 }
 
-function AliasSummary({ branch }: { branch: AdminBranch }) {
-  const booking = aliasesOf(branch, 'BOOKING_COM');
-  const agoda = aliasesOf(branch, 'AGODA');
-  if (booking.length === 0 && agoda.length === 0) {
-    return <span className="italic text-slate-400">Chưa cấu hình tên nền tảng</span>;
+/**
+ * The branch table's platform column: ONLY current names.
+ *
+ * Superseded names are never shown here — no strikethrough, no disabled rows.
+ * The full history lives behind "Lịch sử tên" in the identity modal, so the
+ * live list answers exactly one question: what is this branch called right now?
+ */
+function IdentitySummary({ branchId }: { branchId: number }) {
+  const query = useQuery({
+    queryKey: ['branch-identities', branchId],
+    queryFn: () => adminBranchesApi.identities(branchId),
+    staleTime: 30_000,
+  });
+
+  if (query.isLoading) return <span className="text-slate-400">Đang tải…</span>;
+  if (query.isError) return <span className="text-slate-400">Không tải được tên nền tảng</span>;
+
+  const configured = (query.data?.identities ?? []).filter((i) => i.name !== null);
+  if (configured.length === 0) {
+    return <span className="italic text-slate-400">Chưa thiết lập</span>;
   }
   return (
     <ul className="space-y-0.5">
-      {[...booking, ...agoda].map((a) => (
-        <li key={a.id} className={a.active ? '' : 'text-slate-400 line-through'}>
-          <span className="font-medium text-slate-500">{ALIAS_SOURCE_LABEL[a.source]}:</span> {a.alias}
+      {configured.map((i) => (
+        <li key={i.platform}>
+          <span className="font-medium text-slate-500">{PLATFORM_LABEL[i.platform]}:</span> {i.name}
+          {i.needsConfirmation ? (
+            <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">
+              cần xác nhận
+            </span>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -230,7 +258,6 @@ const EMPTY_FORM: CreateBranchInput = {
   email: '',
   contactName: '',
   note: '',
-  aliases: [],
 };
 
 function BranchFormModal({
@@ -247,14 +274,10 @@ function BranchFormModal({
   const isEdit = branch !== null;
   const [form, setForm] = useState<CreateBranchInput>(EMPTY_FORM);
   const [codeTouched, setCodeTouched] = useState(false);
-  const [pendingAliases, setPendingAliases] = useState<NewAliasInput[]>([]);
-  const [draftAlias, setDraftAlias] = useState<NewAliasInput>({ source: 'BOOKING_COM', alias: '' });
 
   useEffect(() => {
     if (!open) return;
     setCodeTouched(isEdit);
-    setPendingAliases([]);
-    setDraftAlias({ source: 'BOOKING_COM', alias: '' });
     setForm(
       branch
         ? {
@@ -294,7 +317,6 @@ function BranchFormModal({
         ...form,
         ...contact,
         code: form.code.trim().toUpperCase(),
-        aliases: pendingAliases,
       });
     },
     onSuccess: () => void onSaved(branch ? 'Đã cập nhật chi nhánh.' : 'Đã tạo chi nhánh mới.'),
@@ -310,13 +332,6 @@ function BranchFormModal({
     form.hotelName.trim().length > 0 &&
     form.address.trim().length > 0 &&
     (isEdit || (form.code.trim().length >= 3 && !codeError));
-
-  const addDraftAlias = () => {
-    const alias = draftAlias.alias.trim();
-    if (alias.length === 0) return;
-    setPendingAliases((prev) => [...prev, { source: draftAlias.source, alias }]);
-    setDraftAlias({ source: draftAlias.source, alias: '' });
-  };
 
   return (
     <Modal
@@ -444,49 +459,12 @@ function BranchFormModal({
         </div>
 
         {!isEdit ? (
-          <div className="rounded-xl border border-slate-200 p-3">
+          <div className="rounded-xl border border-slate-200 p-3 text-sm text-slate-600">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Tên khách sạn trên nền tảng</p>
             <p className="mt-1 text-xs text-slate-500">
-              Booking.com có thể đối chiếu gần đúng (tên bị cắt ngắn). Agoda chỉ đối chiếu chính xác tuyệt đối.
+              Sau khi tạo chi nhánh, dùng “Quản lý tên trên nền tảng” để đặt tên hiện tại cho
+              từng nền tảng (Booking.com, Agoda, CTrip, Tripadvisor, Traveloka).
             </p>
-            <ul className="mt-2 space-y-1 text-sm">
-              {pendingAliases.map((a, i) => (
-                <li key={`${a.source}-${a.alias}`} className="flex items-center justify-between gap-2">
-                  <span>
-                    <span className="text-slate-500">{ALIAS_SOURCE_LABEL[a.source]}:</span> {a.alias}
-                  </span>
-                  <button
-                    type="button"
-                    aria-label={`Xóa tên ${a.alias}`}
-                    className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-red-600"
-                    onClick={() => setPendingAliases((prev) => prev.filter((_, j) => j !== i))}
-                  >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <label className="sr-only" htmlFor="new-alias-source">Nguồn</label>
-              <select
-                id="new-alias-source"
-                className={`${inputClass} w-auto`}
-                value={draftAlias.source}
-                onChange={(e) => setDraftAlias({ ...draftAlias, source: e.target.value as AliasSource })}
-              >
-                <option value="BOOKING_COM">Booking.com</option>
-                <option value="AGODA">Agoda</option>
-              </select>
-              <label className="sr-only" htmlFor="new-alias-name">Tên khách sạn</label>
-              <input
-                id="new-alias-name"
-                className={`${inputClass} flex-1`}
-                placeholder="Tên khách sạn trên nền tảng"
-                value={draftAlias.alias}
-                onChange={(e) => setDraftAlias({ ...draftAlias, alias: e.target.value })}
-              />
-              <Button variant="secondary" onClick={addDraftAlias}>Thêm tên</Button>
-            </div>
           </div>
         ) : null}
 
@@ -510,7 +488,7 @@ function BranchFormModal({
 /* Platform names                                                      */
 /* ------------------------------------------------------------------ */
 
-function AliasModal({
+function IdentityModal({
   branch,
   onClose,
   onChanged,
@@ -519,116 +497,182 @@ function AliasModal({
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState<NewAliasInput>({ source: 'BOOKING_COM', alias: '' });
-  const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
+  const [editing, setEditing] = useState<{ platform: OtaPlatform; value: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<OtaPlatform | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
-  const add = useMutation({
-    mutationFn: () => adminBranchesApi.addAlias(branch!.id, { ...draft, alias: draft.alias.trim() }),
+  const identities = useQuery({
+    queryKey: ['branch-identities', branch?.id],
+    queryFn: () => adminBranchesApi.identities(branch!.id),
+    enabled: !!branch,
+  });
+
+  // Audit history is a SEPARATE query behind a toggle, never merged into the
+  // current-name list: the live list must only ever answer "what is this branch
+  // called right now?".
+  const history = useQuery({
+    queryKey: ['branch-identity-history', branch?.id],
+    queryFn: () => adminBranchesApi.identityHistory(branch!.id),
+    enabled: !!branch && showHistory,
+  });
+
+  const refresh = async () => {
+    await identities.refetch();
+    await onChanged();
+  };
+
+  const save = useMutation({
+    mutationFn: (vars: { platform: OtaPlatform; name: string }) =>
+      adminBranchesApi.setIdentity(branch!.id, vars.platform, vars.name),
     onSuccess: async () => {
-      setDraft({ source: draft.source, alias: '' });
-      await onChanged();
+      setEditing(null);
+      await refresh();
     },
   });
-  const patch = useMutation({
-    mutationFn: (vars: { aliasId: number; body: { alias?: string; active?: boolean } }) =>
-      adminBranchesApi.updateAlias(branch!.id, vars.aliasId, vars.body),
+
+  const remove = useMutation({
+    mutationFn: (platform: OtaPlatform) => adminBranchesApi.deleteIdentity(branch!.id, platform),
     onSuccess: async () => {
-      setRenaming(null);
-      await onChanged();
+      setConfirmDelete(null);
+      await refresh();
     },
+  });
+
+  const confirm = useMutation({
+    mutationFn: (platform: OtaPlatform) => adminBranchesApi.confirmIdentity(branch!.id, platform),
+    onSuccess: refresh,
   });
 
   if (!branch) return null;
 
+  const rows = identities.data?.identities ?? [];
+  const mutationError = save.error ?? remove.error ?? confirm.error;
+
   return (
-    <Modal open title={`Tên trên nền tảng — ${branch.address}`} onClose={onClose} footer={<Button variant="secondary" onClick={onClose}>Đóng</Button>}>
-      {add.isError ? <div className="mb-3"><ErrorAlert>{toUserMessage(add.error)}</ErrorAlert></div> : null}
-      {patch.isError ? <div className="mb-3"><ErrorAlert>{toUserMessage(patch.error)}</ErrorAlert></div> : null}
+    <Modal
+      open
+      title={`Tên hiện tại theo nền tảng — ${branch.address}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => setShowHistory((v) => !v)}>
+            {showHistory ? 'Ẩn lịch sử tên' : 'Lịch sử tên'}
+          </Button>
+          <Button variant="secondary" onClick={onClose}>Đóng</Button>
+        </>
+      }
+    >
+      {mutationError ? (
+        <div className="mb-3"><ErrorAlert>{toUserMessage(mutationError)}</ErrorAlert></div>
+      ) : null}
 
       <p className="text-xs text-slate-500">
-        Đổi tên khách sạn trên nền tảng không làm đổi địa chỉ chi nhánh và không ảnh hưởng đơn đã lưu.
-        Tên cũ vẫn tiếp tục nhận đơn cho tới khi bạn tắt thủ công.
+        Mỗi nền tảng chỉ có MỘT tên hiện tại. Sửa tên sẽ thay thế tên cũ và có hiệu lực ngay
+        với các đơn nhập sau đó. Đơn đã gửi vẫn giữ nguyên chi nhánh đã lưu.
       </p>
 
-      <ul className="mt-3 space-y-2">
-        {branch.aliases.map((a) => (
-          <li key={a.id} className="rounded-xl border border-slate-200 px-3 py-2">
+      <ul className="mt-3 space-y-2" aria-label="Tên khách sạn theo nền tảng">
+        {rows.map((row) => (
+          <li key={row.platform} className="rounded-xl border border-slate-200 px-3 py-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                  {ALIAS_SOURCE_LABEL[a.source]} · {a.matchMode === 'EXACT' ? 'Chính xác' : 'Gần đúng'}
+                  {PLATFORM_LABEL[row.platform]}
                 </p>
-                {renaming?.id === a.id ? (
+                {editing?.platform === row.platform ? (
                   <input
                     className={`${inputClass} mt-1`}
-                    aria-label={`Đổi tên ${a.alias}`}
-                    value={renaming.value}
-                    onChange={(e) => setRenaming({ id: a.id, value: e.target.value })}
+                    aria-label={`Tên trên ${PLATFORM_LABEL[row.platform]}`}
+                    value={editing.value}
+                    onChange={(e) => setEditing({ platform: row.platform, value: e.target.value })}
                   />
+                ) : row.name ? (
+                  <p className="text-sm text-slate-800">{row.name}</p>
                 ) : (
-                  <p className={`text-sm ${a.active ? 'text-slate-800' : 'text-slate-400 line-through'}`}>{a.alias}</p>
+                  <p className="text-sm italic text-slate-400">Chưa thiết lập</p>
                 )}
+                {row.needsConfirmation && editing?.platform !== row.platform ? (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Tên này được chuyển tự động từ cấu hình cũ — vui lòng kiểm tra và xác nhận.
+                  </p>
+                ) : null}
               </div>
-              <div className="flex gap-2">
-                {renaming?.id === a.id ? (
+
+              <div className="flex flex-wrap gap-2">
+                {editing?.platform === row.platform ? (
                   <>
-                    <Button variant="secondary" onClick={() => setRenaming(null)}>Huỷ</Button>
+                    <Button variant="secondary" onClick={() => setEditing(null)}>Huỷ</Button>
                     <Button
-                      onClick={() => patch.mutate({ aliasId: a.id, body: { alias: renaming.value.trim() } })}
-                      loading={patch.isPending}
+                      onClick={() => save.mutate({ platform: row.platform, name: editing.value.trim() })}
+                      disabled={editing.value.trim().length === 0}
+                      loading={save.isPending}
                     >
-                      Lưu tên
+                      Lưu
                     </Button>
                   </>
                 ) : (
                   <>
-                    <Button variant="secondary" onClick={() => setRenaming({ id: a.id, value: a.alias })}>
-                      Đổi tên
-                    </Button>
+                    {row.needsConfirmation ? (
+                      <Button onClick={() => confirm.mutate(row.platform)} loading={confirm.isPending}>
+                        Xác nhận
+                      </Button>
+                    ) : null}
                     <Button
-                      variant={a.active ? 'danger' : 'primary'}
-                      onClick={() => patch.mutate({ aliasId: a.id, body: { active: !a.active } })}
+                      variant="secondary"
+                      onClick={() => setEditing({ platform: row.platform, value: row.name ?? '' })}
                     >
-                      {a.active ? 'Tắt' : 'Bật lại'}
+                      {row.name ? 'Sửa' : 'Thêm'}
                     </Button>
+                    {row.name ? (
+                      <Button variant="danger" onClick={() => setConfirmDelete(row.platform)}>
+                        Xoá
+                      </Button>
+                    ) : null}
                   </>
                 )}
               </div>
             </div>
+
+            {confirmDelete === row.platform ? (
+              <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <p className="text-sm text-red-700">
+                  Xoá tên này? Đơn nhập sau đó sẽ không còn tự nhận diện chi nhánh từ tên trên
+                  {' '}{PLATFORM_LABEL[row.platform]}. Lịch sử tên vẫn được giữ lại.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Button variant="secondary" onClick={() => setConfirmDelete(null)}>Huỷ</Button>
+                  <Button variant="danger" onClick={() => remove.mutate(row.platform)} loading={remove.isPending}>
+                    Xoá tên
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </li>
         ))}
-        {branch.aliases.length === 0 ? (
-          <li className="py-4 text-center text-sm text-slate-400">Chi nhánh chưa có tên nền tảng nào.</li>
-        ) : null}
       </ul>
 
-      <div className="mt-4 rounded-xl border border-slate-200 p-3">
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Thêm tên khách sạn</p>
-        <p className="mt-1 text-xs text-slate-500">Agoda chỉ đối chiếu chính xác tuyệt đối.</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <label className="sr-only" htmlFor="alias-source">Nguồn</label>
-          <select
-            id="alias-source"
-            className={`${inputClass} w-auto`}
-            value={draft.source}
-            onChange={(e) => setDraft({ ...draft, source: e.target.value as AliasSource })}
-          >
-            <option value="BOOKING_COM">Booking.com</option>
-            <option value="AGODA">Agoda</option>
-          </select>
-          <label className="sr-only" htmlFor="alias-name">Tên khách sạn</label>
-          <input
-            id="alias-name"
-            className={`${inputClass} flex-1`}
-            placeholder="Tên khách sạn trên nền tảng"
-            value={draft.alias}
-            onChange={(e) => setDraft({ ...draft, alias: e.target.value })}
-          />
-          <Button onClick={() => add.mutate()} disabled={draft.alias.trim().length === 0} loading={add.isPending}>
-            Thêm
-          </Button>
+      {showHistory ? (
+        <div className="mt-4 rounded-xl border border-slate-200 p-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Lịch sử tên</p>
+          {history.isLoading ? <p className="mt-2 text-sm text-slate-400">Đang tải…</p> : null}
+          <ul className="mt-2 space-y-1 text-sm text-slate-600">
+            {(history.data?.history ?? []).map((h) => (
+              <li key={h.id}>
+                <span className="font-medium text-slate-500">{PLATFORM_LABEL[h.platform]}</span>{' '}
+                {h.oldValue ? <span className="text-slate-400">{h.oldValue}</span> : null}
+                {h.oldValue && h.newValue ? ' → ' : null}
+                {h.newValue ?? null}
+                <span className="ml-1 text-xs text-slate-400">
+                  ({h.action}{h.actor ? ` · ${h.actor.fullName}` : ''})
+                </span>
+              </li>
+            ))}
+            {history.data && history.data.history.length === 0 ? (
+              <li className="text-slate-400">Chưa có thay đổi nào.</li>
+            ) : null}
+          </ul>
         </div>
-      </div>
+      ) : null}
     </Modal>
   );
 }

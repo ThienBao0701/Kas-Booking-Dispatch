@@ -1,5 +1,6 @@
 import { parseBooking } from './parser';
 import { resolveAgodaBranch } from './branchMatcher';
+import { resolveBranchIdentity, type IdentityBranch } from './identityResolver';
 import {
   AGODA_PARTNER_PARSER_VERSION,
   buildAgodaPmsNote,
@@ -41,7 +42,7 @@ export function parseAgodaBooking(
     .replace(/\(?\s*originally\b[^\n)]*\)?/gi, ' ')
     .replace(/\(?\s*gia goc\b[^\n)]*\)?/gi, ' ');
 
-  const parsed = parseBooking(cleaned, branches);
+  const parsed = parseBooking(cleaned, branches, 'AGODA');
   return { ...parsed, parserVersion: AGODA_PARSER_VERSION };
 }
 
@@ -54,7 +55,18 @@ function fromPartnerEmail(rawText: string, branches: readonly MatchableBranch[])
   // normalisation as Booking.com (`branchMatcher`), using the configured Agoda
   // property-name map. The public hotel name is ONLY a lookup value; an unknown or
   // incomplete name is never assigned to a default branch — the Admin picks it.
-  const suggestedBranch = resolveAgodaBranch(p.sourceHotelName, branches);
+  // Resolved against the branch's CURRENT Agoda identity (then its internal
+  // name), exactly like every other platform. `resolveAgodaBranch` remains as
+  // the fallback for fixtures that carry no identities at all.
+  const identity = resolveBranchIdentity(
+    p.sourceHotelName,
+    'AGODA',
+    branches as readonly IdentityBranch[],
+  );
+  const suggestedBranch =
+    identity.branchId !== null
+      ? (branches.find((b) => b.id === identity.branchId) ?? null)
+      : resolveAgodaBranch(p.sourceHotelName, branches);
   // An exact configured name is a certain match; anything else is unresolved.
   const matchScore = suggestedBranch ? 1 : 0;
   const branchConfident = suggestedBranch !== null;
@@ -88,6 +100,8 @@ function fromPartnerEmail(rawText: string, branches: readonly MatchableBranch[])
     checkOut: p.checkOut,
     nights: p.nights,
     roomTypeOriginal: p.roomTypeOriginal,
+    roomTypeNormalized: p.roomTypeNormalized,
+    roomLines: p.roomLines,
     roomCode: p.roomCode,
     roomTypeKnown: p.roomTypeKnown,
     roomQuantity: p.roomQuantity,
@@ -99,6 +113,13 @@ function fromPartnerEmail(rawText: string, branches: readonly MatchableBranch[])
     ratePlan: p.ratePlan,
     cancellationPolicy: p.cancellationPolicy,
     countryOfResidence: p.countryOfResidence,
+    sourcePropertyId: p.sourcePropertyId,
+    bookingStatus: p.bookingStatus,
+    websiteLanguage: p.websiteLanguage,
+    paymentType: p.paymentType,
+    benefitsIncluded: p.benefitsIncluded,
+    specialRequests: p.specialRequests,
+    customerPhone: p.customerPhone,
     nightlyRates: p.nightlyRates,
     // The authoritative schedule: Net rate split evenly, summing to the total.
     totalDebtAmount: p.netRate,
