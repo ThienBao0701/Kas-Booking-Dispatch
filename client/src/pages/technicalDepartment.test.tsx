@@ -895,7 +895,7 @@ describe('Quản lý kỹ thuật — no "Nghiệm thu" screen any more', () => 
 
     expect(await screen.findByRole('heading', { name: 'Quản lý sự cố kỹ thuật' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Quản lý sự cố kỹ thuật']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Quản lý sự cố kỹ thuật', 'Individual PerformanceSẽ phát triển']);
     expect(screen.queryByTestId('inspection-inactive')).not.toBeInTheDocument();
     expect(screen.queryByText(/Nghiệm thu/)).not.toBeInTheDocument();
   });

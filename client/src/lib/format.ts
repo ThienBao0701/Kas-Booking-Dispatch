@@ -38,6 +38,16 @@ export function formatDateTime(iso: string | null | undefined): string {
 
 const HCM_OFFSET_MS = 7 * 60 * 60 * 1000;
 
+/** "22/10/2026 08:42:05" — Asia/Ho_Chi_Minh wall time, with seconds, whatever the device's zone. */
+export function formatHcmDateTimeSeconds(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '—';
+  const d = new Date(t + HCM_OFFSET_MS);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
 /** Today's calendar date in Asia/Ho_Chi_Minh, as ISO "YYYY-MM-DD". */
 export function hcmToday(now: Date = new Date()): string {
   return new Date(now.getTime() + HCM_OFFSET_MS).toISOString().slice(0, 10);

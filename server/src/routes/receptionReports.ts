@@ -30,6 +30,7 @@ import {
   type CreateReportInput,
   guestByEz,
   listHousekeepingJournal,
+  setGuestIdentity,
   lateEntryReceptionists,
   lateEntrySessions,
   listActiveJournal,
@@ -128,8 +129,10 @@ const paymentSchema = z.object({
 });
 
 const guestRequestSchema = z.object({
-  guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
+  // Reception names the guest; Bộ phận buồng phòng names the room or area instead (the service decides which).
+  guestName: text(200).optional(),
   ezCode: text(100).optional(),
+  roomNumber: text(80).optional(),
   note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
   severity: SEVERITY.optional(),
 });
@@ -192,8 +195,9 @@ const deliverySchema = z.object({
  */
 const createSchema = z.discriminatedUnion('category', [
   z.object({ category: z.literal('PAYMENT'), payment: paymentSchema }),
-  z.object({ category: z.literal('GUEST_REQUEST'), guestRequest: guestRequestSchema }),
-  z.object({ category: z.literal('FACILITY_ISSUE'), facility: facilitySchema }),
+  // `taskId`: Bộ phận buồng phòng's "+ Báo cáo vấn đề" from a room or area it is working.
+  z.object({ category: z.literal('GUEST_REQUEST'), guestRequest: guestRequestSchema, taskId: z.string().min(1).max(64).optional() }),
+  z.object({ category: z.literal('FACILITY_ISSUE'), facility: facilitySchema, taskId: z.string().min(1).max(64).optional() }),
   z.object({ category: z.literal('CUSTOMER_COMPLAINT'), complaint: complaintSchema }),
   z.object({ category: z.literal('ROOM_SERVICE'), roomService: roomServiceSchema }),
   z.object({ category: z.literal('HOTEL_DELIVERY'), delivery: deliverySchema }),
@@ -232,6 +236,12 @@ const updateSchema = z.object({
 
 const voidSchema = z.object({
   reason: text(1000).min(1, 'Vui lòng nhập lý do hủy.'),
+});
+
+/** Reception's "Thông tin khách" on a Housekeeping request: the guest's name and Mã EZ. */
+const guestIdentitySchema = z.object({
+  guestName: text(200).min(1, 'Vui lòng nhập tên khách.'),
+  ezCode: text(100).optional(),
 });
 
 /** "Lịch sử xóa": an optional BUSINESS-date period, a branch of the scope, a category. */
@@ -361,6 +371,9 @@ const requireJournalWriter = requireRole(
 /** Bộ phận buồng phòng's journal, and the Admin reading it. */
 const requireHousekeepingJournal = requireRole('ADMIN', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER');
 
+/** Who names the guest of a Housekeeping request: Reception (its branch) and its supervisors (their scope). */
+const requireGuestIdentifier = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
+
 /** "Hoàn thành": the desk, and Bộ phận buồng phòng on its own records (the service checks whose). */
 const requireCompleter = requireRole('RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER');
 
@@ -421,7 +434,7 @@ export function createReceptionReportsRouter(): Router {
         listReports(actor(user), filter),
         countByCategory(actor(user), filter),
       ]);
-      res.json({ reports: reports.map((r) => serializeReport(r, now)), counts });
+      res.json({ reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)), counts });
     })().catch(next);
   });
 
@@ -438,7 +451,7 @@ export function createReceptionReportsRouter(): Router {
       const q = activeSchema.parse(req.query);
       const { reports, totals } = await listActiveJournal(actor(user), now, undefined, q.severity);
       res.json({
-        reports: reports.map((r) => serializeReport(r, now)),
+        reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)),
         // Each category's full count: the list is a page, and the screen says so.
         totals,
         archiveAfterHours: COMPLETION_ARCHIVE_HOURS,
@@ -476,7 +489,7 @@ export function createReceptionReportsRouter(): Router {
         category: q.category,
       });
       res.json({
-        reports: reports.map((r) => serializeReport(r, now)),
+        reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)),
         totals,
         range: q.from && q.to ? { from: q.from, to: q.to } : null,
         archiveAfterHours: COMPLETION_ARCHIVE_HOURS,
@@ -494,7 +507,7 @@ export function createReceptionReportsRouter(): Router {
       const q = z.object({ branchId: z.coerce.number().int().positive().optional() }).parse(req.query);
       const now = getClock().now();
       const reports = await listHousekeepingJournal(actor(req.currentUser!), now, { branchId: q.branchId });
-      res.json({ reports: reports.map((r) => serializeReport(r, now)), archiveAfterHours: COMPLETION_ARCHIVE_HOURS });
+      res.json({ reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)), archiveAfterHours: COMPLETION_ARCHIVE_HOURS });
     })().catch(next);
   });
 
@@ -515,10 +528,28 @@ export function createReceptionReportsRouter(): Router {
       const user = req.currentUser!;
       const inputs = parseCreateInputs(req.body);
       const { branchId } = targetSchema.parse(req.body ?? {});
+      // "Vẫn gửi" after a possible-duplicate warning.
+      const { confirmDuplicate } = z.object({ confirmDuplicate: z.boolean().optional() }).parse(req.body ?? {});
       const clock = getClock();
-      const created = await createReports(inputs, { branchId }, actor(user), clock);
-      const reports = created.map((r) => serializeReport(r, clock.now()));
+      const created = await createReports(inputs, { branchId, confirmDuplicate }, actor(user), clock);
+      const reports = created.map((r) => serializeReport(r, clock.now(), req.currentUser!.role));
       res.status(201).json({ report: reports[0], reports });
+    })().catch(next);
+  });
+
+  /*
+    PATCH /api/reception/reports/:id/guest — Reception names the guest of a
+    request Bộ phận buồng phòng recorded (after checking its own PMS). Only the
+    guest's name and Mã EZ change; the reporter, content, department and time
+    stay, and each changed field is kept in the record's correction history.
+  */
+  router.patch('/reception/reports/:id/guest', requireAuth, requirePasswordChanged, requireGuestIdentifier, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = guestIdentitySchema.parse(req.body ?? {});
+      const clock = getClock();
+      const updated = await setGuestIdentity(req.params.id!, input, actor(user), clock);
+      res.json({ report: serializeReport(updated, clock.now(), user.role) });
     })().catch(next);
   });
 
@@ -529,7 +560,7 @@ export function createReceptionReportsRouter(): Router {
       const patch = updateSchema.parse(req.body ?? {});
       const clock = getClock();
       const updated = await updateReport(req.params.id!, patch, actor(user), clock);
-      res.json({ report: serializeReport(updated, clock.now()) });
+      res.json({ report: serializeReport(updated, clock.now(), req.currentUser!.role) });
     })().catch(next);
   });
 
@@ -555,7 +586,7 @@ export function createReceptionReportsRouter(): Router {
         const { reason } = voidSchema.parse(req.body ?? {});
         const clock = getClock();
         const voided = await voidReport(req.params.id!, reason, actor(user), clock);
-        res.json({ report: serializeReport(voided, clock.now()) });
+        res.json({ report: serializeReport(voided, clock.now(), req.currentUser!.role) });
       })().catch(next);
     },
   );
@@ -580,7 +611,7 @@ export function createReceptionReportsRouter(): Router {
             : null;
         const now = getClock().now();
         const reports = await listDeletedReports(actor(user), { branchId: q.branchId, category: q.category, period });
-        res.json({ reports: reports.map((r) => serializeReport(r, now)) });
+        res.json({ reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)) });
       })().catch(next);
     },
   );
@@ -610,14 +641,14 @@ export function createReceptionReportsRouter(): Router {
           category: q.category,
           period,
         });
-        const byId = new Map(reports.map((r) => [r.id, serializeReport(r, now)]));
+        const byId = new Map(reports.map((r) => [r.id, serializeReport(r, now, req.currentUser!.role)]));
         res.json({
           edits: audits.flatMap((a) => {
             const r = a.reportId ? byId.get(a.reportId) : undefined;
             if (!r) return [];
             return [
               {
-                ...serializeReportAudit(a),
+                ...serializeReportAudit(a, user.role === 'HOUSEKEEPING' || user.role === 'HOUSEKEEPING_MANAGER'),
                 report: {
                   id: r.id,
                   category: r.category,
@@ -714,7 +745,7 @@ export function createReceptionReportsRouter(): Router {
         const late = lateEntrySchema.parse(req.body ?? {});
         const clock = getClock();
         const created = await createLateReports(inputs, late, actor(req.currentUser!), clock);
-        const reports = created.map((r) => serializeReport(r, clock.now()));
+        const reports = created.map((r) => serializeReport(r, clock.now(), req.currentUser!.role));
         res.status(201).json({ report: reports[0], reports });
       })().catch(next);
     },
@@ -733,7 +764,7 @@ export function createReceptionReportsRouter(): Router {
       const input = completeSchema.parse(req.body ?? {});
       const clock = getClock();
       const completed = await completeReport(req.params.id!, input, actor(user), clock);
-      res.json({ report: serializeReport(completed, clock.now()) });
+      res.json({ report: serializeReport(completed, clock.now(), req.currentUser!.role) });
     })().catch(next);
   });
 

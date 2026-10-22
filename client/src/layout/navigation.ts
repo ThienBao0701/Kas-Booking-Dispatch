@@ -2,16 +2,17 @@ import {
   AlertTriangle,
   BarChart3,
   CalendarCheck,
+  ListTodo,
   ShieldAlert,
+  TrendingUp,
   ConciergeBell,
   MessageSquareText,
   Boxes,
-  Brush,
-  CalendarPlus,
-  ClipboardList,
+  FlaskConical,
   Package,
   PackageCheck,
   Shirt,
+  SprayCan,
   Sparkles,
   ThumbsUp,
   Wallet,
@@ -46,7 +47,28 @@ export interface NavItem {
   children?: NavItem[];
   /** A plain heading above this top-level link, starting a section (not a level). */
   section?: string;
+  /** A short status beside the label — "Sẽ phát triển" for a screen not built yet. */
+  status?: string;
 }
+
+/**
+ * THE MANAGEMENT ENTRIES — for the Admin and every Quản lý / Tổng quản lý
+ * (`MANAGEMENT_ROLES`): "Theo dõi công việc" (two screens) and "Individual
+ * Performance". Both are planned, not built: their pages say so and read nothing.
+ */
+const PLANNED = 'Sẽ phát triển';
+const MANAGEMENT_ITEMS: NavItem[] = [
+  {
+    to: '/app/work-tracking',
+    label: 'Theo dõi công việc',
+    icon: ListTodo,
+    children: [
+      { to: '/app/work-tracking/assigned', label: 'Theo dõi công việc đã giao', icon: Send, status: PLANNED },
+      { to: '/app/work-tracking/mine', label: 'Theo dõi công việc được giao và phải xử lí', icon: ListTodo, status: PLANNED },
+    ],
+  },
+  { to: '/app/performance', label: 'Individual Performance', icon: TrendingUp, status: PLANNED },
+];
 
 /**
  * "BÁO CÁO VẤN ĐỀ" — ONE report, three departments, for the Admin and the two
@@ -115,36 +137,39 @@ const HOUSEKEEPING_KPI_GROUP: NavItem = {
 };
 
 /**
- * "CÔNG VIỆC CÁ NHÂN" — the manager's own work, in four pages: its own rooms to
- * clean, the stock count, giving out today's work, and preparing tomorrow's.
+ * "CÔNG VIỆC MỖI NGÀY CẦN LÀM" — ONE link: Tổng, Dọn phòng (the manager's own
+ * rooms), Kiểm kho, Phân công ca, việc làm and Phân công việc ngày hôm sau are
+ * the page's own tabs.
  */
-const PERSONAL_WORK: NavItem = {
-  to: '/app/hk#personal',
-  label: 'Công việc cá nhân',
-  icon: BedDouble,
+const DAILY_WORK: NavItem = { to: '/app/hk/daily', label: 'Công việc mỗi ngày cần làm', icon: CalendarCheck };
+
+/** "KHO HÀNG" — the four warehouses, in their code order (1, 2, 3, 4). */
+const WAREHOUSE_GROUP: NavItem = {
+  to: '/app/hk#stores',
+  label: 'Kho hàng',
+  icon: Boxes,
   children: [
-    { to: '/app/hk/clean', label: 'Dọn phòng', icon: Brush },
-    { to: '/app/hk/stock-count', label: 'Kiểm kho', icon: ClipboardList },
-    { to: '/app/hk/rooms', label: 'Phân công ca, việc làm', icon: BedDouble },
-    { to: '/app/hk/tomorrow', label: 'Phân công việc ngày hôm sau', icon: CalendarPlus },
+    { to: '/app/hk/store/chemicals', label: 'Kho hóa chất & dụng cụ', icon: FlaskConical },
+    { to: '/app/hk/store/guest-supplies', label: 'Đồ dùng cho khách', icon: SprayCan },
+    { to: '/app/hk/store/linens', label: 'Kho đồ vải', icon: Shirt },
+    { to: '/app/hk/store/amenities', label: 'Kho đồ dùng khác / Đồ tiêu hao (Amenities)', icon: Package },
   ],
 };
 
 /**
  * "QUẢN LÝ BUỒNG PHÒNG" — the screens over one branch's housekeeping. Work is
- * given out in "Phân công ca, việc làm", so there is no separate "Phân công
- * công việc" entry. Every screen keeps its title here. The three warehouses
- * ("Kho …") keep the branch's stock.
+ * given out in "Phân công ca, việc làm" (a tab of "Công việc mỗi ngày cần
+ * làm"). Every screen keeps its title here. "Kho hàng" keeps the branch's stock;
+ * "Phát hiện & thu tiền" is the branch's findings (the collection is Reception's).
  */
 const HOUSEKEEPING_MANAGER_SCREENS: NavItem[] = [
   { to: '/app/hk/overview', label: 'Công việc chung', icon: LayoutDashboard },
-  PERSONAL_WORK,
+  DAILY_WORK,
   { to: '/app/hk/staff', label: 'Theo dõi nhân viên', icon: Users },
   { to: '/app/hk/kpi', label: 'KPI', icon: Wallet },
   { to: '/app/hk/report', label: 'Báo cáo', icon: FileText },
-  { to: '/app/hk/store/linens', label: 'Kho Linens', icon: Shirt },
-  { to: '/app/hk/store/amenities', label: 'Kho Amenities', icon: Package },
-  { to: '/app/hk/store/equipment', label: 'Kho đồ dùng, thiết bị', icon: Boxes },
+  WAREHOUSE_GROUP,
+  { to: '/app/reports/housekeeping', label: 'Phát hiện & thu tiền', icon: Wallet },
 ];
 
 /**
@@ -155,17 +180,18 @@ const HOUSEKEEPING_MANAGER_SCREENS: NavItem[] = [
  */
 const HIDDEN_FROM_MENU = new Set(['/app/hk/staff', '/app/hk/report', '/app/hk/kpi']);
 
-/** The "Quản lý buồng phòng" menu: Công việc chung, Công việc cá nhân, then the three stores (KPI: under "Báo cáo vấn đề"). */
+/** The "Quản lý buồng phòng" menu: Công việc chung, Công việc mỗi ngày cần làm, Kho hàng, Phát hiện & thu tiền (KPI: under "Báo cáo vấn đề"). */
 const HOUSEKEEPING_MANAGER_ITEMS: NavItem[] = HOUSEKEEPING_MANAGER_SCREENS.filter((item) => !HIDDEN_FROM_MENU.has(item.to));
 
 /**
  * THE ADMIN'S "QUẢN LÝ BUỒNG PHÒNG" — three entries, its OWN list (the
  * manager's menu above is not derived from it, nor it from the manager's):
  *
- *   Công việc chung        the overview, every branch
- *   Điều phối công việc    today's work, and tomorrow's
- *   Kho & tồn kho          the three warehouses, "Kiểm kho" (the Admin
- *                          reconciles), every branch's stock and damage reports
+ *   Công việc chung              the overview, every branch
+ *   Công việc mỗi ngày cần làm   Tổng, Kiểm kho (the Admin reconciles), today's
+ *                                work and tomorrow's — the page's tabs
+ *   Kho hàng                     the four warehouses, and every branch's stock
+ *                                and damage reports ("Tồn kho & Báo hỏng")
  *
  * No "Dọn phòng": the Admin works no shift and cleans no room. Its reports —
  * KPI, inspections, completed issues — are under "Báo cáo vấn đề → Buồng phòng".
@@ -176,24 +202,13 @@ const ADMIN_HOUSEKEEPING_GROUP: NavItem = {
   icon: BedDouble,
   children: [
     { to: '/app/hk/overview', label: 'Công việc chung', icon: LayoutDashboard },
+    DAILY_WORK,
     {
-      to: '/app/hk#dispatch',
-      label: 'Điều phối công việc',
-      icon: CalendarCheck,
+      ...WAREHOUSE_GROUP,
+      // The Admin's view spans every branch: "Kho hàng tổng".
+      label: 'Kho hàng tổng',
       children: [
-        { to: '/app/hk/rooms', label: 'Phân công ca, việc làm', icon: BedDouble },
-        { to: '/app/hk/tomorrow', label: 'Phân công việc ngày hôm sau', icon: CalendarPlus },
-      ],
-    },
-    {
-      to: '/app/hk#stores',
-      label: 'Kho & tồn kho',
-      icon: Boxes,
-      children: [
-        { to: '/app/hk/store/linens', label: 'Kho Linens', icon: Shirt },
-        { to: '/app/hk/store/amenities', label: 'Kho Amenities', icon: Package },
-        { to: '/app/hk/store/equipment', label: 'Kho đồ dùng, thiết bị', icon: Boxes },
-        { to: '/app/hk/stock-count', label: 'Kiểm kho', icon: ClipboardList },
+        ...WAREHOUSE_GROUP.children!,
         // Every branch's stock, the count differences and the damage reports to review — the Admin's own.
         { to: '/app/inventory', label: 'Tồn kho & Báo hỏng', icon: AlertTriangle },
       ],
@@ -264,6 +279,7 @@ export const ADMIN_NAV: NavItem[] = [
   { to: '/app/pending-review', label: 'Chờ kiểm tra', icon: ScanSearch },
   { to: '/app/rejected', label: 'Cần tạo lại', icon: RotateCcw },
   { to: '/app/history', label: 'Lịch sử', icon: History },
+  { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
   // "Sự cố khách sạn" and "Bàn giao ca" are gone: incidents live under
   // "Báo cáo vấn đề" -> "Sự cố cơ sở vật chất đang xử lý"; handover has no screen.
   // "Đã xác nhận đúng" is gone too (its address redirects to "Lịch sử"), and
@@ -272,7 +288,8 @@ export const ADMIN_NAV: NavItem[] = [
   ADMIN_HOUSEKEEPING_GROUP,
   // The 12-hour completion archive, every branch.
   COMPLETED_GROUP,
-  { to: '/app/resend-orders', label: 'Gửi lại đơn', icon: Send },
+  // Theo dõi công việc and Individual Performance — planned, right after the archive.
+  ...MANAGEMENT_ITEMS,
   { to: '/app/charge-documents', label: 'Chứng từ', icon: FileText },
   { to: '/app/reminders', label: 'Nhắc nhở', icon: BellRing },
   { to: '/app/branches', label: 'Khách sạn & chi nhánh', icon: Building2 },
@@ -332,6 +349,9 @@ export const RECEPTION_MANAGER_NAV: NavItem[] = [
   { to: '/app/new', label: 'Đơn mới', icon: Inbox },
   REPORT_GROUP,
   COMPLETED_GROUP,
+  // Today's housekeeping work of its branches, and "Giao lại" — its own screen.
+  { to: '/app/hk-work-orders', label: 'Công việc buồng phòng', icon: BedDouble },
+  ...MANAGEMENT_ITEMS,
 ];
 
 /**
@@ -371,6 +391,7 @@ export const HOUSEKEEPING_MANAGER_NAV: NavItem[] = [
   ...HOUSEKEEPING_MANAGER_ITEMS,
   housekeepingReportGroup(HOUSEKEEPING_KPI_GROUP),
   HOUSEKEEPING_COMPLETED_GROUP,
+  ...MANAGEMENT_ITEMS,
 ];
 
 /**
@@ -380,6 +401,7 @@ export const HOUSEKEEPING_MANAGER_NAV: NavItem[] = [
  */
 export const TECHNICAL_MANAGER_NAV: NavItem[] = [
   { to: '/app/reports/technical', label: 'Quản lý sự cố kỹ thuật', icon: Wrench },
+  ...MANAGEMENT_ITEMS,
 ];
 
 export function navForRole(role: UserRole | undefined): NavItem[] {

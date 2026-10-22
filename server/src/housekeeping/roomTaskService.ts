@@ -26,7 +26,8 @@ import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch, openSegmentFor } from './workShiftService';
-import { applyCleaningStock } from './inventoryLedger';
+import { applyCleaningItems, itemLabel } from './inventoryLedger';
+import { cleaningItemsOfBranch, cleaningLines } from './inventoryService';
 import { can } from '../auth/capabilities';
 import {
   AREA_KIND_LABELS,
@@ -800,6 +801,17 @@ export async function getTask(actor: HousekeepingActor, id: string, client: Pris
   return serializeTask(row, { money: true });
 }
 
+/**
+ * THE ITEMS THIS ROOM'S CLEANING COUNTS — the branch's list, with what is on
+ * hand, for the room's own housekeeper (or a manager in scope). No item codes.
+ */
+export async function taskCleaningItems(actor: HousekeepingActor, id: string, client: PrismaClient = defaultPrisma) {
+  const row = await loadTask(id, client);
+  if (actor.role === 'HOUSEKEEPING' || (actor.role === 'HOUSEKEEPING_MANAGER' && row.assigneeUserId === actor.id)) assertAssignee(row, actor);
+  else assertManagerOf(row, actor);
+  return cleaningItemsOfBranch(row.branchId, client);
+}
+
 /** "Mở phòng" — recorded once per worker; it starts nothing. */
 export async function openTask(actor: HousekeepingActor, id: string, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   const row = await loadTask(id, client);
@@ -828,8 +840,8 @@ export async function inspectTask(
   assertAssignee(row, actor);
   assertNotWaitingNoClean(row);
   assertWorkDayStarted(row, clock);
-  if (row.state !== 'NOT_STARTED' || row.inspectionId) throw ApiError.conflict('Phòng này đã được kiểm.');
   if (row.areaKind !== 'ROOM') return inspectArea(actor, row, input, clock, client);
+  if (row.state !== 'NOT_STARTED' || row.inspectionId) throw ApiError.conflict('Phòng này đã được kiểm.');
   await createInspection({ roomNumber: row.roomNumber, issues: input.issues }, actor, clock, client, {
     allowNoFindings: true,
     branchId: row.branchId,
@@ -866,6 +878,7 @@ export async function startTask(actor: HousekeepingActor, id: string, clock: Clo
   assertNotWaitingNoClean(row);
   assertWorkDayStarted(row, clock);
   if (row.state === 'NOT_STARTED') throw ApiError.conflict('Cần "Kiểm phòng" trước khi bắt đầu dọn.');
+  if (row.areaKind !== 'ROOM') throw ApiError.conflict('Khu vực chung hoàn thành khi lưu "Kiểm tra tình trạng" — không có bước dọn phòng.');
   if (row.state === 'IN_PROGRESS') throw ApiError.conflict('Phòng đang được dọn.');
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong.');
   const now = clock.now();
@@ -896,11 +909,20 @@ async function writeCleaning(
   if (row.state === 'COMPLETED') throw ApiError.conflict('Phòng đã dọn xong.');
   const form = parseCleaningForm(raw);
   const now = clock.now();
-  const stored = { ...form, savedAt: now.toISOString(), savedByUserId: actor.id, savedByName: actor.fullName };
   // The Quản lý buồng phòng's OWN cleaning is not reviewed by itself: it is
   // recorded "Đạt" as it completes (and says so in its history).
   const selfReviewed = complete && actor.role === 'HOUSEKEEPING_MANAGER';
   await client.$transaction(async (tx) => {
+    // Only the branch's room-cleaning items; each saved with its name as it is now.
+    const lines = await cleaningLines(tx, row.branchId, form.items);
+    const stored = {
+      items: lines.map((l) => ({ itemId: l.item.id, label: itemLabel(l.item), quantity: l.quantity })),
+      special: form.special,
+      note: form.note,
+      savedAt: now.toISOString(),
+      savedByUserId: actor.id,
+      savedByName: actor.fullName,
+    };
     const durationSeconds = Math.max(0, Math.round((now.getTime() - row.startedAt!.getTime()) / 1000));
     const { count } = await tx.housekeepingRoomTask.updateMany({
       where: { id, voidedAt: null, state: 'IN_PROGRESS', assigneeUserId: actor.id },
@@ -920,17 +942,15 @@ async function writeCleaning(
     });
     if (count === 0) throw ApiError.conflict('Phòng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
     await recordEvent(tx, id, complete ? 'COMPLETED' : 'CLEANING_SAVED', actor, now, {
-      linen: Object.keys(form.linen).length,
-      quantities: Object.keys(form.quantities).length,
-      collected: Object.keys(form.collected).length,
-      replaced: form.replaced.length,
+      items: lines.length,
+      quantity: lines.reduce((n, l) => n + l.quantity, 0),
       special: form.special.length,
       ...(complete ? { durationSeconds } : {}),
     });
     if (!complete) return;
     if (selfReviewed) await recordEvent(tx, id, 'REVIEWED', actor, now, { result: 'PASSED', selfCleaned: true, reason: null, recleanRequested: false });
     // The stock moves with the completion — the same transaction, so never one without the other, never twice.
-    await applyCleaningStock(tx, { id, branchId: row.branchId, roomNumber: row.roomNumber, workDate: row.workDate }, form, actor, now);
+    await applyCleaningItems(tx, { id, branchId: row.branchId, roomNumber: row.roomNumber, workDate: row.workDate }, lines, actor, now);
   });
   return serializeTask(await loadTask(id, client), { money: false });
 }
@@ -1170,10 +1190,13 @@ export async function beginInspection(actor: HousekeepingActor, id: string, cloc
 }
 
 /**
- * "LƯU KIỂM TRA" of a SHARED AREA. A hallway is not a room: it has no room
- * inspection record and no guest damages to charge, so what the housekeeper
- * saw is kept on the item itself (`inspectionNote`), at the server's time, on
- * the open shift there. Then, as for a room: "Chờ dọn phòng", nothing started.
+ * "KIỂM TRA TÌNH TRẠNG" of a SHARED AREA — a hallway is not a room: it has no
+ * room inspection record, no guest damages and no "Dọn phòng". What the
+ * housekeeper saw is kept on the item (`inspectionNote`), at the server's time,
+ * on the open shift there, and saving it COMPLETES the item — its time runs
+ * from "Kiểm tra" to the save. An area already "Chờ dọn phòng" from before
+ * completes the same way. No stock moves. The manager's own check is recorded
+ * "Đạt", as its own cleaning is.
  */
 async function inspectArea(
   actor: HousekeepingActor,
@@ -1184,20 +1207,32 @@ async function inspectArea(
 ) {
   await workingSegment(actor, row.branchId, client);
   if (input.issues.length > 0) throw ApiError.validation('Khu vực chung không ghi nhận hư hỏng phòng — ghi vào phần ghi chú.');
-  const note = text(input.note, 2000, 'Ghi chú kiểm tra');
+  if (row.state === 'COMPLETED') throw ApiError.conflict('Khu vực này đã kiểm tra xong.');
+  if (row.state === 'IN_PROGRESS' || row.startedAt) throw ApiError.conflict('Khu vực này đang được dọn — bấm “Hoàn thành” ở phần dọn.');
+  const note = text(input.note, 2000, 'Ghi chú kiểm tra') ?? row.inspectionNote;
   const now = clock.now();
+  const begun = row.inspectionStartedAt ?? now;
+  const selfReviewed = actor.role === 'HOUSEKEEPING_MANAGER';
   await client.$transaction(async (tx) => {
     const { count } = await tx.housekeepingRoomTask.updateMany({
-      where: { id: row.id, voidedAt: null, state: 'NOT_STARTED', assigneeUserId: actor.id },
+      where: { id: row.id, voidedAt: null, state: { in: ['NOT_STARTED', 'INSPECTED'] }, startedAt: null, assigneeUserId: actor.id },
       data: {
-        state: 'INSPECTED',
-        inspectedAt: now,
+        state: 'COMPLETED',
+        inspectedAt: row.inspectedAt ?? now,
         inspectionNote: note,
-        ...(row.inspectionStartedAt ? {} : { inspectionStartedAt: now }),
+        inspectionStartedAt: begun,
+        startedAt: begun,
+        completedAt: now,
+        durationSeconds: Math.max(0, Math.round((now.getTime() - begun.getTime()) / 1000)),
+        cleanedByUserId: actor.id,
+        cleanedByNameSnapshot: actor.fullName,
+        ...(selfReviewed ? { reviewResult: 'PASSED' as const, reviewedAt: now, reviewedByUserId: actor.id, reviewedByNameSnapshot: actor.fullName } : {}),
       },
     });
     if (count === 0) throw ApiError.conflict('Công việc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
-    await recordEvent(tx, row.id, 'INSPECTED', actor, now, { area: true, note });
+    if (row.state === 'NOT_STARTED') await recordEvent(tx, row.id, 'INSPECTED', actor, now, { area: true, note });
+    await recordEvent(tx, row.id, 'COMPLETED', actor, now, { area: true });
+    if (selfReviewed) await recordEvent(tx, row.id, 'REVIEWED', actor, now, { result: 'PASSED', selfCleaned: true, reason: null, recleanRequested: false });
   });
   return serializeTask(await loadTask(row.id, client), { money: false });
 }

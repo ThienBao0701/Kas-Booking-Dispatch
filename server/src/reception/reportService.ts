@@ -83,6 +83,7 @@ import {
 import { assertCan, can } from '../auth/capabilities';
 import { roleLabel } from '../auth/roleLabels';
 import { NO_HISTORY } from './lateEntryText';
+import { placeLabel } from '../housekeeping/workAreas';
 
 /**
  * The journal's actor: a receptionist on shift, or a reception SUPERVISOR
@@ -215,7 +216,7 @@ export function requestContent(row: { itemType: string | null; note: string | nu
  * summarise a row identically. It never invents information: every part of it is
  * a field that is on the row.
  */
-export function reportSummary(row: ReportDetail): string {
+export function reportSummary(row: ReportDetail, hidesGuest = false): string {
   if (row.payment) {
     const who = row.payment.guestName?.trim() || row.payment.roomNumber?.trim() || 'Khách';
     const used = allocationsOf(row.payment);
@@ -228,7 +229,9 @@ export function reportSummary(row: ReportDetail): string {
     // A legacy row leads with its short "Ký gửi", as it always did; a current
     // one with the content itself.
     const what = row.guestRequest.itemType?.trim() || row.guestRequest.note?.trim() || 'Yêu cầu';
-    return `${what} · ${row.guestRequest.guestName} · ${state}`;
+    // Bộ phận buồng phòng never reads the guest; nobody reads "null" for a guest not yet named.
+    if (hidesGuest) return `${what} · ${state}`;
+    return `${what} · ${row.guestRequest.guestName ?? 'Chưa xác định khách'} · ${state}`;
   }
   if (row.facility) {
     const issue = row.facility.issue;
@@ -257,13 +260,17 @@ export function reportSummary(row: ReportDetail): string {
   return CATEGORY_LABELS[row.category];
 }
 
-export function serializeReportAudit(row: ReportDetail['audits'][number]) {
+/** The guest's identity, kept from Bộ phận buồng phòng in a correction's trail too. */
+const GUEST_FIELDS = new Set(['guestName', 'ezCode']);
+
+export function serializeReportAudit(row: ReportDetail['audits'][number], hidesGuest = false) {
+  const hidden = hidesGuest && row.field !== null && GUEST_FIELDS.has(row.field);
   return {
     id: row.id,
     action: row.action,
     field: row.field,
-    oldValue: row.oldValue,
-    newValue: row.newValue,
+    oldValue: hidden ? null : row.oldValue,
+    newValue: hidden ? null : row.newValue,
     reason: row.reason,
     actor: { id: row.actorUserId, name: row.actorNameSnapshot },
     actorRole: row.actorRole,
@@ -273,7 +280,9 @@ export function serializeReportAudit(row: ReportDetail['audits'][number]) {
   };
 }
 
-export function serializeReport(row: ReportDetail, now: Date = getClock().now()) {
+export function serializeReport(row: ReportDetail, now: Date = getClock().now(), viewerRole?: UserRole) {
+  // Bộ phận buồng phòng records what it saw; who the guest is stays Reception's to know.
+  const hidesGuest = viewerRole === 'HOUSEKEEPING' || viewerRole === 'HOUSEKEEPING_MANAGER';
   return {
     id: row.id,
     category: row.category,
@@ -321,7 +330,7 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
     departmentLabel: DEPARTMENT_LABELS[row.originDepartment],
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    summary: reportSummary(row),
+    summary: reportSummary(row, hidesGuest),
 
     voided: row.voidedAt !== null,
     voidedAt: row.voidedAt ? row.voidedAt.toISOString() : null,
@@ -350,10 +359,12 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
       ? serializePayment(row.payment)
       : null,
 
+    /** The housekeeping work item it was reported from, if any. */
+    taskId: row.taskId,
     guestRequest: row.guestRequest
       ? {
-          guestName: row.guestRequest.guestName,
-          ezCode: row.guestRequest.ezCode,
+          guestName: hidesGuest ? null : row.guestRequest.guestName,
+          ezCode: hidesGuest ? null : row.guestRequest.ezCode,
           /** "Nội dung" as read — the note, or a legacy row's "Ký gửi" and note. */
           content: requestContent(row.guestRequest),
           note: row.guestRequest.note,
@@ -451,7 +462,7 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now())
         }
       : null,
 
-    audits: row.audits.map(serializeReportAudit),
+    audits: row.audits.map((a) => serializeReportAudit(a, hidesGuest)),
   };
 }
 
@@ -768,8 +779,11 @@ export function assertQuantity(value: unknown): number {
 
 /** Tên khách, Mã EZ and "Nội dung" (`note`) — the whole of the current form. */
 export interface GuestRequestInput {
-  guestName: string;
+  /** Reception's; Bộ phận buồng phòng never sends one. */
+  guestName?: string;
   ezCode?: string;
+  /** Optional: the room or area — kept from the work item when the request was made from one. */
+  roomNumber?: string;
   note: string;
   /** "Mức độ" — Trung bình when omitted. */
   severity?: IssueSeverity;
@@ -886,8 +900,8 @@ export function normaliseRoomService(input: RoomServiceInput) {
 
 export type CreateReportInput =
   | { category: 'PAYMENT'; payment: PaymentInput }
-  | { category: 'GUEST_REQUEST'; guestRequest: GuestRequestInput }
-  | { category: 'FACILITY_ISSUE'; facility: FacilityInput }
+  | { category: 'GUEST_REQUEST'; guestRequest: GuestRequestInput; taskId?: string }
+  | { category: 'FACILITY_ISSUE'; facility: FacilityInput; taskId?: string }
   | { category: 'CUSTOMER_COMPLAINT'; complaint: ComplaintInput }
   | { category: 'ROOM_SERVICE'; roomService: RoomServiceInput }
   | { category: 'HOTEL_DELIVERY'; delivery: DeliveryInput };
@@ -924,7 +938,7 @@ export async function createReport(
  */
 export async function createReports(
   inputs: CreateReportInput[],
-  target: { branchId?: number },
+  target: { branchId?: number; confirmDuplicate?: boolean },
   actor: ReportActor,
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
@@ -955,7 +969,6 @@ export async function createReports(
     throw ApiError.forbidden('Bạn không có quyền ghi báo cáo vận hành.');
   }
   const now = clock.now();
-
   const base = {
     branchId: writer.branchId,
     shiftSessionId: writer.shiftSessionId,
@@ -970,7 +983,10 @@ export async function createReports(
   return client.$transaction(async (tx) => {
     const created: ReportDetail[] = [];
     for (const input of inputs) {
-      const data = await buildCreateData(input, { ...base, category: input.category }, tx);
+      const task = 'taskId' in input && input.taskId ? await reportedTask(input.taskId, actor, writer.branchId, tx) : null;
+      // After the item's own checks: whether it may be reported comes before whether it looks repeated.
+      if (isHousekeepingReporter(actor.role) && !target.confirmDuplicate) await assertNotDuplicate(input, writer.branchId, now, tx);
+      const data = await buildCreateData(input, { ...base, category: input.category, task }, tx);
       created.push(await tx.receptionOperationalReport.create({ data, include: REPORT_INCLUDE }));
     }
     return created;
@@ -988,6 +1004,8 @@ async function buildCreateData(
     createdByRole: UserRole;
     /** Reception's when absent. */
     originDepartment?: ReportDepartment;
+    /** The work item it was reported from, checked, with its place in words. */
+    task?: { id: string; place: string } | null;
     category: CreateReportInput['category'];
     createdAt: Date;
     /** "Nhập bù" only: the manager who actually entered it, and why. */
@@ -1011,6 +1029,7 @@ async function buildCreateData(
     createdByNameSnapshot: base.createdByNameSnapshot,
     createdByRole: base.createdByRole,
     originDepartment: base.originDepartment ?? 'RECEPTION',
+    ...(base.task ? { task: { connect: { id: base.task.id } } } : {}),
     category: base.category,
     createdAt: base.createdAt,
   } satisfies Omit<Prisma.ReceptionOperationalReportCreateInput, 'category'> & {
@@ -1033,20 +1052,35 @@ async function buildCreateData(
         },
       };
     }
-    case 'GUEST_REQUEST':
+    case 'GUEST_REQUEST': {
+      /*
+        Reception names the guest. Bộ phận buồng phòng writes only the content
+        and "Mức độ" — never the guest, and no room is asked of it (the work
+        item's place is kept when it reported from one). Reception adds the
+        name and Mã EZ later (`setGuestIdentity`).
+      */
+      const housekeeping = base.originDepartment === 'HOUSEKEEPING';
       return {
         ...scalars,
         guestRequest: {
-          // Recorded as "Đã tiếp nhận": the completion columns stay null until
-          // `completeReport` writes them. Ký gửi and Số phòng are not asked for.
-          create: {
-            guestName: required(input.guestRequest.guestName, 'tên khách'),
-            ezCode: optional(input.guestRequest.ezCode),
-            note: required(input.guestRequest.note, 'nội dung'),
-            severity: newSeverity(input.guestRequest.severity),
-          },
+          // Recorded as "Đã tiếp nhận": the completion columns stay null until `completeReport` writes them.
+          create: housekeeping
+            ? {
+                guestName: null,
+                ezCode: null,
+                roomNumber: base.task?.place ?? optional(input.guestRequest.roomNumber),
+                note: required(input.guestRequest.note, 'nội dung'),
+                severity: newSeverity(input.guestRequest.severity),
+              }
+            : {
+                guestName: required(input.guestRequest.guestName, 'tên khách'),
+                ezCode: optional(input.guestRequest.ezCode),
+                note: required(input.guestRequest.note, 'nội dung'),
+                severity: newSeverity(input.guestRequest.severity),
+              },
         },
       };
+    }
     case 'FACILITY_ISSUE': {
       /*
         THE INCIDENT MUST ALREADY EXIST, AND MUST BE THIS BRANCH'S.
@@ -1104,6 +1138,119 @@ async function buildCreateData(
   }
 }
 
+/** How far back a possible duplicate is looked for. */
+const DUPLICATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Case, spacing and punctuation do not make two reports different. */
+const foldText = (v: string | null | undefined) =>
+  (v ?? '').normalize('NFC').toLocaleLowerCase('vi').replace(/[\s\p{P}]+/gu, ' ').trim();
+
+/**
+ * "CÓ THỂ ĐÃ ĐƯỢC BÁO" — before Bộ phận buồng phòng records a guest request or a
+ * delivery, the same branch's live records of the last 24 hours of that
+ * category are compared on what the report IS (the same content; the same item
+ * for the same department), whichever department wrote them. A match is
+ * refused with POSSIBLE_DUPLICATE, saying only which department — never the
+ * other record's content, guest or reporter — and the same report is accepted
+ * once `confirmDuplicate` says it is a separate issue. Nothing is merged or deleted.
+ * (Incidents have their own check by place: `/issues/similar`.)
+ */
+async function assertNotDuplicate(input: CreateReportInput, branchId: number, now: Date, client: PrismaClient | Prisma.TransactionClient) {
+  const recent = { branchId, voidedAt: null, createdAt: { gte: new Date(now.getTime() - DUPLICATE_WINDOW_MS) } };
+  let match: { report: { originDepartment: ReportDepartment } } | undefined;
+  if (input.category === 'GUEST_REQUEST') {
+    const key = foldText(input.guestRequest.note);
+    if (!key) return;
+    const rows = await client.guestRequestReport.findMany({ where: { report: recent }, select: { note: true, report: { select: { originDepartment: true } } } });
+    match = rows.find((r) => foldText(r.note) === key);
+  } else if (input.category === 'HOTEL_DELIVERY') {
+    const key = foldText(input.delivery.itemName);
+    const rows = await client.hotelDeliveryReport.findMany({
+      where: { report: recent, department: input.delivery.department as never },
+      select: { itemName: true, report: { select: { originDepartment: true } } },
+    });
+    match = rows.find((r) => foldText(r.itemName) === key);
+  }
+  if (!match) return;
+  const other = match.report.originDepartment === 'RECEPTION';
+  throw new ApiError(
+    'POSSIBLE_DUPLICATE',
+    other
+      ? 'Bộ phận lễ tân có thể đã ghi nhận một báo cáo tương tự trong 24 giờ qua. Kiểm tra lại; nếu đây là việc khác, bấm “Vẫn gửi”.'
+      : 'Bộ phận buồng phòng đã ghi nhận một báo cáo tương tự trong 24 giờ qua. Kiểm tra lại; nếu đây là việc khác, bấm “Vẫn gửi”.',
+    { department: match.report.originDepartment },
+  );
+}
+
+/**
+ * THE WORK ITEM a Housekeeping report names ("+ Báo cáo vấn đề" on a room or
+ * area): of the writer's branch, live; a housekeeper's own item (the manager's,
+ * any of its branch). Its place in words is what the report then shows.
+ */
+async function reportedTask(taskId: string, actor: ReportActor, branchId: number, client: PrismaClient | Prisma.TransactionClient) {
+  if (!isHousekeepingReporter(actor.role)) throw ApiError.validation('Chỉ báo cáo của Bộ phận buồng phòng mới gắn với công việc buồng phòng.');
+  const task = await client.housekeepingRoomTask.findUnique({
+    where: { id: taskId },
+    select: { id: true, branchId: true, voidedAt: true, assigneeUserId: true, areaKind: true, roomNumber: true, floor: true },
+  });
+  if (!task || task.voidedAt || task.branchId !== branchId) throw ApiError.validation('Không tìm thấy công việc buồng phòng của chi nhánh.');
+  if (actor.role === 'HOUSEKEEPING' && task.assigneeUserId !== actor.id) throw ApiError.forbidden('Công việc này không được giao cho bạn.');
+  return { id: task.id, place: placeLabel(task.areaKind, task.areaKind === 'ROOM' ? task.roomNumber : null, task.floor) };
+}
+
+/**
+ * "THÔNG TIN KHÁCH" — Reception names the guest of a request Bộ phận buồng
+ * phòng recorded: its branch's desk, or a supervisor in scope (the Admin, any).
+ * Only `guestName` and `ezCode` change; the reporter, content, department and
+ * time never do. Each changed field writes an EDIT row to the record's history,
+ * naming who did it; a request already withdrawn is refused.
+ */
+export async function setGuestIdentity(
+  id: string,
+  input: { guestName: string; ezCode?: string },
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail> {
+  if (actor.role !== 'RECEPTIONIST' && !isReceptionSupervisor(actor.role)) throw ApiError.forbidden('Chỉ lễ tân mới nhập thông tin khách.');
+  const row = await client.receptionOperationalReport.findUnique({ where: { id }, include: REPORT_INCLUDE });
+  if (!row) throw ApiError.notFound('Không tìm thấy báo cáo.');
+  const inScope = actor.role === 'RECEPTIONIST' ? row.branchId === actor.branchId : scopeIncludes(branchScopeOf(actor), row.branchId);
+  if (!inScope) throw ApiError.branchAccessDenied('Báo cáo không thuộc chi nhánh của bạn.');
+  if (row.originDepartment !== 'HOUSEKEEPING' || row.category !== 'GUEST_REQUEST' || !row.guestRequest) {
+    throw ApiError.validation('Chỉ yêu cầu do Bộ phận buồng phòng ghi nhận mới cần nhập thông tin khách.');
+  }
+  if (row.voidedAt) throw ApiError.conflict('Báo cáo đã bị hủy.');
+  const guestName = required(input.guestName, 'tên khách');
+  const ezCode = optional(input.ezCode);
+  const now = clock.now();
+  const changes = [
+    ['guestName', row.guestRequest.guestName, guestName],
+    ['ezCode', row.guestRequest.ezCode, ezCode],
+  ].filter(([, before, after]) => before !== after) as [string, string | null, string | null][];
+  if (changes.length === 0) return row;
+  return client.$transaction(async (tx) => {
+    await tx.guestRequestReport.update({ where: { reportId: id }, data: { guestName, ezCode } });
+    for (const [field, oldValue, newValue] of changes) {
+      await tx.receptionReportAudit.create({
+        data: {
+          branchId: row.branchId,
+          reportId: id,
+          action: 'EDIT',
+          field,
+          oldValue,
+          newValue,
+          reason: 'Lễ tân nhập thông tin khách',
+          actorUserId: actor.id,
+          actorNameSnapshot: actor.fullName,
+          actorRole: actor.role,
+          createdAt: now,
+        },
+      });
+    }
+    return tx.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+  });
+}
+
 /* ------------------------------------------------------------------ *
  * Listing
  * ------------------------------------------------------------------ */
@@ -1130,6 +1277,11 @@ export interface ListReportsFilter {
    * would be missing from every period report and export.
    */
   unshiftedWindow?: { from: Date; to: Date };
+  /**
+   * One shift was asked for: of the records with no shift, only Bộ phận buồng
+   * phòng's — it works no reception shift, so a shift filter never hides it.
+   */
+  unshiftedHousekeepingOnly?: boolean;
   /** Half-open [from, to) instants, already resolved from HCM calendar days. */
   from?: Date;
   to?: Date;
@@ -1155,6 +1307,7 @@ export function reportWhere(
       {
         shiftSessionId: null,
         createdAt: { gte: filter.unshiftedWindow.from, lt: filter.unshiftedWindow.to },
+        ...(filter.unshiftedHousekeepingOnly ? { originDepartment: 'HOUSEKEEPING' as const } : {}),
       },
     ];
   } else if (filter.shiftSessionIds) where.shiftSessionId = { in: filter.shiftSessionIds };

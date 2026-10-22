@@ -1,5 +1,5 @@
 /**
- * THE HOUSEKEEPING WAREHOUSES, ON SCREEN — and the manager's personal work.
+ * "KHO HÀNG", ON SCREEN — four warehouses, coded items — and the manager's daily work.
  *
  *   1. "Nhập kho": many items in ONE "Lưu phiếu nhập", each item once
  *   2. "Kiểm kho": the manager counts blind — no book figure, no difference — and gives a reason when asked
@@ -46,14 +46,16 @@ function item(id: string, over: Record<string, unknown> = {}) {
     name: 'Khăn tắm',
     variant: '',
     label: 'Khăn tắm',
-    code: null,
+    code: '3.001',
     unit: 'cái',
-    catalogKey: 'QTY:BATH_TOWEL',
+    cleaningOrder: null,
+    unclassified: false,
+    legacyBalances: [],
     lowStockThreshold: null,
     lowStock: false,
     note: null,
     archived: false,
-    balances: { AVAILABLE: 20, DIRTY: 0, IN_LAUNDRY: 0, DAMAGED: 0 },
+    balances: { AVAILABLE: 20, DAMAGED: 0 },
     pendingDamage: 0,
     opened: true,
     ...over,
@@ -61,7 +63,7 @@ function item(id: string, over: Record<string, unknown> = {}) {
 }
 
 const TOWEL = item('towel');
-const KING = item('king', { name: 'Ga giường', variant: 'King', label: 'Ga giường (King)', catalogKey: 'LINEN:BED_SHEET:K', balances: { AVAILABLE: 5, DIRTY: 1, IN_LAUNDRY: 0, DAMAGED: 0 } });
+const KING = item('king', { name: 'Ga giường King', label: 'Ga giường King', code: '3.002', balances: { AVAILABLE: 5, DAMAGED: 0 } });
 const LINEN_ITEMS = 'GET /api/housekeeping/inventory/items?warehouse=LINEN';
 const RECEIPTS = 'GET /api/housekeeping/inventory/receipts?warehouse=LINEN';
 
@@ -89,7 +91,7 @@ describe('"Nhập kho" — one delivery, many items', () => {
     await userEvent.click(within(dialog).getByTestId('receipt-add-line'));
     // The towel is on the first line: the second offers the sheet only.
     const second = within(dialog).getByTestId('receipt-item-1');
-    expect(within(second).getAllByRole('option').map((o) => o.textContent)).toEqual(['— Chọn mặt hàng —', 'Ga giường (King) (cái)']);
+    expect(within(second).getAllByRole('option').map((o) => o.textContent)).toEqual(['— Chọn mặt hàng —', 'Ga giường King (cái)']);
     await userEvent.selectOptions(second, 'king');
     // A line without its quantity holds the save.
     expect(save).toBeDisabled();
@@ -120,6 +122,7 @@ describe('"Kiểm kho"', () => {
     installApiMock(
       shell(MANAGER, {
         [LINEN_ITEMS]: () => ({ status: 200, body: { items: [TOWEL, KING] } }),
+        'GET /api/housekeeping/inventory/items?warehouse=CHEMICAL_TOOLS': () => ({ status: 200, body: { items: [] } }),
         'GET /api/housekeeping/inventory/counts': () => ({
           status: 200,
           body: {
@@ -145,6 +148,10 @@ describe('"Kiểm kho"', () => {
     );
     renderApp('/app/hk/stock-count');
     expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Kiểm kho' })).toBeInTheDocument();
+    expect(screen.getByTestId('daily-tab-count')).toHaveAttribute('aria-pressed', 'true');
+    // The four warehouses, in their order; the count starts on the first.
+    expect(within(screen.getByTestId('count-warehouse')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Hóa chất & dụng cụ', 'Đồ dùng cho khách', 'Đồ vải', 'Đồ tiêu hao']);
+    await userEvent.click(screen.getByTestId('count-warehouse-LINEN'));
     await userEvent.selectOptions(await screen.findByTestId('count-item-0'), 'towel');
     // Neither the book's figure nor a difference is on the screen.
     expect(screen.queryByTestId('count-system-0')).not.toBeInTheDocument();
@@ -232,7 +239,10 @@ describe('the Admin — "Tồn kho & Báo hỏng"', () => {
     const reviewed: Record<string, unknown>[] = [];
     installApiMock(
       shell(ADMIN_USER, {
-        'GET /api/housekeeping/inventory/items': () => ({ status: 200, body: { items: [TOWEL, item('t2', { branch: BRANCH2, balances: { AVAILABLE: 4, DIRTY: 6, IN_LAUNDRY: 0, DAMAGED: 0 } })] } }),
+        'GET /api/housekeeping/inventory/items': () => ({
+          status: 200,
+          body: { items: [TOWEL, item('t2', { branch: BRANCH2, balances: { AVAILABLE: 4, DAMAGED: 0 }, legacyBalances: [{ state: 'DIRTY', stateLabel: 'Bẩn', quantity: 6 }] })] },
+        }),
         'GET /api/housekeeping/inventory/damage?status=PENDING': () => ({ status: 200, body: { reports: [report] } }),
         'GET /api/housekeeping/inventory/damage': () => ({ status: 200, body: { reports: [report] } }),
         'POST /api/housekeeping/inventory/damage/d1/review': (init) => {
@@ -259,12 +269,14 @@ describe('the Admin — "Tồn kho & Báo hỏng"', () => {
     const table = await screen.findByTestId('admin-inventory-items');
     expect(table).toHaveTextContent('260 Lý Tự Trọng');
     expect(table).toHaveTextContent('05 Trương Định');
-    // No "đang giặt" column: linen is clean, dirty or damaged.
+    // One on-hand figure and the written-off; a dirty balance from before is flagged, not added.
     expect(table).not.toHaveTextContent('Đang giặt');
+    expect(table).toHaveTextContent('3.001');
+    expect(table).toHaveTextContent('Số cũ cần kiểm tra: bẩn 6');
   });
 });
 
-describe('"Công việc cá nhân"', () => {
+describe('"Công việc mỗi ngày cần làm"', () => {
   const TOMORROW = hcmTomorrow();
 
   it('"Phân công việc ngày hôm sau" prepares TOMORROW’s board — its own day, no date to change', async () => {
@@ -285,6 +297,7 @@ describe('"Công việc cá nhân"', () => {
       }),
     );
     renderApp('/app/hk/tomorrow');
+    expect(await screen.findByTestId('daily-tab-tomorrow')).toHaveAttribute('aria-pressed', 'true');
     expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Phân công việc ngày hôm sau' })).toBeInTheDocument();
     await waitFor(() => expect(asked).toEqual(expect.arrayContaining(['tasks', 'groups'])));
     expect(screen.getByTestId('hk-period-value')).toHaveTextContent(TOMORROW.split('-').reverse().join('/'));
@@ -301,6 +314,7 @@ describe('"Công việc cá nhân"', () => {
       }),
     );
     renderApp('/app/hk/clean');
+    expect(await screen.findByTestId('daily-tab-clean')).toHaveAttribute('aria-pressed', 'true');
     expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Dọn phòng' })).toBeInTheDocument();
     expect(await screen.findByTestId('manager-shift')).toBeInTheDocument();
     expect(screen.getByTestId('manager-shift-start')).toBeInTheDocument();
@@ -308,7 +322,7 @@ describe('"Công việc cá nhân"', () => {
 });
 
 describe('keeping the items, and the Admin’s damage filters', () => {
-  it('edits an item’s code, unit, threshold and note — never its name or size — and lists archived items when asked', async () => {
+  it('edits an item’s unit, threshold and note — never its name or code — and lists archived items when asked', async () => {
     const patched: Record<string, unknown>[] = [];
     let archived = false;
     installApiMock(
@@ -316,7 +330,7 @@ describe('keeping the items, and the Admin’s damage filters', () => {
         [LINEN_ITEMS]: () => ({ status: 200, body: { items: [TOWEL] } }),
         [`${LINEN_ITEMS}&includeArchived=true`]: () => {
           archived = true;
-          return { status: 200, body: { items: [TOWEL, item('old', { name: 'Khăn cũ', label: 'Khăn cũ', catalogKey: null, archived: true })] } };
+          return { status: 200, body: { items: [TOWEL, item('old', { name: 'Khăn cũ', label: 'Khăn cũ', code: '3.009', archived: true })] } };
         },
         [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
         'PATCH /api/housekeeping/inventory/items/towel': (init) => {
@@ -326,6 +340,8 @@ describe('keeping the items, and the Admin’s damage filters', () => {
       }),
     );
     renderApp('/app/hk/store/linens');
+    // The code beside the name — the manager's view.
+    expect(await screen.findByTestId('inventory-code-towel')).toHaveTextContent('3.001');
     // The catalog tools are one tap away: "Quản lý danh mục".
     await userEvent.click(await screen.findByTestId('inventory-manage-open'));
     const manage = await screen.findByTestId('inventory-manage');
@@ -336,11 +352,11 @@ describe('keeping the items, and the Admin’s damage filters', () => {
     await userEvent.click(await screen.findByTestId('inventory-edit-towel'));
     const dialog = await screen.findByRole('dialog', { name: 'Sửa Khăn tắm' });
     expect(within(dialog).getByTestId('inventory-item-name')).toBeDisabled();
-    expect(within(dialog).getByTestId('inventory-item-variant')).toBeDisabled();
+    expect(within(dialog).getByTestId('inventory-item-code')).toBeDisabled();
+    expect(within(dialog).getByTestId('inventory-item-code')).toHaveValue('3.001');
     await userEvent.type(within(dialog).getByTestId('inventory-item-threshold'), '5');
-    await userEvent.type(within(dialog).getByTestId('inventory-item-code'), 'KT-01');
     await userEvent.click(within(dialog).getByTestId('inventory-item-save'));
-    await waitFor(() => expect(patched).toEqual([{ code: 'KT-01', unit: 'cái', lowStockThreshold: 5, note: '' }]));
+    await waitFor(() => expect(patched).toEqual([{ unit: 'cái', lowStockThreshold: 5, note: '' }]));
     // Archived items: off the list until asked for, then marked and without actions.
     await userEvent.click(await screen.findByTestId('inventory-manage-open'));
     await userEvent.click(await screen.findByTestId('inventory-show-archived'));
@@ -358,7 +374,7 @@ describe('keeping the items, and the Admin’s damage filters', () => {
       id: 'd2',
       branch: BRANCH2,
       warehouse: 'LINEN',
-      warehouseLabel: 'Kho Linens',
+      warehouseLabel: 'Kho đồ vải',
       itemId: 't2',
       label: 'Khăn tắm',
       unit: 'cái',
@@ -412,7 +428,7 @@ describe('keeping the items, and the Admin’s damage filters', () => {
   });
 });
 
-describe('damage sources, the form mapping and the opening count', () => {
+describe('damage sources, the room-cleaning list and the opening count', () => {
   it('links a damage report to this room’s work item and incident — both optional — and the Admin reads them', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
@@ -449,47 +465,82 @@ describe('damage sources, the form mapping and the opening count', () => {
     expect(posted[0]).toMatchObject({ roomNumber: '102', taskId: 'task-102', issueId: 'issue-9' });
   });
 
-  it('ties a grouped replacement only after confirming the item IS that kit — and says what each field does to the stock', async () => {
-    const mapped: { url: string; body: unknown }[] = [];
-    const kit = item('kit', { warehouse: 'AMENITY', name: 'Túi lược tăm bông', label: 'Túi lược tăm bông', unit: 'bộ', catalogKey: null, balances: { AVAILABLE: 5, DAMAGED: 0 } });
-    const field = (over: Record<string, unknown>) => ({ warehouse: 'AMENITY', size: null, kit: false, item: null, ...over });
+  it('chooses and orders the items of the room-cleaning form — codes shown to the manager — and saves the list in one request', async () => {
+    const saved: unknown[] = [];
+    const choice = (id: string, warehouse: string, code: string, label: string, cleaningOrder: number | null) => ({
+      id,
+      warehouse,
+      warehouseLabel: warehouse === 'LINEN' ? 'Kho đồ vải' : 'Kho đồ dùng khác / Đồ tiêu hao (Amenities)',
+      code,
+      label,
+      unit: 'cái',
+      available: 5,
+      cleaningOrder,
+    });
     installApiMock(
       shell(MANAGER, {
-        'GET /api/housekeeping/inventory/items?warehouse=AMENITY': () => ({ status: 200, body: { items: [kit] } }),
-        'GET /api/housekeeping/inventory/receipts?warehouse=AMENITY': () => ({ status: 200, body: { receipts: [] } }),
-        'GET /api/housekeeping/inventory/mapping?warehouse=AMENITY': () => ({
+        [LINEN_ITEMS]: () => ({ status: 200, body: { items: [TOWEL] } }),
+        [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
+        'GET /api/housekeeping/inventory/cleaning-items': () => ({
           status: 200,
-          body: {
-            fields: [
-              field({ catalogKey: 'REPLACED:COMB_COTTON_CAP', field: '✓ Lược, tăm bông, chụp tóc', meaning: 'TICK', meaningLabel: 'Mỗi ô ✓ trừ 1 bộ khỏi “Sẵn dùng”', kit: true }),
-              field({ catalogKey: 'QTY:WATER', field: 'Nước suối', meaning: 'CLEAN_ISSUE', meaningLabel: 'Số cấp cho phòng trừ “Sẵn dùng” (đồ tiêu hao, không thành đồ bẩn)' }),
-            ],
-          },
+          body: { branchId: 1, items: [choice('towel', 'LINEN', '3.001', 'Khăn tắm', 1), choice('king', 'LINEN', '3.002', 'Ga giường King', null), choice('water', 'AMENITY', '4.001', 'Nước suối', null)] },
         }),
-        'PUT /api/housekeeping/inventory/items/kit/mapping': (init) => {
-          mapped.push({ url: 'kit', body: JSON.parse(String(init.body)) });
-          return { status: 200, body: { item: kit } };
+        'PUT /api/housekeeping/inventory/cleaning-items': (init) => {
+          saved.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { branchId: 1, items: [] } };
         },
       }),
     );
-    renderApp('/app/hk/store/amenities');
+    renderApp('/app/hk/store/linens');
     await userEvent.click(await screen.findByTestId('inventory-manage-open'));
-    await userEvent.click(await screen.findByTestId('inventory-mapping-open'));
-    const dialog = await screen.findByRole('dialog');
-    const comb = await within(dialog).findByTestId('mapping-REPLACED:COMB_COTTON_CAP');
-    expect(comb).toHaveTextContent('Một bộ gồm nhiều món');
-    expect(comb).toHaveTextContent('Mỗi ô ✓ trừ 1 bộ');
-    expect(within(dialog).getByTestId('mapping-QTY:WATER')).toHaveTextContent('không thành đồ bẩn');
-    // Not confirmed: the kit cannot be tied.
-    expect(within(comb).getByTestId('mapping-select-REPLACED:COMB_COTTON_CAP')).toBeDisabled();
-    await userEvent.click(within(comb).getByTestId('mapping-kit-REPLACED:COMB_COTTON_CAP'));
-    await userEvent.selectOptions(within(comb).getByTestId('mapping-select-REPLACED:COMB_COTTON_CAP'), 'kit');
-    await waitFor(() => expect(mapped).toEqual([{ url: 'kit', body: { catalogKey: 'REPLACED:COMB_COTTON_CAP', confirmKit: true } }]));
+    // The old form mapping is gone.
+    expect(screen.queryByTestId('inventory-mapping-open')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('inventory-from-catalog')).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId('inventory-cleaning-open'));
+    const dialog = await screen.findByRole('dialog', { name: 'Mặt hàng dùng khi dọn phòng' });
+    const chosen = await within(dialog).findByTestId('cleaning-items-chosen');
+    expect(chosen).toHaveTextContent('3.001Khăn tắm');
+    // Water joins, then goes first.
+    await userEvent.click(within(dialog).getByTestId('cleaning-pick-water'));
+    await userEvent.click(within(dialog).getByTestId('cleaning-up-water'));
+    expect(within(within(dialog).getByTestId('cleaning-items-chosen')).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      expect.stringContaining('Nước suối'),
+      expect.stringContaining('Khăn tắm'),
+    ]);
+    await userEvent.click(within(dialog).getByTestId('cleaning-items-save'));
+    await waitFor(() => expect(saved).toEqual([{ itemIds: ['water', 'towel'] }]));
+  });
+
+  it('classifies an item of the former equipment warehouse into one of the four', async () => {
+    const patched: unknown[] = [];
+    const mop = item('mop', { warehouse: 'EQUIPMENT', name: 'Máy hút bụi', label: 'Máy hút bụi', code: null, unclassified: true, balances: { AVAILABLE: 2, ISSUED: 0, DAMAGED: 0 } });
+    installApiMock(
+      shell(MANAGER, {
+        'GET /api/housekeeping/inventory/items?warehouse=EQUIPMENT': () => ({ status: 200, body: { items: [mop] } }),
+        'GET /api/housekeeping/inventory/receipts?warehouse=EQUIPMENT': () => ({ status: 200, body: { receipts: [] } }),
+        'PATCH /api/housekeeping/inventory/items/mop': (init) => {
+          patched.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { item: { ...mop, warehouse: 'CHEMICAL_TOOLS', code: '1.001', unclassified: false } } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/equipment');
+    expect(await screen.findByText('Chờ phân loại')).toBeInTheDocument();
+    // No receipts into it: its items wait to be classified.
+    expect(screen.queryByTestId('inventory-receive-open')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('inventory-more-mop'));
+    await userEvent.click(await screen.findByTestId('inventory-classify-mop'));
+    const dialog = await screen.findByRole('dialog', { name: 'Phân loại Máy hút bụi' });
+    expect(within(dialog).getByTestId('inventory-classify-save')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('inventory-classify-CHEMICAL_TOOLS'));
+    await userEvent.click(within(dialog).getByTestId('inventory-classify-save'));
+    await waitFor(() => expect(patched).toEqual([{ warehouse: 'CHEMICAL_TOOLS' }]));
+    expect(await screen.findByText(/mã 1\.001/)).toBeInTheDocument();
   });
 
   it('asks for the opening count of items never set up — once, as one counted document', async () => {
     const posted: Record<string, unknown>[] = [];
-    const fresh = item('fresh', { opened: false, balances: { AVAILABLE: 0, DIRTY: 0, IN_LAUNDRY: 0, DAMAGED: 0 } });
+    const fresh = item('fresh', { opened: false, balances: { AVAILABLE: 0, DAMAGED: 0 } });
     installApiMock(
       shell(MANAGER, {
         [LINEN_ITEMS]: () => ({ status: 200, body: { items: [fresh, KING] } }),
@@ -512,7 +563,6 @@ describe('damage sources, the form mapping and the opening count', () => {
     expect(within(dialog).queryByTestId('opening-fresh-DAMAGED')).not.toBeInTheDocument();
     expect(within(dialog).getByTestId('opening-save')).toBeDisabled();
     await userEvent.type(within(dialog).getByTestId('opening-fresh-AVAILABLE'), '20');
-    await userEvent.type(within(dialog).getByTestId('opening-fresh-DIRTY'), '0');
     await userEvent.click(within(dialog).getByTestId('opening-save'));
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toMatchObject({
@@ -521,7 +571,6 @@ describe('damage sources, the form mapping and the opening count', () => {
       requestId: expect.any(String),
       lines: [
         { itemId: 'fresh', state: 'AVAILABLE', systemQuantity: 0, countedQuantity: 20 },
-        { itemId: 'fresh', state: 'DIRTY', systemQuantity: 0, countedQuantity: 0 },
       ],
     });
     expect(await screen.findByText('Đã khai báo tồn đầu kỳ cho 1 mặt hàng.')).toBeInTheDocument();
@@ -529,7 +578,7 @@ describe('damage sources, the form mapping and the opening count', () => {
 });
 
 describe('"Thêm mặt hàng" — several at once', () => {
-  it('adds rows (King, Queen, Twin…), removes one, and saves them all in ONE request', async () => {
+  it('asks the names only — the codes are the server’s — removes a row, and saves them all in ONE request', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       shell(MANAGER, {
@@ -544,33 +593,108 @@ describe('"Thêm mặt hàng" — several at once', () => {
     renderApp('/app/hk/store/linens');
     await userEvent.click(await screen.findByTestId('inventory-manage-open'));
     await userEvent.click(await screen.findByTestId('inventory-item-open'));
-    const dialog = await screen.findByRole('dialog', { name: 'Thêm mặt hàng — Kho Linens' });
+    const dialog = await screen.findByRole('dialog', { name: 'Thêm mặt hàng — Kho đồ vải' });
     const save = within(dialog).getByTestId('inventory-items-save');
     expect(save).toBeDisabled();
-    await userEvent.type(within(dialog).getByTestId('inventory-new-name-0'), 'Ga giường');
-    await userEvent.type(within(dialog).getByTestId('inventory-new-variant-0'), 'King');
-    for (const [i, variant] of [[1, 'Queen'], [2, 'Twin']] as const) {
+    // Only a name per row: no code, unit, size or note to type.
+    expect(within(dialog).getAllByRole('textbox')).toHaveLength(1);
+    await userEvent.type(within(dialog).getByTestId('inventory-new-name-0'), 'Ga giường King');
+    for (const [i, name] of [[1, 'Ga giường Queen'], [2, 'Ga giường Twin']] as const) {
       await userEvent.click(within(dialog).getByTestId('inventory-new-add'));
-      await userEvent.type(within(dialog).getByTestId(`inventory-new-name-${i}`), 'Ga giường');
-      await userEvent.type(within(dialog).getByTestId(`inventory-new-variant-${i}`), variant);
+      await userEvent.type(within(dialog).getByTestId(`inventory-new-name-${i}`), name);
     }
-    await userEvent.type(within(dialog).getByTestId('inventory-new-code-1'), 'GQ-01');
-    // Twin is not wanted after all.
     await userEvent.click(within(dialog).getByTestId('inventory-new-remove-2'));
     expect(save).toHaveTextContent('Lưu 2 mặt hàng');
-    // A row without a name holds the save back.
-    await userEvent.clear(within(dialog).getByTestId('inventory-new-name-1'));
-    await userEvent.type(within(dialog).getByTestId('inventory-new-code-0'), 'GK-01');
-    expect(save).toBeDisabled();
-    await userEvent.type(within(dialog).getByTestId('inventory-new-name-1'), 'Ga giường');
     await userEvent.click(save);
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toEqual({
+    expect(posted[0]).toEqual({ warehouse: 'LINEN', items: [{ name: 'Ga giường King' }, { name: 'Ga giường Queen' }] });
+  });
+});
+
+describe('the Admin’s shared catalog and receipts for several branches', () => {
+  const ADMIN_ROUTES = (extra: Record<string, Handler> = {}) =>
+    shell(ADMIN_USER, {
+      'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH2] } }),
+      'GET /api/housekeeping/inventory/items?warehouse=LINEN&branchId=1': () => ({ status: 200, body: { items: [{ ...TOWEL, scope: 'SYSTEM' }] } }),
+      'GET /api/housekeeping/inventory/items?warehouse=LINEN&branchId=2': () => ({
+        status: 200,
+        body: { items: [{ ...TOWEL, id: 'towel-2', branch: BRANCH2, scope: 'SYSTEM' }, item('local-2', { branch: BRANCH2, name: 'Khăn riêng', label: 'Khăn riêng', code: '3.004', scope: 'BRANCH' })] },
+      }),
+      ...extra,
+    });
+
+  it('adds shared items by name alone — "Danh mục dùng chung toàn hệ thống", for all eight branches, with no stock', async () => {
+    const posted: unknown[] = [];
+    installApiMock(
+      ADMIN_ROUTES({
+        'POST /api/housekeeping/inventory/items/batch': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { items: [item('s1', { scope: 'SYSTEM', name: 'Khăn tắm' })] } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    // No branch to choose first: the catalog is the system's.
+    await userEvent.click(await screen.findByTestId('inventory-shared-open'));
+    const dialog = await screen.findByRole('dialog', { name: 'Thêm mặt hàng dùng chung — Kho đồ vải' });
+    expect(within(dialog).getByTestId('inventory-new-scope')).toHaveTextContent('Danh mục dùng chung toàn hệ thống');
+    expect(within(dialog).getByTestId('inventory-new-scope')).toHaveTextContent('Tạo mặt hàng không tạo tồn kho');
+    await userEvent.type(within(dialog).getByTestId('inventory-new-name-0'), 'Khăn tắm');
+    await userEvent.click(within(dialog).getByTestId('inventory-items-save'));
+    await waitFor(() => expect(posted).toEqual([{ warehouse: 'LINEN', items: [{ name: 'Khăn tắm' }] }]));
+  });
+
+  it('receives for chosen branches, each with its own quantities — never one figure copied to all', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      ADMIN_ROUTES({
+        'POST /api/housekeeping/inventory/receipts/multi': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { receipts: [{ id: 'r1' }, { id: 'r2' }], duplicate: false } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    await userEvent.click(await screen.findByTestId('inventory-multi-receipt-open'));
+    const dialog = await screen.findByRole('dialog', { name: /Nhập kho cho các chi nhánh/ });
+    expect(within(dialog).getByTestId('multi-receipt-save')).toBeDisabled();
+    await userEvent.click(await within(dialog).findByTestId('multi-receipt-branch-1'));
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-branch-2'));
+    // Each branch lists its own items — CN2's own one only under CN2.
+    expect(await within(dialog).findByTestId('multi-receipt-qty-2-local-2')).toBeInTheDocument();
+    expect(within(within(dialog).getByTestId('multi-receipt-lines-1')).queryByText('Khăn riêng')).not.toBeInTheDocument();
+    await userEvent.type(await within(dialog).findByTestId('multi-receipt-qty-1-towel'), '5');
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-qty-2-towel-2'), '3');
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-save'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({
       warehouse: 'LINEN',
-      items: [
-        { name: 'Ga giường', variant: 'King', unit: 'cái', code: 'GK-01' },
-        { name: 'Ga giường', variant: 'Queen', unit: 'cái', code: 'GQ-01' },
+      requestId: expect.any(String),
+      branches: [
+        { branchId: 1, lines: [{ itemId: 'towel', quantity: 5 }] },
+        { branchId: 2, lines: [{ itemId: 'towel-2', quantity: 3 }] },
       ],
     });
+    expect(await screen.findByText('Đã nhập kho cho 2 chi nhánh.')).toBeInTheDocument();
+  });
+
+  it('marks shared and branch items, and gives the manager no "Xóa" on a shared one', async () => {
+    installApiMock(
+      shell(MANAGER, {
+        [LINEN_ITEMS]: () => ({ status: 200, body: { items: [{ ...TOWEL, scope: 'SYSTEM' }, item('mine', { name: 'Khăn riêng', label: 'Khăn riêng', code: '3.004', scope: 'BRANCH' })] } }),
+        [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    expect(within(await screen.findByTestId('inventory-item-towel')).getByText('Dùng chung')).toBeInTheDocument();
+    expect(within(screen.getByTestId('inventory-item-mine')).getByText('Riêng chi nhánh')).toBeInTheDocument();
+    // The manager adds its branch's own.
+    await userEvent.click(screen.getByTestId('inventory-manage-open'));
+    await userEvent.click(await screen.findByTestId('inventory-item-open'));
+    expect(within(await screen.findByRole('dialog')).getByTestId('inventory-new-scope')).toHaveTextContent('Mặt hàng riêng chi nhánh');
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(await screen.findByTestId('inventory-more-towel'));
+    expect(await screen.findByTestId('inventory-edit-towel')).toBeInTheDocument();
+    expect(screen.queryByTestId('inventory-remove-towel')).not.toBeInTheDocument();
   });
 });

@@ -145,6 +145,8 @@ export interface ReportPeriod {
   sessions: BusinessDateSession[];
   sessionIds: string[];
   unshiftedWindow: { start: Date; end: Date } | null;
+  /** One shift asked for: Bộ phận buồng phòng's shift-less records of the period still belong (it works no reception shift). */
+  housekeepingWindow?: { start: Date; end: Date } | null;
 }
 
 export async function resolveReportPeriod(
@@ -158,15 +160,12 @@ export async function resolveReportPeriod(
       (!q.branchIds || q.branchIds.includes(s.branchId)) &&
       (!q.shiftType || s.shiftType === q.shiftType),
   );
+  const days = { start: hcmWallClockToUtc(q.from, '00:00'), end: hcmWallClockToUtc(nextHcmDay(q.to), '00:00') };
   return {
     sessions,
     sessionIds: sessions.map((s) => s.id),
-    unshiftedWindow: q.shiftType
-      ? null
-      : {
-          start: hcmWallClockToUtc(q.from, '00:00'),
-          end: hcmWallClockToUtc(nextHcmDay(q.to), '00:00'),
-        },
+    unshiftedWindow: q.shiftType ? null : days,
+    housekeepingWindow: q.shiftType ? days : null,
   };
 }
 
@@ -183,7 +182,14 @@ function periodWhere(p: ReportPeriod) {
 }
 
 export function journalPeriodWhere(p: ReportPeriod): Prisma.ReceptionOperationalReportWhereInput {
-  return periodWhere(p);
+  const where = periodWhere(p);
+  if (!p.housekeepingWindow) return where;
+  return {
+    OR: [
+      ...where.OR,
+      { shiftSessionId: null, originDepartment: 'HOUSEKEEPING', createdAt: { gte: p.housekeepingWindow.start, lt: p.housekeepingWindow.end } },
+    ],
+  };
 }
 
 export function issuePeriodWhere(p: ReportPeriod): Prisma.HotelIssueWhereInput {

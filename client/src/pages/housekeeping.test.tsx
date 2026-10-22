@@ -718,56 +718,49 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     expect(starts).toEqual([1]);
   });
 
-  it('records King / Queen / Twin with a count, counts, ✓ replacements and special notes, and completes the room', async () => {
-    const posted: unknown[] = [];
-    const task = roomTask('t1', {
+  const ITEMS = [
+    { id: 'it-towel', label: 'Khăn tắm', unit: 'cái', warehouse: 'LINEN', available: 3 },
+    { id: 'it-water', label: 'Nước suối', unit: 'chai', warehouse: 'AMENITY', available: 10 },
+  ];
+  const cleaningRoom = (over: Record<string, unknown> = {}) =>
+    roomTask('t1', {
       state: 'IN_PROGRESS',
       stateLabel: 'Đang dọn',
       startedAt: '2026-10-05T02:00:00.000Z',
       inspection: { id: 'in1', createdAt: '2026-10-05T02:00:00.000Z', inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] },
+      ...over,
     });
+
+  it('counts the branch’s items — name, −, the count, + — never past what is on hand, keeps the special flags and note, and completes the room', async () => {
+    const posted: unknown[] = [];
+    const task = cleaningRoom();
     installApiMock(
       routes(task, {
+        'GET /api/housekeeping/work/tasks/t1/cleaning-items': () => ({ status: 200, body: { items: ITEMS } }),
         'POST /api/housekeeping/work/tasks/t1/complete': (init) => {
           posted.push(JSON.parse(String(init.body)));
-          return {
-            status: 200,
-            body: { task: { ...task, state: 'COMPLETED', stateLabel: 'Hoàn thành', completedAt: '2026-10-05T02:42:00.000Z', durationSeconds: 2520 } },
-          };
+          return { status: 200, body: { task: { ...task, state: 'COMPLETED', stateLabel: 'Hoàn thành', completedAt: '2026-10-05T02:42:00.000Z', durationSeconds: 2520 } } };
         },
       }),
     );
     renderApp('/app/inspections/room/t1');
-    await screen.findByTestId('cleaning-form');
-    // The three linen items, each King / Queen / Twin — the words, never K / Q / T.
-    for (const label of ['Ga giường', 'Bọc chăn', 'Bảo vệ nệm']) {
-      expect(within(screen.getByRole('group', { name: `Loại ${label}` })).getAllByRole('button').map((b) => b.textContent)).toEqual(['King', 'Queen', 'Twin']);
-    }
-    // ONE type per item: another choice replaces it; then its count.
-    expect(screen.queryByTestId('linen-qty-BED_SHEET')).not.toBeInTheDocument();
-    await userEvent.click(screen.getByTestId('linen-BED_SHEET-K'));
-    await userEvent.click(screen.getByTestId('linen-BED_SHEET-Q'));
-    expect(screen.getByTestId('linen-BED_SHEET-K')).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByTestId('linen-BED_SHEET-Q')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(1);
-    await userEvent.click(screen.getByRole('button', { name: 'Thêm số lượng Ga giường' }));
-    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(2);
-    await userEvent.click(screen.getByRole('button', { name: 'Thêm Khăn tắm' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Thêm Khăn tắm' }));
-    // The six replacement items, exactly — each a ✓, never the word "Đúng".
-    expect(screen.getAllByTestId(/^replaced-/).map((b) => b.textContent)).toEqual([
-      'Lược, tăm bông, chụp tóc',
-      'Trà, cà phê, đường. Miễn phí',
-      'Giấy ăn, lau tay',
-      'Nước rửa tay',
-      'Dầu gội',
-      'Sữa tắm',
-    ]);
-    await userEvent.click(screen.getByTestId('replaced-SHAMPOO'));
-    expect(screen.getByTestId('replaced-SHAMPOO')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.queryByText('Đúng')).not.toBeInTheDocument();
-    // "Ghi nhận đặc biệt": the six, several at once.
-    expect(screen.getByRole('heading', { name: 'Ghi nhận đặc biệt' })).toBeInTheDocument();
+    const list = await screen.findByTestId('cleaning-items');
+    // The list in the branch's order; no code anywhere, no clean / dirty pair.
+    expect(within(list).getAllByRole('listitem').map((li) => li.querySelector('label')!.firstChild!.textContent)).toEqual(['Khăn tắm', 'Nước suối']);
+    expect(screen.getByTestId('cleaning-form')).not.toHaveTextContent(/3\.001|Đồ bẩn|Đồ sạch/);
+    expect(screen.queryByTestId(/^linen-/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(/^replaced-/)).not.toBeInTheDocument();
+    // Never below 0.
+    expect(screen.getByRole('button', { name: 'Bớt Khăn tắm' })).toBeDisabled();
+    for (let i = 0; i < 4; i += 1) await userEvent.click(screen.getByRole('button', { name: 'Thêm Khăn tắm' }));
+    // Never above the stock: 3 on hand, the fourth press says so in Vietnamese.
+    expect(screen.getByTestId('item-it-towel')).toHaveValue(3);
+    expect(screen.getByTestId('cleaning-short')).toHaveTextContent('Không đủ tồn kho: Khăn tắm chỉ còn 3 cái');
+    await userEvent.click(screen.getByRole('button', { name: 'Bớt Khăn tắm' }));
+    expect(screen.getByTestId('item-it-towel')).toHaveValue(2);
+    expect(screen.queryByTestId('cleaning-short')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Thêm Nước suối' }));
+    // "Ghi nhận đặc biệt": the six, as before.
     expect(screen.getAllByTestId(/^special-/).map((b) => b.textContent)).toEqual([
       'L/B : Khách có hành lý gọn nhẹ',
       'SO : Phòng có đồ nhưng khách không ngủ',
@@ -777,75 +770,92 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
       'LNL : Hàng thất lạc',
     ]);
     await userEvent.click(screen.getByTestId('special-LB'));
-    await userEvent.click(screen.getByTestId('special-DND'));
-    expect(screen.getByTestId('special-LB')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('special-DND')).toHaveAttribute('aria-pressed', 'true');
-    // The note, under its own placeholder.
-    expect(screen.getByTestId('cleaning-note')).toHaveAttribute('placeholder', 'Các lưu ý-Hỏng hóc-Vấn đề khác...');
     await userEvent.type(screen.getByTestId('cleaning-note'), 'Rèm hơi bẩn');
-    // "Hoàn thành dọn phòng" shows everything entered first — nothing is sent yet.
+    // "Hoàn thành dọn phòng" shows everything first — nothing is sent yet.
     await userEvent.click(screen.getByTestId('cleaning-complete'));
     const summary = await screen.findByTestId('cleaning-summary');
-    expect(within(summary).getByTestId('summary-linen')).toHaveTextContent('Ga giường: Queen × 2');
-    expect(within(summary).getByTestId('summary-quantities')).toHaveTextContent('Khăn tắm: 2');
-    // The used linen taken out: as many as were put in, unless changed.
-    expect(within(summary).getByTestId('summary-collected')).toHaveTextContent('Ga giường: 2');
-    expect(within(summary).getByTestId('summary-collected')).toHaveTextContent('Khăn tắm: 2');
-    expect(within(summary).getByTestId('summary-replaced')).toHaveTextContent('Dầu gội');
+    expect(within(summary).getByTestId('summary-items')).toHaveTextContent('Khăn tắm: 2 cái');
+    expect(within(summary).getByTestId('summary-items')).toHaveTextContent('Nước suối: 1 chai');
     expect(within(summary).getByTestId('summary-special')).toHaveTextContent('L/B : Khách có hành lý gọn nhẹ');
-    expect(within(summary).getByTestId('summary-special')).toHaveTextContent('DND : Không làm phiền');
     expect(within(summary).getByTestId('summary-note')).toHaveTextContent('Rèm hơi bẩn');
     expect(posted).toEqual([]);
-    // "Quay lại sửa" returns to the form with every value kept.
     await userEvent.click(screen.getByTestId('cleaning-confirm-back'));
-    expect(screen.queryByTestId('cleaning-summary')).not.toBeInTheDocument();
-    expect(screen.getByTestId('linen-qty-BED_SHEET')).toHaveValue(2);
-    expect(screen.getByTestId('cleaning-note')).toHaveValue('Rèm hơi bẩn');
-    expect(posted).toEqual([]);
-    // Only the final confirmation completes — once.
+    expect(screen.getByTestId('item-it-towel')).toHaveValue(2);
     await userEvent.click(screen.getByTestId('cleaning-complete'));
     await userEvent.click(await screen.findByTestId('cleaning-confirm-submit'));
-    await waitFor(() =>
-      expect(posted).toEqual([
-        {
-          linen: { BED_SHEET: { size: 'Q', quantity: 2 } },
-          quantities: { BATH_TOWEL: 2 },
-          collected: { BED_SHEET: 2, BATH_TOWEL: 2 },
-          replaced: ['SHAMPOO'],
-          special: ['LB', 'DND'],
-          note: 'Rèm hơi bẩn',
-        },
-      ]),
-    );
+    await waitFor(() => expect(posted).toEqual([{ items: { 'it-towel': 2, 'it-water': 1 }, special: ['LB'], note: 'Rèm hơi bẩn' }]));
     expect(await screen.findByTestId('cleaning-done')).toHaveTextContent('42 phút');
   });
 
-  it('shows a saved form again on reload — type, count, ✓ and special notes', async () => {
-    const task = roomTask('t1', {
-      state: 'IN_PROGRESS',
-      stateLabel: 'Đang dọn',
-      startedAt: '2026-10-05T02:00:00.000Z',
-      inspection: { id: 'in1', createdAt: '2026-10-05T02:00:00.000Z', inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [] },
-      cleaning: {
-        linen: { DUVET_COVER: { size: 'T', quantity: 3 } },
-        quantities: { WATER: 4 },
-        replaced: ['TEA_COFFEE_SUGAR'],
-        special: ['OOO', 'LNL'],
-        note: 'Ổ cắm hỏng',
-      },
-    });
-    installApiMock(routes(task));
+  it('shows a saved form again on reload — counts, special flags and note', async () => {
+    const task = cleaningRoom({ cleaning: { items: [{ itemId: 'it-water', label: 'Nước suối', quantity: 4 }], special: ['OOO', 'LNL'], note: 'Ổ cắm hỏng' } });
+    installApiMock(routes(task, { 'GET /api/housekeeping/work/tasks/t1/cleaning-items': () => ({ status: 200, body: { items: ITEMS } }) }));
     renderApp('/app/inspections/room/t1');
-    await screen.findByTestId('cleaning-form');
-    expect(screen.getByTestId('linen-DUVET_COVER-T')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('linen-qty-DUVET_COVER')).toHaveValue(3);
-    expect(screen.queryByTestId('linen-qty-BED_SHEET')).not.toBeInTheDocument();
-    expect(screen.getByTestId('qty-WATER')).toHaveValue(4);
-    expect(screen.getByTestId('replaced-TEA_COFFEE_SUGAR')).toHaveAttribute('aria-pressed', 'true');
+    await screen.findByTestId('cleaning-items');
+    expect(screen.getByTestId('item-it-water')).toHaveValue(4);
+    expect(screen.getByTestId('item-it-towel')).toHaveValue(0);
     expect(screen.getByTestId('special-OOO')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByTestId('special-LNL')).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByTestId('special-DND')).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('cleaning-note')).toHaveValue('Ổ cắm hỏng');
+  });
+
+  it('"+ Báo cáo vấn đề" fills in the room, branch and reporter, asks no guest, sends once — and changes nothing on the room', async () => {
+    const reports: unknown[] = [];
+    const issues: unknown[] = [];
+    installApiMock(
+      routes(cleaningRoom(), {
+        'GET /api/housekeeping/work/tasks/t1/cleaning-items': () => ({ status: 200, body: { items: ITEMS } }),
+        'POST /api/reception/reports': (init) => {
+          reports.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: { id: 'r1' } } };
+        },
+        'POST /api/issues': (init) => {
+          issues.push(init.body);
+          return { status: 201, body: { issue: { id: 'i1' } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections/room/t1');
+    await screen.findByTestId('cleaning-items');
+    await userEvent.click(screen.getByTestId('room-report-open'));
+    const dialog = await screen.findByTestId('quick-report');
+    expect(within(dialog).getByTestId('quick-report-facts')).toHaveTextContent('05 Trương Định');
+    expect(within(dialog).getByTestId('quick-report-facts')).toHaveTextContent('Phòng 101');
+    expect(within(dialog).queryByLabelText(/Tên khách|Mã EZ/)).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByTestId('quick-report-kind-GUEST_REQUEST'));
+    await userEvent.type(within(dialog).getByTestId('quick-report-content'), 'Khách xin thêm gối');
+    const send = screen.getByTestId('quick-report-send');
+    await userEvent.dblClick(send);
+    await waitFor(() => expect(reports).toHaveLength(1));
+    expect(reports[0]).toMatchObject({ category: 'GUEST_REQUEST', taskId: 't1', guestRequest: { note: 'Khách xin thêm gối' } });
+    expect((reports[0] as { guestRequest: Record<string, unknown> }).guestRequest).not.toHaveProperty('guestName');
+    expect(issues).toEqual([]);
+    expect(await screen.findByText('Đã gửi yêu cầu của khách cho lễ tân.')).toBeInTheDocument();
+    // The room's form is as it was.
+    expect(screen.getByTestId('item-it-towel')).toHaveValue(0);
+  });
+
+  it('works a shared area by "Kiểm tra tình trạng" alone — no "Dọn phòng" — and its save completes it', async () => {
+    const posted: unknown[] = [];
+    const area = roomTask('t1', { areaKind: 'HALLWAY', areaKindLabel: 'Hành lang', areaLabel: 'Hành lang - Tầng 5', floor: '5', taskLabel: 'Khác', note: 'Lau sàn' });
+    installApiMock(
+      routes(area, {
+        'POST /api/housekeeping/work/tasks/t1/inspect': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { task: { ...area, state: 'COMPLETED', stateLabel: 'Hoàn thành', inspectedAt: '2026-10-05T02:10:00.000Z', inspectionNote: 'Sàn sạch' } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections/room/t1');
+    expect(await screen.findByRole('heading', { name: 'Hành lang - Tầng 5' })).toBeInTheDocument();
+    expect(screen.getByTestId('room-tab-inspect')).toHaveTextContent('Kiểm tra tình trạng');
+    expect(screen.queryByTestId('room-tab-clean')).not.toBeInTheDocument();
+    expect(screen.getByTestId('room-report-open')).toBeInTheDocument();
+    await userEvent.type(screen.getByTestId('area-inspection-note'), 'Sàn sạch');
+    await userEvent.click(screen.getByTestId('area-inspect-save'));
+    await waitFor(() => expect(posted).toEqual([{ issues: [], note: 'Sàn sạch' }]));
+    expect(await screen.findByTestId('inspection-saved')).toHaveTextContent('Sàn sạch');
+    expect(screen.queryByTestId('cleaning-start-panel')).not.toBeInTheDocument();
   });
 });
 
@@ -1205,5 +1215,31 @@ describe('Admin — buồng phòng', () => {
     renderApp('/app/housekeeping');
     await userEvent.click(await screen.findByTestId('collect-a'));
     expect(await screen.findByTestId('collection-status-COLLECTED')).toBeChecked();
+  });
+
+  it('gives the Quản lý buồng phòng its branch’s "Phát hiện & thu tiền": "Xóa" with a reason — no collection, no exports', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const hkManager = { id: 9, username: 'qlbp', fullName: 'Quản lý Buồng', role: 'HOUSEKEEPING_MANAGER' as const, branch: BRANCH, active: true, mustChangePassword: false };
+    installApiMock(
+      shell(hkManager, {
+        'GET /api/branches': () => ({ status: 200, body: { branches: [{ ...BRANCH, active: true }] } }),
+        ...anyIssuesRoute(() => ({ status: 200, body: { issues: [roomIssue('a')], total: 1, truncated: false, summary: SUMMARY } })),
+        'POST /api/housekeeping/issues/a/void': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { issue: roomIssue('a', { voided: true }) } };
+        },
+      }),
+    );
+    renderApp('/app/reports/housekeeping');
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    expect(within(nav).getByRole('link', { name: 'Phát hiện & thu tiền' })).toHaveAttribute('href', '/app/reports/housekeeping');
+    await userEvent.click(await screen.findByTestId('void-room-a'));
+    expect(screen.queryByTestId('collect-a')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('housekeeping-export-pdf')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('housekeeping-export-xlsx')).not.toBeInTheDocument();
+    const dialog = await screen.findByRole('dialog', { name: /Hủy vấn đề — Phòng/ });
+    await userEvent.type(within(dialog).getByTestId('void-room-reason'), 'Kiểm nhầm phòng');
+    await userEvent.click(within(dialog).getByTestId('void-room-confirm'));
+    await waitFor(() => expect(posted).toEqual([{ reason: 'Kiểm nhầm phòng' }]));
   });
 });

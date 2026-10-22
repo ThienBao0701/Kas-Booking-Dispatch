@@ -39,16 +39,13 @@ import { TechnicalReportPage } from '../pages/TechnicalReportPage';
 import { ConfidentialReportsPage } from '../pages/ConfidentialReportsPage';
 import { HousekeepingReportsPage } from '../pages/HousekeepingReportsPage';
 import { HousekeepingRoomPage } from '../pages/HousekeepingRoomPage';
-import { AdminInventoryPage, StockCountPage, WarehousePage } from '../pages/HousekeepingInventoryPages';
+import { AdminInventoryPage, WarehousePage } from '../pages/HousekeepingInventoryPages';
 import { HousekeepingKpiPage } from '../pages/HousekeepingKpiPage';
-import {
-  HkKpiPage,
-  HkOverviewPage,
-  HkReportPage,
-  HkCleaningPage,
-  HkRoomBoardPage,
-  HkStaffPage,
-} from '../pages/HousekeepingManagerPages';
+import { HkDailyWorkPage, type DailyTab } from '../pages/HkDailyWorkPage';
+import { ReceptionWorkOrdersPage } from '../pages/ReceptionWorkOrdersPage';
+import { PlannedFeaturePage } from '../pages/PlannedFeaturePage';
+import { MANAGEMENT_ROLES } from '../auth/types';
+import { HkKpiPage, HkOverviewPage, HkReportPage, HkStaffPage } from '../pages/HousekeepingManagerPages';
 
 /** "Quản lý buồng phòng" — its branch; the Admin, every branch. The server scopes. */
 const HK_MANAGER_ROLES: readonly UserRole[] = ['ADMIN', 'HOUSEKEEPING_MANAGER'];
@@ -63,7 +60,16 @@ function HkAssignRedirect() {
   const { search } = useLocation();
   const params = new URLSearchParams(search);
   params.set('view', 'list');
-  return <Navigate to={`/app/hk/rooms?${params.toString()}`} replace />;
+  params.set('tab', 'rooms');
+  return <Navigate to={`/app/hk/daily?${params.toString()}`} replace />;
+}
+
+/** The old addresses of "Công việc cá nhân": each lands on its tab of "Công việc mỗi ngày cần làm", its query kept. */
+function HkDailyRedirect({ tab }: { tab: DailyTab }) {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  params.set('tab', tab);
+  return <Navigate to={`/app/hk/daily?${params.toString()}`} replace />;
 }
 import { TechnicalPage } from '../pages/TechnicalPage';
 import { BookingDetailPage } from '../pages/BookingDetailPage';
@@ -100,6 +106,8 @@ const TECHNICAL_REPORT_ROLES: readonly UserRole[] = [
  */
 const SUPERVISION_ROLES: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER'];
 const REPORT_ROLES: readonly UserRole[] = ['RECEPTIONIST', ...SUPERVISION_ROLES];
+/** "Phát hiện & thu tiền": the supervisors, and the Quản lý buồng phòng over its own branch (no collection). */
+const HK_FINDINGS_ROLES: readonly UserRole[] = [...SUPERVISION_ROLES, 'HOUSEKEEPING_MANAGER'];
 /** Bộ phận buồng phòng's reporting, and the Admin reading it. */
 const HK_REPORT_ROLES: readonly UserRole[] = ['ADMIN', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'];
 /** "VII" — Reception and Bộ phận buồng phòng send upward; who reads what is the server's. */
@@ -213,7 +221,23 @@ export function AppRoutes() {
           <Route path="reports" element={<RequireRole role={REPORT_ROLES}><OperationalReportsPage /></RequireRole>} />
           {/* "Báo cáo vấn đề" → "Kỹ thuật" and "Buồng phòng". */}
           <Route path="reports/technical" element={<RequireRole role={TECHNICAL_REPORT_ROLES}><TechnicalReportPage /></RequireRole>} />
-          <Route path="reports/housekeeping" element={<RequireRole role={SUPERVISION_ROLES}><AdminHousekeepingPage /></RequireRole>} />
+          <Route path="reports/housekeeping" element={<RequireRole role={HK_FINDINGS_ROLES}><AdminHousekeepingPage /></RequireRole>} />
+          {/* The reception managers' view of today's housekeeping work, with "Giao lại". */}
+          {/* The management entries: planned screens, read nothing yet. */}
+          <Route path="work-tracking" element={<Navigate to="/app/work-tracking/assigned" replace />} />
+          <Route
+            path="work-tracking/assigned"
+            element={<RequireRole role={MANAGEMENT_ROLES}><PlannedFeaturePage title="Theo dõi công việc đã giao" description="Theo dõi các công việc bạn đã giao cho người khác." /></RequireRole>}
+          />
+          <Route
+            path="work-tracking/mine"
+            element={<RequireRole role={MANAGEMENT_ROLES}><PlannedFeaturePage title="Theo dõi công việc được giao và phải xử lí" description="Theo dõi các công việc được giao cho bạn và cần bạn xử lí." /></RequireRole>}
+          />
+          <Route
+            path="performance"
+            element={<RequireRole role={MANAGEMENT_ROLES}><PlannedFeaturePage title="Individual Performance" description="Hiệu quả làm việc của từng cá nhân." /></RequireRole>}
+          />
+          <Route path="hk-work-orders" element={<RequireRole role={['RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER']}><ReceptionWorkOrdersPage /></RequireRole>} />
           {/* "VII" — private reports upward; who may send and who may read is the server's. */}
           <Route path="reports/confidential" element={<RequireRole role={CONFIDENTIAL_ROLES}><ConfidentialReportsPage /></RequireRole>} />
           {/* The 12-hour completion archive — a query over the same records; the Admin reads every branch. */}
@@ -295,11 +319,12 @@ export function AppRoutes() {
           {/* "Quản lý buồng phòng": five focused screens. */}
           <Route path="hk" element={<Navigate to="/app/hk/overview" replace />} />
           <Route path="hk/overview" element={<RequireRole role={HK_MANAGER_ROLES}><HkOverviewPage /></RequireRole>} />
-          <Route path="hk/rooms" element={<RequireRole role={HK_MANAGER_ROLES}><HkRoomBoardPage /></RequireRole>} />
-          {/* "Công việc cá nhân": its own rooms (the manager works shifts; the Admin does not), the count, tomorrow. */}
-          <Route path="hk/clean" element={<RequireRole role="HOUSEKEEPING_MANAGER"><HkCleaningPage /></RequireRole>} />
-          <Route path="hk/stock-count" element={<RequireRole role={HK_MANAGER_ROLES}><StockCountPage /></RequireRole>} />
-          <Route path="hk/tomorrow" element={<RequireRole role={HK_MANAGER_ROLES}><HkRoomBoardPage planTomorrow /></RequireRole>} />
+          {/* "Công việc mỗi ngày cần làm": Tổng, its own rooms (the manager's only), the count, today's and tomorrow's work. */}
+          <Route path="hk/daily" element={<RequireRole role={HK_MANAGER_ROLES}><HkDailyWorkPage /></RequireRole>} />
+          <Route path="hk/rooms" element={<RequireRole role={HK_MANAGER_ROLES}><HkDailyRedirect tab="rooms" /></RequireRole>} />
+          <Route path="hk/clean" element={<RequireRole role="HOUSEKEEPING_MANAGER"><HkDailyRedirect tab="clean" /></RequireRole>} />
+          <Route path="hk/stock-count" element={<RequireRole role={HK_MANAGER_ROLES}><HkDailyRedirect tab="count" /></RequireRole>} />
+          <Route path="hk/tomorrow" element={<RequireRole role={HK_MANAGER_ROLES}><HkDailyRedirect tab="tomorrow" /></RequireRole>} />
           <Route path="hk/assign" element={<RequireRole role={HK_MANAGER_ROLES}><HkAssignRedirect /></RequireRole>} />
           <Route path="hk/staff" element={<RequireRole role={HK_MANAGER_ROLES}><HkStaffPage /></RequireRole>} />
           <Route path="hk/kpi" element={<RequireRole role={HK_MANAGER_ROLES}><HkKpiPage /></RequireRole>} />
@@ -307,6 +332,9 @@ export function AppRoutes() {
           {/* Bộ phận buồng phòng's own "Báo cáo vấn đề" and "Hoàn thành vấn đề" (the Admin reads them). */}
           <Route path="hk/reports" element={<RequireRole role={HK_REPORT_ROLES}><HousekeepingReportsPage /></RequireRole>} />
           <Route path="hk/completed" element={<RequireRole role={HK_REPORT_ROLES}><CompletedIssuesPage department="HOUSEKEEPING" /></RequireRole>} />
+          {/* "Kho hàng": the four warehouses, and the former equipment warehouse's items waiting to be classified. */}
+          <Route path="hk/store/chemicals" element={<RequireRole role={HK_MANAGER_ROLES}><WarehousePage key="CHEMICAL_TOOLS" warehouse="CHEMICAL_TOOLS" /></RequireRole>} />
+          <Route path="hk/store/guest-supplies" element={<RequireRole role={HK_MANAGER_ROLES}><WarehousePage key="GUEST_SUPPLIES" warehouse="GUEST_SUPPLIES" /></RequireRole>} />
           <Route path="hk/store/linens" element={<RequireRole role={HK_MANAGER_ROLES}><WarehousePage key="LINEN" warehouse="LINEN" /></RequireRole>} />
           <Route path="hk/store/amenities" element={<RequireRole role={HK_MANAGER_ROLES}><WarehousePage key="AMENITY" warehouse="AMENITY" /></RequireRole>} />
           <Route path="hk/store/equipment" element={<RequireRole role={HK_MANAGER_ROLES}><WarehousePage key="EQUIPMENT" warehouse="EQUIPMENT" /></RequireRole>} />

@@ -610,8 +610,9 @@ export async function voidRoomIssue(
   clock: Clock = getClock(),
   client: PrismaClient = defaultPrisma,
 ) {
-  if (actor.role !== 'ADMIN' && actor.role !== 'RECEPTION_MANAGER' && actor.role !== 'RECEPTION_GENERAL_MANAGER') {
-    throw ApiError.forbidden('Chỉ Admin và quản lý lễ tân mới hủy được vấn đề phòng.');
+  // The Admin, and the managers over their own branches: Quản lý lễ tân, Tổng quản lý lễ tân, Quản lý buồng phòng.
+  if (actor.role !== 'ADMIN' && actor.role !== 'RECEPTION_MANAGER' && actor.role !== 'RECEPTION_GENERAL_MANAGER' && actor.role !== 'HOUSEKEEPING_MANAGER') {
+    throw ApiError.forbidden('Chỉ Admin và quản lý mới hủy được vấn đề phòng.');
   }
   const why = trimmed(reason);
   if (!why) throw ApiError.validation('Vui lòng nhập lý do hủy.');

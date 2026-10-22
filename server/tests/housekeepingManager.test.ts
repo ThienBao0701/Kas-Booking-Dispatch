@@ -27,6 +27,17 @@ import { BEDDING_COLUMNS, REPLACEMENT_COLUMNS, ROOM_COLUMNS } from '../src/repor
 import type { Column } from '../src/report/pdf';
 
 const app = createApp();
+
+let itemSeq = 0;
+/** An item on the branch's room-cleaning list, with `available` on hand. */
+async function cleaningItem(branchId: number, name: string, available: number): Promise<string> {
+  itemSeq += 1;
+  const item = await testPrisma.inventoryItem.create({
+    data: { branchId, warehouse: 'LINEN', name, variant: '', unit: 'cái', code: `3.${String(itemSeq).padStart(3, '0')}`, cleaningOrder: itemSeq, createdByUserId: manager1Id, createdByNameSnapshot: 'Test' },
+  });
+  await testPrisma.inventoryBalance.create({ data: { itemId: item.id, state: 'AVAILABLE', quantity: available } });
+  return item.id;
+}
 type Agent = Awaited<ReturnType<typeof loginAgent>>['agent'];
 const hcm = (day: string, hhmm: string) => new Date(Date.parse(`${day}T${hhmm}:00.000Z`) - 7 * 60 * 60 * 1000);
 const PASSWORD = 'Matkhau123';
@@ -316,21 +327,14 @@ describe('the room work', () => {
     expect(started.body.task).toMatchObject({ state: 'IN_PROGRESS', startedAt: hcm(DAY, '09:00').toISOString() });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(409);
 
-    // The form, validated against the catalog: ONE type per linen item, with its count.
+    // The form, validated: counts of the branch's room-cleaning items, the catalog's special flags.
+    const towel = await cleaningItem(cn1, 'Khăn tắm', 10);
     const cleaning = (body: Record<string, unknown>) => worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send(body);
-    expect((await cleaning({ quantities: { BATH_TOWEL: -1 } })).status).toBe(422);
-    expect((await cleaning({ linen: { BED_SHEET: ['K', 'Q'] } })).status).toBe(422);
-    expect((await cleaning({ linen: { BED_SHEET: { size: 'X', quantity: 1 } } })).status).toBe(422);
-    expect((await cleaning({ linen: { BED_SHEET: { size: 'K' } } })).status).toBe(422);
-    expect((await cleaning({ replaced: ['COMB'] })).status).toBe(422);
+    expect((await cleaning({ items: { [towel]: -1 } })).status).toBe(422);
+    expect((await cleaning({ items: { [towel]: 1.5 } })).status).toBe(422);
+    expect((await cleaning({ items: { 'không hợp lệ': 1 } })).status).toBe(422);
     expect((await cleaning({ special: ['VIP'] })).status).toBe(422);
-    const form = {
-      linen: { BED_SHEET: { size: 'K', quantity: 2 }, DUVET_COVER: { size: 'T', quantity: 1 } },
-      quantities: { BATH_TOWEL: 2, WATER: 4 },
-      replaced: ['SHAMPOO', 'COMB_COTTON_CAP'],
-      special: ['DND', 'LB'],
-      note: 'Rèm hơi bẩn',
-    };
+    const form = { items: { [towel]: 2 }, special: ['DND', 'LB'], note: 'Rèm hơi bẩn' };
 
     // 7. Completion: the end time and the duration from the inspection.
     setClock({ now: () => hcm(DAY, '09:42') });
@@ -344,9 +348,7 @@ describe('the room work', () => {
       cleanedBy: { id: workerId, name: 'Chị Lan' },
     });
     expect(done.body.task.cleaning).toMatchObject({
-      linen: { BED_SHEET: { size: 'K', quantity: 2 }, DUVET_COVER: { size: 'T', quantity: 1 } },
-      quantities: { BATH_TOWEL: 2, WATER: 4 },
-      replaced: ['COMB_COTTON_CAP', 'SHAMPOO'],
+      items: [{ itemId: towel, label: 'Khăn tắm', quantity: 2 }],
       special: ['LB', 'DND'],
       note: 'Rèm hơi bẩn',
       savedByUserId: workerId,
@@ -355,7 +357,7 @@ describe('the room work', () => {
     // 12. The manager sees every step and every value the worker entered.
     const seen = (await manager1.get(`/api/housekeeping/manager/staff/${workerId}?from=${DAY}&to=${DAY}`)).body;
     expect(seen.tasks[0].events.map((e: { type: string }) => e.type)).toEqual(['CREATED', 'ASSIGNED', 'OPENED', 'INSPECTED', 'STARTED', 'COMPLETED']);
-    expect(seen.tasks[0].cleaning).toMatchObject({ quantities: { BATH_TOWEL: 2, WATER: 4 }, special: ['LB', 'DND'], linen: { BED_SHEET: { size: 'K', quantity: 2 } } });
+    expect(seen.tasks[0].cleaning).toMatchObject({ items: [{ itemId: towel, quantity: 2 }], special: ['LB', 'DND'] });
     expect(seen.findings.map((f: { typeLabel: string }) => f.typeLabel)).toEqual(['Hút thuốc']);
     expect(seen.shifts).toHaveLength(1);
     const progress = (await manager1.get(`/api/housekeeping/manager/staff-progress?from=${DAY}&to=${DAY}`)).body.rows;
@@ -412,17 +414,13 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     await onShift(worker, cn1);
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(200);
-    const form = {
-      linen: { BED_SHEET: { size: 'Q', quantity: 2 }, MATTRESS_PROTECTOR: { size: 'K', quantity: 1 } },
-      quantities: { PILLOWCASE: 4 },
-      replaced: ['TEA_COFFEE_SUGAR', 'HAND_WASH'],
-      special: ['SO', 'OOO', 'LNL'],
-      note: 'Ổ cắm hỏng',
-    };
+    const pillowcase = await cleaningItem(cn1, 'Áo gối', 10);
+    const form = { items: { [pillowcase]: 4 }, special: ['SO', 'OOO', 'LNL'], note: 'Ổ cắm hỏng' };
+    const saved = { items: [{ itemId: pillowcase, label: 'Áo gối', quantity: 4 }], special: ['SO', 'OOO', 'LNL'], note: 'Ổ cắm hỏng' };
     expect((await worker.put(`/api/housekeeping/work/tasks/${task!.id}/cleaning`).send(form)).status).toBe(200);
     // Reloaded, and stored as data — not as text.
-    expect((await worker.get(`/api/housekeeping/work/tasks/${task!.id}`)).body.task.cleaning).toMatchObject(form);
-    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task!.id } })).cleaning).toMatchObject(form);
+    expect((await worker.get(`/api/housekeeping/work/tasks/${task!.id}`)).body.task.cleaning).toMatchObject(saved);
+    expect((await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task!.id } })).cleaning).toMatchObject(saved);
 
     setClock({ now: () => hcm(DAY, '08:40') });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send(form)).status).toBe(200);
@@ -450,15 +448,9 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
         recleanRequested: false,
         recleanCount: 0,
         finalOutcome: 'Chờ đánh giá',
-        linen: [
-          { item: 'BED_SHEET', label: 'Ga giường', size: 'Q', sizeLabel: 'Queen', quantity: 2 },
-          { item: 'MATTRESS_PROTECTOR', label: 'Bảo vệ nệm', size: 'K', sizeLabel: 'King', quantity: 1 },
-        ],
-        quantities: [{ item: 'PILLOWCASE', label: 'Áo gối', quantity: 4 }],
-        replaced: [
-          { code: 'TEA_COFFEE_SUGAR', label: 'Trà, cà phê, đường. Miễn phí' },
-          { code: 'HAND_WASH', label: 'Nước rửa tay' },
-        ],
+        linen: [],
+        quantities: [{ item: pillowcase, label: 'Áo gối', quantity: 4 }],
+        replaced: [],
         special: [
           { code: 'SO', short: 'SO', label: 'Phòng có đồ nhưng khách không ngủ' },
           { code: 'OOO', short: 'OOO', label: 'Không thể bán phòng' },
@@ -479,29 +471,25 @@ describe('"Dọn phòng" — the form’s fields, as data', () => {
     expect(cell('Time In')).toBe('08:00');
     expect(cell('Time Out')).toBe('08:40');
     expect(cell('Thời gian dọn')).toBe('40 phút');
-    expect(cell('Ga giường')).toBe('Queen × 2');
-    expect(cell('Bảo vệ nệm')).toBe('King × 1');
     expect(cell('Số lượng')).toBe('Áo gối: 4');
-    expect(cell('Đồ thay thế')).toBe('Trà, cà phê, đường. Miễn phí; Nước rửa tay');
     expect(cell('Ghi nhận đặc biệt')).toBe('SO : Phòng có đồ nhưng khách không ngủ; OOO : Không thể bán phòng; LNL : Hàng thất lạc');
     expect(cell('Ghi chú')).toBe('Ổ cắm hỏng');
   });
 
-  it('prints the PDF from the "Dọn phòng" data — King and its count, replacements, special statuses, note, worker, times', async () => {
+  it('prints the PDF from a saved "Dọn phòng" — an older save’s King and its count, replacements, special statuses, note, worker, times', async () => {
     const [task] = await setUp(manager1, ['101'], workerId);
     await onShift(worker, cn1);
     setClock({ now: () => hcm(DAY, '09:00') });
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/inspect`).send({ issues: [] })).status).toBe(201);
     expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/start`)).status).toBe(200);
     setClock({ now: () => hcm(DAY, '09:42') });
-    const form = {
-      linen: { BED_SHEET: { size: 'K', quantity: 2 } },
-      quantities: { BATH_TOWEL: 3 },
-      replaced: ['SHAMPOO', 'HAND_WASH'],
-      special: ['DND', 'LNL'],
-      note: 'Vòi sen rỉ nước',
-    };
-    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send(form)).status).toBe(200);
+    expect((await worker.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send({ special: ['DND', 'LNL'], note: 'Vòi sen rỉ nước' })).status).toBe(200);
+    // The fixed fields of the form before the room-cleaning list, as an older save holds them — still printed.
+    const before = (await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task!.id } })).cleaning as Record<string, unknown>;
+    await testPrisma.housekeepingRoomTask.update({
+      where: { id: task!.id },
+      data: { cleaning: { ...before, linen: { BED_SHEET: { size: 'K', quantity: 2 } }, quantities: { BATH_TOWEL: 3 }, replaced: ['SHAMPOO', 'HAND_WASH'] } },
+    });
 
     // The PDF's boxes read the very rows the report (and the Excel sheet) is made of.
     const [row] = (await manager1.get(`/api/housekeeping/manager/report?from=${DAY}&to=${DAY}`)).body.rooms as CleaningDetailRow[];

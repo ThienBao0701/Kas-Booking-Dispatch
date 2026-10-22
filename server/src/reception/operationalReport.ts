@@ -185,16 +185,18 @@ export async function branchOperationalReport(
    * when the report is for one shift — a shift-less row is in no shift.
    */
   unshiftedWindow?: { from: Date; to: Date },
+  /** One shift asked for: only Bộ phận buồng phòng's shift-less records join it. */
+  unshiftedHousekeepingOnly = false,
 ): Promise<BranchOperationalReport> {
   const now = getClock().now();
   const closed = sessions.filter((s) => s.closedAt !== null);
   const closedIds = closed.map((s) => s.id);
   // The official report counts what is in force: a deleted record is not printed
   // (its totals already excluded it); it stays on file in "Lịch sử xóa".
-  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow, includeVoided: false };
+  const filter = { branchId: branch.id, category, shiftSessionIds: closedIds, unshiftedWindow, unshiftedHousekeepingOnly, includeVoided: false };
 
   // "Đơn mới" and "Buồng phòng" are by day, not by shift: the full report only.
-  const fullDay = category === undefined && unshiftedWindow !== undefined;
+  const fullDay = category === undefined && unshiftedWindow !== undefined && !unshiftedHousekeepingOnly;
   const [rows, total, cash, shiftCash, rooms, orders] = await Promise.all([
     listReports(actor, { ...filter, take: MAX_ROWS_PER_BRANCH }, client),
     countReports(actor, filter, client),
@@ -401,16 +403,16 @@ export async function operationalReport(
     return { from: params.from, to: params.to, section: params.section, branches: sections, generatedAt: getClock().now() };
   }
   const sessions = params.shiftType ? allSessions.filter((s) => s.shiftType === params.shiftType) : allSessions;
-  // Shift-less supervisor rows join by their own HCM day — unless one shift was asked for.
+  // Shift-less rows join by their own HCM day; with one shift asked for, only Bộ phận buồng phòng's (it has no shift).
   const window = hcmRange(params.from, params.to);
-  const unshiftedWindow = params.shiftType ? undefined : { from: window.start, to: window.end };
+  const unshiftedWindow = { from: window.start, to: window.end };
 
   const sections: BranchOperationalReport[] = [];
   // Sequential on purpose: eight branches × four queries in parallel would open
   // thirty-two connections at once on a pool this application sizes for a desk.
   for (const branch of branches) {
     const mine = sessions.filter((s) => s.branchId === branch.id);
-    sections.push(await branchOperationalReport(actor, branch, mine, client, params.category, unshiftedWindow));
+    sections.push(await branchOperationalReport(actor, branch, mine, client, params.category, unshiftedWindow, Boolean(params.shiftType)));
   }
 
   return {

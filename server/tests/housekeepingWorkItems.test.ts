@@ -659,7 +659,15 @@ describe('J. the Quản lý buồng phòng takes a group and does the work itsel
     setClock({ now: () => hcm(DAY, '08:45') });
     const done = await manager1.post(`${url(p101!.id)}/complete`).send({});
     expect(done.body.task).toMatchObject({ phase: 'COMPLETED', cleanedBy: { name: 'QL qlbp1' } });
-    expect((await manager1.post(`${url(hallway!.id)}/inspect`).send({ issues: [], note: 'Sàn sạch' })).status).toBe(201);
+    // A shared area has no "Dọn phòng": its check completes it.
+    expect((await manager1.post(`${url(hallway!.id)}/start`)).status).toBe(409);
+    setClock({ now: () => hcm(DAY, '08:55') });
+    const area = await manager1.post(`${url(hallway!.id)}/inspect`).send({ issues: [], note: 'Sàn sạch' });
+    expect(area.status).toBe(201);
+    expect(area.body.task).toMatchObject({ phase: 'COMPLETED', inspectionNote: 'Sàn sạch', cleanedBy: { name: 'QL qlbp1' } });
+    expect(await task(hallway!.id)).toMatchObject({ state: 'COMPLETED', reviewResult: 'PASSED', durationSeconds: 0 });
+    // Saved once: a second check is refused.
+    expect((await manager1.post(`${url(hallway!.id)}/inspect`).send({ issues: [] })).status).toBe(409);
     // "Không cần dọn" stays the housekeeper's to ask and the manager's to decide.
     expect((await manager1.post(`${url(hallway!.id)}/no-clean`).send({ reason: 'x' })).status).toBe(403);
     // Its own cleaning needs no review of its own: recorded "Đạt" as it completed.

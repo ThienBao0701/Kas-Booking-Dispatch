@@ -39,6 +39,20 @@ export interface PlaceDraft {
   noteConfirmed?: boolean;
 }
 
+/**
+ * The review of a new work group, by floor: one section per floor (a shared
+ * area under its own floor), floors in the order first picked; a place with no
+ * floor known under its own labelled section.
+ */
+export function draftsByFloor(drafts: PlaceDraft[]): { heading: string; places: PlaceDraft[] }[] {
+  const floors = new Map<string, PlaceDraft[]>();
+  for (const d of drafts) {
+    const heading = d.groupLabel.trim() || 'Chưa xác định tầng';
+    floors.set(heading, [...(floors.get(heading) ?? []), d]);
+  }
+  return [...floors].map(([heading, places]) => ({ heading, places }));
+}
+
 /** The shortest reason that says something ("Thay rèm", "Lau sàn"). */
 export const MIN_NOTE_CHARS = 3;
 

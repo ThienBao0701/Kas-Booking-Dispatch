@@ -481,13 +481,14 @@ export function createAdminReportsRouter(): Router {
         shifts — plus, unless one shift was asked for, the records supervisors
         entered while no shift was open, by their own HCM day.
       */
+      // One shift asked for: Bộ phận buồng phòng's records (no reception shift) stay — never a shift invented for them.
       const periodScope = period
         ? {
             shiftSessionIds: sessionIds,
-            ...(q.shiftType || !window ? {} : { unshiftedWindow: { from: window.start, to: window.end } }),
+            ...(window ? { unshiftedWindow: { from: window.start, to: window.end }, unshiftedHousekeepingOnly: Boolean(q.shiftType) } : {}),
           }
         : q.shiftType
-          ? { shiftSessionIds: sessionIds }
+          ? { shiftSessionIds: sessionIds, unshiftedWindow: { from: new Date(0), to: new Date(8.64e15) }, unshiftedHousekeepingOnly: true }
           : {};
       /*
         DELETED RECORDS ARE NOT ACTIVE RECORDS: they leave this list, the

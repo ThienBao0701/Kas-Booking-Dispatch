@@ -36,6 +36,7 @@ import {
   openTask,
   saveCleaning,
   startTask,
+  taskCleaningItems,
   reviewTask,
   roomHistory,
   updateTask,
@@ -445,6 +446,13 @@ export function createHousekeepingWorkRouter(): Router {
   router.get('/housekeeping/work/tasks/:id', ...gate, (req, res, next) => {
     (async () => {
       res.json({ task: await getTask(actorOf(req), req.params.id!) });
+    })().catch(next);
+  });
+
+  // The items this room's cleaning counts — the branch's list, with what is on hand (no codes).
+  router.get('/housekeeping/work/tasks/:id/cleaning-items', ...gate, (req, res, next) => {
+    (async () => {
+      res.json({ items: await taskCleaningItems(actorOf(req), req.params.id!) });
     })().catch(next);
   });
 

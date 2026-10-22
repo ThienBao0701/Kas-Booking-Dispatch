@@ -22,14 +22,16 @@ import { dispatchPush } from '../push/pushService';
 import type { HousekeepingActor } from './roomIssueService';
 import { managedBranch, managerBranchWhere } from './roomTaskService';
 import {
-  MEANING_LABELS,
+  ALL_WAREHOUSES,
+  CODE_PREFIX,
+  LEGACY_WAREHOUSE,
   MOVEMENT_LABELS,
   STATE_LABELS,
   WAREHOUSES,
   WAREHOUSE_LABELS,
   WAREHOUSE_STATES,
   applyMovements,
-  cleaningCatalog,
+  itemCode,
   itemLabel,
   type MoveInput,
 } from './inventoryLedger';
@@ -41,9 +43,32 @@ const MAX_QUANTITY = 100_000;
  * Input checks
  * ------------------------------------------------------------------ */
 
+/** Any warehouse a row may name — the four, and the legacy "chưa phân loại" one. */
 function warehouseOf(raw: unknown): InventoryWarehouse {
-  if (typeof raw !== 'string' || !(WAREHOUSES as readonly string[]).includes(raw)) throw ApiError.validation('Kho không hợp lệ.');
+  if (typeof raw !== 'string' || !(ALL_WAREHOUSES as readonly string[]).includes(raw)) throw ApiError.validation('Kho không hợp lệ.');
   return raw as InventoryWarehouse;
+}
+
+/** One of the four "Kho hàng" — where new items, receipts and classifications go. */
+function activeWarehouseOf(raw: unknown): InventoryWarehouse {
+  if (typeof raw !== 'string' || !(WAREHOUSES as readonly string[]).includes(raw)) throw ApiError.validation('Vui lòng chọn một trong bốn kho hàng.');
+  return raw as InventoryWarehouse;
+}
+
+/**
+ * THE NEXT ITEM CODE NUMBER of a warehouse — ONE numbering for the whole
+ * system (shared and branch items alike), incremented under its row lock in the
+ * caller's transaction: two creations at once wait for each other and never
+ * share a number, a shared item never collides with a branch's own, and an
+ * archived or deleted item's number is never handed out again.
+ */
+async function nextCodeNumber(tx: Prisma.TransactionClient, warehouse: InventoryWarehouse): Promise<number> {
+  const rows = await tx.$queryRaw<{ lastNumber: number }[]>`
+    INSERT INTO "InventoryGlobalCodeSequence" ("warehouse", "lastNumber")
+    VALUES (${warehouse}::"InventoryWarehouse", 1)
+    ON CONFLICT ("warehouse") DO UPDATE SET "lastNumber" = "InventoryGlobalCodeSequence"."lastNumber" + 1
+    RETURNING "lastNumber"`;
+  return rows[0]!.lastNumber;
 }
 
 function stateOf(raw: unknown, warehouse: InventoryWarehouse): InventoryStockState {
@@ -125,10 +150,12 @@ const ITEM_SELECT = {
   name: true,
   variant: true,
   code: true,
+  scope: true,
   unit: true,
   catalogKey: true,
   lowStockThreshold: true,
   note: true,
+  cleaningOrder: true,
   archivedAt: true,
   createdAt: true,
   branch: { select: { id: true, address: true, branchNumber: true } },
@@ -151,6 +178,8 @@ function serializeItem(r: ItemRow) {
     variant: r.variant,
     label: itemLabel(r),
     code: r.code,
+    /** SYSTEM: the Admin's shared catalog ("Danh mục dùng chung toàn hệ thống"); BRANCH: this branch's own ("Mặt hàng riêng chi nhánh"). */
+    scope: r.scope,
     unit: r.unit,
     catalogKey: r.catalogKey,
     lowStockThreshold: r.lowStockThreshold,
@@ -159,6 +188,15 @@ function serializeItem(r: ItemRow) {
     note: r.note,
     archived: r.archivedAt !== null,
     balances,
+    /**
+     * A balance in a state the warehouse no longer keeps (dirty linen, issued
+     * equipment) — kept, never folded into Sẵn dùng, shown for review.
+     */
+    legacyBalances: r.balances.filter((b) => b.quantity !== 0 && !WAREHOUSE_STATES[r.warehouse].includes(b.state)).map((b) => ({ state: b.state, stateLabel: STATE_LABELS[b.state], quantity: b.quantity })),
+    /** In the legacy warehouse: waits to be classified into one of the four. */
+    unclassified: r.warehouse === LEGACY_WAREHOUSE,
+    /** In the branch's "Dọn phòng" list, at this position; null: not in it. */
+    cleaningOrder: r.cleaningOrder,
     pendingDamage: r._count.damageReports,
     // Its stock was set up: counted ("Khai báo tồn đầu kỳ", "Kiểm kho") or moved at least once.
     opened: r._count.movements > 0 || r._count.countLines > 0,
@@ -200,67 +238,41 @@ function thresholdOf(raw: unknown): number | null {
   return raw;
 }
 
-/** "Thêm mặt hàng" — one item of one variant; its balances start at zero. */
+/** "Thêm mặt hàng" — one item (the same path as several). */
 export async function createItem(actor: HousekeepingActor, input: ItemInput, client: PrismaClient = defaultPrisma) {
-  const branch = await managerBranch(actor, client);
-  const name = textOf(input.name, 200, 'Tên mặt hàng');
-  const unit = textOf(input.unit, 30, 'Đơn vị');
-  if (!name) throw ApiError.validation('Vui lòng nhập tên mặt hàng.');
-  if (!unit) throw ApiError.validation('Vui lòng nhập đơn vị tính.');
-  try {
-    const row = await client.inventoryItem.create({
-      data: {
-        branchId: branch.id,
-        warehouse: warehouseOf(input.warehouse),
-        name,
-        variant: textOf(input.variant, 50, 'Kích cỡ / loại') ?? '',
-        code: textOf(input.code, 50, 'Mã mặt hàng'),
-        unit,
-        lowStockThreshold: thresholdOf(input.lowStockThreshold),
-        note: textOf(input.note, 500, 'Ghi chú'),
-        createdByUserId: actor.id,
-        createdByNameSnapshot: actor.fullName,
-      },
-      select: ITEM_SELECT,
-    });
-    return serializeItem(row);
-  } catch (e) {
-    if (isUniqueViolation(e)) throw ApiError.conflict('Kho đã có mặt hàng cùng tên và kích cỡ (hoặc cùng mã) đang dùng.');
-    throw e;
-  }
+  return (await createItems(actor, { warehouse: input.warehouse, items: [input] }, client))[0]!;
 }
 
 /** Most new items one "Thêm mặt hàng" may save together. */
 export const MAX_NEW_ITEMS = 50;
 
 /**
- * "THÊM MẶT HÀNG" — one or several new items of one warehouse, ALL OR NONE: one
- * transaction, so a refused row (a duplicate name and size, a code already used)
- * leaves none of the others saved. Two rows of the request naming the same item
- * are refused before anything is written. Balances start at zero.
+ * "THÊM MẶT HÀNG" — one or several new items of one of the four warehouses,
+ * named, ALL OR NONE: one transaction, so a refused row (a name already in use)
+ * leaves none of the others saved. Each gets the warehouse's next code ("3.016")
+ * from the server — never typed, never reused. Unit "cái" unless given;
+ * balances start at zero (stock comes with "Nhập kho" or a count).
  */
 export async function createItems(
   actor: HousekeepingActor,
   input: { warehouse: unknown; items: unknown },
   client: PrismaClient = defaultPrisma,
 ) {
+  if (actor.role === 'ADMIN') return createSharedItems(actor, input, client);
   const branch = await managerBranch(actor, client);
-  const warehouse = warehouseOf(input.warehouse);
+  const warehouse = activeWarehouseOf(input.warehouse);
   const raw = Array.isArray(input.items) ? (input.items as ItemInput[]) : [];
   if (raw.length === 0) throw ApiError.validation('Vui lòng nhập ít nhất một mặt hàng.');
   if (raw.length > MAX_NEW_ITEMS) throw ApiError.validation(`Tối đa ${MAX_NEW_ITEMS} mặt hàng mỗi lần.`);
   const rows = raw.map((r, i) => {
     const name = textOf(r.name, 200, 'Tên mặt hàng');
-    const unit = textOf(r.unit, 30, 'Đơn vị');
     if (!name) throw ApiError.validation(`Dòng ${i + 1}: vui lòng nhập tên mặt hàng.`);
-    if (!unit) throw ApiError.validation(`Dòng ${i + 1}: vui lòng nhập đơn vị tính.`);
     return {
       branchId: branch.id,
       warehouse,
       name,
       variant: textOf(r.variant, 50, 'Kích cỡ / loại') ?? '',
-      code: textOf(r.code, 50, 'Mã mặt hàng'),
-      unit,
+      unit: textOf(r.unit, 30, 'Đơn vị') ?? 'cái',
       lowStockThreshold: thresholdOf(r.lowStockThreshold),
       note: textOf(r.note, 500, 'Ghi chú'),
       createdByUserId: actor.id,
@@ -269,64 +281,107 @@ export async function createItems(
   });
   const fold = (v: string) => v.normalize('NFC').toLocaleLowerCase('vi');
   assertDistinct(rows.map((r) => `${fold(r.name)}|${fold(r.variant)}`), (i) => itemLabel(rows[i]!));
-  const codes = rows.filter((r) => r.code).map((r) => fold(r.code!));
-  if (new Set(codes).size !== codes.length) throw ApiError.validation('Hai dòng đang dùng cùng một mã mặt hàng.');
   try {
-    const created = await client.$transaction((tx) => Promise.all(rows.map((data) => tx.inventoryItem.create({ data, select: ITEM_SELECT }))));
+    const created = await client.$transaction(async (tx) => {
+      const out = [];
+      for (const data of rows) {
+        const code = itemCode(warehouse, await nextCodeNumber(tx, warehouse));
+        out.push(await tx.inventoryItem.create({ data: { ...data, code, scope: 'BRANCH' }, select: ITEM_SELECT }));
+      }
+      return out;
+    });
     return created.map(serializeItem);
   } catch (e) {
-    if (isUniqueViolation(e)) throw ApiError.conflict('Kho đã có mặt hàng cùng tên và kích cỡ (hoặc cùng mã) đang dùng — không mặt hàng nào được lưu.');
+    if (isUniqueViolation(e)) throw ApiError.conflict('Kho đã có mặt hàng cùng tên đang dùng — không mặt hàng nào được lưu.');
     throw e;
   }
 }
 
 /**
- * "Thêm từ form dọn phòng" — the "Dọn phòng" form's items of one warehouse that
- * this branch does not keep yet, each at zero: no opening balance is invented.
+ * "DANH MỤC DÙNG CHUNG TOÀN HỆ THỐNG" — the Admin's items, by name, all or none:
+ * each gets ONE code and one row in every active branch (scope SYSTEM), so all
+ * eight can receive, count and use it. No stock is created: every branch's
+ * balance starts at nothing until it receives its own. A branch that already
+ * has an active item of that name in that warehouse refuses the whole save —
+ * names are never merged.
  */
-export async function addCatalogItems(actor: HousekeepingActor, warehouseRaw: unknown, client: PrismaClient = defaultPrisma) {
-  const branch = await managerBranch(actor, client);
-  const warehouse = warehouseOf(warehouseRaw);
-  const wanted = cleaningCatalog().filter((c) => c.warehouse === warehouse);
-  const existing = await client.inventoryItem.findMany({
-    where: { branchId: branch.id, archivedAt: null, catalogKey: { in: wanted.map((c) => c.catalogKey) } },
-    select: { catalogKey: true },
+async function createSharedItems(actor: HousekeepingActor, input: { warehouse: unknown; items: unknown }, client: PrismaClient) {
+  const warehouse = activeWarehouseOf(input.warehouse);
+  const raw = Array.isArray(input.items) ? (input.items as ItemInput[]) : [];
+  if (raw.length === 0) throw ApiError.validation('Vui lòng nhập ít nhất một mặt hàng.');
+  if (raw.length > MAX_NEW_ITEMS) throw ApiError.validation(`Tối đa ${MAX_NEW_ITEMS} mặt hàng mỗi lần.`);
+  const names = raw.map((r, i) => {
+    const name = textOf(r.name, 200, 'Tên mặt hàng');
+    if (!name) throw ApiError.validation(`Dòng ${i + 1}: vui lòng nhập tên mặt hàng.`);
+    return name;
   });
-  const have = new Set(existing.map((e) => e.catalogKey));
-  const missing = wanted.filter((c) => !have.has(c.catalogKey));
-  if (missing.length > 0) {
-    await client.inventoryItem.createMany({
-      data: missing.map((c) => ({
-        branchId: branch.id,
-        warehouse: c.warehouse,
-        name: c.name,
-        variant: c.variant,
-        unit: c.unit,
-        // Created FOR this field: the manager's own, explicit act ("Thêm từ form dọn phòng").
-        catalogKey: c.catalogKey,
-        createdByUserId: actor.id,
-        createdByNameSnapshot: actor.fullName,
-      })),
-      // A name the manager already added by hand keeps its own row.
-      skipDuplicates: true,
-    });
+  const fold = (v: string) => v.normalize('NFC').toLocaleLowerCase('vi');
+  assertDistinct(names.map(fold), (i) => names[i]!);
+  const branches = await client.branch.findMany({ where: { active: true }, select: { id: true, address: true }, orderBy: { branchNumber: 'asc' } });
+  const taken = await client.inventoryItem.findMany({
+    where: { warehouse, archivedAt: null, variant: '', name: { in: names, mode: 'insensitive' } },
+    select: { name: true, branch: { select: { address: true } } },
+  });
+  if (taken.length > 0) {
+    throw ApiError.conflict(`${taken[0]!.branch.address} đã có mặt hàng “${taken[0]!.name}” trong kho này — không mặt hàng nào được lưu.`);
   }
-  return { added: missing.length };
+  try {
+    const created = await client.$transaction(async (tx) => {
+      const out = [];
+      for (const name of names) {
+        const code = itemCode(warehouse, await nextCodeNumber(tx, warehouse));
+        for (const branch of branches) {
+          const row = await tx.inventoryItem.create({
+            data: { branchId: branch.id, warehouse, name, variant: '', unit: 'cái', code, scope: 'SYSTEM', createdByUserId: actor.id, createdByNameSnapshot: actor.fullName },
+            select: ITEM_SELECT,
+          });
+          if (branch === branches[0]) out.push(row);
+        }
+      }
+      return out;
+    });
+    return created.map(serializeItem);
+  } catch (e) {
+    if (isUniqueViolation(e)) throw ApiError.conflict('Một chi nhánh đã có mặt hàng cùng tên đang dùng — không mặt hàng nào được lưu.');
+    throw e;
+  }
 }
 
-/** Edits what does not change the stock's meaning: code, unit, threshold, note. */
+/**
+ * Edits what does not change the stock's meaning: unit, threshold, note. The
+ * code is the server's and never edited. An item still in the legacy warehouse
+ * may be CLASSIFIED once into one of the four (`warehouse`): it keeps its id,
+ * balances and history, and gets that warehouse's next code.
+ */
 export async function updateItem(
   actor: HousekeepingActor,
   id: string,
-  input: { code?: unknown; unit?: unknown; lowStockThreshold?: unknown; note?: unknown },
+  input: { unit?: unknown; lowStockThreshold?: unknown; note?: unknown; warehouse?: unknown },
   client: PrismaClient = defaultPrisma,
 ) {
   const branch = await managerBranch(actor, client);
-  const item = await client.inventoryItem.findUnique({ where: { id }, select: { branchId: true, archivedAt: true } });
+  const item = await client.inventoryItem.findUnique({ where: { id }, select: { branchId: true, archivedAt: true, warehouse: true, scope: true, unit: true } });
   if (!item || item.branchId !== branch.id) throw ApiError.notFound('Không tìm thấy mặt hàng.');
   if (item.archivedAt) throw ApiError.conflict('Mặt hàng đã ngừng sử dụng.');
+  // A shared item is the Admin's: its name, code and unit are the same everywhere; the branch keeps its own threshold and note.
+  if (item.scope === 'SYSTEM' && (input.warehouse !== undefined || (input.unit !== undefined && textOf(input.unit, 30, 'Đơn vị') !== item.unit))) {
+    throw ApiError.forbidden('Mặt hàng dùng chung do Admin quản lý — chỉ sửa được ngưỡng sắp hết và ghi chú.');
+  }
+  if (input.warehouse !== undefined) {
+    const target = activeWarehouseOf(input.warehouse);
+    if (item.warehouse !== LEGACY_WAREHOUSE) throw ApiError.conflict('Chỉ mặt hàng chưa phân loại mới được xếp vào kho.');
+    // A quantity "đang sử dụng" has no place in the four warehouses: count it first.
+    const issued = await client.inventoryBalance.findUnique({ where: { itemId_state: { itemId: id, state: 'ISSUED' } }, select: { quantity: true } });
+    if ((issued?.quantity ?? 0) > 0) throw ApiError.conflict('Mặt hàng còn số lượng "Đang sử dụng" — kiểm kho đưa về 0 trước khi phân loại.');
+    const moved = await client.$transaction(async (tx) => {
+      const code = itemCode(target, await nextCodeNumber(tx, target));
+      const { count } = await tx.inventoryItem.updateMany({ where: { id, warehouse: LEGACY_WAREHOUSE, archivedAt: null }, data: { warehouse: target, code } });
+      if (count === 0) throw ApiError.conflict('Mặt hàng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+      return tx.inventoryItem.findUniqueOrThrow({ where: { id }, select: ITEM_SELECT });
+    });
+    return serializeItem(moved);
+  }
   const data: Prisma.InventoryItemUpdateInput = {};
-  if (input.code !== undefined) data.code = textOf(input.code, 50, 'Mã mặt hàng');
   if (input.unit !== undefined) {
     const unit = textOf(input.unit, 30, 'Đơn vị');
     if (!unit) throw ApiError.validation('Vui lòng nhập đơn vị tính.');
@@ -337,7 +392,7 @@ export async function updateItem(
   try {
     return serializeItem(await client.inventoryItem.update({ where: { id }, data, select: ITEM_SELECT }));
   } catch (e) {
-    if (isUniqueViolation(e)) throw ApiError.conflict('Mã mặt hàng đã được dùng cho mặt hàng khác.');
+    if (isUniqueViolation(e)) throw ApiError.conflict('Mặt hàng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
     throw e;
   }
 }
@@ -347,16 +402,19 @@ export async function updateItem(
  * archived ("Ngừng sử dụng"): its movements, receipts and counts stay.
  */
 export async function removeItem(actor: HousekeepingActor, id: string, client: PrismaClient = defaultPrisma) {
+  if (actor.role === 'ADMIN') return removeSharedItem(id, client);
   const branch = await managerBranch(actor, client);
   const item = await client.inventoryItem.findUnique({
     where: { id },
     select: {
       branchId: true,
       archivedAt: true,
+      scope: true,
       _count: { select: { movements: true, receiptLines: true, countLines: true, transferLines: true, damageReports: true } },
     },
   });
   if (!item || item.branchId !== branch.id) throw ApiError.notFound('Không tìm thấy mặt hàng.');
+  if (item.scope === 'SYSTEM') throw ApiError.forbidden('Mặt hàng dùng chung do Admin quản lý — chi nhánh không xóa được.');
   const used = Object.values(item._count).some((n) => n > 0);
   if (!used) {
     await client.inventoryItem.delete({ where: { id } });
@@ -366,86 +424,121 @@ export async function removeItem(actor: HousekeepingActor, id: string, client: P
   return { removed: false, archived: true };
 }
 
-/* ------------------------------------------------------------------ *
- * "Gắn với form dọn phòng" — which item each form field moves, explicitly
- * ------------------------------------------------------------------ */
-
 /**
- * The "Dọn phòng" form, field by field, for one branch: what each field does to
- * the stock and the ONE item it moves — or none, and then a completed cleaning
- * moves nothing for it (no stock is invented, nothing deducted by a guess).
+ * The Admin removes a SHARED item: in every branch, the row never used is
+ * removed and the row with any history only archived ("Ngừng sử dụng").
  */
-export async function listFormMapping(
-  actor: HousekeepingActor,
-  query: { branchId?: number; warehouse?: unknown },
-  client: PrismaClient = defaultPrisma,
-) {
-  const branchId = actor.role === 'HOUSEKEEPING_MANAGER' ? (actor.branchId ?? -1) : query.branchId;
-  if (branchId === undefined) throw ApiError.validation('Vui lòng chọn chi nhánh.');
-  const where = managerBranchWhere(actor, branchId);
-  const warehouse = query.warehouse ? warehouseOf(query.warehouse) : undefined;
-  const fields = cleaningCatalog().filter((c) => !warehouse || c.warehouse === warehouse);
-  const items = await client.inventoryItem.findMany({
-    where: { ...where, archivedAt: null, catalogKey: { in: fields.map((f) => f.catalogKey) } },
-    select: ITEM_SELECT,
+async function removeSharedItem(id: string, client: PrismaClient) {
+  const item = await client.inventoryItem.findUnique({ where: { id }, select: { scope: true, warehouse: true, code: true } });
+  if (!item || item.scope !== 'SYSTEM' || !item.code) throw ApiError.notFound('Không tìm thấy mặt hàng dùng chung.');
+  const rows = await client.inventoryItem.findMany({
+    where: { scope: 'SYSTEM', warehouse: item.warehouse, code: item.code },
+    select: { id: true, archivedAt: true, _count: { select: { movements: true, receiptLines: true, countLines: true, transferLines: true, damageReports: true } } },
   });
-  return fields.map((f) => {
-    const item = items.find((i) => i.catalogKey === f.catalogKey);
-    return {
-      catalogKey: f.catalogKey,
-      field: f.field,
-      warehouse: f.warehouse,
-      meaning: f.meaning,
-      meaningLabel: MEANING_LABELS[f.meaning],
-      kit: f.kit,
-      size: f.size,
-      item: item ? serializeItem(item) : null,
-    };
+  let archived = 0;
+  await client.$transaction(async (tx) => {
+    for (const row of rows) {
+      if (Object.values(row._count).some((n) => n > 0)) {
+        archived += 1;
+        if (!row.archivedAt) await tx.inventoryItem.update({ where: { id: row.id }, data: { archivedAt: new Date() } });
+      } else await tx.inventoryItem.delete({ where: { id: row.id } });
+    }
   });
-}
-
-/**
- * Ties ONE form field to ONE item of this branch — or unties it (`null`). The
- * item must be of the field's warehouse; bed linen of the field's size; and a
- * grouped replacement ("Lược, tăm bông, chụp tóc") only an item the manager
- * confirms IS that kit — never silently one of its parts. One item per field.
- */
-export async function mapItemToForm(
-  actor: HousekeepingActor,
-  id: string,
-  input: { catalogKey: unknown; confirmKit?: unknown },
-  client: PrismaClient = defaultPrisma,
-) {
-  const branch = await managerBranch(actor, client);
-  const item = await client.inventoryItem.findUnique({
-    where: { id },
-    select: { branchId: true, warehouse: true, name: true, variant: true, unit: true, archivedAt: true },
-  });
-  if (!item || item.branchId !== branch.id) throw ApiError.notFound('Không tìm thấy mặt hàng.');
-  if (item.archivedAt) throw ApiError.conflict('Mặt hàng đã ngừng sử dụng.');
-  if (input.catalogKey === null) {
-    return serializeItem(await client.inventoryItem.update({ where: { id }, data: { catalogKey: null }, select: ITEM_SELECT }));
-  }
-  const entry = cleaningCatalog().find((c) => c.catalogKey === input.catalogKey);
-  if (!entry) throw ApiError.validation('Ô của form dọn phòng không hợp lệ.');
-  if (entry.warehouse !== item.warehouse) throw ApiError.validation(`“${entry.field}” thuộc ${WAREHOUSE_LABELS[entry.warehouse]}.`);
-  if (entry.size && item.variant.trim().toLowerCase() !== entry.size.toLowerCase()) {
-    throw ApiError.validation(`“${entry.field}” chỉ gắn được với mặt hàng cỡ ${entry.size}; ${itemLabel(item)} không phải cỡ ${entry.size}.`);
-  }
-  if (entry.kit && input.confirmKit !== true) {
-    throw ApiError.validation(`“${entry.field}” là một bộ nhiều món: chỉ gắn với mặt hàng là trọn bộ đó, và cần xác nhận (mỗi ô ✓ trừ 1 ${item.unit}).`);
-  }
-  try {
-    return serializeItem(await client.inventoryItem.update({ where: { id }, data: { catalogKey: entry.catalogKey }, select: ITEM_SELECT }));
-  } catch (e) {
-    if (isUniqueViolation(e)) throw ApiError.conflict(`“${entry.field}” đã gắn với một mặt hàng khác. Bỏ gắn mặt hàng đó trước.`);
-    throw e;
-  }
+  return { removed: archived === 0, archived: archived > 0 };
 }
 
 /* ------------------------------------------------------------------ *
- * Receipts — "Lưu phiếu nhập"
+ * "Mặt hàng dùng khi dọn phòng" — the branch's list, chosen from the warehouses
  * ------------------------------------------------------------------ */
+
+const CLEANING_SELECT = {
+  id: true,
+  branchId: true,
+  warehouse: true,
+  name: true,
+  variant: true,
+  unit: true,
+  code: true,
+  cleaningOrder: true,
+  archivedAt: true,
+  balances: { where: { state: 'AVAILABLE' as const }, select: { quantity: true } },
+} satisfies Prisma.InventoryItemSelect;
+
+/**
+ * THE BRANCH'S ROOM-CLEANING LIST for its managers and the Admin: every active
+ * item of the four warehouses, with its code, on-hand quantity and, when it is
+ * in the list, its position. The Quản lý buồng phòng reads its own branch; the
+ * Admin names one.
+ */
+export async function listCleaningItems(actor: HousekeepingActor, query: { branchId?: unknown }, client: PrismaClient = defaultPrisma) {
+  const branch = await managedBranch(actor, actor.role === 'HOUSEKEEPING_MANAGER' ? undefined : query.branchId, client);
+  const rows = await client.inventoryItem.findMany({
+    where: { branchId: branch.id, archivedAt: null, warehouse: { in: [...WAREHOUSES] } },
+    select: CLEANING_SELECT,
+    orderBy: [{ warehouse: 'asc' }, { code: 'asc' }],
+  });
+  return {
+    branchId: branch.id,
+    items: rows.map((r) => ({
+      id: r.id,
+      warehouse: r.warehouse,
+      warehouseLabel: WAREHOUSE_LABELS[r.warehouse],
+      code: r.code,
+      label: itemLabel(r),
+      unit: r.unit,
+      available: r.balances[0]?.quantity ?? 0,
+      cleaningOrder: r.cleaningOrder,
+    })),
+  };
+}
+
+/**
+ * "LƯU DANH SÁCH" — exactly these items, in this order, are the branch's room
+ * cleaning list; every other item of the branch leaves it. Items of the
+ * branch's four warehouses only, each once, active. One transaction.
+ */
+export async function setCleaningItems(actor: HousekeepingActor, input: { branchId?: unknown; itemIds?: unknown }, client: PrismaClient = defaultPrisma) {
+  const branch = await managedBranch(actor, actor.role === 'HOUSEKEEPING_MANAGER' ? undefined : input.branchId, client);
+  const ids = Array.isArray(input.itemIds) ? input.itemIds : [];
+  if (ids.some((i) => typeof i !== 'string')) throw ApiError.validation('Mặt hàng không hợp lệ.');
+  if (ids.length > MAX_LINES) throw ApiError.validation(`Tối đa ${MAX_LINES} mặt hàng.`);
+  if (new Set(ids).size !== ids.length) throw ApiError.validation('Một mặt hàng chỉ chọn một lần.');
+  const found = await client.inventoryItem.findMany({
+    where: { id: { in: ids as string[] }, branchId: branch.id, archivedAt: null, warehouse: { in: [...WAREHOUSES] } },
+    select: { id: true },
+  });
+  if (found.length !== ids.length) throw ApiError.validation('Chỉ chọn được mặt hàng đang dùng của bốn kho hàng của chi nhánh.');
+  await client.$transaction(async (tx) => {
+    await tx.inventoryItem.updateMany({ where: { branchId: branch.id, cleaningOrder: { not: null } }, data: { cleaningOrder: null } });
+    for (const [i, id] of (ids as string[]).entries()) await tx.inventoryItem.update({ where: { id }, data: { cleaningOrder: i + 1 } });
+  });
+  return listCleaningItems(actor, { branchId: branch.id }, client);
+}
+
+/**
+ * THE ITEMS A ROOM'S CLEANING COUNTS — the branch's list, in its order, with
+ * what is on hand. The worker's view: no codes.
+ */
+export async function cleaningItemsOfBranch(branchId: number, client: PrismaClient | Prisma.TransactionClient = defaultPrisma) {
+  const rows = await client.inventoryItem.findMany({
+    where: { branchId, archivedAt: null, cleaningOrder: { not: null }, warehouse: { in: [...WAREHOUSES] } },
+    select: CLEANING_SELECT,
+    orderBy: { cleaningOrder: 'asc' },
+  });
+  return rows.map((r) => ({ id: r.id, label: itemLabel(r), unit: r.unit, warehouse: r.warehouse, available: r.balances[0]?.quantity ?? 0 }));
+}
+
+/** The same list as ledger items, for a completion — refusing anything outside it. */
+export async function cleaningLines(tx: Prisma.TransactionClient, branchId: number, quantities: Record<string, number>) {
+  const ids = Object.keys(quantities);
+  if (ids.length === 0) return [];
+  const items = await tx.inventoryItem.findMany({
+    where: { id: { in: ids }, branchId, archivedAt: null, cleaningOrder: { not: null }, warehouse: { in: [...WAREHOUSES] } },
+    select: { id: true, branchId: true, warehouse: true, name: true, variant: true, unit: true },
+  });
+  if (items.length !== ids.length) throw ApiError.validation('Có mặt hàng không thuộc danh sách dọn phòng của chi nhánh. Vui lòng tải lại.');
+  return items.map((item) => ({ item, quantity: quantities[item.id]! }));
+}
 
 export interface ReceiptInput {
   warehouse: unknown;
@@ -478,7 +571,7 @@ function serializeReceipt(r: Prisma.InventoryReceiptGetPayload<{ include: typeof
 /** ONE delivery of many items — the header, every line and every movement, or nothing. */
 export async function createReceipt(actor: HousekeepingActor, input: ReceiptInput, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   const branch = await managerBranch(actor, client);
-  const warehouse = warehouseOf(input.warehouse);
+  const warehouse = activeWarehouseOf(input.warehouse);
   const requestId = requestIdOf(input.requestId);
   const again = await client.inventoryReceipt.findUnique({ where: { requestId }, include: RECEIPT_INCLUDE });
   if (again) return { receipt: serializeReceipt(again), duplicate: true };
@@ -523,6 +616,90 @@ export async function createReceipt(actor: HousekeepingActor, input: ReceiptInpu
     if (isUniqueViolation(e)) {
       const first = await client.inventoryReceipt.findUnique({ where: { requestId }, include: RECEIPT_INCLUDE });
       if (first) return { receipt: serializeReceipt(first), duplicate: true };
+    }
+    throw e;
+  }
+}
+
+export interface MultiReceiptInput {
+  warehouse: unknown;
+  requestId: unknown;
+  receivedAt?: unknown;
+  reference?: unknown;
+  note?: unknown;
+  branches: { branchId: unknown; lines: { itemId: unknown; quantity: unknown; note?: unknown }[] }[];
+}
+
+/**
+ * THE ADMIN'S "NHẬP KHO" FOR SEVERAL BRANCHES — each chosen branch with ITS OWN
+ * items and quantities (never one figure copied to all), one receipt per branch
+ * under the same reference, all or none, once per request. Each branch's
+ * receipt and movements are that branch's alone, exactly as its manager's.
+ */
+export async function createMultiBranchReceipt(actor: HousekeepingActor, input: MultiReceiptInput, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
+  if (actor.role !== 'ADMIN') throw ApiError.forbidden('Chỉ Admin nhập kho cho nhiều chi nhánh.');
+  const warehouse = activeWarehouseOf(input.warehouse);
+  const requestId = requestIdOf(input.requestId);
+  const targets = Array.isArray(input.branches) ? input.branches : [];
+  if (targets.length === 0) throw ApiError.validation('Vui lòng chọn ít nhất một chi nhánh.');
+  const keyOf = (branchId: number) => `${requestId}-${branchId}`;
+  // Each branch checked as its own receipt would be: in scope, its own items of this warehouse, each once.
+  const plan = async (t: MultiReceiptInput['branches'][number]) => {
+    const branch = await managedBranch(actor, t.branchId, client);
+    const lines = Array.isArray(t.lines) ? t.lines : [];
+    const items = await lineItems(client, branch.id, warehouse, lines.map((l) => l.itemId));
+    assertDistinct(items.map((i) => i.id), (i) => itemLabel(items[i]!));
+    const quantities = lines.map((l, i) => quantityOf(l.quantity, `Số lượng của ${itemLabel(items[i]!)}`));
+    return { branch, lines, items, quantities };
+  };
+  const plans: Awaited<ReturnType<typeof plan>>[] = [];
+  for (const t of targets) plans.push(await plan(t));
+  assertDistinct(plans.map((p) => String(p.branch.id)), (i) => `Chi nhánh #${plans[i]!.branch.id}`);
+  const again = await client.inventoryReceipt.findMany({ where: { requestId: { in: plans.map((p) => keyOf(p.branch.id)) } }, include: RECEIPT_INCLUDE });
+  if (again.length > 0) return { receipts: again.map(serializeReceipt), duplicate: true };
+  const now = clock.now();
+  let receivedAt = now;
+  if (input.receivedAt !== undefined && input.receivedAt !== null && input.receivedAt !== '') {
+    receivedAt = new Date(String(input.receivedAt));
+    if (Number.isNaN(receivedAt.getTime())) throw ApiError.validation('Thời gian nhận hàng không hợp lệ.');
+    if (receivedAt.getTime() > now.getTime() + 5 * 60_000) throw ApiError.validation('Thời gian nhận hàng không thể ở tương lai.');
+  }
+  const reference = textOf(input.reference, 100, 'Số phiếu / tham chiếu');
+  const note = textOf(input.note, 1000, 'Ghi chú');
+  try {
+    const ids = await client.$transaction(async (tx) => {
+      const out: string[] = [];
+      for (const p of plans) {
+        const receipt = await tx.inventoryReceipt.create({
+          data: {
+            branchId: p.branch.id,
+            warehouse,
+            requestId: keyOf(p.branch.id),
+            receivedAt,
+            reference,
+            note,
+            createdByUserId: actor.id,
+            createdByNameSnapshot: actor.fullName,
+            createdAt: now,
+            lines: { create: p.lines.map((l, i) => ({ itemId: p.items[i]!.id, quantity: p.quantities[i]!, note: textOf(l.note, 300, 'Ghi chú dòng') })) },
+          },
+        });
+        await applyMovements(
+          tx,
+          p.items.map((item, i) => ({ item, state: 'AVAILABLE', delta: p.quantities[i]!, type: 'RECEIPT', sourceKey: `RECEIPT:${receipt.id}`, receiptId: receipt.id })),
+          actor,
+          now,
+        );
+        out.push(receipt.id);
+      }
+      return out;
+    });
+    const rows = await client.inventoryReceipt.findMany({ where: { id: { in: ids } }, include: RECEIPT_INCLUDE });
+    return { receipts: rows.map(serializeReceipt), duplicate: false };
+  } catch (e) {
+    if (isUniqueViolation(e)) {
+      const first = await client.inventoryReceipt.findMany({ where: { requestId: { in: plans.map((p) => keyOf(p.branch.id)) } }, include: RECEIPT_INCLUDE });
+      if (first.length > 0) return { receipts: first.map(serializeReceipt), duplicate: true };
     }
     throw e;
   }
@@ -1166,7 +1343,8 @@ export async function listMovements(
 /** What the screens need to draw the warehouses: labels and each warehouse's states. */
 export function inventoryCatalog() {
   return {
-    warehouses: WAREHOUSES.map((w) => ({ code: w, label: WAREHOUSE_LABELS[w], states: WAREHOUSE_STATES[w] })),
+    warehouses: WAREHOUSES.map((w) => ({ code: w, label: WAREHOUSE_LABELS[w], states: WAREHOUSE_STATES[w], codePrefix: CODE_PREFIX[w] })),
+    legacyWarehouse: { code: LEGACY_WAREHOUSE, label: WAREHOUSE_LABELS[LEGACY_WAREHOUSE] },
     states: STATE_LABELS,
     movements: MOVEMENT_LABELS,
     damageStatuses: DAMAGE_STATUS_LABELS,

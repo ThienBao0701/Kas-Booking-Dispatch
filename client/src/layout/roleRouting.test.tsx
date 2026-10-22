@@ -51,12 +51,20 @@ describe('role-based shell and routing', () => {
       'Chờ kiểm tra',
       'Cần tạo lại',
       'Lịch sử',
+      // "Gửi lại đơn" right after "Lịch sử", nowhere else.
       'Gửi lại đơn',
+      // The management entries right after "Hoàn thành vấn đề" (a group, not a link): a planned screen, marked so.
+      'Individual PerformanceSẽ phát triển',
       'Chứng từ',
       'Nhắc nhở',
       'Khách sạn & chi nhánh',
       'Quản lý tài khoản',
     ]);
+    expect(labels.filter((l) => l === 'Gửi lại đơn')).toHaveLength(1);
+    // "Hoàn thành vấn đề", then "Theo dõi công việc", then "Individual Performance".
+    const order = [...nav.querySelectorAll('[data-testid^="nav-group-"], a')].map((e) => e.getAttribute('data-testid') ?? e.getAttribute('href'));
+    const done = order.indexOf('nav-group-Hoàn thành vấn đề');
+    expect(order.slice(done, done + 3)).toEqual(['nav-group-Hoàn thành vấn đề', 'nav-group-Theo dõi công việc', '/app/performance']);
     // The group: Lễ tân (with its categories), Kỹ thuật, Buồng phòng — folded off the reports.
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toHaveAttribute('aria-expanded', 'false');
     // "Hoàn thành vấn đề": a group of two views — đúng / sai.
@@ -124,7 +132,7 @@ describe('role-based shell and routing', () => {
     renderApp('/app/new');
 
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Đơn mới', 'Công việc buồng phòng', 'Individual PerformanceSẽ phát triển']);
     expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
     // "Báo cáo vấn đề" is the same folded group as the Admin's (Lễ tân, Kỹ thuật, Buồng phòng).
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();

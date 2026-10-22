@@ -64,8 +64,10 @@ function request(over: Record<string, unknown> = {}) {
     audits: [],
     payment: null,
     guestRequest: {
-      guestName: 'Khách 301',
-      ezCode: 'EZ301',
+      // Housekeeping's record: the room, never the guest (the server sends Housekeeping none).
+      guestName: null,
+      ezCode: null,
+      roomNumber: 'Phòng - 301',
       content: 'Thêm gối',
       note: 'Thêm gối',
       severity: 'MEDIUM',
@@ -120,13 +122,16 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     expect(document.body).not.toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
     expect(screen.getByTestId('hk-report-title')).toHaveTextContent('Vấn đề khách yêu cầu');
     const table = await screen.findByTestId('guest-request-table');
-    expect(await within(table).findByText('Khách 301')).toBeInTheDocument();
+    expect(await within(table).findByText('Thêm gối')).toBeInTheDocument();
+    expect(table).not.toHaveTextContent('Chưa xác định khách');
+    expect(within(table).queryByRole('columnheader', { name: 'Tên khách' })).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: 'Mã EZ' })).not.toBeInTheDocument();
     // Who reported it, by department.
-    expect(within(table).getByText('Buồng phòng')).toBeInTheDocument();
+    expect(within(table).getByTestId('request-meta-r1')).toHaveTextContent('Buồng phòng · Ghi nhận:');
     expect(screen.getByTestId('hk-report-confidential')).toHaveAttribute('href', '/app/reports/confidential');
   });
 
-  it('records a guest request through the shared journal — no branch, shift or department in the request', async () => {
+  it('records a guest request from its content and "Mức độ" alone — no room, guest, Mã EZ, branch, shift or department in the request', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       shell(HOUSEKEEPING_USER, {
@@ -139,12 +144,50 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     renderApp('/app/hk/reports?category=GUEST_REQUEST');
     await userEvent.click(await screen.findByTestId('hk-report-add'));
     const dialog = await screen.findByRole('dialog');
-    await userEvent.type(within(dialog).getByTestId('guest-request-guest'), 'Khách 405');
+    // Only "Mức độ" and "Nội dung".
+    for (const id of ['guest-request-guest', 'guest-request-ez', 'guest-request-place', 'hk-place', 'hk-place-room']) expect(within(dialog).queryByTestId(id)).not.toBeInTheDocument();
+    expect(within(dialog).getAllByRole('textbox')).toHaveLength(1);
+    expect(within(dialog).getByTestId('guest-request-severity')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('guest-request-form-add')).toBeDisabled();
     await userEvent.type(within(dialog).getByTestId('guest-request-content'), 'Thêm khăn');
     await userEvent.click(within(dialog).getByTestId('guest-request-form-add'));
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toMatchObject({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'Khách 405', note: 'Thêm khăn' } });
-    for (const key of ['branchId', 'department', 'originDepartment', 'shiftSessionId']) expect(posted[0]).not.toHaveProperty(key);
+    expect(posted[0]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Thêm khăn', severity: 'MEDIUM' } });
+  });
+
+  it('warns of a possible duplicate the server found — without its details — and sends it only when confirmed', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      shell(HOUSEKEEPING_USER, {
+        'POST /api/reception/reports': (init) => {
+          const body = JSON.parse(String(init.body));
+          posted.push(body);
+          return body.confirmDuplicate
+            ? { status: 201, body: { report: request({ id: 'r9' }) } }
+            : {
+                status: 409,
+                body: {
+                  error: {
+                    code: 'POSSIBLE_DUPLICATE',
+                    message: 'Bộ phận lễ tân có thể đã ghi nhận một báo cáo tương tự trong 24 giờ qua. Kiểm tra lại; nếu đây là việc khác, bấm “Vẫn gửi”.',
+                    details: { department: 'RECEPTION' },
+                  },
+                },
+              };
+        },
+      }),
+    );
+    renderApp('/app/hk/reports?category=GUEST_REQUEST');
+    await userEvent.click(await screen.findByTestId('hk-report-add'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.type(within(dialog).getByTestId('guest-request-content'), 'Khách xin thêm khăn');
+    await userEvent.click(within(dialog).getByTestId('guest-request-form-add'));
+    const warning = await within(dialog).findByTestId('guest-request-form-duplicate');
+    expect(warning).toHaveTextContent('Bộ phận lễ tân có thể đã ghi nhận');
+    expect(posted).toHaveLength(1);
+    await userEvent.click(within(warning).getByTestId('guest-request-form-confirm-duplicate'));
+    await waitFor(() => expect(posted).toHaveLength(2));
+    expect(posted[1]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Khách xin thêm khăn', severity: 'MEDIUM' }, confirmDuplicate: true });
   });
 
   it('follows the branch’s incidents and reports a new one, without correcting, returning or deleting any', async () => {
@@ -183,7 +226,10 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     renderApp('/app/hk/reports');
     expect(await screen.findByTestId('hk-reports-branch')).toBeInTheDocument();
     const table = await screen.findByTestId('guest-request-table');
-    expect(await within(table).findByText('Khách 301')).toBeInTheDocument();
+    // The Admin is not Housekeeping: the request says it has no guest yet, who sent it and when it was recorded.
+    expect(await within(table).findByText('Chưa xác định khách')).toBeInTheDocument();
+    expect(within(table).getByTestId('request-meta-r1')).toHaveTextContent('Ghi nhận: 05/10/2026 09:00:00');
+    expect(table).not.toHaveTextContent('Phòng - 301');
     expect(screen.queryByTestId('hk-report-add')).not.toBeInTheDocument();
     expect(within(table).queryByTestId('complete-r1')).not.toBeInTheDocument();
   });
@@ -212,7 +258,8 @@ describe('"Hoàn thành vấn đề" of Bộ phận buồng phòng', () => {
     });
     renderApp('/app/hk/completed?verdict=CORRECT');
     const completed = await screen.findByTestId('completed-issues');
-    expect(await within(completed).findByText('Khách 301')).toBeInTheDocument();
+    expect(await within(completed).findByText('Thêm gối')).toBeInTheDocument();
+    expect(completed).not.toHaveTextContent('Chưa xác định khách');
     expect(completed).not.toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
     expect(screen.queryByTestId('completed-export-pdf')).not.toBeInTheDocument();
     // The manager's own department is the server's to decide — never asked for.

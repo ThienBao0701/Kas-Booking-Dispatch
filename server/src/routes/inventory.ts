@@ -13,18 +13,18 @@ import { contentDisposition } from '../report/format';
 import { buildInventoryWorkbook, inventoryFileName } from '../report/inventoryReport';
 import type { HousekeepingActor } from '../housekeeping/roomIssueService';
 import {
-  addCatalogItems,
   createCount,
   createDamageReport,
   createItem,
   createItems,
   seesReconciliation,
+  createMultiBranchReceipt,
   createReceipt,
   createTransfer,
   damageSources,
   inventoryCatalog,
-  listFormMapping,
-  mapItemToForm,
+  listCleaningItems,
+  setCleaningItems,
   listCounts,
   listDamageReports,
   listItems,
@@ -101,13 +101,6 @@ export function createInventoryRouter(): Router {
     })().catch(next);
   });
 
-  // "Thêm từ form dọn phòng" — the form's items this branch does not keep yet.
-  router.post(`${base}/items/from-catalog`, ...gate, (req, res, next) => {
-    (async () => {
-      res.json(await addCatalogItems(actorOf(req), (req.body ?? {}).warehouse));
-    })().catch(next);
-  });
-
   router.patch(`${base}/items/:id`, ...gate, (req, res, next) => {
     (async () => {
       res.json({ item: await updateItem(actorOf(req), req.params.id!, req.body ?? {}) });
@@ -121,18 +114,25 @@ export function createInventoryRouter(): Router {
     })().catch(next);
   });
 
-  // "Gắn với form dọn phòng": each form field and the one item it moves.
-  router.get(`${base}/mapping`, ...gate, (req, res, next) => {
+  // "Mặt hàng dùng khi dọn phòng": the branch's list, chosen from its four warehouses.
+  router.get(`${base}/cleaning-items`, ...gate, (req, res, next) => {
     (async () => {
-      const q = listQuery.parse(req.query);
-      res.json({ fields: await listFormMapping(actorOf(req), { branchId: q.branchId, warehouse: q.warehouse }) });
+      res.json(await listCleaningItems(actorOf(req), { branchId: req.query.branchId }));
     })().catch(next);
   });
 
-  router.put(`${base}/items/:id/mapping`, ...gate, (req, res, next) => {
+  router.put(`${base}/cleaning-items`, ...gate, (req, res, next) => {
     (async () => {
-      const body = z.object({ catalogKey: z.string().nullable(), confirmKit: z.boolean().optional() }).parse(req.body ?? {});
-      res.json({ item: await mapItemToForm(actorOf(req), req.params.id!, body) });
+      const body = z.object({ branchId: z.number().int().positive().optional(), itemIds: z.array(z.string()).max(100) }).parse(req.body ?? {});
+      res.json(await setCleaningItems(actorOf(req), body));
+    })().catch(next);
+  });
+
+  // The Admin's receipt for several branches, each with its own quantities.
+  router.post(`${base}/receipts/multi`, ...gate, (req, res, next) => {
+    (async () => {
+      const result = await createMultiBranchReceipt(actorOf(req), (req.body ?? {}) as never, getClock());
+      res.status(result.duplicate ? 200 : 201).json(result);
     })().catch(next);
   });
 

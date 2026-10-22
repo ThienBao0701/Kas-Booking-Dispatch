@@ -110,19 +110,30 @@ export function RoomTaskDetail({ task, catalog, compact = false }: { task: RoomT
         ) : (
           <div className="space-y-1.5 text-slate-800" data-testid="task-cleaning">
             <p>
-              <span className="text-slate-500">Đồ vải: </span>
-              {Object.entries(c.linen)
-                .map(([k, e]) => `${label(catalog?.linen, k)}: ${label(catalog?.linenSizes, e.size)}${e.quantity === null ? '' : ` × ${e.quantity}`}`)
-                .join(' · ') || '—'}
+              <span className="text-slate-500">Mặt hàng sử dụng: </span>
+              {(c.items ?? []).map((i) => `${i.label}: ${i.quantity}`).join(' · ') || '—'}
             </p>
-            <p>
-              <span className="text-slate-500">Số lượng: </span>
-              {Object.entries(c.quantities).map(([k, n]) => `${label(catalog?.quantities, k)}: ${n}`).join(' · ') || '—'}
-            </p>
-            <p>
-              <span className="text-slate-500">Thay thế ✓: </span>
-              {c.replaced.map((k) => label(catalog?.replacements, k)).join(', ') || '—'}
-            </p>
+            {/* The fixed fields of the form before the room-cleaning list — on an older save only. */}
+            {Object.keys(c.linen ?? {}).length ? (
+              <p>
+                <span className="text-slate-500">Đồ vải: </span>
+                {Object.entries(c.linen)
+                  .map(([k, e]) => `${label(catalog?.linen, k)}: ${label(catalog?.linenSizes, e.size)}${e.quantity === null ? '' : ` × ${e.quantity}`}`)
+                  .join(' · ')}
+              </p>
+            ) : null}
+            {Object.keys(c.quantities ?? {}).length ? (
+              <p>
+                <span className="text-slate-500">Số lượng: </span>
+                {Object.entries(c.quantities).map(([k, n]) => `${label(catalog?.quantities, k)}: ${n}`).join(' · ')}
+              </p>
+            ) : null}
+            {c.replaced?.length ? (
+              <p>
+                <span className="text-slate-500">Thay thế ✓: </span>
+                {c.replaced.map((k) => label(catalog?.replacements, k)).join(', ')}
+              </p>
+            ) : null}
             <p>
               <span className="text-slate-500">Ghi nhận đặc biệt: </span>
               {(c.special ?? [])

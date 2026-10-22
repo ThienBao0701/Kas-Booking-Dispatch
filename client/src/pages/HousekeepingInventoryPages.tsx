@@ -1,10 +1,12 @@
 /**
  * HOUSEKEEPING WAREHOUSES — the screens, phone first.
  *
- *   Kho Linens / Kho Amenities / Kho đồ dùng, thiết bị   the stock at a glance
- *        (one card per item), the few daily actions on top — "Nhập kho",
- *        "Xuất dùng / Thu hồi" (equipment), "Báo hỏng" — and the rest
- *        (the catalog, the form mapping, the history) one tap further
+ *   "Kho hàng" — Kho hóa chất & dụng cụ / Đồ dùng cho khách / Kho đồ vải /
+ *        Kho đồ dùng khác / Đồ tiêu hao (Amenities): the stock at a glance
+ *        (one card per item, with its code), the few daily actions on top —
+ *        "Nhập kho", "Báo hỏng" — and the rest (new items, the room-cleaning
+ *        list, the history) one tap further. Items of the former equipment
+ *        warehouse wait under "Chưa phân loại" to be classified.
  *   Kiểm kho                                            the physical count
  *   Tồn kho & Báo hỏng (Admin)                          every branch's stock and
  *        the damage reports to review
@@ -13,15 +15,18 @@
  * double tap or a retry is the same save — never a second receipt.
  */
 import { useMemo, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   Boxes,
   ClipboardCheck,
   FileSpreadsheet,
+  ArrowDown,
+  ArrowUp,
+  FolderInput,
   History,
-  Link2,
+  ListChecks,
   MoreHorizontal,
   PackagePlus,
   Pencil,
@@ -35,14 +40,15 @@ import {
 import {
   INVENTORY_KEY,
   STATE_LABELS,
+  WAREHOUSES,
   WAREHOUSE_LABELS,
+  WAREHOUSE_SHORT,
   WAREHOUSE_STATES,
   inventoryApi,
   inventoryExportUrl,
   newRequestId,
   type DamageReport,
   type DamageStatus,
-  type FormField,
   type InventoryItem,
   type Movement,
   type Receipt,
@@ -75,9 +81,11 @@ const STATE_TEXT: Record<StockState, string> = {
 };
 
 const DESCRIPTIONS: Record<Warehouse, string> = {
-  LINEN: 'Đồ vải theo từng loại và cỡ: sẵn dùng, bẩn và hỏng.',
-  AMENITY: 'Đồ dùng cho khách, cấp vào phòng khi dọn.',
-  EQUIPMENT: 'Dụng cụ, thiết bị buồng phòng: sẵn dùng, đang sử dụng và hỏng.',
+  CHEMICAL_TOOLS: 'Hóa chất tẩy rửa và dụng cụ làm phòng.',
+  GUEST_SUPPLIES: 'Đồ dùng đặt trong phòng cho khách.',
+  LINEN: 'Đồ vải: ga, gối, chăn, khăn…',
+  AMENITY: 'Đồ tiêu hao cấp vào phòng khi dọn.',
+  EQUIPMENT: 'Mặt hàng của kho đồ dùng, thiết bị cũ — chọn kho cho từng mặt hàng.',
 };
 
 /** The moves in use: equipment out and back. Linen has no laundry step — clean linen is received. */
@@ -85,8 +93,8 @@ const TRANSFER_LABELS: Partial<Record<TransferKind, { label: string; hint: strin
   STOCK_ISSUE: { label: 'Xuất dùng', hint: 'Lấy dụng cụ ra dùng.', from: 'AVAILABLE', to: 'ISSUED', icon: Send },
   STOCK_RETURN: { label: 'Thu hồi', hint: 'Dụng cụ dùng xong, trả về kho.', from: 'ISSUED', to: 'AVAILABLE', icon: Undo2 },
 };
-// Equipment goes out and comes back; linen has no laundry step here — clean linen is received ("Nhập kho").
-const TRANSFERS_OF: Record<Warehouse, TransferKind[]> = { LINEN: [], AMENITY: [], EQUIPMENT: ['STOCK_ISSUE', 'STOCK_RETURN'] };
+// The four keep one on-hand figure; only what the former equipment warehouse still has out comes back.
+const TRANSFERS_OF: Record<Warehouse, TransferKind[]> = { CHEMICAL_TOOLS: [], GUEST_SUPPLIES: [], LINEN: [], AMENITY: [], EQUIPMENT: ['STOCK_RETURN'] };
 
 const qty = (n: number | undefined) => (n ?? 0).toLocaleString('vi-VN');
 
@@ -162,7 +170,10 @@ type Dialog =
   | { kind: 'item'; item?: InventoryItem }
   | { kind: 'receipt' }
   | { kind: 'opening' }
-  | { kind: 'mapping' }
+  | { kind: 'cleaning' }
+  | { kind: 'shared' }
+  | { kind: 'multi-receipt' }
+  | { kind: 'classify'; item: InventoryItem }
   | { kind: 'manage' }
   | { kind: 'actions'; item: InventoryItem }
   | { kind: 'remove'; item: InventoryItem }
@@ -190,19 +201,30 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
   // Items whose stock was never set up: a room using them cannot be completed yet.
   const unopened = all.filter((i) => !i.opened);
   const manager = scope.isManager;
+  const legacy = warehouse === 'EQUIPMENT';
+  const navigate = useNavigate();
   const refresh = async (message: string) => {
     await queryClient.invalidateQueries({ queryKey: INVENTORY_KEY });
     setDialog(null);
     setToast(message);
   };
-  const fromCatalog = useMutation({
-    mutationFn: () => inventoryApi.addFromCatalog(warehouse),
-    onSuccess: async ({ added }) => refresh(added > 0 ? `Đã thêm ${added} mặt hàng từ form dọn phòng.` : 'Kho đã có đủ mặt hàng của form dọn phòng.'),
-  });
 
   return (
     <div>
       <HkHeader title={WAREHOUSE_LABELS[warehouse]} description={DESCRIPTIONS[warehouse]} actions={manager ? undefined : scope.picker} />
+      {/* The Admin's catalog and receipts span the branches: no branch has to be chosen first. */}
+      {scope.isAdmin && !legacy ? (
+        <div className="mb-4 grid grid-cols-1 gap-2 sm:flex sm:flex-wrap" data-testid="inventory-admin-actions">
+          <Button onClick={() => setDialog({ kind: 'shared' })} className="min-h-[2.75rem]" data-testid="inventory-shared-open">
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            Thêm mặt hàng dùng chung
+          </Button>
+          <Button variant="secondary" onClick={() => setDialog({ kind: 'multi-receipt' })} className="min-h-[2.75rem]" data-testid="inventory-multi-receipt-open">
+            <PackagePlus className="h-4 w-4" aria-hidden="true" />
+            Nhập kho cho các chi nhánh
+          </Button>
+        </div>
+      ) : null}
       {!scope.ready ? (
         <EmptyState icon={<Boxes className="h-6 w-6" aria-hidden="true" />} title="Chọn chi nhánh" message="Chọn một chi nhánh để xem kho." />
       ) : (
@@ -210,10 +232,12 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
           {/* The daily actions — big, on top. */}
           {manager ? (
             <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap" data-testid="inventory-actions">
-              <Button onClick={() => setDialog({ kind: 'receipt' })} className="min-h-[2.75rem]" data-testid="inventory-receive-open">
-                <PackagePlus className="h-4 w-4" aria-hidden="true" />
-                Nhập kho
-              </Button>
+              {legacy ? null : (
+                <Button onClick={() => setDialog({ kind: 'receipt' })} className="min-h-[2.75rem]" data-testid="inventory-receive-open">
+                  <PackagePlus className="h-4 w-4" aria-hidden="true" />
+                  Nhập kho
+                </Button>
+              )}
               {TRANSFERS_OF[warehouse].map((t) => {
                 const rule = TRANSFER_LABELS[t]!;
                 const Icon = rule.icon;
@@ -281,7 +305,9 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
                   <EmptyState
                     icon={<Boxes className="h-6 w-6" aria-hidden="true" />}
                     title={term ? 'Không có mặt hàng phù hợp' : 'Kho chưa có mặt hàng'}
-                    message={term ? 'Thử từ khóa khác.' : manager ? 'Mở “Quản lý danh mục” để thêm mặt hàng.' : 'Chi nhánh chưa thêm mặt hàng nào vào kho này.'}
+                    message={
+                      term ? 'Thử từ khóa khác.' : legacy ? 'Không còn mặt hàng nào chờ phân loại.' : manager ? 'Mở “Quản lý danh mục” để thêm mặt hàng.' : 'Chi nhánh chưa thêm mặt hàng nào vào kho này.'
+                    }
                   />
                 </div>
               ) : (
@@ -335,25 +361,25 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
       {dialog?.kind === 'manage' ? (
         <Modal open title="Quản lý danh mục" onClose={() => setDialog(null)}>
           <div className="space-y-2" data-testid="inventory-manage">
-            <SheetButton icon={Plus} label="Thêm mặt hàng" hint="Một hoặc nhiều mặt hàng mới, số tồn bắt đầu từ 0." onClick={() => setDialog({ kind: 'item' })} testId="inventory-item-open" />
-            {warehouse !== 'EQUIPMENT' ? (
+            {legacy ? null : (
               <>
+                <SheetButton icon={Plus} label="Thêm mặt hàng" hint="Chỉ cần tên — mã do hệ thống cấp, số tồn bắt đầu từ 0." onClick={() => setDialog({ kind: 'item' })} testId="inventory-item-open" />
                 <SheetButton
-                  icon={Boxes}
-                  label="Thêm từ form dọn phòng"
-                  hint="Các mặt hàng có trên form dọn phòng mà kho chưa có."
-                  onClick={() => fromCatalog.mutate()}
-                  testId="inventory-from-catalog"
+                  icon={ListChecks}
+                  label="Mặt hàng dùng khi dọn phòng"
+                  hint="Chọn và sắp xếp các mặt hàng hiện trên form dọn phòng của chi nhánh."
+                  onClick={() => setDialog({ kind: 'cleaning' })}
+                  testId="inventory-cleaning-open"
                 />
                 <SheetButton
-                  icon={Link2}
-                  label="Gắn với form dọn phòng"
-                  hint="Ô nào trên form trừ kho mặt hàng nào."
-                  onClick={() => setDialog({ kind: 'mapping' })}
-                  testId="inventory-mapping-open"
+                  icon={FolderInput}
+                  label="Mặt hàng chờ phân loại"
+                  hint="Mặt hàng của kho đồ dùng, thiết bị cũ — chọn kho cho từng mặt hàng."
+                  onClick={() => navigate('/app/hk/store/equipment')}
+                  testId="inventory-unclassified-open"
                 />
               </>
-            ) : null}
+            )}
             <label className="flex items-center gap-3 rounded-xl border border-line-subtle px-4 py-3 text-[15px] text-slate-900">
               <input
                 type="checkbox"
@@ -365,30 +391,44 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
               Hiện mặt hàng ngừng sử dụng
             </label>
             <ExportLink warehouse={warehouse} />
-            {fromCatalog.isError ? <ErrorAlert>{toUserMessage(fromCatalog.error)}</ErrorAlert> : null}
           </div>
         </Modal>
       ) : null}
       {dialog?.kind === 'actions' ? (
         <Modal open title={dialog.item.label} onClose={() => setDialog(null)}>
           <div className="space-y-2" data-testid="inventory-item-actions">
+            {dialog.item.unclassified ? (
+              <SheetButton
+                icon={FolderInput}
+                label="Phân loại vào kho"
+                hint="Chọn một trong bốn kho hàng — mặt hàng nhận mã mới."
+                onClick={() => setDialog({ kind: 'classify', item: dialog.item })}
+                testId={`inventory-classify-${dialog.item.id}`}
+              />
+            ) : null}
             <SheetButton icon={Pencil} label="Sửa thông tin" onClick={() => setDialog({ kind: 'item', item: dialog.item })} testId={`inventory-edit-${dialog.item.id}`} />
             <SheetButton icon={ShieldAlert} label="Báo hỏng" onClick={() => setDialog({ kind: 'damage', item: dialog.item })} testId={`inventory-damage-${dialog.item.id}`} />
-            <SheetButton icon={Trash2} label="Xóa" tone="danger" onClick={() => setDialog({ kind: 'remove', item: dialog.item })} testId={`inventory-remove-${dialog.item.id}`} />
+            {/* A shared item is the Admin's: the branch neither removes nor renames it. */}
+            {dialog.item.scope === 'SYSTEM' ? null : (
+              <SheetButton icon={Trash2} label="Xóa" tone="danger" onClick={() => setDialog({ kind: 'remove', item: dialog.item })} testId={`inventory-remove-${dialog.item.id}`} />
+            )}
           </div>
         </Modal>
       ) : null}
       {dialog?.kind === 'remove' ? <RemoveDialog item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       {dialog?.kind === 'item' ? (
         dialog.item ? (
-          <ItemDialog warehouse={warehouse} item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} />
+          <ItemDialog item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} />
         ) : (
           <NewItemsDialog warehouse={warehouse} onClose={() => setDialog(null)} onDone={refresh} />
         )
       ) : null}
       {dialog?.kind === 'receipt' ? <ReceiptDialog warehouse={warehouse} items={all} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       {dialog?.kind === 'opening' ? <OpeningDialog warehouse={warehouse} items={unopened} onClose={() => setDialog(null)} onDone={refresh} /> : null}
-      {dialog?.kind === 'mapping' ? <MappingDialog warehouse={warehouse} items={all} onClose={() => setDialog(null)} onChanged={refresh} /> : null}
+      {dialog?.kind === 'cleaning' ? <CleaningItemsDialog onClose={() => setDialog(null)} onDone={refresh} /> : null}
+      {dialog?.kind === 'shared' ? <NewItemsDialog warehouse={warehouse} shared onClose={() => setDialog(null)} onDone={refresh} /> : null}
+      {dialog?.kind === 'multi-receipt' ? <MultiReceiptDialog warehouse={warehouse} onClose={() => setDialog(null)} onDone={refresh} /> : null}
+      {dialog?.kind === 'classify' ? <ClassifyDialog item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       {dialog?.kind === 'transfer' ? <TransferDialog kind={dialog.transfer} items={all} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       {dialog?.kind === 'damage' ? <DamageDialog warehouse={warehouse} items={all} item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       <Toast message={toast} onDone={() => setToast(null)} />
@@ -402,10 +442,20 @@ function ItemCard({ item: i, states, onMore }: { item: InventoryItem; states: St
     <li className={`rounded-xl border bg-white px-4 py-3 ${i.archived ? 'border-line-subtle opacity-70' : 'border-line-subtle'}`} data-testid={`inventory-item-${i.id}`}>
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <p className="font-semibold text-slate-900">{i.label}</p>
+          <p className="font-semibold text-slate-900">
+            {i.code ? (
+              <span className="mr-1.5 font-mono text-sm font-medium text-slate-500" data-testid={`inventory-code-${i.id}`}>
+                {i.code}
+              </span>
+            ) : null}
+            {i.label}
+          </p>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
             <span>{i.unit}</span>
             {i.archived ? <Badge tone="gray">Ngừng sử dụng</Badge> : !i.opened ? <Badge tone="amber">Chưa khai báo tồn đầu kỳ</Badge> : i.lowStock ? <Badge tone="amber">Sắp hết</Badge> : null}
+            {i.unclassified && !i.archived ? <Badge tone="amber">Chờ phân loại</Badge> : null}
+            {i.cleaningOrder ? <Badge tone="green">Dùng khi dọn phòng</Badge> : null}
+            {i.scope === 'SYSTEM' ? <Badge tone="blue">Dùng chung</Badge> : i.scope === 'BRANCH' && !i.unclassified ? <Badge tone="gray">Riêng chi nhánh</Badge> : null}
           </div>
         </div>
         {onMore ? (
@@ -428,7 +478,21 @@ function ItemCard({ item: i, states, onMore }: { item: InventoryItem; states: St
           </div>
         ))}
       </dl>
+      <LegacyNote item={i} />
     </li>
+  );
+}
+
+/**
+ * A balance from before the four warehouses (dirty linen, equipment still
+ * out) — shown apart, never added to the on-hand figure; a count settles it.
+ */
+function LegacyNote({ item }: { item: InventoryItem }) {
+  if (!item.legacyBalances?.length) return null;
+  return (
+    <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-xs text-amber-900" data-testid={`inventory-legacy-${item.id}`}>
+      Số cũ cần kiểm tra: {item.legacyBalances.map((b) => `${b.stateLabel.toLowerCase()} ${qty(b.quantity)}`).join(', ')} — không cộng vào số sẵn dùng.
+    </p>
   );
 }
 
@@ -469,59 +533,36 @@ function RemoveDialog({ item, onClose, onDone }: { item: InventoryItem; onClose:
 }
 
 /**
- * "Thêm mặt hàng" — or "Sửa thông tin": the unit and the "sắp hết" level (the
- * code and a note under "Thêm thông tin"). The name and size are what the stock
- * IS, so an existing item keeps them.
+ * "SỬA THÔNG TIN" — the unit, the "sắp hết" level and a note. The name is what
+ * the stock IS and the code is the system's, so both stay.
  */
-function ItemDialog({ warehouse, item, onClose, onDone }: { warehouse: Warehouse; item?: InventoryItem; onClose: () => void; onDone: (m: string) => Promise<void> }) {
-  const [name, setName] = useState(item?.name ?? '');
-  const [variant, setVariant] = useState(item?.variant ?? '');
-  const [code, setCode] = useState(item?.code ?? '');
-  const [unit, setUnit] = useState(item?.unit ?? 'cái');
-  const [threshold, setThreshold] = useState(item?.lowStockThreshold === null || item?.lowStockThreshold === undefined ? '' : String(item.lowStockThreshold));
-  const [note, setNote] = useState(item?.note ?? '');
+function ItemDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+  const [unit, setUnit] = useState(item.unit);
+  const [threshold, setThreshold] = useState(item.lowStockThreshold === null ? '' : String(item.lowStockThreshold));
+  const [note, setNote] = useState(item.note ?? '');
   const save = useMutation({
-    mutationFn: () =>
-      item
-        ? inventoryApi.updateItem(item.id, { code: code.trim(), unit: unit.trim(), lowStockThreshold: threshold.trim() ? Number(threshold) : null, note: note.trim() })
-        : inventoryApi.createItem({
-            warehouse,
-            name: name.trim(),
-            variant: variant.trim() || undefined,
-            code: code.trim() || undefined,
-            unit: unit.trim(),
-            lowStockThreshold: threshold.trim() ? Number(threshold) : null,
-            note: note.trim() || undefined,
-          }),
-    onSuccess: ({ item: saved }) => onDone(item ? `Đã lưu ${saved.label}.` : `Đã thêm ${saved.label}.`),
+    mutationFn: () => inventoryApi.updateItem(item.id, { unit: unit.trim(), lowStockThreshold: threshold.trim() ? Number(threshold) : null, note: note.trim() }),
+    onSuccess: ({ item: saved }) => onDone(`Đã lưu ${saved.label}.`),
   });
-  const ready = name.trim().length > 0 && unit.trim().length > 0;
   return (
     <Modal
       open
-      title={item ? `Sửa ${item.label}` : `Thêm mặt hàng — ${WAREHOUSE_LABELS[warehouse]}`}
+      title={`Sửa ${item.label}`}
       onClose={onClose}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => save.mutate()} disabled={!ready} loading={save.isPending} data-testid="inventory-item-save">
+          <Button onClick={() => save.mutate()} disabled={!unit.trim()} loading={save.isPending} data-testid="inventory-item-save">
             Lưu
           </Button>
         </>
       }
     >
       <div className="grid gap-3 sm:grid-cols-2">
-        <Input label="Tên mặt hàng" value={name} disabled={Boolean(item)} onChange={(e) => setName(e.target.value)} data-testid="inventory-item-name" />
-        <Input
-          label="Cỡ / loại (nếu có)"
-          value={variant}
-          disabled={Boolean(item)}
-          onChange={(e) => setVariant(e.target.value)}
-          placeholder="VD: King"
-          data-testid="inventory-item-variant"
-        />
+        <Input label="Mã mặt hàng" value={item.code ?? '—'} disabled data-testid="inventory-item-code" />
+        <Input label="Tên mặt hàng" value={item.label} disabled data-testid="inventory-item-name" />
         <Input label="Đơn vị tính" value={unit} onChange={(e) => setUnit(e.target.value)} data-testid="inventory-item-unit" />
         <Input
           label="Báo sắp hết khi còn (nếu cần)"
@@ -530,14 +571,8 @@ function ItemDialog({ warehouse, item, onClose, onDone }: { warehouse: Warehouse
           onChange={(e) => setThreshold(e.target.value.replace(/\D/g, ''))}
           data-testid="inventory-item-threshold"
         />
+        <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="inventory-item-note" />
       </div>
-      <details className="mt-3" open={Boolean(item?.code || item?.note)}>
-        <summary className="cursor-pointer text-sm font-medium text-slate-600">Thêm thông tin (mã, ghi chú)</summary>
-        <div className="mt-2 grid gap-3 sm:grid-cols-2">
-          <Input label="Mã mặt hàng" value={code} onChange={(e) => setCode(e.target.value)} data-testid="inventory-item-code" />
-          <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="inventory-item-note" />
-        </div>
-      </details>
       {save.isError ? (
         <div className="mt-3">
           <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
@@ -547,96 +582,217 @@ function ItemDialog({ warehouse, item, onClose, onDone }: { warehouse: Warehouse
   );
 }
 
-/** One new item as typed. */
-interface NewItemRow {
-  key: number;
-  name: string;
-  variant: string;
-  unit: string;
-  code: string;
-  note: string;
-}
-
-const VARIANT_HINT: Record<Warehouse, string> = { LINEN: 'VD: King, Queen, Twin', AMENITY: 'VD: 30ml', EQUIPMENT: 'VD: loại lớn' };
-const blankItem = (key: number): NewItemRow => ({ key, name: '', variant: '', unit: 'cái', code: '', note: '' });
-
 /**
- * "THÊM MẶT HÀNG" — as many new items as needed, one card each, saved once:
- * all or none. A size (King / Queen / Twin) is its own item. The stock of each
- * starts at zero; the quantities come with "Nhập kho".
+ * "NHẬP KHO CHO CÁC CHI NHÁNH" — the Admin's receipt: the branches chosen, and
+ * for EACH its own quantities of its own items (an empty box: none received).
+ * Saved once, all or none — one receipt per branch, nothing copied between them.
  */
-function NewItemsDialog({ warehouse, onClose, onDone }: { warehouse: Warehouse; onClose: () => void; onDone: (m: string) => Promise<void> }) {
-  const [rows, setRows] = useState<NewItemRow[]>([blankItem(1)]);
-  const set = (key: number, patch: Partial<NewItemRow>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  const filled = rows.filter((r) => r.name.trim() || r.variant.trim() || r.code.trim() || r.note.trim());
-  const ready = filled.length > 0 && filled.every((r) => r.name.trim() && r.unit.trim());
+function MultiReceiptDialog({ warehouse, onClose, onDone }: { warehouse: Warehouse; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+  const [requestId] = useState(newRequestId);
+  const [receivedAt, setReceivedAt] = useState(nowLocal);
+  const [chosen, setChosen] = useState<number[]>([]);
+  // "branchId:itemId" → the quantity typed.
+  const [qty, setQty] = useState<Record<string, string>>({});
+  const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list() });
+  const lines = chosen
+    .map((branchId) => ({
+      branchId,
+      lines: Object.entries(qty)
+        .filter(([k, v]) => k.startsWith(`${branchId}:`) && v !== '')
+        .map(([k, v]) => ({ itemId: k.slice(String(branchId).length + 1), quantity: Number(v) })),
+    }))
+    .filter((b) => b.lines.length > 0);
+  const bad = lines.some((b) => b.lines.some((l) => !Number.isInteger(l.quantity) || l.quantity < 1));
   const save = useMutation({
     mutationFn: () =>
-      inventoryApi.createItems(
-        warehouse,
-        filled.map((r) => ({
-          name: r.name.trim(),
-          variant: r.variant.trim() || undefined,
-          unit: r.unit.trim(),
-          code: r.code.trim() || undefined,
-          note: r.note.trim() || undefined,
-        })),
-      ),
-    onSuccess: ({ items }) => onDone(items.length === 1 ? `Đã thêm ${items[0]!.label}.` : `Đã thêm ${items.length} mặt hàng.`),
+      inventoryApi.createMultiReceipt({ warehouse, requestId, receivedAt: new Date(`${receivedAt}:00+07:00`).toISOString(), branches: lines }),
+    onSuccess: ({ receipts }) => onDone(`Đã nhập kho cho ${receipts.length} chi nhánh.`),
   });
+  const toggle = (id: number) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
   return (
     <Modal
       open
-      title={`Thêm mặt hàng — ${WAREHOUSE_LABELS[warehouse]}`}
+      size="xl"
+      title={`Nhập kho cho các chi nhánh — ${WAREHOUSE_LABELS[warehouse]}`}
       onClose={onClose}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => save.mutate()} disabled={!ready || save.isPending} loading={save.isPending} data-testid="inventory-items-save">
+          <Button onClick={() => save.mutate()} disabled={lines.length === 0 || bad || save.isPending} loading={save.isPending} data-testid="multi-receipt-save">
+            Lưu phiếu nhập ({lines.length} chi nhánh)
+          </Button>
+        </>
+      }
+    >
+      <Input label="Ngày giờ nhập hàng" type="datetime-local" value={receivedAt} onChange={(e) => setReceivedAt(e.target.value)} data-testid="multi-receipt-at" />
+      <fieldset className="mt-4">
+        <legend className="text-sm font-semibold text-slate-900">Chi nhánh nhận hàng</legend>
+        <div className="mt-1 grid gap-1 sm:grid-cols-2">
+          {(branches.data?.branches ?? []).map((b) => (
+            <label key={b.id} className="flex min-h-[2.75rem] items-center gap-2 rounded-lg border border-line-subtle px-3 py-2 text-sm text-slate-900">
+              <input type="checkbox" checked={chosen.includes(b.id)} onChange={() => toggle(b.id)} className="h-5 w-5 accent-brand-600" data-testid={`multi-receipt-branch-${b.id}`} />
+              {b.address}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <div className="mt-4 space-y-4">
+        {chosen.map((branchId) => (
+          <BranchReceiptLines
+            key={branchId}
+            warehouse={warehouse}
+            branchId={branchId}
+            address={branches.data?.branches.find((b) => b.id === branchId)?.address ?? ''}
+            qty={qty}
+            onQty={(itemId, v) => setQty((q) => ({ ...q, [`${branchId}:${itemId}`]: v.replace(/\D/g, '') }))}
+          />
+        ))}
+      </div>
+      {bad ? <p className="mt-2 text-sm text-red-700">Số lượng phải từ 1.</p> : null}
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
+/** One chosen branch: its own active items of the warehouse, a quantity box each. */
+function BranchReceiptLines({
+  warehouse,
+  branchId,
+  address,
+  qty,
+  onQty,
+}: {
+  warehouse: Warehouse;
+  branchId: number;
+  address: string;
+  qty: Record<string, string>;
+  onQty: (itemId: string, value: string) => void;
+}) {
+  const items = useItems(warehouse, branchId);
+  const list = (items.data?.items ?? []).filter((i) => !i.archived);
+  return (
+    <section className="rounded-xl border border-line-subtle p-3" data-testid={`multi-receipt-lines-${branchId}`}>
+      <h3 className="mb-2 text-sm font-semibold text-slate-900">{address}</h3>
+      <QueryState isLoading={items.isLoading} isError={items.isError} error={items.error} onRetry={() => void items.refetch()}>
+        {list.length === 0 ? (
+          <p className="text-sm text-slate-500">Chi nhánh chưa có mặt hàng nào trong kho này.</p>
+        ) : (
+          <ul className="space-y-1">
+            {list.map((i) => (
+              <li key={i.id} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 text-sm text-slate-800">
+                  {i.code ? <span className="mr-1.5 font-mono text-slate-500">{i.code}</span> : null}
+                  {i.label}
+                </span>
+                <input
+                  inputMode="numeric"
+                  value={qty[`${branchId}:${i.id}`] ?? ''}
+                  onChange={(e) => onQty(i.id, e.target.value)}
+                  placeholder={i.unit}
+                  aria-label={`Số lượng ${i.label} — ${address}`}
+                  data-testid={`multi-receipt-qty-${branchId}-${i.id}`}
+                  className={`${CONTROL} w-24 text-right tabular-nums`}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </QueryState>
+    </section>
+  );
+}
+
+/** One new item as typed: its name only. */
+interface NewItemRow {
+  key: number;
+  name: string;
+}
+
+/**
+ * "THÊM MẶT HÀNG" — as many new items as needed, one name per line, saved once:
+ * all or none. The code (`1.001` …) is the server's; the unit starts as "cái"
+ * and the stock at zero — the quantities come with "Nhập kho".
+ */
+function NewItemsDialog({
+  warehouse,
+  shared = false,
+  onClose,
+  onDone,
+}: {
+  warehouse: Warehouse;
+  /** The Admin's: "Danh mục dùng chung toàn hệ thống" — in every branch at once. */
+  shared?: boolean;
+  onClose: () => void;
+  onDone: (m: string) => Promise<void>;
+}) {
+  const [rows, setRows] = useState<NewItemRow[]>([{ key: 1, name: '' }]);
+  const filled = rows.filter((r) => r.name.trim());
+  const save = useMutation({
+    mutationFn: () => inventoryApi.createItems(warehouse, filled.map((r) => ({ name: r.name.trim() }))),
+    onSuccess: ({ items }) => onDone(items.length === 1 ? `Đã thêm ${items[0]!.label}.` : `Đã thêm ${items.length} mặt hàng.`),
+  });
+  return (
+    <Modal
+      open
+      title={`${shared ? 'Thêm mặt hàng dùng chung' : 'Thêm mặt hàng'} — ${WAREHOUSE_LABELS[warehouse]}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={filled.length === 0 || save.isPending} loading={save.isPending} data-testid="inventory-items-save">
             Lưu {filled.length > 0 ? `${filled.length} mặt hàng` : ''}
           </Button>
         </>
       }
     >
-      <ul className="space-y-3" data-testid="inventory-new-items">
+      <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700" data-testid="inventory-new-scope">
+        {shared ? (
+          <>
+            <b>Danh mục dùng chung toàn hệ thống</b> — mặt hàng có ở cả 8 chi nhánh, mỗi chi nhánh tự nhập số lượng của mình. Tạo mặt hàng không tạo tồn kho.
+          </>
+        ) : (
+          <>
+            <b>Mặt hàng riêng chi nhánh</b> — chỉ chi nhánh của bạn thấy và dùng.
+          </>
+        )}
+      </p>
+      <ul className="space-y-2" data-testid="inventory-new-items">
         {rows.map((r, i) => (
-          <li key={r.key} className="space-y-2 rounded-xl border border-line-subtle bg-white p-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-slate-700">Mặt hàng {i + 1}</span>
-              {rows.length > 1 ? (
-                <button
-                  type="button"
-                  onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
-                  className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-red-700"
-                  aria-label={`Bỏ mặt hàng ${i + 1}`}
-                  data-testid={`inventory-new-remove-${i}`}
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </button>
-              ) : null}
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Input label="Tên mặt hàng" value={r.name} onChange={(e) => set(r.key, { name: e.target.value })} data-testid={`inventory-new-name-${i}`} />
+          <li key={r.key} className="flex items-end gap-2">
+            <div className="min-w-0 flex-1">
               <Input
-                label="Cỡ / loại (nếu có)"
-                value={r.variant}
-                onChange={(e) => set(r.key, { variant: e.target.value })}
-                placeholder={VARIANT_HINT[warehouse]}
-                data-testid={`inventory-new-variant-${i}`}
+                label={`Tên mặt hàng ${i + 1}`}
+                value={r.name}
+                onChange={(e) => setRows((rs) => rs.map((x) => (x.key === r.key ? { ...x, name: e.target.value } : x)))}
+                data-testid={`inventory-new-name-${i}`}
               />
-              <Input label="Đơn vị tính" value={r.unit} onChange={(e) => set(r.key, { unit: e.target.value })} data-testid={`inventory-new-unit-${i}`} />
-              <Input label="Mã (nếu có)" value={r.code} onChange={(e) => set(r.key, { code: e.target.value })} data-testid={`inventory-new-code-${i}`} />
             </div>
-            <Input label="Ghi chú (nếu có)" value={r.note} onChange={(e) => set(r.key, { note: e.target.value })} data-testid={`inventory-new-note-${i}`} />
+            {rows.length > 1 ? (
+              <button
+                type="button"
+                onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-red-700"
+                aria-label={`Bỏ mặt hàng ${i + 1}`}
+                data-testid={`inventory-new-remove-${i}`}
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : null}
           </li>
         ))}
       </ul>
       <Button
         variant="secondary"
         className="mt-3 min-h-[2.75rem] w-full"
-        onClick={() => setRows((rs) => [...rs, blankItem(Math.max(...rs.map((x) => x.key)) + 1)])}
+        onClick={() => setRows((rs) => [...rs, { key: Math.max(...rs.map((x) => x.key)) + 1, name: '' }])}
         data-testid="inventory-new-add"
       >
         <Plus className="h-4 w-4" aria-hidden="true" />
@@ -1041,89 +1197,151 @@ function OpeningDialog({ warehouse, items, onClose, onDone }: { warehouse: Wareh
 }
 
 /**
- * "GẮN VỚI FORM DỌN PHÒNG" — each field of the form and the ONE item it moves.
- * A field with no item moves nothing. A grouped replacement is tied only to an
- * item confirmed to BE that kit.
+ * "MẶT HÀNG DÙNG KHI DỌN PHÒNG" — which items of the branch's four warehouses
+ * the room-cleaning form counts, and in what order. The same list opens in the
+ * housekeeper's and the manager's form; the server takes no other item.
+ * `branchId`: the Admin's chosen branch (a manager's is its own).
  */
-function MappingDialog({ warehouse, items, onClose, onChanged }: { warehouse: Warehouse; items: InventoryItem[]; onClose: () => void; onChanged: (m: string) => Promise<void> }) {
-  const mapping = useQuery({ queryKey: [...INVENTORY_KEY, 'mapping', warehouse], queryFn: () => inventoryApi.mapping({ warehouse }) });
-  const queryClient = useQueryClient();
-  const [kitOk, setKitOk] = useState<Record<string, boolean>>({});
-  const [error, setError] = useState<string | null>(null);
-  const tie = useMutation({
-    mutationFn: async ({ field, itemId }: { field: FormField; itemId: string }) => {
-      // Moving a field to another item: untie the old one first (one item per field).
-      if (field.item && field.item.id !== itemId) await inventoryApi.mapItem(field.item.id, { catalogKey: null });
-      if (itemId) await inventoryApi.mapItem(itemId, { catalogKey: field.catalogKey, confirmKit: field.kit ? true : undefined });
-    },
-    onSuccess: async () => {
-      setError(null);
-      await queryClient.invalidateQueries({ queryKey: INVENTORY_KEY });
-    },
-    onError: (e) => setError(toUserMessage(e)),
+export function CleaningItemsDialog({ branchId, onClose, onDone }: { branchId?: number; onClose: () => void; onDone: (m: string) => Promise<void> | void }) {
+  const list = useQuery({ queryKey: [...INVENTORY_KEY, 'cleaning-items', branchId ?? null], queryFn: () => inventoryApi.cleaningItems(branchId) });
+  const choices = list.data?.items ?? [];
+  // The ids chosen, in order — starting from the saved list.
+  const [chosen, setChosen] = useState<string[] | null>(null);
+  const order =
+    chosen ??
+    choices
+      .filter((c) => c.cleaningOrder !== null)
+      .sort((a, b) => a.cleaningOrder! - b.cleaningOrder!)
+      .map((c) => c.id);
+  const byId = new Map(choices.map((c) => [c.id, c]));
+  const toggle = (id: string) => setChosen(order.includes(id) ? order.filter((x) => x !== id) : [...order, id]);
+  const move = (index: number, by: -1 | 1) => {
+    const next = [...order];
+    const [id] = next.splice(index, 1);
+    next.splice(index + by, 0, id!);
+    setChosen(next);
+  };
+  const save = useMutation({
+    mutationFn: () => inventoryApi.setCleaningItems(order, branchId),
+    onSuccess: async ({ items }) => onDone(`Đã lưu ${items.filter((i) => i.cleaningOrder !== null).length} mặt hàng dùng khi dọn phòng.`),
   });
   return (
     <Modal
       open
       size="xl"
-      title="Gắn với form dọn phòng"
+      title="Mặt hàng dùng khi dọn phòng"
       onClose={onClose}
       footer={
-        <Button variant="secondary" onClick={() => void onChanged('Đã cập nhật việc gắn với form dọn phòng.')}>
-          Xong
-        </Button>
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={list.isLoading || save.isPending} loading={save.isPending} data-testid="cleaning-items-save">
+            Lưu danh sách
+          </Button>
+        </>
       }
     >
-      <p className="mb-3 text-sm text-slate-600">Khi phòng “Hoàn thành”, mỗi ô trên form chỉ trừ kho qua mặt hàng được gắn. Ô chưa gắn thì không trừ kho.</p>
-      {error ? (
-        <div className="mb-3">
-          <ErrorAlert>{error}</ErrorAlert>
+      <p className="mb-3 text-sm text-slate-600">Các mặt hàng được chọn hiện trên form dọn phòng theo thứ tự dưới đây. Khi phòng “Hoàn thành”, số đã dùng được trừ khỏi kho.</p>
+      <QueryState isLoading={list.isLoading} isError={list.isError} error={list.error} onRetry={() => void list.refetch()}>
+        <h3 className="text-sm font-semibold text-slate-900">Đã chọn ({order.length})</h3>
+        {order.length === 0 ? (
+          <p className="mt-1 text-sm text-slate-500" data-testid="cleaning-items-chosen">
+            Chưa chọn mặt hàng nào — form dọn phòng sẽ không có mục đếm.
+          </p>
+        ) : (
+          <ol className="mt-1 space-y-1" data-testid="cleaning-items-chosen">
+            {order.map((id, index) => {
+              const c = byId.get(id);
+              return (
+                <li key={id} className="flex items-center gap-2 rounded-lg border border-line-subtle px-3 py-2" data-testid={`cleaning-chosen-${id}`}>
+                  <span className="w-6 text-right text-sm tabular-nums text-slate-500">{index + 1}.</span>
+                  <span className="min-w-0 flex-1 text-sm text-slate-900">
+                    {c?.code ? <span className="mr-1.5 font-mono text-slate-500">{c.code}</span> : null}
+                    {c?.label ?? '—'}
+                  </span>
+                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Đưa ${c?.label ?? ''} lên`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-30" data-testid={`cleaning-up-${id}`}>
+                    <ArrowUp className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                  <button type="button" onClick={() => move(index, 1)} disabled={index === order.length - 1} aria-label={`Đưa ${c?.label ?? ''} xuống`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-30" data-testid={`cleaning-down-${id}`}>
+                    <ArrowDown className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+        {WAREHOUSES.map((w) => {
+          const ofWarehouse = choices.filter((c) => c.warehouse === w);
+          if (ofWarehouse.length === 0) return null;
+          return (
+            <fieldset key={w} className="mt-4">
+              <legend className="text-sm font-semibold text-slate-900">{WAREHOUSE_LABELS[w]}</legend>
+              <ul className="mt-1 grid gap-1 sm:grid-cols-2">
+                {ofWarehouse.map((c) => (
+                  <li key={c.id}>
+                    <label className="flex min-h-[2.75rem] items-center gap-2 rounded-lg border border-line-subtle px-3 py-2 text-sm text-slate-900">
+                      <input type="checkbox" checked={order.includes(c.id)} onChange={() => toggle(c.id)} className="h-5 w-5 accent-brand-600" data-testid={`cleaning-pick-${c.id}`} />
+                      {c.code ? <span className="font-mono text-slate-500">{c.code}</span> : null}
+                      <span className="min-w-0 flex-1">{c.label}</span>
+                      <span className="text-xs tabular-nums text-slate-500">
+                        {qty(c.available)} {c.unit}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </fieldset>
+          );
+        })}
+        {choices.length === 0 ? <p className="mt-3 text-sm text-slate-500">Bốn kho hàng của chi nhánh chưa có mặt hàng nào.</p> : null}
+      </QueryState>
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
         </div>
       ) : null}
-      <QueryState isLoading={mapping.isLoading} isError={mapping.isError} error={mapping.error} onRetry={() => void mapping.refetch()}>
-        <ul className="space-y-2" data-testid="mapping-fields">
-          {(mapping.data?.fields ?? []).map((f) => {
-            const choices = items.filter((i) => !i.archived && (!f.size || i.variant.trim().toLowerCase() === f.size.toLowerCase()));
-            const needsKit = f.kit && !kitOk[f.catalogKey];
-            return (
-              <li key={f.catalogKey} className="rounded-xl border border-line-subtle p-3" data-testid={`mapping-${f.catalogKey}`}>
-                <p className="text-sm font-semibold text-slate-900">{f.field}</p>
-                <p className="text-xs text-slate-500">
-                  {f.meaningLabel}
-                  {f.kit ? ' · Một bộ gồm nhiều món' : ''}
-                </p>
-                <select
-                  value={f.item?.id ?? ''}
-                  disabled={tie.isPending || (needsKit && !f.item)}
-                  onChange={(e) => tie.mutate({ field: f, itemId: e.target.value })}
-                  aria-label={`Mặt hàng cho ${f.field}`}
-                  data-testid={`mapping-select-${f.catalogKey}`}
-                  className={`${CONTROL} mt-2 w-full`}
-                >
-                  <option value="">— Chưa gắn: không trừ kho —</option>
-                  {choices.map((i) => (
-                    <option key={i.id} value={i.id} disabled={needsKit && i.id !== f.item?.id}>
-                      {i.label} ({i.unit})
-                    </option>
-                  ))}
-                </select>
-                {f.kit ? (
-                  <label className="mt-2 flex items-start gap-2 text-xs text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(kitOk[f.catalogKey])}
-                      onChange={(e) => setKitOk((k) => ({ ...k, [f.catalogKey]: e.target.checked }))}
-                      className="mt-0.5 h-4 w-4 accent-brand-600"
-                      data-testid={`mapping-kit-${f.catalogKey}`}
-                    />
-                    Mặt hàng được chọn là trọn bộ “{f.field.replace(/^✓ /, '')}” — mỗi ô ✓ trừ 1 bộ.
-                  </label>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-      </QueryState>
+    </Modal>
+  );
+}
+
+/** "PHÂN LOẠI VÀO KHO" — an item of the former equipment warehouse goes into one of the four, with a new code. */
+function ClassifyDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+  const [warehouse, setWarehouse] = useState<Warehouse | ''>('');
+  const save = useMutation({
+    mutationFn: () => inventoryApi.updateItem(item.id, { warehouse: warehouse as Warehouse }),
+    onSuccess: ({ item: saved }) => onDone(`Đã chuyển ${saved.label} vào ${WAREHOUSE_LABELS[saved.warehouse]} — mã ${saved.code ?? '—'}.`),
+  });
+  return (
+    <Modal
+      open
+      title={`Phân loại ${item.label}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={!warehouse} loading={save.isPending} data-testid="inventory-classify-save">
+            Chuyển vào kho
+          </Button>
+        </>
+      }
+    >
+      <fieldset className="space-y-2" data-testid="inventory-classify">
+        <legend className="mb-2 text-sm text-slate-600">Chọn kho cho mặt hàng này. Số tồn đi theo mặt hàng.</legend>
+        {WAREHOUSES.map((w) => (
+          <label key={w} className="flex min-h-[2.75rem] items-center gap-3 rounded-xl border border-line-subtle px-4 py-2 text-[15px] text-slate-900">
+            <input type="radio" name="classify-warehouse" checked={warehouse === w} onChange={() => setWarehouse(w)} className="h-5 w-5 accent-brand-600" data-testid={`inventory-classify-${w}`} />
+            {WAREHOUSE_LABELS[w]}
+          </label>
+        ))}
+      </fieldset>
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+        </div>
+      ) : null}
     </Modal>
   );
 }
@@ -1302,7 +1520,7 @@ const blankLine = (key: number): CountLine => ({ key, itemId: '', state: 'AVAILA
 export function StockCountPage() {
   const scope = useInventoryScope(false);
   const queryClient = useQueryClient();
-  const [warehouse, setWarehouse] = useState<Warehouse>('LINEN');
+  const [warehouse, setWarehouse] = useState<Warehouse>(WAREHOUSES[0]!);
   const [requestId, setRequestId] = useState(newRequestId);
   const [lines, setLines] = useState<CountLine[]>([blankLine(1)]);
   const [toast, setToast] = useState<string | null>(null);
@@ -1366,7 +1584,7 @@ export function StockCountPage() {
             label="Kho"
             value={warehouse}
             onChange={(w) => reset(w)}
-            options={(Object.keys(WAREHOUSE_LABELS) as Warehouse[]).map((w) => ({ value: w, label: WAREHOUSE_LABELS[w].replace('Kho ', '') }))}
+            options={WAREHOUSES.map((w) => ({ value: w, label: WAREHOUSE_SHORT[w] }))}
             testId="count-warehouse"
           />
           <ul className="space-y-3">
@@ -1552,6 +1770,7 @@ export function AdminInventoryPage() {
   const [warehouse, setWarehouse] = useState<Warehouse | 'ALL'>('ALL');
   const [tab, setTab] = useState<'stock' | 'damage' | 'counts' | 'movements'>(params.get('damage') ? 'damage' : 'stock');
   const [reviewing, setReviewing] = useState<DamageReport | null>(null);
+  const [cleaning, setCleaning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const items = useItems(warehouse === 'ALL' ? undefined : warehouse, scope.branchId);
   const pending = useQuery({ queryKey: [...INVENTORY_KEY, 'damage', 'pending', scope.branchId ?? null], queryFn: () => inventoryApi.damage({ branchId: scope.branchId, status: 'PENDING' }) });
@@ -1568,20 +1787,23 @@ export function AdminInventoryPage() {
       header: 'Mặt hàng',
       render: (i) => (
         <span>
+          {i.code ? <span className="mr-1.5 font-mono text-slate-500">{i.code}</span> : null}
           <span className="font-medium text-slate-900">{i.label}</span>
           <span className="block text-xs text-slate-500">
-            {i.branch.address} · {WAREHOUSE_LABELS[i.warehouse].replace('Kho ', '')}
+            {i.branch.address} · {WAREHOUSE_SHORT[i.warehouse]} · {i.scope === 'SYSTEM' ? 'Dùng chung' : 'Riêng chi nhánh'}
           </span>
+          {i.legacyBalances?.length ? (
+            <span className="block text-xs text-amber-800">Số cũ cần kiểm tra: {i.legacyBalances.map((b) => `${b.stateLabel.toLowerCase()} ${qty(b.quantity)}`).join(', ')}</span>
+          ) : null}
         </span>
       ),
     },
-    ...(['AVAILABLE', 'DIRTY', 'ISSUED', 'DAMAGED'] as StockState[]).map<DataColumn<InventoryItem>>((s) => ({
+    ...(['AVAILABLE', 'DAMAGED'] as StockState[]).map<DataColumn<InventoryItem>>((s) => ({
       key: s,
       header: STATE_LABELS[s],
       align: 'right',
-      secondary: s === 'DIRTY' || s === 'ISSUED',
       className: 'w-[1%] whitespace-nowrap',
-      render: (i) => (WAREHOUSE_STATES[i.warehouse].includes(s) ? qty(i.balances[s]) : <span className="text-slate-300">—</span>),
+      render: (i) => qty(i.balances[s]),
     })),
   ];
   const close = () => {
@@ -1605,12 +1827,23 @@ export function AdminInventoryPage() {
           <>
             {scope.picker}
             <ExportLink branchId={scope.branchId} warehouse={warehouse === 'ALL' ? undefined : warehouse} />
+            <Button
+              variant="secondary"
+              className="min-h-[2.75rem]"
+              disabled={!scope.branchId}
+              title={scope.branchId ? undefined : 'Chọn một chi nhánh trước'}
+              onClick={() => setCleaning(true)}
+              data-testid="admin-cleaning-items-open"
+            >
+              <ListChecks className="h-4 w-4" aria-hidden="true" />
+              Mặt hàng dọn phòng
+            </Button>
           </>
         }
       />
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5" data-testid="admin-inventory-cards">
-          {(['AVAILABLE', 'DIRTY', 'ISSUED', 'DAMAGED'] as StockState[]).map((s) => (
+        <div className="grid grid-cols-3 gap-2" data-testid="admin-inventory-cards">
+          {(['AVAILABLE', 'DAMAGED'] as StockState[]).map((s) => (
             <div key={s} className="rounded-xl border border-line-subtle bg-white px-3 py-2.5 text-center">
               <p className="text-xs font-medium text-slate-600">{STATE_LABELS[s]}</p>
               <p className={`text-2xl font-semibold tabular-nums ${STATE_TEXT[s]}`}>{qty(sum(s))}</p>
@@ -1654,7 +1887,7 @@ export function AdminInventoryPage() {
             headerAction={
               <select value={warehouse} onChange={(e) => setWarehouse(e.target.value as Warehouse | 'ALL')} className={CONTROL} aria-label="Kho" data-testid="admin-inventory-warehouse">
                 <option value="ALL">Tất cả kho</option>
-                {(Object.keys(WAREHOUSE_LABELS) as Warehouse[]).map((w) => (
+                {[...WAREHOUSES, 'EQUIPMENT' as const].map((w) => (
                   <option key={w} value={w}>
                     {WAREHOUSE_LABELS[w]}
                   </option>
@@ -1670,6 +1903,16 @@ export function AdminInventoryPage() {
           <MovementHistory branchId={scope.branchId} showBranch />
         )}
       </div>
+      {cleaning && scope.branchId ? (
+        <CleaningItemsDialog
+          branchId={scope.branchId}
+          onClose={() => setCleaning(false)}
+          onDone={(m) => {
+            setCleaning(false);
+            setToast(m);
+          }}
+        />
+      ) : null}
       {open ? (
         <ReviewDialog
           report={open}

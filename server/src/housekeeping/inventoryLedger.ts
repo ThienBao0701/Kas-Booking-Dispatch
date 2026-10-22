@@ -14,31 +14,47 @@
  * NEVER TWICE. Each movement names its action (`sourceKey`: "TASK:<id>",
  * "RECEIPT:<id>", …), unique per action, item and state.
  *
- * THE ROOM CLEANING. A completed "Dọn phòng" moves the stock of the items the
- * branch keeps in its warehouses (`catalogKey`): what was put into the room
- * leaves AVAILABLE ("Đồ sạch cấp cho phòng"), the linen taken out enters DIRTY
- * ("Đồ bẩn thu về"), traced to the room, the task and its day. An item the
- * branch has not added to a warehouse is not tracked — no stock is invented.
+ * THE ROOM CLEANING. A completed "Dọn phòng" takes the quantities counted for
+ * the branch's room-cleaning items (`cleaningOrder`) out of their on-hand
+ * stock (AVAILABLE), traced to the room, the task and its day — one ordinary
+ * quantity per item, no clean / dirty pair. Nothing moves before "Hoàn thành".
  */
 import type { InventoryMovementType, InventoryStockState, InventoryWarehouse, Prisma, UserRole } from '@prisma/client';
 import { ApiError } from '../lib/errors';
-import { LINEN_ITEMS, LINEN_QUANTITY_CODES, LINEN_SIZES, QUANTITY_ITEMS, REPLACEMENT_ITEMS, type CleaningForm } from './roomTaskCatalog';
+/** "Kho hàng": the four warehouses, in their order (and the order of their code prefixes). */
+export const WAREHOUSES: readonly InventoryWarehouse[] = ['CHEMICAL_TOOLS', 'GUEST_SUPPLIES', 'LINEN', 'AMENITY'];
 
-export const WAREHOUSES: readonly InventoryWarehouse[] = ['LINEN', 'AMENITY', 'EQUIPMENT'];
+/** The former "Kho đồ dùng, thiết bị": not offered any more; its items wait to be classified. */
+export const LEGACY_WAREHOUSE: InventoryWarehouse = 'EQUIPMENT';
+
+/** Every warehouse a stored row may name — the four, and the legacy one. */
+export const ALL_WAREHOUSES: readonly InventoryWarehouse[] = [...WAREHOUSES, LEGACY_WAREHOUSE];
 
 export const WAREHOUSE_LABELS: Record<InventoryWarehouse, string> = {
-  LINEN: 'Kho Linens',
-  AMENITY: 'Kho Amenities',
-  EQUIPMENT: 'Kho đồ dùng, thiết bị',
+  CHEMICAL_TOOLS: 'Kho hóa chất & dụng cụ',
+  GUEST_SUPPLIES: 'Đồ dùng cho khách',
+  LINEN: 'Kho đồ vải',
+  AMENITY: 'Kho đồ dùng khác / Đồ tiêu hao (Amenities)',
+  EQUIPMENT: 'Chưa phân loại (kho đồ dùng, thiết bị cũ)',
 };
 
+/** The item code's prefix: "1.001", "2.001", "3.001", "4.001". The legacy warehouse has none. */
+export const CODE_PREFIX: Partial<Record<InventoryWarehouse, string>> = { CHEMICAL_TOOLS: '1', GUEST_SUPPLIES: '2', LINEN: '3', AMENITY: '4' };
+
+/** "3.001" … "3.999", then "3.1000" — the number grows, never wraps. */
+export function itemCode(warehouse: InventoryWarehouse, n: number): string {
+  return `${CODE_PREFIX[warehouse]}.${String(n).padStart(3, '0')}`;
+}
+
 /**
- * The states each warehouse keeps, in display order. Linen is clean, dirty or
- * damaged: "Giặt xong" brings dirty linen straight back to clean (there is no
- * separate "đang giặt" stage — IN_LAUNDRY stays in the enum, unused).
+ * The states each warehouse keeps, in display order: ONE on-hand quantity
+ * (Sẵn dùng) and what was written off (Hỏng). A DIRTY or ISSUED balance left
+ * from before is history to review, never folded into Sẵn dùng.
  */
 export const WAREHOUSE_STATES: Record<InventoryWarehouse, InventoryStockState[]> = {
-  LINEN: ['AVAILABLE', 'DIRTY', 'DAMAGED'],
+  CHEMICAL_TOOLS: ['AVAILABLE', 'DAMAGED'],
+  GUEST_SUPPLIES: ['AVAILABLE', 'DAMAGED'],
+  LINEN: ['AVAILABLE', 'DAMAGED'],
   AMENITY: ['AVAILABLE', 'DAMAGED'],
   EQUIPMENT: ['AVAILABLE', 'ISSUED', 'DAMAGED'],
 };
@@ -165,165 +181,37 @@ export async function applyMovements(tx: Prisma.TransactionClient, moves: MoveIn
 }
 
 /* ------------------------------------------------------------------ *
- * The "Dọn phòng" form as warehouse items
+ * The room cleaning
  * ------------------------------------------------------------------ */
-
-const UNITS: Record<string, string> = { WATER: 'chai', TOILET_ROLL: 'cuộn', SLIPPERS: 'đôi' };
-
-/**
- * WHAT A FORM FIELD DOES TO THE STOCK, said once:
- *   CLEAN_AND_DIRTY  linen — "Đồ sạch cấp cho phòng" out of Sẵn dùng, and
- *                    "Đồ bẩn thu về" into Bẩn: two quantities, two movements
- *   CLEAN_ISSUE      a supply — "Cấp cho phòng" out of Sẵn dùng; never dirty
- *   TICK             a replacement ✓ — ONE unit (one set) out of Sẵn dùng
- */
-export type FieldMeaning = 'CLEAN_AND_DIRTY' | 'CLEAN_ISSUE' | 'TICK';
-
-export interface CatalogEntry {
-  catalogKey: string;
-  warehouse: InventoryWarehouse;
-  /** The form field, as the form names it ("Ga giường — King", "✓ Dầu gội"). */
-  field: string;
-  meaning: FieldMeaning;
-  /**
-   * A grouped replacement ("Lược, tăm bông, chụp tóc"): one ✓ is ONE KIT of
-   * several things, so it may only deduct an item that IS that kit — mapped
-   * only with an explicit confirmation, never silently to one of its parts.
-   */
-  kit: boolean;
-  /** For bed linen: the size the item must be ("King" / "Queen" / "Twin"). */
-  size: string | null;
-  /** What "Thêm từ form dọn phòng" creates for it. */
-  name: string;
-  variant: string;
-  unit: string;
-}
-
-/**
- * Every field of the "Dọn phòng" form and the stock it moves: bed linen per
- * size (a King and a Queen sheet are two items), the counted linen, the counted
- * supplies, and the six replacements (one ✓ = one set). A field moves stock
- * only once a manager has tied it to an item of its warehouse (`catalogKey`).
- */
-export function cleaningCatalog(): CatalogEntry[] {
-  return [
-    ...LINEN_ITEMS.flatMap((i) =>
-      LINEN_SIZES.map((z) => ({
-        catalogKey: `LINEN:${i.code}:${z.code}`,
-        warehouse: 'LINEN' as const,
-        field: `${i.label} — ${z.label}`,
-        meaning: 'CLEAN_AND_DIRTY' as const,
-        kit: false,
-        size: z.label,
-        name: i.label,
-        variant: z.label,
-        unit: 'cái',
-      })),
-    ),
-    ...QUANTITY_ITEMS.map((i) => {
-      const linen = LINEN_QUANTITY_CODES.includes(i.code);
-      return {
-        catalogKey: `QTY:${i.code}`,
-        warehouse: linen ? ('LINEN' as const) : ('AMENITY' as const),
-        field: i.label,
-        meaning: linen ? ('CLEAN_AND_DIRTY' as const) : ('CLEAN_ISSUE' as const),
-        kit: false,
-        size: null,
-        name: i.label,
-        variant: '',
-        unit: UNITS[i.code] ?? 'cái',
-      };
-    }),
-    ...REPLACEMENT_ITEMS.map((i) => {
-      const kit = i.label.includes(',');
-      return {
-        catalogKey: `REPLACED:${i.code}`,
-        warehouse: 'AMENITY' as const,
-        field: `✓ ${i.label}`,
-        meaning: 'TICK' as const,
-        kit,
-        size: null,
-        // A kit is created AS the kit ("Bộ: …"), never as one of its parts.
-        name: kit ? `Bộ: ${i.label}` : i.label,
-        variant: '',
-        unit: 'bộ',
-      };
-    }),
-  ];
-}
-
-export const MEANING_LABELS: Record<FieldMeaning, string> = {
-  CLEAN_AND_DIRTY: 'Đồ sạch cấp cho phòng trừ “Sẵn dùng”; đồ bẩn thu về cộng vào “Bẩn”',
-  CLEAN_ISSUE: 'Số cấp cho phòng trừ “Sẵn dùng” (đồ tiêu hao, không thành đồ bẩn)',
-  TICK: 'Mỗi ô ✓ trừ 1 bộ khỏi “Sẵn dùng”',
-};
-
-/** What one completed form puts into the room and takes out of it, per catalog key. */
-export function cleaningNeeds(form: CleaningForm): { catalogKey: string; provided: number; collected: number }[] {
-  const out: { catalogKey: string; provided: number; collected: number }[] = [];
-  for (const i of LINEN_ITEMS) {
-    const e = form.linen[i.code];
-    if (!e) continue;
-    out.push({ catalogKey: `LINEN:${i.code}:${e.size}`, provided: e.quantity, collected: form.collected[i.code] ?? 0 });
-  }
-  for (const i of QUANTITY_ITEMS) {
-    const linen = LINEN_QUANTITY_CODES.includes(i.code);
-    const provided = form.quantities[i.code] ?? 0;
-    const collected = linen ? (form.collected[i.code] ?? 0) : 0;
-    if (provided > 0 || collected > 0) out.push({ catalogKey: `QTY:${i.code}`, provided, collected });
-  }
-  for (const code of form.replaced) out.push({ catalogKey: `REPLACED:${code}`, provided: 1, collected: 0 });
-  return out.filter((n) => n.provided > 0 || n.collected > 0);
-}
 
 /**
  * A COMPLETED CLEANING'S STOCK — in the transaction that marks it completed, so
  * the task and its stock succeed or fail together, and its guarded update makes
- * it once. A shortage refuses the whole completion, naming every short item.
+ * it once. Each counted item leaves Sẵn dùng; a shortage refuses the whole
+ * completion, naming every short item at once.
  */
-export async function applyCleaningStock(
+export async function applyCleaningItems(
   tx: Prisma.TransactionClient,
   task: { id: string; branchId: number; roomNumber: string; workDate: string },
-  form: CleaningForm,
+  lines: { item: LedgerItem; quantity: number }[],
   actor: Mover,
   now: Date,
 ): Promise<void> {
-  const needs = cleaningNeeds(form);
-  if (needs.length === 0) return;
-  const items = await tx.inventoryItem.findMany({
-    where: { branchId: task.branchId, archivedAt: null, catalogKey: { in: needs.map((n) => n.catalogKey) } },
-    select: { id: true, branchId: true, warehouse: true, name: true, variant: true, unit: true, catalogKey: true },
-  });
-  const byKey = new Map(items.map((i) => [i.catalogKey!, i]));
-  // Every shortage at once, so the manager can fix them in one receipt or count.
+  const used = lines.filter((l) => l.quantity > 0);
+  if (used.length === 0) return;
   const short: string[] = [];
-  let unopened = false;
-  for (const n of needs) {
-    const item = byKey.get(n.catalogKey);
-    if (!item || n.provided === 0) continue;
-    const left = await balanceOf(tx, item.id, 'AVAILABLE');
-    if (left >= n.provided) continue;
-    // An item tied to the form but never counted or received: its stock was never set up.
-    const history = await tx.inventoryItem.findUniqueOrThrow({ where: { id: item.id }, select: { _count: { select: { movements: true, countLines: true } } } });
-    const never = history._count.movements === 0 && history._count.countLines === 0;
-    unopened ||= never;
-    short.push(`${itemLabel(item)} cần ${n.provided}, còn ${left} (${WAREHOUSE_LABELS[item.warehouse]}${never ? ', chưa khai báo tồn đầu kỳ' : ''})`);
+  for (const l of used) {
+    const left = await balanceOf(tx, l.item.id, 'AVAILABLE');
+    if (left < l.quantity) short.push(`${itemLabel(l.item)} cần ${l.quantity}, còn ${left}`);
   }
   if (short.length > 0) {
-    throw ApiError.conflict(
-      `Không đủ tồn kho để hoàn thành: ${short.join('; ')}. ` +
-        (unopened
-          ? 'Quản lý buồng phòng cần “Khai báo tồn đầu kỳ” (đếm thực tế) hoặc “Nhập kho” rồi bấm “Hoàn thành” lại.'
-          : 'Báo quản lý nhập kho hoặc kiểm kho rồi bấm “Hoàn thành” lại.'),
-    );
+    throw ApiError.conflict(`Không đủ tồn kho để hoàn thành: ${short.join('; ')}. Báo quản lý nhập kho hoặc kiểm kho rồi bấm “Hoàn thành” lại.`);
   }
   const where = { roomNumber: task.roomNumber, workDate: task.workDate, taskId: task.id, sourceKey: `TASK:${task.id}` };
-  const moves: MoveInput[] = [];
-  for (const n of needs) {
-    const item = byKey.get(n.catalogKey);
-    if (!item) continue;
-    if (n.provided > 0) moves.push({ item, state: 'AVAILABLE', delta: -n.provided, type: 'ROOM_ISSUE', ...where });
-    if (n.collected > 0 && item.warehouse === 'LINEN') moves.push({ item, state: 'DIRTY', delta: n.collected, type: 'DIRTY_COLLECTED', ...where });
-  }
-  await applyMovements(tx, moves, actor, now);
+  await applyMovements(
+    tx,
+    used.map((l) => ({ item: l.item, state: 'AVAILABLE' as const, delta: -l.quantity, type: 'ROOM_ISSUE' as const, ...where })),
+    actor,
+    now,
+  );
 }

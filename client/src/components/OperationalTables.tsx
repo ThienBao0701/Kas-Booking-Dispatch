@@ -36,7 +36,14 @@ import {
 import { formatVnd } from '../lib/money';
 import { actorColumns } from '../lib/issueActors';
 import { completionText } from '../lib/completionVerdict';
-import { formatDateTime } from '../lib/format';
+import { formatDateTime, formatHcmDateTimeSeconds } from '../lib/format';
+import { useMutation } from '@tanstack/react-query';
+import { reportsApi } from '../api/receptionReports';
+import { toUserMessage } from '../api/errors';
+import { Button } from './Button';
+import { ErrorAlert } from './ErrorAlert';
+import { Input } from './Input';
+import { Modal } from './Modal';
 import { ROOM_SERVICE_PRICE_LABEL, reviewTotal, roomServiceFields, serviceRevenue } from '../lib/roomServiceFields';
 
 interface TableProps {
@@ -196,16 +203,18 @@ function RequestHandling({
 }
 
 /**
- * SEVEN COLUMNS: STT, Tên khách, Mã EZ, Nội dung, the two times, and "Cách xử
- * lý (nếu có)". No status or action column of its own.
+ * THE REQUEST TABLE — six compact columns: STT, Tên khách, Mức độ, Mã EZ, Nội
+ * dung, Trạng thái. "Nội dung" is the widest; beneath it, one muted line says
+ * where the request came from (Bộ phận buồng phòng and who) and when it was
+ * recorded, to the second, in Asia/Ho_Chi_Minh — the server's own stamp.
  *
- * The status is shown in "Thời gian hoàn thành" — "Đã tiếp nhận" until the
- * server has stamped a completion time — and the way to change it sits in
- * "Cách xử lý", which is where its result is written. "Sửa" and "Hủy" sit there
- * too when the table may edit.
+ * A request Bộ phận buồng phòng recorded reads "Chưa xác định khách" until
+ * Reception names the guest, with a small "Nhập thông tin khách" in that cell
+ * (no extra column). Bộ phận buồng phòng itself has no guest columns at all.
  *
- * THE SUMMARY (overview, "Hoàn thành vấn đề") keeps five: STT, Tên khách, Mã
- * EZ, Nội dung and a status that is only "Đã tiếp nhận" or "Đã hoàn thành".
+ * The category's own screen adds "Cách xử lý (nếu có)": the way to complete the
+ * request — and "Sửa" / "Hủy" — sits there, where its result is written, and
+ * "Trạng thái" carries the completion time.
  */
 export function GuestRequestTable({
   rows,
@@ -225,40 +234,80 @@ export function GuestRequestTable({
 }: TableProps) {
   const { editing, setEditing, setVoiding, voidNode } = useRowActions(onChanged, onToast);
   const [completing, setCompleting] = useState<string | null>(null);
+  const [identifying, setIdentifying] = useState<OperationalReport | null>(null);
+  const role = useAuth().user?.role;
+  // Bộ phận buồng phòng is never shown a guest — the server sends it none either.
+  const housekeeping = role === 'HOUSEKEEPING' || role === 'HOUSEKEEPING_MANAGER';
+  // Reception (and its supervisors) name the guest of a request Bộ phận buồng phòng recorded — the server checks again.
+  const mayIdentify = role === 'RECEPTIONIST' || role === 'ADMIN' || role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER';
+  const fromHousekeeping = (r: OperationalReport) => r.originDepartment === 'HOUSEKEEPING';
 
   /*
     ON A PHONE the glance is the guest, the content and the status: STT and Mã
     EZ fold into the row's expander (below `md` only). The content may break
-    anywhere, so one long unbroken word cannot push the status off screen; the
-    name keeps a readable width and breaks only between words.
+    anywhere, so one long unbroken word cannot push the status off screen.
   */
-  const summaryColumns: DataColumn<OperationalReport>[] = [
-    { ...stt<OperationalReport>(), secondary: true },
-    {
-      key: 'guest',
-      header: 'Tên khách',
-      className: 'w-[1%] min-w-[5.5rem] max-w-[9rem] sm:max-w-[11rem] break-words font-medium text-slate-800',
-      render: (r) => (
-        <>
-          {r.guestRequest?.guestName ?? '—'}
-          <SourceTag label={r.sourceLabel} />
+  const guest: DataColumn<OperationalReport> = {
+    key: 'guest',
+    header: 'Tên khách',
+    className: 'w-[1%] min-w-[6rem] max-w-[11rem] break-words font-medium text-slate-800',
+    render: (r) => {
+      const name = r.guestRequest?.guestName;
+      return (
+        <span data-testid={`request-guest-${r.id}`}>
+          {name ?? <span className="font-normal italic text-amber-800">Chưa xác định khách</span>}
+          {/* "Admin tạo" beside the guest, as on every desk record; a housekeeping source is under the content. */}
+          {fromHousekeeping(r) ? null : <SourceTag label={r.sourceLabel} />}
           <RecordLateEntryBadge row={r} />
-        </>
-      ),
+          {mayIdentify && fromHousekeeping(r) && !r.voided ? (
+            <span className="mt-1 block">
+              <RowAction onClick={() => setIdentifying(r)} testId={`identify-${r.id}`}>
+                <Pencil className="h-3 w-3" aria-hidden="true" />
+                {name ? 'Sửa thông tin khách' : 'Nhập thông tin khách'}
+              </RowAction>
+            </span>
+          ) : null}
+        </span>
+      );
     },
-    {
-      key: 'severity',
-      header: 'Mức độ',
-      className: 'w-[1%] whitespace-nowrap',
-      render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
-    },
-    { key: 'ez', header: 'Mã EZ', secondary: true, className: 'w-[1%] whitespace-nowrap', render: (r) => r.guestRequest?.ezCode || '—' },
-    {
-      key: 'content',
-      header: 'Nội dung',
-      className: 'w-full sm:min-w-[12rem]',
-      render: (r) => <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{r.guestRequest?.content || '—'}</span>,
-    },
+  };
+  const ez: DataColumn<OperationalReport> = {
+    key: 'ez',
+    header: 'Mã EZ',
+    secondary: true,
+    className: 'w-[1%] whitespace-nowrap',
+    render: (r) => r.guestRequest?.ezCode || '—',
+  };
+  const severity: DataColumn<OperationalReport> = {
+    key: 'severity',
+    header: 'Mức độ',
+    className: 'w-[1%] whitespace-nowrap',
+    render: (r) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
+  };
+  /*
+    THE CONTENT IS THE COLUMN THAT MUST BREATHE. An older row reads its "Ký
+    gửi" here too — the server's `content`. Naming the guest later changes
+    neither the source nor the time beneath it.
+  */
+  const content: DataColumn<OperationalReport> = {
+    key: 'content',
+    header: 'Nội dung',
+    className: 'w-full min-w-[10rem] sm:min-w-[14rem]',
+    render: (r) => (
+      <>
+        <span className="whitespace-pre-wrap [overflow-wrap:anywhere] text-slate-800">{r.guestRequest?.content || '—'}</span>
+        <span className="mt-0.5 block text-xs text-slate-500" data-testid={`request-meta-${r.id}`}>
+          {fromHousekeeping(r) && r.sourceLabel ? `${r.sourceLabel} · ` : ''}
+          <span className="whitespace-nowrap">Ghi nhận: {formatHcmDateTimeSeconds(r.createdAt)}</span>
+        </span>
+        <VoidedNote report={r} />
+      </>
+    ),
+  };
+  const lead: DataColumn<OperationalReport>[] = [{ ...stt<OperationalReport>(), secondary: true }, ...(housekeeping ? [severity] : [guest, severity, ez]), content];
+
+  const summaryColumns: DataColumn<OperationalReport>[] = [
+    ...lead,
     {
       key: 'status',
       header: 'Trạng thái',
@@ -269,58 +318,10 @@ export function GuestRequestTable({
   if (showActors) summaryColumns.splice(-1, 0, ...actorColumns<OperationalReport>((r) => r.createdByName, (r) => r.guestRequest?.completedByName));
 
   const detailColumns: DataColumn<OperationalReport>[] = [
-    stt(),
-    {
-      key: 'guest',
-      header: 'Tên khách',
-      className: 'w-[1%] min-w-[6rem] max-w-[11rem] break-words font-medium text-slate-800',
-      render: (r) => (
-        <>
-          {r.guestRequest?.guestName ?? '—'}
-          <SourceTag label={r.sourceLabel} />
-          <RecordLateEntryBadge row={r} />
-          <VoidedNote report={r} />
-        </>
-      ),
-    },
-    {
-      key: 'severity',
-      header: 'Mức độ',
-      className: 'w-[1%] whitespace-nowrap',
-      render: (r: OperationalReport) => <SeverityBadge severity={r.guestRequest?.severity} label={r.guestRequest?.severityLabel} />,
-    },
-    {
-      key: 'ez',
-      header: 'Mã EZ',
-      className: 'w-[1%] whitespace-nowrap',
-      render: (r) => r.guestRequest?.ezCode || '—',
-    },
-    /*
-      THE CONTENT IS THE COLUMN THAT MUST BREATHE: short headers may wrap and
-      the two times break between date and hour, so "Nội dung" keeps enough
-      width to be read instead of collapsing to a word per line. An older row
-      reads its "Ký gửi" here too — the server's `content`.
-    */
-    {
-      key: 'content',
-      header: 'Nội dung',
-      className: 'w-full min-w-[12rem]',
-      render: (r) => <span className="whitespace-pre-wrap break-words">{r.guestRequest?.content || '—'}</span>,
-    },
-    {
-      key: 'receivedAt',
-      header: 'Thời gian tiếp nhận',
-      secondary: true,
-      className: 'min-w-[5.5rem] text-slate-500',
-      render: (r) => (
-        <>
-          {formatDateTime(r.createdAt)}
-        </>
-      ),
-    },
+    ...lead,
     {
       key: 'completedAt',
-      header: 'Thời gian hoàn thành',
+      header: 'Trạng thái',
       className: 'min-w-[6.5rem]',
       render: (r) => <RequestCompletion row={r} />,
     },
@@ -361,6 +362,17 @@ export function GuestRequestTable({
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm."
       />
       {voidNode}
+      {identifying ? (
+        <GuestIdentityDialog
+          report={identifying}
+          onClose={() => setIdentifying(null)}
+          onSaved={async () => {
+            setIdentifying(null);
+            await onChanged();
+            onToast('Đã lưu thông tin khách.');
+          }}
+        />
+      ) : null}
       {completing ? (
         <CompleteRecordDialog
           id={completing}
@@ -388,6 +400,46 @@ export function GuestRequestTable({
         />
       ) : null}
     </>
+  );
+}
+
+/** "NHẬP THÔNG TIN KHÁCH" — the guest's name and Mã EZ; who recorded it, and when, stay as they are. */
+function GuestIdentityDialog({ report, onClose, onSaved }: { report: OperationalReport; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [guestName, setGuestName] = useState(report.guestRequest?.guestName ?? '');
+  const [ezCode, setEzCode] = useState(report.guestRequest?.ezCode ?? '');
+  const save = useMutation({
+    mutationFn: () => reportsApi.setGuest(report.id, { guestName: guestName.trim(), ...(ezCode.trim() ? { ezCode: ezCode.trim() } : {}) }),
+    onSuccess: onSaved,
+  });
+  return (
+    <Modal
+      open
+      title="Nhập thông tin khách"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={!guestName.trim() || save.isPending} loading={save.isPending} data-testid="identify-save">
+            Lưu
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-3 text-sm text-slate-600">
+        Buồng phòng · {report.createdByName} · {report.guestRequest?.roomNumber ?? '—'} — {report.guestRequest?.content}
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Input label="Tên khách" value={guestName} onChange={(e) => setGuestName(e.target.value)} data-testid="identify-guest" />
+        <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="identify-ez" />
+      </div>
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 

@@ -515,11 +515,14 @@ async function openCategory(code: string) {
   await userEvent.click(find()!);
 }
 
-/** The heading of the shift frame a table sits in — "Ca A · 06:00 – 14:00 · …". */
-function shiftTitleOf(el: HTMLElement): HTMLElement {
-  const frame = el.closest<HTMLElement>('[data-testid^="shift-group-"]');
-  if (!frame) throw new Error('not inside a shift frame');
-  return within(frame).getByTestId(/^shift-title-/);
+/**
+ * ONE CATEGORY, ONE TABLE: no frame per shift or person around it — the shift
+ * and the person are the row's own "Ca" and "Nhân viên / Người tạo" columns.
+ */
+function expectUnified(table: HTMLElement, person: string, shift = 'Ca A') {
+  expect(table.closest('[data-testid^="shift-group-"]')).toBeNull();
+  expect(table).toHaveTextContent(person);
+  expect(table).toHaveTextContent(shift);
 }
 
 afterEach(() => {
@@ -671,15 +674,16 @@ describe('each category is a table', () => {
     // the SHIFT and the PERSON head the frame it sits in — DATE → SHIFT → EMPLOYEE.
     expect(screen.getByTestId('report-title')).toHaveTextContent('Theo dõi thanh toán');
     expect(within(table).getByRole('heading')).toHaveTextContent('Theo dõi thanh toán');
-    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expectUnified(table, 'Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     // The first is the expander's own column, which carries no label.
     expect(headers[0]).toBe('');
-    // No "Nhân viên" or "Ca" column: the heading above states both, once,
-    // rather than every row repeating them.
+    // "Nhân viên" and "Ca" are columns: the category's one table holds every shift's rows.
     expect(headers.slice(1)).toEqual([
       'STT',
+      'Nhân viên',
+      'Ca',
       'Tên khách',
       'Mã EZ',
       'Nguồn',
@@ -700,7 +704,7 @@ describe('each category is a table', () => {
     ]);
 
     const row = within(table).getByTestId('row-p1');
-    expect(within(row).queryByText('Nguyễn Văn A')).not.toBeInTheDocument();
+    expect(within(row).getByText('Nguyễn Văn A')).toBeInTheDocument();
     expect(within(row).getByText('EZ123')).toBeInTheDocument();
     expect(within(row).getByText('Booking.com')).toBeInTheDocument();
     expect(within(row).getByText('Nguyễn Khách')).toBeInTheDocument();
@@ -708,6 +712,38 @@ describe('each category is a table', () => {
     expect(within(row).getAllByText('300.000 ₫')).toHaveLength(1);
     expect(headers).not.toContain('Phương thức');
     expect(headers).not.toContain('Thu tiền');
+  });
+
+  it('shows one category as ONE table — Reception’s shift rows and Bộ phận buồng phòng’s shiftless rows together, each once', async () => {
+    const HK = {
+      ...REQUEST,
+      id: 'g-hk',
+      shiftSessionId: null,
+      shiftType: null,
+      shiftName: null,
+      shiftWindow: null,
+      shiftReceptionistName: null,
+      createdBy: { id: 40, fullName: 'Chị Lan' },
+      createdByName: 'Chị Lan',
+      createdByRole: 'HOUSEKEEPING',
+      originDepartment: 'HOUSEKEEPING',
+      sourceLabel: 'Buồng phòng · Chị Lan',
+      createdAt: '2026-10-05T09:30:00.000Z',
+    };
+    installApiMock(
+      shellRoutes({
+        [`GET /api/admin/reports/operational?branchId=11&category=GUEST_REQUEST&${PERIOD}`]: () => ({ status: 200, body: body([REQUEST, HK]) }),
+      }),
+    );
+    renderApp('/app/reports');
+    await chooseBranch();
+    await openCategory('GUEST_REQUEST');
+    const tables = await screen.findAllByTestId('admin-table-GUEST_REQUEST');
+    expect(tables).toHaveLength(1);
+    expect(screen.queryByTestId(/^shift-group-/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Không gắn ca/)).not.toBeInTheDocument();
+    expect(within(tables[0]!).getByTestId('row-g-hk')).toHaveTextContent('Buồng phòng · Chị Lan');
+    expect(within(tables[0]!).getAllByTestId(/^row-g/).map((r) => r.dataset.testid)).toEqual(['row-g-hk', 'row-g1']);
   });
 
   it('lays the guest requests out with both actors', async () => {
@@ -718,7 +754,7 @@ describe('each category is a table', () => {
 
     const table = await screen.findByTestId('admin-table-GUEST_REQUEST');
     expect(screen.getByTestId('report-title')).toHaveTextContent('Vấn đề khách yêu cầu');
-    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expectUnified(table, 'Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers.slice(1)).toEqual([
@@ -727,6 +763,8 @@ describe('each category is a table', () => {
       'Mức độ',
       'Mã EZ',
       'Nội dung',
+      'Người tạo',
+      'Ca',
       'Thời gian tiếp nhận',
       'Thời gian hoàn thành',
       'Cách xử lý (nếu có)',
@@ -748,7 +786,7 @@ describe('each category is a table', () => {
     // Who took it, and who completed it — two facts, never one overwriting the
     // other. The taker is the shift's person, named once in the heading; the
     // completer, on another shift, is in the row.
-    expect(shiftTitleOf(table)).toHaveTextContent('Nguyễn Văn A');
+    expect(within(row).getByText('Nguyễn Văn A')).toBeInTheDocument();
     expect(within(row).getByText('Nguyễn Văn B · Ca B')).toBeInTheDocument();
   });
 
@@ -874,7 +912,7 @@ describe('each category is a table', () => {
     expect(screen.getByTestId('report-title')).toHaveTextContent(
       'Vấn đề về chất lượng và dịch vụ',
     );
-    expect(shiftTitleOf(table)).toHaveTextContent('Ca A · 06:00 – 14:00 · Nguyễn Văn A');
+    expectUnified(table, 'Nguyễn Văn A');
 
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers.slice(1)).toEqual([
@@ -885,6 +923,8 @@ describe('each category is a table', () => {
       'Mô tả',
       'Trạng thái',
       'Hướng xử lý (nếu có)',
+      'Người tạo',
+      'Ca',
       'Thời gian',
       'Bản ghi',
       'Thao tác',
@@ -920,6 +960,8 @@ describe('each category is a table', () => {
       'Tới hạng phòng',
       'Số đêm',
       'Tổng giá tiền',
+      'Nhân viên',
+      'Ca',
       'Thời gian',
       'Ghi chú',
       'Trạng thái',
@@ -931,7 +973,7 @@ describe('each category is a table', () => {
 
     const laundry = screen.getByTestId('admin-table-ROOM_SERVICE-LAUNDRY');
     const laundryHeaders = within(laundry).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Thời gian', 'Ghi chú', 'Trạng thái', 'Thao tác']);
+    expect(laundryHeaders.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tổng giá tiền', 'Nhân viên', 'Ca', 'Thời gian', 'Ghi chú', 'Trạng thái', 'Thao tác']);
     expect(within(laundry).getByText('Phạm Giặt')).toBeInTheDocument();
     // The room an older laundry row recorded is not a column; it is in the full record.
     await userEvent.click(within(laundry).getByTestId('row-toggle-v2'));
@@ -982,7 +1024,7 @@ describe('each category is a table', () => {
     await openCategory('ROOM_SERVICE');
     const table = await screen.findByTestId('admin-table-ROOM_SERVICE-REVIEW');
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
-    expect(headers.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Thời gian', 'Trạng thái', 'Thao tác']);
+    expect(headers.slice(1)).toEqual(['STT', 'Tên khách', 'Mã EZ', 'Tripadvisor', 'Google', 'Nhân viên', 'Ca', 'Thời gian', 'Trạng thái', 'Thao tác']);
     const row = within(table).getByTestId('row-v3');
     expect(within(row).getByText('Guest A')).toBeInTheDocument();
     expect(within(row).getByText('QA-REVIEW-01')).toBeInTheDocument();

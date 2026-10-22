@@ -89,7 +89,8 @@ export interface PaymentDetail {
  * "Đã hoàn thành" once `completed` — with `resolution` saying how.
  */
 export interface GuestRequestDetail {
-  guestName: string;
+  /** Null until Reception names the guest of a request Bộ phận buồng phòng recorded — and always to Bộ phận buồng phòng. */
+  guestName: string | null;
   ezCode: string | null;
   /** "Nội dung" as the server reads it — the note, or a legacy row's "Ký gửi" and note. */
   content: string;
@@ -221,6 +222,8 @@ export interface OperationalReport {
   sourceLabel?: string | null;
   /** Which department's journal it belongs to. */
   originDepartment?: 'RECEPTION' | 'HOUSEKEEPING';
+  /** The housekeeping work item it was reported from ("+ Báo cáo vấn đề"). */
+  taskId?: string | null;
   createdAt: string;
   updatedAt: string;
   summary: string;
@@ -335,8 +338,10 @@ export interface NewPaymentInput {
 
 /** Tên khách, Mã EZ and Nội dung — the whole of the form. */
 export interface NewGuestRequestInput {
-  guestName: string;
+  /** Reception's; Bộ phận buồng phòng never sends a guest. */
+  guestName?: string;
   ezCode?: string;
+
   note: string;
   severity?: Severity;
 }
@@ -370,8 +375,9 @@ export interface NewRoomServiceInput {
  */
 export type NewReportInput =
   | { category: 'PAYMENT'; payment: NewPaymentInput }
-  | { category: 'GUEST_REQUEST'; guestRequest: NewGuestRequestInput }
-  | { category: 'FACILITY_ISSUE'; facility: { issueId: string } }
+  // `taskId`: Bộ phận buồng phòng's "+ Báo cáo vấn đề" from the room or area it is working.
+  | { category: 'GUEST_REQUEST'; guestRequest: NewGuestRequestInput; taskId?: string }
+  | { category: 'FACILITY_ISSUE'; facility: { issueId: string }; taskId?: string }
   | { category: 'CUSTOMER_COMPLAINT'; complaint: NewComplaintInput }
   | { category: 'ROOM_SERVICE'; roomService: NewRoomServiceInput }
   // One guest, several services: one entry per service, saved together (all or none).
@@ -473,8 +479,13 @@ export const reportsApi = {
    * Tổng quản lý lễ tân), who must name exactly one branch of its scope; a
    * receptionist's branch is its open shift's.
    */
-  create: (input: NewReportInput & { branchId?: number }) =>
+  /** `confirmDuplicate`: "Vẫn gửi" after the server's POSSIBLE_DUPLICATE warning. */
+  create: (input: NewReportInput & { branchId?: number; confirmDuplicate?: boolean }) =>
     api.post<{ report: OperationalReport }>('/reception/reports', input),
+
+  /** "Nhập thông tin khách" — Reception names the guest of a request Bộ phận buồng phòng recorded. */
+  setGuest: (id: string, body: { guestName: string; ezCode?: string }) =>
+    api.patch<{ report: OperationalReport }>(`/reception/reports/${id}/guest`, body),
 
   update: (id: string, patch: UpdateReportInput) =>
     api.patch<{ report: OperationalReport }>(`/reception/reports/${id}`, patch),

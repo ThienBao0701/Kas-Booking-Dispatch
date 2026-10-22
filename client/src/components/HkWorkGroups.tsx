@@ -51,6 +51,7 @@ import {
   placeProblem,
   placeText,
   placesByFloor,
+  draftsByFloor,
   type FloorSection,
   type PlaceDraft,
 } from '../lib/workPlaces';
@@ -476,10 +477,10 @@ function useAreas(branchId: number) {
   });
 }
 
-/** The review line of a place: "Tầng 1 · Phòng 101 · OUT + Khác". */
+/** The review line of a place, under its floor: "Phòng 101 — OUT + Khác". */
 function reviewLine(d: PlaceDraft): string {
   const what = d.areaKind === 'ROOM' ? codesLabel(d.codes) : 'Khác';
-  return `${d.groupLabel} · ${d.label} · ${what}`;
+  return `${d.label} — ${what}`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -581,16 +582,19 @@ export function CreateWorkDialog({
               <p className="text-sm text-slate-700">
                 <span className="font-semibold">Tầng / khu vực:</span> {groups.join(', ')}
               </p>
-              <ol className="divide-y divide-line-subtle rounded-xl border border-line">
-                {ordered.map((p, i) => (
-                  <li key={p.key} className="px-3 py-2 text-sm">
-                    <p className="font-semibold text-slate-900">
-                      {i + 1}. {reviewLine(p)}
-                    </p>
-                    {needsNote(p) && p.note.trim() ? <p className="mt-0.5 whitespace-pre-wrap text-slate-600">Ghi chú: {p.note.trim()}</p> : null}
-                  </li>
-                ))}
-              </ol>
+              {draftsByFloor(ordered).map((floor) => (
+                <section key={floor.heading} className="overflow-hidden rounded-xl border border-line" data-testid={`work-review-floor-${floor.heading}`}>
+                  <h3 className="border-b border-line-subtle bg-slate-50 px-3 py-1.5 text-sm font-semibold text-slate-900">{floor.heading}</h3>
+                  <ul className="divide-y divide-line-subtle">
+                    {floor.places.map((p) => (
+                      <li key={p.key} className="px-3 py-2 text-sm">
+                        <p className="font-medium text-slate-900">{reviewLine(p)}</p>
+                        {needsNote(p) && p.note.trim() ? <p className="mt-0.5 whitespace-pre-wrap text-slate-600">Ghi chú: {p.note.trim()}</p> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ))}
               <p className="text-xs text-slate-500">Một công việc, giao và nhận cùng nhau; mỗi phòng / khu vực vẫn được kiểm tra và dọn riêng.</p>
               {save.isError ? (
                 <ErrorAlert>

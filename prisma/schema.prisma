@@ -821,6 +821,7 @@ model Branch {
 
   /// Its three housekeeping warehouses (Kho Linens / Amenities / đồ dùng, thiết bị).
   inventoryItems         InventoryItem[]
+  inventoryCodeSequences InventoryCodeSequence[]
   inventoryMovements     InventoryMovement[]
   inventoryReceipts      InventoryReceipt[]
   inventoryCounts        InventoryCount[]
@@ -2790,6 +2791,8 @@ model ReceptionOperationalReport {
   /// Which department's journal this record belongs to — set by the server from
   /// the writer's role. Every row written before it existed is Reception's.
   originDepartment      ReportDepartment @default(RECEPTION)
+  /// The housekeeping work item it was reported from ("+ Báo cáo vấn đề" on a room or area).
+  taskId                String?
 
   category OperationalReportCategory
 
@@ -2823,6 +2826,7 @@ model ReceptionOperationalReport {
   createdBy    User                   @relation("OperationalReportCreatedBy", fields: [createdByUserId], references: [id])
   voidedBy     User?                  @relation("OperationalReportVoidedBy", fields: [voidedByUserId], references: [id])
   enteredBy    User?                  @relation("OperationalReportEnteredBy", fields: [enteredByUserId], references: [id])
+  task         HousekeepingRoomTask?  @relation(fields: [taskId], references: [id], onDelete: Restrict)
 
   /// Exactly one of these exists, decided by `category`.
   payment      ReceptionPayment?
@@ -2845,6 +2849,7 @@ model ReceptionOperationalReport {
   @@index([voidedAt])
   @@index([enteredByUserId])
   @@index([originDepartment, branchId, createdAt])
+  @@index([taskId])
 }
 
 /// ONE PAYMENT ROW — "Thu tiền thanh toán".
@@ -2920,7 +2925,8 @@ model GuestRequestReport {
   /// entry form was reduced to name, Mã EZ and content. Null on every request
   /// recorded since; kept, never rewritten, on the ones recorded before.
   itemType   String?
-  guestName  String
+  /// Null on a request Bộ phận buồng phòng recorded until Reception names the guest.
+  guestName  String?
   /// Mã EZ — the PMS reference, as typed, like the payment's.
   ezCode     String?
   /// Số phòng — LEGACY, like `itemType`: no longer asked for.
@@ -3596,6 +3602,8 @@ model HousekeepingRoomTask {
   /// The stock its completed cleaning moved (clean linen and supplies out, dirty linen in).
   inventoryMovements InventoryMovement[]
   inventoryDamage    InventoryDamageReport[]
+  /// The reports made from this work item.
+  reports            ReceptionOperationalReport[]
 
   @@unique([branchId, workDate, roomNumber, itemKey, cycleNumber])
   @@unique([groupId, groupIndex])
@@ -3915,13 +3923,21 @@ model HotelIssueDispatch {
  */
 
 /// The three warehouses of a branch.
+/// The four warehouses, each with its code prefix: CHEMICAL_TOOLS 1, GUEST_SUPPLIES 2,
+/// LINEN 3, AMENITY 4. EQUIPMENT is the former "Kho đồ dùng, thiết bị": no
+/// longer offered; an item still in it waits to be classified into one of the
+/// four (its history stays as recorded).
 enum InventoryWarehouse {
-  /// Kho Linens — reusable linen: clean, dirty, at the laundry, damaged.
+  /// Kho đồ vải.
   LINEN
-  /// Kho Amenities — guest supplies, consumed in the rooms.
+  /// Kho đồ dùng khác / Đồ tiêu hao (Amenities).
   AMENITY
-  /// Kho đồ dùng, thiết bị — housekeeping tools, equipment and supplies.
+  /// LEGACY — "Kho đồ dùng, thiết bị": items here are "chưa phân loại".
   EQUIPMENT
+  /// Kho hóa chất & dụng cụ.
+  CHEMICAL_TOOLS
+  /// Đồ dùng cho khách.
+  GUEST_SUPPLIES
 }
 
 /// Where a quantity of an item is. A balance exists per item and state.
@@ -3994,6 +4010,8 @@ model InventoryItem {
   /// Size / variant — "K" / "Q" / "T" (King / Queen / Twin) for bed linen; '' when none.
   variant               String             @default("")
   code                  String?
+  /// SYSTEM: a row of the Admin's shared catalog; BRANCH: this branch's own item.
+  scope                 InventoryItemScope @default(BRANCH)
   unit                  String
   /// The "Dọn phòng" form field this item IS ("LINEN:BED_SHEET:K",
   /// "QTY:BATH_TOWEL", "REPLACED:SHAMPOO"): a completed cleaning moves its stock.
@@ -4001,6 +4019,8 @@ model InventoryItem {
   /// "Sắp hết" below this — only when a manager set one.
   lowStockThreshold     Int?
   note                  String?
+  /// In the branch's "Dọn phòng" list, at this position; null: not used in room cleaning.
+  cleaningOrder         Int?
   archivedAt            DateTime?
   createdByUserId       Int
   createdByNameSnapshot String
@@ -4016,7 +4036,41 @@ model InventoryItem {
   transferLines InventoryTransferLine[]
   damageReports InventoryDamageReport[]
 
+  /// The code ("3.001") is the server's, once, never reused within the branch — archived items keep theirs.
+  @@unique([branchId, code])
   @@index([branchId, warehouse])
+}
+
+/// WHO A CATALOG ITEM IS FOR. SYSTEM: the Admin's shared catalog — one row in
+/// every branch, the same code and name, each with its OWN stock (nothing is
+/// received by creating it). BRANCH: one branch's own item, seen nowhere else.
+enum InventoryItemScope {
+  SYSTEM
+  BRANCH
+}
+
+/// THE LAST ITEM CODE NUMBER handed out per warehouse, for the whole system —
+/// shared and branch items alike, so a code is never issued twice anywhere and
+/// a shared item never collides with a branch's own. Started after the highest
+/// number any branch had used.
+model InventoryGlobalCodeSequence {
+  warehouse  InventoryWarehouse @id
+  lastNumber Int
+}
+
+/// (Superseded by InventoryGlobalCodeSequence; kept as the record of the
+/// per-branch numbering used before it.)
+/// THE LAST ITEM CODE NUMBER handed out, per branch and warehouse — "3.015"
+/// means the next Kho đồ vải item is "3.016". Only ever increases, under a row
+/// lock, so two creations never share a number and a number is never reused.
+model InventoryCodeSequence {
+  branchId   Int
+  warehouse  InventoryWarehouse
+  lastNumber Int
+
+  branch Branch @relation(fields: [branchId], references: [id])
+
+  @@id([branchId, warehouse])
 }
 
 /// THE CURRENT QUANTITY of one item in one state — a projection of its

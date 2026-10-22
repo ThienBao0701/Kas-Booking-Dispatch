@@ -215,14 +215,19 @@ function finding(id: string, createdAt: string, collectionStatus: 'COLLECTED' | 
 }
 
 /** The "Quản lý buồng phòng" menu, exactly, in order. */
-const MENU = ['Công việc chung', 'Công việc cá nhân', 'Kho Linens', 'Kho Amenities', 'Kho đồ dùng, thiết bị'];
-/** "Công việc cá nhân", opened: its four pages. */
-const PERSONAL = ['Dọn phòng', 'Kiểm kho', 'Phân công ca, việc làm', 'Phân công việc ngày hôm sau'];
+const MENU = ['Công việc chung', 'Công việc mỗi ngày cần làm', 'Phát hiện & thu tiền', 'Individual PerformanceSẽ phát triển'];
+/** "Kho hàng", opened: the four warehouses, in code order. */
+const STORES = [
+  ['Kho hóa chất & dụng cụ', '/app/hk/store/chemicals'],
+  ['Đồ dùng cho khách', '/app/hk/store/guest-supplies'],
+  ['Kho đồ vải', '/app/hk/store/linens'],
+  ['Kho đồ dùng khác / Đồ tiêu hao (Amenities)', '/app/hk/store/amenities'],
+];
 /** What "Công việc chung" no longer shows. */
 const REMOVED = ['hk-context', 'hk-date', 'hk-overview-rooms', 'hk-overview-progress', 'hk-working', 'hk-overview-kpi', 'hk-quick'];
 
 describe('Quản lý buồng phòng — menu and overview', () => {
-  it('lands on "Công việc chung" with the six menu entries — only "Tiến độ công việc hôm nay", watching only, no "Tạo công việc"', async () => {
+  it('lands on "Công việc chung": one "Công việc mỗi ngày cần làm" link, "Kho hàng" folded, "Phát hiện & thu tiền" — watching only, no "Tạo công việc"', async () => {
     installApiMock(
       shell(MANAGER, {
         [`GET /api/housekeeping/manager/overview?date=${TODAY}&branchId=1`]: () => ({
@@ -254,10 +259,12 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     renderApp('/app');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     // "Theo dõi nhân viên" and "Báo cáo" stay off the menu (their pages remain); KPI is under "Báo cáo vấn đề".
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(MENU.filter((m) => m !== 'Công việc cá nhân'));
-    const personal = within(nav).getByTestId('nav-group-Công việc cá nhân');
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(MENU);
+    expect(within(nav).getByRole('link', { name: 'Công việc mỗi ngày cần làm' })).toHaveAttribute('href', '/app/hk/daily');
+    expect(within(nav).queryByTestId('nav-group-Công việc cá nhân')).not.toBeInTheDocument();
+    const stores = within(nav).getByTestId('nav-group-Kho hàng');
     const reports = within(nav).getByTestId('nav-group-Báo cáo vấn đề');
-    expect(personal.compareDocumentPosition(reports) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(stores.compareDocumentPosition(reports) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
     await userEvent.click(reports);
     // Its own three categories (no "Dịch vụ phòng, KPI"), the private reports, then its inspections and KPI.
@@ -269,9 +276,8 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     ]);
     expect(within(reports.parentElement!).getByTestId('nav-group-Kiểm tra phòng & KPI buồng phòng')).toBeInTheDocument();
     await userEvent.click(reports);
-    expect(within(nav).getByRole('link', { name: 'Công việc chung' }).compareDocumentPosition(personal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    await userEvent.click(personal);
-    expect(within(personal.parentElement!).getAllByRole('link').map((l) => l.textContent)).toEqual(PERSONAL);
+    await userEvent.click(stores);
+    expect(within(stores.parentElement!).getAllByRole('link').map((l) => [l.textContent, l.getAttribute('href')])).toEqual(STORES);
     expect(await within(screen.getByRole('main')).findByRole('heading', { level: 1, name: 'Công việc chung' })).toBeInTheDocument();
     // Gone: the date / branch strip and its cards, the progress bar, "Nhân viên trong ca",
     // "KPI & thu tiền hôm nay" and "Truy cập nhanh". The manager never had a branch filter.
@@ -293,7 +299,7 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     expect(within(screen.getByRole('main')).queryByRole('button', { name: /Tạo công việc|Nhận công việc|Chỉnh sửa/ })).not.toBeInTheDocument();
   });
 
-  it('gives the Admin three entries — Công việc chung, Điều phối công việc, Kho & tồn kho — and keeps its branch filter on "Công việc chung"', async () => {
+  it('gives the Admin three entries — Công việc chung, Công việc mỗi ngày cần làm, Kho hàng — and keeps its branch filter on "Công việc chung"', async () => {
     const CN2 = { id: 2, code: 'LTT', hotelName: 'KAS', address: '260 Lý Tự Trọng', branchNumber: 2 };
     installApiMock(
       shell(ADMIN_USER, {
@@ -314,29 +320,22 @@ describe('Quản lý buồng phòng — menu and overview', () => {
     // The Admin's branch filter stays: one branch shows its own day.
     await userEvent.click(screen.getByTestId('branch-select'));
     await userEvent.click(screen.getByTestId('branch-option-2'));
-    expect(await screen.findByText('Chưa có công việc nào trong ngày. Công việc được tạo ở “Công việc cá nhân”.')).toBeInTheDocument();
+    expect(await screen.findByText('Chưa có công việc nào trong ngày. Công việc được tạo ở “Công việc mỗi ngày cần làm”.')).toBeInTheDocument();
     expect(screen.queryByTestId('overview-group-1')).not.toBeInTheDocument();
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     // Open, since the page is inside it.
     expect(within(nav).getByTestId('nav-group-Quản lý buồng phòng')).toHaveAttribute('aria-expanded', 'true');
     const group = within(nav).getByTestId('nav-group-Quản lý buồng phòng').parentElement!;
-    // Three rows: one link, two folded groups.
-    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/overview']);
-    const dispatch = within(group).getByTestId('nav-group-Điều phối công việc');
-    const stores = within(group).getByTestId('nav-group-Kho & tồn kho');
-    expect(within(group).queryByTestId('nav-group-Công việc cá nhân')).not.toBeInTheDocument();
-    await userEvent.click(dispatch);
-    // Giving out work — never "Dọn phòng": the Admin works no shift and cleans no room.
-    expect(within(dispatch.parentElement!).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/rooms', '/app/hk/tomorrow']);
+    // Three rows: two links, one folded group.
+    expect(within(group).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual(['/app/hk/overview', '/app/hk/daily']);
+    // The Admin's view spans every branch: "Kho hàng tổng".
+    expect(within(group).queryByTestId('nav-group-Kho hàng')).not.toBeInTheDocument();
+    const stores = within(group).getByTestId('nav-group-Kho hàng tổng');
+    expect(within(group).queryByTestId('nav-group-Điều phối công việc')).not.toBeInTheDocument();
+    // Never "Dọn phòng": the Admin works no shift and cleans no room.
     expect(within(nav).queryByRole('link', { name: 'Dọn phòng' })).not.toBeInTheDocument();
     await userEvent.click(stores);
-    expect(within(stores.parentElement!).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([
-      '/app/hk/store/linens',
-      '/app/hk/store/amenities',
-      '/app/hk/store/equipment',
-      '/app/hk/stock-count',
-      '/app/inventory',
-    ]);
+    expect(within(stores.parentElement!).getAllByRole('link').map((l) => l.getAttribute('href'))).toEqual([...STORES.map(([, href]) => href), '/app/inventory']);
     // "Tồn kho & Báo hỏng": inside "Quản lý buồng phòng", nowhere else.
     expect(within(group).getByRole('link', { name: 'Tồn kho & Báo hỏng' })).toHaveAttribute('href', '/app/inventory');
     // Its reports are under "Báo cáo vấn đề", not here.
@@ -363,45 +362,51 @@ describe('Quản lý buồng phòng — menu and overview', () => {
       name: 'Khăn tắm',
       variant: '',
       label: 'Khăn tắm',
-      code: null,
+      code: '3.001',
       unit: 'cái',
-      catalogKey: 'QTY:BATH_TOWEL',
       lowStockThreshold: 20,
       lowStock: true,
       note: null,
       archived: false,
       opened: true,
-      balances: { AVAILABLE: 18, DIRTY: 2, DAMAGED: 1 },
+      cleaningOrder: 1,
+      unclassified: false,
+      legacyBalances: [{ state: 'DIRTY', stateLabel: 'Bẩn', quantity: 2 }],
+      balances: { AVAILABLE: 18, DAMAGED: 1 },
       pendingDamage: 1,
     };
     installApiMock(routesFor('LINEN', [towel]));
     const linen = renderApp('/app/hk/store/linens');
     const main = await screen.findByRole('main');
-    expect(await within(main).findByRole('heading', { level: 1, name: 'Kho Linens' })).toBeInTheDocument();
+    expect(await within(main).findByRole('heading', { level: 1, name: 'Kho đồ vải' })).toBeInTheDocument();
     const table = await screen.findByTestId('inventory-items');
     expect(await within(table).findByText('Khăn tắm')).toBeInTheDocument();
     expect(within(table).getByText('Sắp hết')).toBeInTheDocument();
+    expect(within(table).getByText('Dùng khi dọn phòng')).toBeInTheDocument();
     expect(screen.getByTestId('inventory-total-AVAILABLE')).toHaveTextContent('18');
-    expect(screen.getByTestId('inventory-total-DIRTY')).toHaveTextContent('2');
     expect(screen.getByTestId('inventory-pending-damage')).toHaveTextContent('1');
-    // Clean, dirty, damaged — no "đang giặt" stage.
+    // One on-hand figure: no "Bẩn", no "đang giặt"; a dirty balance from before is flagged apart.
+    expect(screen.queryByTestId('inventory-total-DIRTY')).not.toBeInTheDocument();
     expect(screen.queryByTestId('inventory-total-IN_LAUNDRY')).not.toBeInTheDocument();
-    // The daily actions on top: receive and report; the catalog tools behind "Quản lý danh mục".
+    expect(screen.getByTestId('inventory-legacy-i1')).toHaveTextContent('bẩn 2');
     for (const id of ['inventory-receive-open', 'inventory-damage-open', 'inventory-manage-open']) {
       expect(screen.getByTestId(id)).toBeInTheDocument();
     }
-    // No laundry processing: neither "Gửi giặt" nor "Giặt xong".
-    expect(screen.queryByTestId('inventory-transfer-LAUNDRY_RETURN')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('inventory-transfer-LAUNDRY_SEND')).not.toBeInTheDocument();
+    // No transfers in the four warehouses.
+    expect(screen.queryByTestId(/^inventory-transfer-/)).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent('Giặt xong');
     linen.unmount();
-    installApiMock(routesFor('EQUIPMENT', []));
-    renderApp('/app/hk/store/equipment');
-    expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: 'Kho đồ dùng, thiết bị' })).toBeInTheDocument();
-    expect(await screen.findByText('Kho chưa có mặt hàng')).toBeInTheDocument();
-    expect(screen.getByTestId('inventory-transfer-STOCK_ISSUE')).toBeInTheDocument();
-    expect(screen.queryByTestId('inventory-transfer-LAUNDRY_SEND')).not.toBeInTheDocument();
-    expect(screen.getByTestId('inventory-total-ISSUED')).toHaveTextContent('0');
+    for (const [path, warehouse, title] of [
+      ['chemicals', 'CHEMICAL_TOOLS', 'Kho hóa chất & dụng cụ'],
+      ['guest-supplies', 'GUEST_SUPPLIES', 'Đồ dùng cho khách'],
+      ['amenities', 'AMENITY', 'Kho đồ dùng khác / Đồ tiêu hao (Amenities)'],
+    ] as const) {
+      installApiMock(routesFor(warehouse, []));
+      const view = renderApp(`/app/hk/store/${path}`);
+      expect(await within(await screen.findByRole('main')).findByRole('heading', { level: 1, name: title })).toBeInTheDocument();
+      expect(await screen.findByText('Kho chưa có mặt hàng')).toBeInTheDocument();
+      view.unmount();
+    }
   });
 
   it('keeps "Theo dõi nhân viên" and "Báo cáo" reachable by address — off the menu, not removed', async () => {
@@ -530,11 +535,14 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
     const review = within(dialog).getByTestId('work-review-list');
     expect(review).toHaveTextContent('Tên công việc: Tổng vệ sinh buổi sáng');
     expect(review).toHaveTextContent('Tầng / khu vực: Tầng 1, Tầng 2');
+    // One section per floor, the area under its own floor.
+    expect(within(review).getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tầng 1', 'Tầng 2']);
+    expect(within(screen.getByTestId('work-review-floor-Tầng 1')).getAllByRole('listitem')).toHaveLength(3);
     expect(within(review).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      '1. Tầng 1 · Phòng 101 · OC + KhácGhi chú: Thay rèm',
-      '2. Tầng 1 · Phòng 102 · VC',
-      '3. Tầng 1 · Hành lang · KhácGhi chú: Lau sàn',
-      '4. Tầng 2 · Phòng 201 · OUT',
+      'Phòng 101 — OC + KhácGhi chú: Thay rèm',
+      'Phòng 102 — VC',
+      'Hành lang — KhácGhi chú: Lau sàn',
+      'Phòng 201 — OUT',
     ]);
     await userEvent.click(within(dialog).getByRole('button', { name: /Sửa lại/ }));
     expect(within(dialog).getByTestId('place-row-ROOM:201')).toHaveTextContent('Phòng 201 — OUT');
@@ -621,7 +629,7 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
     await userEvent.click(within(dialog).getByTestId('place-tile-ROOM:401'));
     await userEvent.click(within(dialog).getByTestId('place-code-ROOM:401-OUT'));
     await userEvent.click(within(dialog).getByTestId('work-review'));
-    expect(within(dialog).getByTestId('work-review-list')).toHaveTextContent('Tầng 4 · Phòng 401 · OUT');
+    expect(within(dialog).getByTestId('work-review-list')).toHaveTextContent('Tầng 4Phòng 401 — OUT');
     const reads = () => fetchMock.mock.calls.filter(([u]) => String(u).includes('/manager/tasks?')).length;
     const before = reads();
     await userEvent.click(within(dialog).getByTestId('work-save'));

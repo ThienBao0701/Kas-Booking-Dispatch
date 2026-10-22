@@ -168,7 +168,8 @@ export function RoomIssueTable({
         ]),
   ];
 
-  const actionable = (mode === 'reception' || mode === 'admin') && onCollect;
+  // The Quản lý buồng phòng may void a finding but not settle its money: either action makes the column.
+  const actionable = (mode === 'reception' || mode === 'admin') && (onCollect || (mode === 'admin' && onVoid));
   return (
     <DataTable
       testId={testId}
@@ -191,10 +192,12 @@ export function RoomIssueTable({
                 <span className="text-xs text-slate-300">—</span>
               ) : (
                 <>
-                  <RowAction onClick={() => onCollect(i)} testId={`collect-${i.id}`}>
-                    <CircleDollarSign className="h-3 w-3" aria-hidden="true" />
-                    {i.collection ? 'Cập nhật' : 'Thu tiền'}
-                  </RowAction>
+                  {onCollect ? (
+                    <RowAction onClick={() => onCollect(i)} testId={`collect-${i.id}`}>
+                      <CircleDollarSign className="h-3 w-3" aria-hidden="true" />
+                      {i.collection ? 'Cập nhật' : 'Thu tiền'}
+                    </RowAction>
+                  ) : null}
                   {mode === 'admin' && onVoid ? (
                     <RowAction onClick={() => onVoid(i)} tone="danger" testId={`void-room-${i.id}`}>
                       <Trash2 className="h-3 w-3" aria-hidden="true" />

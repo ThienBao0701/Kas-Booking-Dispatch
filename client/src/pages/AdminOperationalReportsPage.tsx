@@ -627,14 +627,19 @@ function CategoryView({
       <RoomServiceTotals rows={rows} order={ROOM_SERVICE_ORDER} labelOf={serviceLabel} scope="trong danh sách đang xem" />
     ) : null;
 
-  // Loading, failed or empty: one table carries the state, with nothing to group.
-  if (tableState.isLoading || tableState.isError || rows.length === 0) {
+  /*
+    ONE CATEGORY, ONE TABLE: every record of it — Reception's and Bộ phận buồng
+    phòng's, any shift or none — in a single table, newest first, with its own
+    "Ca" and "Người tạo" columns. Never a table per department, shift or person.
+    Loading, failed or empty: the same one table carries the state.
+  */
+  if (category !== null || tableState.isLoading || tableState.isError || rows.length === 0) {
     return (
       <div className="space-y-3">
         {totals}
         <CategoryTable
           category={category}
-          rows={rows}
+          rows={[...rows].sort((a, b) => b.createdAt.localeCompare(a.createdAt))}
           title={category ? label(category) : 'Tất cả danh mục'}
           label={label}
           serviceLabel={serviceLabel}

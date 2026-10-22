@@ -36,7 +36,9 @@ export type ApiErrorCode =
   | 'REVIEW_REASON_REQUIRED'
   // Reception shift codes. The client keys off SHIFT_CHECK_IN_REQUIRED to open
   // the shift picker, so it must be distinguishable from any other 422.
-  | 'SHIFT_CHECK_IN_REQUIRED';
+  | 'SHIFT_CHECK_IN_REQUIRED'
+  // A report that looks like one already recorded: shown, then sent again only when confirmed.
+  | 'POSSIBLE_DUPLICATE';
 
 const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   BAD_REQUEST: 400,
@@ -65,6 +67,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   PROOF_ALREADY_REVIEWED: 409,
   REVIEW_REASON_REQUIRED: 422,
   SHIFT_CHECK_IN_REQUIRED: 422,
+  POSSIBLE_DUPLICATE: 409,
 };
 
 export class ApiError extends Error {

@@ -1853,8 +1853,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
       'Mức độ',
       'Mã EZ',
       'Nội dung',
-      'Thời gian tiếp nhận',
-      'Thời gian hoàn thành',
+      'Trạng thái',
       'Cách xử lý (nếu có)',
     ]);
     expect(within(table).queryByText('Người tạo')).not.toBeInTheDocument();

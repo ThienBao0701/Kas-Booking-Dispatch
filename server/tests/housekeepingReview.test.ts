@@ -117,8 +117,8 @@ async function clean(agent: Agent, id: string, from: string, to: string, form: R
 
 const review = (id: string, body: Record<string, unknown>, agent: Agent = manager1) => agent.post(`/api/housekeeping/manager/tasks/${id}/review`).send(body);
 
-const FORM_1 = { linen: { BED_SHEET: { size: 'K', quantity: 2 } }, quantities: { BATH_TOWEL: 1 }, replaced: ['SHAMPOO'], special: ['DND'], note: 'Lần 1' };
-const FORM_2 = { linen: { BED_SHEET: { size: 'K', quantity: 2 } }, quantities: { BATH_TOWEL: 2 }, replaced: ['SHAMPOO', 'HAND_WASH'], special: [], note: 'Lần 2' };
+const FORM_1 = { special: ['DND'], note: 'Lần 1' };
+const FORM_2 = { special: [], note: 'Lần 2' };
 
 describe('"Hoàn thành" waits for the manager', () => {
   it('1–3. leaves the worker’s list and appears in "Chờ đánh giá" — the room stays taken', async () => {

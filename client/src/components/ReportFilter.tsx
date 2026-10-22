@@ -168,6 +168,11 @@ export function ReportFilterBar({
               {s.label}
             </button>
           ))}
+          {value.shiftType ? (
+            <span className="basis-full text-xs text-slate-500" data-testid="shift-filter-note">
+              Báo cáo của Bộ phận buồng phòng không thuộc ca lễ tân — vẫn hiển thị theo ngày.
+            </span>
+          ) : null}
         </div>
       ) : null}
     </section>

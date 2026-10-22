@@ -50,6 +50,20 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
 };
 
+/**
+ * THE MANAGEMENT LEVEL — the Admin and every Quản lý / Tổng quản lý role, named
+ * one by one (never matched by name). It decides only which menu entries and
+ * placeholder screens are shown; it grants no data and no action.
+ */
+export const MANAGEMENT_ROLES: readonly UserRole[] = [
+  'ADMIN',
+  'RECEPTION_MANAGER',
+  'RECEPTION_GENERAL_MANAGER',
+  'HOUSEKEEPING_MANAGER',
+  'TECHNICAL_MANAGER',
+  'TECHNICAL_GENERAL_MANAGER',
+];
+
 /** Who runs the daily room work: the Admin (every branch), the Quản lý buồng phòng (its one). */
 export function isRoomWorkManager(role: UserRole | undefined): boolean {
   return role === 'ADMIN' || role === 'HOUSEKEEPING_MANAGER';

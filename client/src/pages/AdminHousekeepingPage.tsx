@@ -63,8 +63,10 @@ export function AdminHousekeepingPage() {
   const today = hcmToday();
   const role = useAuth().user?.role;
   const isAdmin = role === 'ADMIN';
-  // "Xóa" (a void, with a reason): the Admin, and the reception managers over their branches — the server checks both.
-  const mayVoid = isAdmin || role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER';
+  // The Quản lý buồng phòng reads its branch's findings: no collection, no exports (Reception's).
+  const isHkManager = role === 'HOUSEKEEPING_MANAGER';
+  // "Xóa" (a void, with a reason): the Admin; the reception managers and the Quản lý buồng phòng over their branches — the server checks.
+  const mayVoid = isAdmin || isHkManager || role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER';
   // "Hôm nay", "Ngày cụ thể" or "Khoảng ngày" — the last 30 days to begin with, as before.
   const [period, setPeriod] = useState<ReportFilterValue>(() =>
     initialReportFilter(today, { mode: 'RANGE', range: { from: daysBefore(today, 29), to: today } }),
@@ -143,11 +145,15 @@ export function AdminHousekeepingPage() {
     <div className="space-y-4">
       <PageHeader
         title="Buồng phòng — tình trạng sử dụng phòng & thu tiền"
-        description={`Vấn đề Bộ phận buồng phòng ghi nhận và kết quả thu tiền của lễ tân, ${isAdmin ? 'tất cả chi nhánh' : 'các chi nhánh được phân công'}.`}
+        description={`Vấn đề Bộ phận buồng phòng ghi nhận và kết quả thu tiền của lễ tân, ${isAdmin ? 'tất cả chi nhánh' : isHkManager ? 'chi nhánh của bạn' : 'các chi nhánh được phân công'}.`}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            {exportLink(operationalPdfUrl(exportScope), 'Xuất PDF', 'housekeeping-export-pdf')}
-            {exportLink(operationalXlsxUrl(exportScope), 'Xuất Excel', 'housekeeping-export-xlsx')}
+            {isHkManager ? null : (
+              <>
+                {exportLink(operationalPdfUrl(exportScope), 'Xuất PDF', 'housekeeping-export-pdf')}
+                {exportLink(operationalXlsxUrl(exportScope), 'Xuất Excel', 'housekeeping-export-xlsx')}
+              </>
+            )}
             <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
               <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />
               Làm mới
@@ -243,7 +249,7 @@ export function AdminHousekeepingPage() {
                 testId={`room-issue-table-${rows[0]!.branchId}`}
                 title={`${branchLabel(rows[0]!.branch)} — ${rows.length} vấn đề`}
                 issues={rows}
-                onCollect={setCollecting}
+                onCollect={isHkManager ? undefined : setCollecting}
                 onVoid={mayVoid ? setVoiding : undefined}
               />
             ))

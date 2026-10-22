@@ -11,9 +11,14 @@
  * "Hoàn thành dọn phòng" shows everything entered for a last check before it is
  * sent. The person is the account: no name is asked anywhere.
  *
- * A SHARED AREA ("Hành lang - Tầng 5") is worked the same way; its inspection is
- * what the housekeeper noted (it has no room findings), and its cleaning is the
- * same form and the same times.
+ * A SHARED AREA ("Hành lang - Tầng 5") has no "Dọn phòng": its one step is
+ * "Kiểm tra tình trạng" — what the housekeeper noted — and saving it completes
+ * the item. ("Dọn phòng" shows only on an area already being cleaned from before.)
+ *
+ * "DỌN PHÒNG" counts the items of the branch's room-cleaning list — name, −, the
+ * count, + — never above what is on hand; the stock moves only at "Hoàn thành".
+ * "+ Báo cáo vấn đề" sits beside the special flags and the note (and on an
+ * area's check): it reports, and changes nothing about the room or the stock.
  *
  * "KHÔNG CẦN DỌN" is asked HERE, beside the room's name (top right): the reason
  * is required, the Quản lý buồng phòng decides, and while it waits the room says
@@ -27,20 +32,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Ban, Check, ClipboardCheck, Hourglass, Minus, Pencil, Play, Plus, Save, Sparkles, UserRoundPlus } from 'lucide-react';
+import { ArrowLeft, Ban, Check, ClipboardCheck, Hourglass, Megaphone, Minus, Pencil, Play, Plus, Save, Sparkles, UserRoundPlus } from 'lucide-react';
 import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
-import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
+import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type CleaningInput, type CleaningItem, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
 import { Button } from '../components/Button';
 import { NoCleanRequestDialog, ReleaseRoomDialog } from '../components/HkWorkerActions';
+import { QuickReportDialog } from '../components/HkQuickReport';
 import { Modal } from '../components/Modal';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { QueryState } from '../components/PageState';
 import { Toast } from '../components/Toast';
 import { formatDateTime } from '../lib/format';
-
-const EMPTY_FORM: CleaningForm = { linen: {}, quantities: {}, collected: {}, replaced: [], special: [], note: null };
 
 export function HousekeepingRoomPage() {
   const { id = '' } = useParams();
@@ -52,6 +56,7 @@ export function HousekeepingRoomPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [askingNoClean, setAskingNoClean] = useState(false);
   const [releasing, setReleasing] = useState(false);
+  const [reporting, setReporting] = useState(false);
   const navigate = useNavigate();
 
   // "Mở phòng" is recorded once (the server ignores a repeat); it starts nothing.
@@ -71,7 +76,10 @@ export function HousekeepingRoomPage() {
   const me = useAuth().user;
   // A Quản lý buồng phòng doing a room it accepted comes back to its board.
   const manager = me?.role === 'HOUSEKEEPING_MANAGER';
-  const active = tab ?? (t && t.state !== 'NOT_STARTED' ? 'clean' : 'inspect');
+  // A shared area is checked, not cleaned — "Dọn phòng" only for one already being cleaned from before.
+  const isArea = !!t?.areaKind && t.areaKind !== 'ROOM';
+  const showClean = !isArea || t?.state === 'IN_PROGRESS';
+  const active = showClean ? (tab ?? (t && t.state !== 'NOT_STARTED' ? 'clean' : 'inspect')) : 'inspect';
   // "Không cần dọn": the housekeeper's own room, not yet being cleaned, nothing pending
   // (the server holds the same rule). The manager decides such requests — it never asks.
   const waitingNoClean = t?.noClean?.status === 'PENDING' && !t.voided;
@@ -80,7 +88,7 @@ export function HousekeepingRoomPage() {
 
   return (
     <div className="mx-auto max-w-3xl pb-24">
-      <Link to={manager ? '/app/hk/clean' : '/app/inspections'} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
+      <Link to={manager ? '/app/hk/daily?tab=clean' : '/app/inspections'} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
         {manager ? 'Dọn phòng' : 'Danh sách công việc'}
       </Link>
@@ -103,11 +111,11 @@ export function HousekeepingRoomPage() {
                 ) : null
               }
             />
-            <div role="tablist" aria-label="Công việc phòng" className="my-4 grid grid-cols-2 gap-2">
+            <div role="tablist" aria-label="Công việc phòng" className={`my-4 grid gap-2 ${showClean ? 'grid-cols-2' : 'grid-cols-1'}`}>
               {(
                 [
-                  ['inspect', 'Kiểm phòng', ClipboardCheck, false],
-                  ['clean', 'Dọn phòng', Sparkles, t.state === 'NOT_STARTED'],
+                  ['inspect', isArea ? 'Kiểm tra tình trạng' : 'Kiểm phòng', ClipboardCheck, false],
+                  ...(showClean ? ([['clean', 'Dọn phòng', Sparkles, t.state === 'NOT_STARTED']] as const) : []),
                 ] as const
               ).map(([value, label, Icon, locked]) => (
                 <button
@@ -127,7 +135,7 @@ export function HousekeepingRoomPage() {
                 </button>
               ))}
             </div>
-            {t.state === 'NOT_STARTED' && active === 'inspect' && !waitingNoClean ? (
+            {t.state === 'NOT_STARTED' && active === 'inspect' && !waitingNoClean && !isArea ? (
               <p className="mb-3 text-sm text-slate-600">“Dọn phòng” mở sau khi lưu kiểm tra; thời gian dọn chỉ bắt đầu khi bấm “Bắt đầu dọn”.</p>
             ) : null}
             {waitingNoClean ? (
@@ -135,13 +143,13 @@ export function HousekeepingRoomPage() {
                 Đã gửi yêu cầu “Không cần dọn” — lý do: <span className="font-semibold">{t.noClean?.reason}</span>. Chờ Quản lý buồng phòng xác nhận;
                 trong lúc chờ, chưa kiểm tra hay dọn phòng này.
               </p>
-            ) : active === 'inspect' && t.areaKind && t.areaKind !== 'ROOM' ? (
+            ) : active === 'inspect' && isArea ? (
               <AreaInspectPanel
                 task={t}
+                onReport={() => setReporting(true)}
                 onSaved={(next) => {
                   refresh(next);
-                  setTab('clean');
-                  setToast('Đã lưu kiểm tra. Bấm “Bắt đầu dọn” khi bắt đầu dọn.');
+                  setToast('Đã kiểm tra xong khu vực.');
                 }}
               />
             ) : active === 'inspect' ? (
@@ -167,6 +175,7 @@ export function HousekeepingRoomPage() {
               <CleanPanel
                 task={t}
                 catalog={catalog.data}
+                onReport={() => setReporting(true)}
                 onSaved={(next, done) => {
                   refresh(next);
                   setToast(done ? 'Đã hoàn thành dọn phòng.' : 'Đã lưu tạm.');
@@ -184,6 +193,16 @@ export function HousekeepingRoomPage() {
             setAskingNoClean(false);
             refresh(next);
             setToast('Đã gửi yêu cầu “Không cần dọn”. Chờ Quản lý xác nhận.');
+          }}
+        />
+      ) : null}
+      {reporting && t ? (
+        <QuickReportDialog
+          task={t}
+          onClose={() => setReporting(false)}
+          onDone={(message) => {
+            setReporting(false);
+            setToast(message);
           }}
         />
       ) : null}
@@ -312,24 +331,37 @@ function StartPanel({ task, onStarted, onRelease }: { task: RoomTask; onStarted:
 
 /* --------------------------------- Kiểm phòng -------------------------------- */
 
+/** "+ Báo cáo vấn đề" — beside the flags and the note; it reports and changes nothing else. */
+function ReportButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="secondary" className="min-h-[3rem] w-full text-base" onClick={onClick} data-testid="room-report-open">
+      <Megaphone className="h-5 w-5" aria-hidden="true" />+ Báo cáo vấn đề
+    </Button>
+  );
+}
+
 /**
- * "KIỂM TRA" OF A SHARED AREA — what the housekeeper saw, in words (optional),
- * then "Lưu kiểm tra": "Chờ dọn phòng". Nothing starts until "Bắt đầu dọn".
+ * "KIỂM TRA TÌNH TRẠNG" OF A SHARED AREA — what the housekeeper saw, in words
+ * (optional), then "Hoàn thành kiểm tra": the item is done. No cleaning step.
  */
-function AreaInspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomTask) => void }) {
+function AreaInspectPanel({ task, onSaved, onReport }: { task: RoomTask; onSaved: (task: RoomTask) => void; onReport: () => void }) {
   const [note, setNote] = useState('');
   const save = useMutation({
     mutationFn: () => roomWorkApi.inspect(task.id, [], note.trim() || undefined),
     onSuccess: ({ task: next }) => onSaved(next),
   });
-  if (task.state !== 'NOT_STARTED') {
+  // An area "Chờ dọn phòng" from before completes the same way.
+  if (task.state !== 'NOT_STARTED' && task.state !== 'INSPECTED') {
     return (
-      <section className="rounded-2xl border border-line bg-white p-4" data-testid="inspection-saved">
-        <h2 className="text-base font-semibold text-slate-900">
-          Đã kiểm tra{task.inspectedAt ? ` lúc ${formatDateTime(task.inspectedAt)}` : ''}
-        </h2>
-        <p className="mt-2 text-base text-slate-700">{task.inspectionNote ?? 'Không ghi nhận gì thêm.'}</p>
-      </section>
+      <div className="space-y-3">
+        <section className="rounded-2xl border border-line bg-white p-4" data-testid="inspection-saved">
+          <h2 className="text-base font-semibold text-slate-900">
+            Đã kiểm tra{task.inspectedAt ? ` lúc ${formatDateTime(task.inspectedAt)}` : ''}
+          </h2>
+          <p className="mt-2 text-base text-slate-700">{task.inspectionNote ?? 'Không ghi nhận gì thêm.'}</p>
+        </section>
+        {task.voided ? null : <ReportButton onClick={onReport} />}
+      </div>
     );
   }
   return (
@@ -347,10 +379,11 @@ function AreaInspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: R
           data-testid="area-inspection-note"
         />
       </label>
+      <ReportButton onClick={onReport} />
       {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
-      <Button className="w-full" onClick={() => save.mutate()} loading={save.isPending} data-testid="area-inspect-save">
-        <Save className="h-4 w-4" aria-hidden="true" />
-        Lưu kiểm tra
+      <Button className="min-h-[3rem] w-full text-base" onClick={() => save.mutate()} loading={save.isPending} disabled={save.isPending} data-testid="area-inspect-save">
+        <Check className="h-5 w-5" aria-hidden="true" />
+        Hoàn thành kiểm tra
       </Button>
     </section>
   );
@@ -454,38 +487,44 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
 
 /* --------------------------------- Dọn phòng --------------------------------- */
 
+/** What a saved form recorded, in words: today's items, and an older save's fixed fields. */
+function savedLines(cleaning: CleaningForm | null, catalog: RoomWorkCatalog): string[] {
+  if (!cleaning) return [];
+  const label = (code: string) => [...catalog.linen, ...catalog.quantities, ...catalog.replacements].find((i) => i.code === code)?.label ?? code;
+  return [
+    ...(cleaning.items ?? []).map((i) => `${i.label}: ${i.quantity}`),
+    ...Object.entries(cleaning.linen ?? {}).map(([code, e]) => `${label(code)}: ${e.size} × ${e.quantity ?? 0}`),
+    ...Object.entries(cleaning.quantities ?? {})
+      .filter(([, n]) => n > 0)
+      .map(([code, n]) => `${label(code)}: ${n}`),
+    ...(cleaning.replaced ?? []).map((code) => `${label(code)} ✓`),
+  ];
+}
+
 function CleanPanel({
   task,
   catalog,
   onSaved,
+  onReport,
 }: {
   task: RoomTask;
   catalog: RoomWorkCatalog;
   onSaved: (task: RoomTask, done: boolean) => void;
+  onReport: () => void;
 }) {
-  const [form, setForm] = useState<CleaningForm>(() => ({ ...EMPTY_FORM, ...(task.cleaning ?? {}) }));
   const done = task.state === 'COMPLETED';
-  const collectable = catalog.collectable ?? [];
-  const cleanOf = (code: string) => (catalog.linen.some((i) => i.code === code) ? (form.linen[code]?.quantity ?? 0) : (form.quantities[code] ?? 0));
-  /**
-   * "ĐỒ BẨN THU VỀ" — the count typed for it, else the clean pieces put in (a
-   * replacement usually takes out as many as it brings). Set to 0 when nothing
-   * was taken out: topping up is not a replacement.
-   */
-  const collectedOf = (code: string) => form.collected?.[code] ?? cleanOf(code);
-  // Read fresh each render: a few small objects.
-  const payload = {
-    linen: Object.fromEntries(Object.entries(form.linen).map(([item, e]) => [item, { size: e.size, quantity: e.quantity ?? 0 }])),
-    quantities: form.quantities,
-    collected: Object.fromEntries(
-      collectable
-        .filter((code) => form.collected?.[code] !== undefined || cleanOf(code) > 0)
-        .filter((code) => !catalog.linen.some((i) => i.code === code) || form.linen[code])
-        .map((code) => [code, collectedOf(code)]),
-    ),
-    replaced: form.replaced,
-    special: form.special,
-    note: form.note?.trim() || null,
+  // The branch's list, with what is on hand now — loaded while the room is being worked.
+  const list = useQuery({ queryKey: [...ROOM_WORK_KEY, 'cleaning-items', task.id], queryFn: () => roomWorkApi.cleaningItems(task.id), enabled: !done });
+  const items = list.data?.items ?? [];
+  const [counts, setCounts] = useState<Record<string, number>>(() => Object.fromEntries((task.cleaning?.items ?? []).map((i) => [i.itemId, i.quantity])));
+  const [special, setSpecial] = useState<string[]>(task.cleaning?.special ?? []);
+  const [note, setNote] = useState(task.cleaning?.note ?? '');
+  const [short, setShort] = useState<string | null>(null);
+  // Only the items still on the list are sent; a count of 0 is left out.
+  const payload: CleaningInput = {
+    items: Object.fromEntries(items.filter((i) => (counts[i.id] ?? 0) > 0).map((i) => [i.id, counts[i.id]!])),
+    special,
+    note: note.trim() || null,
   };
   /** "Hoàn thành dọn phòng" opens the summary first; only its confirmation completes. */
   const [confirming, setConfirming] = useState(false);
@@ -496,21 +535,14 @@ function CleanPanel({
       onSaved(next, complete);
     },
   });
-
-  const clamp = (value: number) => Math.max(0, Math.min(catalog.maxQuantity, Math.round(value) || 0));
-  // ONE type per linen item: choosing another replaces it; choosing it again clears it.
-  const pickSize = (item: string, size: string) =>
-    setForm((f) => {
-      const { [item]: current, ...rest } = f.linen;
-      return { ...f, linen: current?.size === size ? rest : { ...rest, [item]: { size, quantity: current?.quantity ?? 1 } } };
-    });
-  const setLinenQty = (item: string, value: number) =>
-    setForm((f) => (f.linen[item] ? { ...f, linen: { ...f.linen, [item]: { ...f.linen[item]!, quantity: clamp(value) } } } : f));
-  const setQty = (item: string, value: number) => setForm((f) => ({ ...f, quantities: { ...f.quantities, [item]: clamp(value) } }));
-  const setCollected = (item: string, value: number) => setForm((f) => ({ ...f, collected: { ...(f.collected ?? {}), [item]: clamp(value) } }));
-  const toggleIn = (list: string[], item: string) => (list.includes(item) ? list.filter((c) => c !== item) : [...list, item]);
-  const toggleReplaced = (item: string) => setForm((f) => ({ ...f, replaced: toggleIn(f.replaced, item) }));
-  const toggleSpecial = (item: string) => setForm((f) => ({ ...f, special: toggleIn(f.special, item) }));
+  // Never below 0, never above what is on hand.
+  const setCount = (item: CleaningItem, value: number) => {
+    const wanted = Math.max(0, Math.round(value) || 0);
+    if (wanted > item.available) setShort(`Không đủ tồn kho: ${item.label} chỉ còn ${item.available} ${item.unit}. Báo quản lý nhập kho.`);
+    else setShort(null);
+    setCounts((c) => ({ ...c, [item.id]: Math.min(wanted, item.available) }));
+  };
+  const toggleSpecial = (code: string) => setSpecial((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
 
   const section = (title: string, children: React.ReactNode) => (
     <section className="rounded-2xl border border-line bg-white p-4">
@@ -519,151 +551,59 @@ function CleanPanel({
     </section>
   );
 
-  return (
-    <div className="space-y-4" data-testid="cleaning-form">
-      {done ? (
+  if (done) {
+    const lines = savedLines(task.cleaning, catalog);
+    const flags = catalog.specialStatuses.filter((i) => task.cleaning?.special.includes(i.code)).map((i) => `${i.short} : ${i.label}`);
+    return (
+      <div className="space-y-4" data-testid="cleaning-form">
         <p className="rounded-xl border border-green-300 bg-green-50 px-3 py-2 text-base text-green-900" data-testid="cleaning-done">
           Đã hoàn thành lúc {task.completedAt ? formatDateTime(task.completedAt) : '—'} · {formatMinutes(task.durationSeconds)}
           {task.cleanedBy ? ` · ${task.cleanedBy.name}` : ''}
         </p>
-      ) : null}
+        {section('Mặt hàng đã dùng', lines.length ? <ul className="space-y-1 text-base text-slate-800">{lines.map((l) => <li key={l}>{l}</li>)}</ul> : <p className="text-slate-500">Không có</p>)}
+        {flags.length ? section('Ghi nhận đặc biệt', <ul className="space-y-1 text-base text-slate-800">{flags.map((l) => <li key={l}>{l}</li>)}</ul>) : null}
+        {task.cleaning?.note ? section('Ghi chú', <p className="whitespace-pre-wrap text-base text-slate-800">{task.cleaning.note}</p>) : null}
+        <ReportButton onClick={onReport} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4" data-testid="cleaning-form">
       {section(
-        'Đồ vải giường',
-        <div className="space-y-3">
-          {catalog.linen.map((item) => {
-            const entry = form.linen[item.code];
-            return (
-              <div key={item.code} className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-base font-medium text-slate-800">{item.label}</span>
-                  <div className="flex gap-2" role="group" aria-label={`Loại ${item.label}`}>
-                    {catalog.linenSizes.map((size) => {
-                      const on = entry?.size === size.code;
-                      return (
-                        <button
-                          key={size.code}
-                          type="button"
-                          disabled={done}
-                          aria-pressed={on}
-                          onClick={() => pickSize(item.code, size.code)}
-                          data-testid={`linen-${item.code}-${size.code}`}
-                          className={`h-12 min-w-[4.75rem] rounded-xl border-2 px-3 text-base font-bold ${
-                            on ? 'border-brand-600 bg-brand-600 text-white' : 'border-line-strong bg-white text-slate-700'
-                          } disabled:opacity-70`}
-                        >
-                          {size.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                {entry ? (
-                  <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
-                    <div className="flex items-center gap-2">
-                      <label htmlFor={`linen-qty-${item.code}`} className="text-base text-slate-700">
-                        Đồ sạch cấp cho phòng
-                      </label>
-                      <Stepper
-                        id={`linen-qty-${item.code}`}
-                        label={`số lượng ${item.label}`}
-                        value={entry.quantity ?? 0}
-                        max={catalog.maxQuantity}
-                        disabled={done}
-                        onChange={(v) => setLinenQty(item.code, v)}
-                      />
-                    </div>
-                    {collectable.includes(item.code) ? (
-                      <div className="flex items-center gap-2">
-                        <label htmlFor={`linen-collected-${item.code}`} className="text-base text-amber-800">
-                          Đồ bẩn thu về
-                        </label>
-                        <Stepper
-                          id={`linen-collected-${item.code}`}
-                          label={`đồ bẩn thu về ${item.label}`}
-                          value={collectedOf(item.code)}
-                          max={catalog.maxQuantity}
-                          disabled={done}
-                          onChange={(v) => setCollected(item.code, v)}
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>,
-      )}
-      {section(
-        'Số lượng cấp cho phòng',
-        <div className="grid gap-3 sm:grid-cols-2">
-          {catalog.quantities.map((item) => {
-            const value = form.quantities[item.code] ?? 0;
-            const linen = collectable.includes(item.code);
-            return (
-              <div key={item.code} className={`flex flex-wrap items-center justify-between gap-2 ${linen ? 'rounded-xl bg-slate-50 p-2' : ''}`}>
-                <label htmlFor={`qty-${item.code}`} className="text-base text-slate-800">
-                  {item.label}
-                  <span className="block text-xs text-slate-500">{linen ? 'Đồ sạch cấp cho phòng' : 'Cấp cho phòng (đồ dùng một lần)'}</span>
-                </label>
-                <Stepper
-                  id={`qty-${item.code}`}
-                  label={item.label}
-                  value={value}
-                  max={catalog.maxQuantity}
-                  disabled={done}
-                  onChange={(v) => setQty(item.code, v)}
-                />
-                {linen ? (
-                  <div className="flex w-full items-center justify-between gap-2">
-                    <label htmlFor={`collected-${item.code}`} className="text-sm text-amber-800">
-                      Đồ bẩn thu về
-                    </label>
-                    <Stepper
-                      id={`collected-${item.code}`}
-                      label={`đồ bẩn thu về ${item.label}`}
-                      value={collectedOf(item.code)}
-                      max={catalog.maxQuantity}
-                      disabled={done}
-                      onChange={(v) => setCollected(item.code, v)}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>,
-      )}
-      {section(
-        'Đánh dấu nếu đồ được thay thế',
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <p className="col-span-full text-xs text-slate-500" data-testid="replacement-hint">
-            Mỗi ô đánh dấu là 1 bộ cấp cho phòng — chỉ trừ kho khi quản lý đã gắn ô đó với một mặt hàng.
-          </p>
-          {catalog.replacements.map((item) => (
-            <CheckToggle
-              key={item.code}
-              on={form.replaced.includes(item.code)}
-              disabled={done}
-              onClick={() => toggleReplaced(item.code)}
-              testId={`replaced-${item.code}`}
-            >
-              {item.label}
-            </CheckToggle>
-          ))}
-        </div>,
+        'Mặt hàng sử dụng',
+        <QueryState isLoading={list.isLoading} isError={list.isError} error={list.error} onRetry={() => void list.refetch()}>
+          {items.length === 0 ? (
+            <p className="text-sm text-slate-500" data-testid="cleaning-items-empty">
+              Chi nhánh chưa chọn mặt hàng dùng khi dọn phòng — báo Quản lý buồng phòng.
+            </p>
+          ) : (
+            <ul className="divide-y divide-line-subtle" data-testid="cleaning-items">
+              {items.map((item) => (
+                <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                  <label htmlFor={`item-${item.id}`} className="min-w-0 text-base text-slate-800">
+                    {item.label}
+                    <span className="block text-xs text-slate-500">
+                      Còn {item.available} {item.unit}
+                    </span>
+                  </label>
+                  <Stepper id={`item-${item.id}`} label={item.label} value={counts[item.id] ?? 0} max={item.available} disabled={false} onChange={(v) => setCount(item, v)} />
+                </li>
+              ))}
+            </ul>
+          )}
+          {short ? (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900" role="alert" data-testid="cleaning-short">
+              {short}
+            </p>
+          ) : null}
+        </QueryState>,
       )}
       {section(
         'Ghi nhận đặc biệt',
         <div className="grid gap-2 sm:grid-cols-2">
           {catalog.specialStatuses.map((item) => (
-            <CheckToggle
-              key={item.code}
-              on={form.special.includes(item.code)}
-              disabled={done}
-              onClick={() => toggleSpecial(item.code)}
-              testId={`special-${item.code}`}
-            >
+            <CheckToggle key={item.code} on={special.includes(item.code)} disabled={false} onClick={() => toggleSpecial(item.code)} testId={`special-${item.code}`}>
               <span>
                 <span className="font-bold">{item.short}</span> : {item.label}
               </span>
@@ -676,35 +616,33 @@ function CleanPanel({
         <textarea
           rows={3}
           maxLength={2000}
-          disabled={done}
-          value={form.note ?? ''}
-          onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
           placeholder="Các lưu ý-Hỏng hóc-Vấn đề khác..."
           data-testid="cleaning-note"
           className="w-full rounded-xl border border-line-strong px-3 py-2 text-base"
         />,
       )}
+      <ReportButton onClick={onReport} />
       {save.isError ? <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert> : null}
-      {!done ? (
-        <div className="sticky bottom-0 -mx-4 flex gap-2 border-t border-line bg-white/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
-          <Button variant="secondary" className="min-h-[3rem] flex-1 text-base" onClick={() => save.mutate(false)} loading={save.isPending && save.variables === false} disabled={save.isPending} data-testid="cleaning-save">
-            <Save className="h-5 w-5" aria-hidden="true" />
-            Lưu tạm
-          </Button>
-          <Button
-            className="min-h-[3rem] flex-[2] text-base"
-            onClick={() => {
-              save.reset();
-              setConfirming(true);
-            }}
-            disabled={save.isPending}
-            data-testid="cleaning-complete"
-          >
-            <Check className="h-5 w-5" aria-hidden="true" />
-            Hoàn thành dọn phòng
-          </Button>
-        </div>
-      ) : null}
+      <div className="sticky bottom-0 -mx-4 flex gap-2 border-t border-line bg-white/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
+        <Button variant="secondary" className="min-h-[3rem] flex-1 text-base" onClick={() => save.mutate(false)} loading={save.isPending && save.variables === false} disabled={save.isPending || !list.isSuccess} data-testid="cleaning-save">
+          <Save className="h-5 w-5" aria-hidden="true" />
+          Lưu tạm
+        </Button>
+        <Button
+          className="min-h-[3rem] flex-[2] text-base"
+          onClick={() => {
+            save.reset();
+            setConfirming(true);
+          }}
+          disabled={save.isPending || !list.isSuccess}
+          data-testid="cleaning-complete"
+        >
+          <Check className="h-5 w-5" aria-hidden="true" />
+          Hoàn thành dọn phòng
+        </Button>
+      </div>
       {confirming ? (
         <Modal
           open
@@ -717,19 +655,14 @@ function CleanPanel({
                 <Pencil className="h-4 w-4" aria-hidden="true" />
                 Quay lại sửa
               </Button>
-              <Button
-                onClick={() => save.mutate(true)}
-                loading={save.isPending && save.variables === true}
-                disabled={save.isPending}
-                data-testid="cleaning-confirm-submit"
-              >
+              <Button onClick={() => save.mutate(true)} loading={save.isPending && save.variables === true} disabled={save.isPending} data-testid="cleaning-confirm-submit">
                 <Check className="h-4 w-4" aria-hidden="true" />
                 Xác nhận hoàn thành
               </Button>
             </>
           }
         >
-          <CleaningSummary task={task} catalog={catalog} form={form} payload={payload} />
+          <CleaningSummary task={task} catalog={catalog} items={items} payload={payload} />
           {save.isError ? (
             <div className="mt-3">
               <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
@@ -742,38 +675,14 @@ function CleanPanel({
 }
 
 /**
- * EVERYTHING ENTERED, AS IT WILL BE SENT — read from the live form state with
- * the catalog's own labels, so the summary can never disagree with the form.
+ * EVERYTHING ENTERED, AS IT WILL BE SENT — read from the payload itself, so the
+ * summary can never disagree with what is saved.
  */
-function CleaningSummary({
-  task,
-  catalog,
-  form,
-  payload,
-}: {
-  task: RoomTask;
-  catalog: RoomWorkCatalog;
-  form: CleaningForm;
-  payload: { collected: Record<string, number> };
-}) {
+function CleaningSummary({ task, catalog, items, payload }: { task: RoomTask; catalog: RoomWorkCatalog; items: CleaningItem[]; payload: CleaningInput }) {
   // The manager's own cleaning is recorded "Đạt" as it completes (the server's rule).
   const selfReviewed = useAuth().user?.role === 'HOUSEKEEPING_MANAGER';
-  const label = (items: { code: string; label: string }[], code: string) => items.find((i) => i.code === code)?.label ?? code;
-  const linen = catalog.linen
-    .filter((item) => form.linen[item.code])
-    .map((item) => {
-      const e = form.linen[item.code]!;
-      return `${item.label}: ${label(catalog.linenSizes, e.size)} × ${e.quantity ?? 0}`;
-    });
-  const quantities = catalog.quantities
-    .filter((item) => (form.quantities[item.code] ?? 0) > 0)
-    .map((item) => `${item.label}: ${form.quantities[item.code]}`);
-  const labelOfCode = (code: string) => [...catalog.linen, ...catalog.quantities].find((i) => i.code === code)?.label ?? code;
-  const collected = Object.entries(payload.collected)
-    .filter(([, n]) => n > 0)
-    .map(([code, n]) => `${labelOfCode(code)}: ${n}`);
-  const replaced = catalog.replacements.filter((item) => form.replaced.includes(item.code)).map((item) => item.label);
-  const special = catalog.specialStatuses.filter((item) => form.special.includes(item.code)).map((item) => `${item.short} : ${item.label}`);
+  const used = items.filter((i) => payload.items[i.id]).map((i) => `${i.label}: ${payload.items[i.id]} ${i.unit}`);
+  const special = catalog.specialStatuses.filter((item) => payload.special.includes(item.code)).map((item) => `${item.short} : ${item.label}`);
   const row = (title: string, values: string[], testId: string) => (
     <div className="border-b border-line-subtle py-2 last:border-0" data-testid={testId}>
       <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</dt>
@@ -798,24 +707,19 @@ function CleaningSummary({
         {task.startedAt ? ` · bắt đầu ${formatDateTime(task.startedAt)}` : ''}
       </p>
       <dl>
-        {row('Đồ vải giường', linen, 'summary-linen')}
-        {row('Đồ sạch cấp cho phòng', quantities, 'summary-quantities')}
-        {row('Đồ bẩn thu về', collected, 'summary-collected')}
-        {row('Đồ được thay thế', replaced, 'summary-replaced')}
+        {row('Mặt hàng sử dụng', used, 'summary-items')}
         {row('Ghi nhận đặc biệt', special, 'summary-special')}
-        {row('Ghi chú', form.note?.trim() ? [form.note.trim()] : [], 'summary-note')}
+        {row('Ghi chú', payload.note ? [payload.note] : [], 'summary-note')}
       </dl>
       <p className="mt-2 text-xs text-slate-500">
-        Kiểm tra lại trước khi xác nhận.{' '}
-        {selfReviewed
-          ? 'Bạn tự dọn phòng này: phòng được ghi “Đạt” ngay, không cần đánh giá.'
-          : 'Sau khi hoàn thành, phòng chờ quản lý đánh giá.'}
+        Kiểm tra lại trước khi xác nhận. Số mặt hàng được trừ khỏi kho khi xác nhận.{' '}
+        {selfReviewed ? 'Bạn tự dọn phòng này: phòng được ghi “Đạt” ngay, không cần đánh giá.' : 'Sau khi hoàn thành, phòng chờ quản lý đánh giá.'}
       </p>
     </div>
   );
 }
 
-/** − [n] + : a count, from 0 to the catalog's maximum. */
+/** − [n] + : a count, from 0 to `max` — "+" past it still reports, so the shortage can be said. */
 function Stepper({ id, label, value, max, disabled, onChange }: { id: string; label: string; value: number; max: number; disabled: boolean; onChange: (v: number) => void }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -844,6 +748,7 @@ function Stepper({ id, label, value, max, disabled, onChange }: { id: string; la
         type="button"
         aria-label={`Thêm ${label}`}
         disabled={disabled}
+        aria-disabled={value >= max || undefined}
         onClick={() => onChange(value + 1)}
         className="flex h-11 w-11 items-center justify-center rounded-xl border border-line-strong bg-white disabled:opacity-40"
       >

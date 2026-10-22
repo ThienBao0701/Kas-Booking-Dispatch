@@ -81,6 +81,10 @@ export async function resetHousekeepingData(): Promise<void> {
   await testPrisma.inventoryCount.deleteMany();
   await testPrisma.inventoryTransfer.deleteMany();
   await testPrisma.inventoryItem.deleteMany();
+  await testPrisma.inventoryCodeSequence.deleteMany();
+  await testPrisma.inventoryGlobalCodeSequence.deleteMany();
+  // A report made from a room ("+ Báo cáo vấn đề") holds a RESTRICT reference to its item.
+  await testPrisma.receptionOperationalReport.updateMany({ where: { taskId: { not: null } }, data: { taskId: null } });
   // The daily room work first: its items hold references to inspections and accounts.
   await testPrisma.housekeepingRoomTaskEvent.deleteMany();
   await testPrisma.housekeepingRoomTask.deleteMany();

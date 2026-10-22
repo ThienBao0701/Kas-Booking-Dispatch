@@ -18,6 +18,7 @@ import { SeverityPicker } from './Severity';
 import { DEFAULT_SEVERITY } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
 import { useReportSubmitOverride } from '../lib/reportSubmit';
+import { useAuth } from '../auth/AuthProvider';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useDebounced } from '../hooks/useDebounced';
@@ -29,7 +30,7 @@ import {
   type ReportOptions,
   type RoomServiceType,
 } from '../api/receptionReports';
-import { toUserMessage } from '../api/errors';
+import { ApiError, toUserMessage } from '../api/errors';
 import { Button } from './Button';
 import { Input } from './Input';
 import { ErrorAlert } from './ErrorAlert';
@@ -66,9 +67,11 @@ interface FormShellProps {
   bare?: boolean;
   /** In a dialog, "Hủy" sits beside "Thêm" and closes it. */
   onCancel?: () => void;
+  /** The server warned of a possible duplicate: "Vẫn gửi" sends it as a separate issue. */
+  onConfirmDuplicate?: () => void;
 }
 
-function FormShell({ title, testId, ready, pending, error, onSubmit, children, bare, onCancel }: FormShellProps) {
+function FormShell({ title, testId, ready, pending, error, onSubmit, children, bare, onCancel, onConfirmDuplicate }: FormShellProps) {
   return (
     <form
       data-testid={testId}
@@ -80,7 +83,16 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
     >
       {bare ? null : <p className="text-sm font-semibold text-slate-800">{title}</p>}
       {children}
-      {error ? <ErrorAlert>{error}</ErrorAlert> : null}
+      {error && onConfirmDuplicate ? (
+        <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950" role="alert" data-testid={`${testId}-duplicate`}>
+          <p>{error}</p>
+          <Button type="button" variant="secondary" onClick={onConfirmDuplicate} loading={pending} data-testid={`${testId}-confirm-duplicate`}>
+            Vẫn gửi
+          </Button>
+        </div>
+      ) : error ? (
+        <ErrorAlert>{error}</ErrorAlert>
+      ) : null}
       <div className={`flex justify-end gap-2 ${bare ? 'border-t border-line-subtle pt-3' : ''}`}>
         {onCancel ? (
           <Button type="button" variant="secondary" onClick={onCancel} data-testid={`${testId}-cancel`}>
@@ -103,17 +115,24 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
  */
 function useCreateReport(onCreated: () => void | Promise<void>, branchId?: number) {
   const [error, setError] = useState<string | null>(null);
+  // The input the server warned may duplicate an existing report — "Vẫn gửi" sends it again, confirmed.
+  const [duplicateOf, setDuplicateOf] = useState<NewReportInput | null>(null);
   // "Nhập bù" submits the same form to its own endpoint (see lib/reportSubmit).
   const override = useReportSubmitOverride();
   const mutation = useMutation({
-    mutationFn: (input: NewReportInput) => (override ? override(input) : reportsApi.create({ ...input, branchId })),
+    mutationFn: (input: NewReportInput & { confirmDuplicate?: boolean }) => (override ? override(input) : reportsApi.create({ ...input, branchId })),
     onSuccess: async () => {
       setError(null);
+      setDuplicateOf(null);
       await onCreated();
     },
-    onError: (e) => setError(toUserMessage(e)),
+    onError: (e, input) => {
+      setError(toUserMessage(e));
+      setDuplicateOf(e instanceof ApiError && e.code === 'POSSIBLE_DUPLICATE' ? input : null);
+    },
   });
-  return { mutation, error, setError };
+  const confirmDuplicate = duplicateOf ? () => mutation.mutate({ ...duplicateOf, confirmDuplicate: true }) : undefined;
+  return { mutation, error, setError, confirmDuplicate };
 }
 
 /** A multi-line field with the same look as `Input`. */
@@ -166,11 +185,14 @@ export function GuestRequestForm({
   /** A supervisor's target branch; omitted for Reception (its shift decides). */
   branchId?: number;
 }) {
+  // Bộ phận buồng phòng writes the content and "Mức độ" only — never the guest: Reception names the guest afterwards.
+  const role = useAuth().user?.role;
+  const housekeeping = role === 'HOUSEKEEPING' || role === 'HOUSEKEEPING_MANAGER';
   const [guestName, setGuestName] = useState('');
   const [ezCode, setEzCode] = useState('');
   const [content, setContent] = useState('');
   const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
-  const { mutation, error } = useCreateReport(async () => {
+  const { mutation, error, confirmDuplicate } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setContent('');
@@ -184,30 +206,30 @@ export function GuestRequestForm({
       testId="guest-request-form"
       bare={bare}
       onCancel={onCancel}
-      ready={guestName.trim().length > 0 && content.trim().length > 0}
+      ready={(housekeeping || guestName.trim().length > 0) && content.trim().length > 0}
       pending={mutation.isPending}
       error={error}
+      onConfirmDuplicate={confirmDuplicate}
       onSubmit={() =>
         mutation.mutate({
           category: 'GUEST_REQUEST',
-          guestRequest: {
-            guestName: guestName.trim(),
-            ezCode: ezCode.trim() || undefined,
-            note: content.trim(),
-            severity,
-          },
+          guestRequest: housekeeping
+            ? { note: content.trim(), severity }
+            : { guestName: guestName.trim(), ezCode: ezCode.trim() || undefined, note: content.trim(), severity },
         })
       }
     >
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Input
-          label="Tên khách"
-          value={guestName}
-          onChange={(e) => setGuestName(e.target.value)}
-          data-testid="guest-request-guest"
-        />
-        <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="guest-request-ez" />
-      </div>
+      {housekeeping ? null : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Input
+            label="Tên khách"
+            value={guestName}
+            onChange={(e) => setGuestName(e.target.value)}
+            data-testid="guest-request-guest"
+          />
+          <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="guest-request-ez" />
+        </div>
+      )}
       <SeverityPicker value={severity} onChange={setSeverity} testId="guest-request-severity" />
       <TextArea
         label="Nội dung"
@@ -242,7 +264,7 @@ export function ServiceQualityForm({
   const [ezCode, setEzCode] = useState('');
   const [description, setDescription] = useState('');
   const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
-  const { mutation, error } = useCreateReport(async () => {
+  const { mutation, error, confirmDuplicate } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setDescription('');
@@ -259,6 +281,7 @@ export function ServiceQualityForm({
       ready={guestName.trim().length > 0 && description.trim().length > 0}
       pending={mutation.isPending}
       error={error}
+      onConfirmDuplicate={confirmDuplicate}
       onSubmit={() =>
         mutation.mutate({
           category: 'CUSTOMER_COMPLAINT',
@@ -430,7 +453,7 @@ export function RoomServiceForm({
   const [ezCode, setEzCode] = useState('');
   const [rows, setRows] = useState<ServiceRow[]>([blankRow(1)]);
 
-  const { mutation, error } = useCreateReport(async () => {
+  const { mutation, error, confirmDuplicate } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setRows([blankRow(1)]);
@@ -486,6 +509,7 @@ export function RoomServiceForm({
       ready={ready}
       pending={mutation.isPending}
       error={error}
+      onConfirmDuplicate={confirmDuplicate}
       onSubmit={submit}
     >
       <fieldset className="space-y-2" data-testid="room-service-guest-block">
@@ -704,7 +728,7 @@ export function DeliveryForm({
   const [itemName, setItemName] = useState('');
   const [quantity, setQuantity] = useState('');
   const [note, setNote] = useState('');
-  const { mutation, error } = useCreateReport(async () => {
+  const { mutation, error, confirmDuplicate } = useCreateReport(async () => {
     setDepartment('');
     setItemName('');
     setQuantity('');
@@ -722,6 +746,7 @@ export function DeliveryForm({
       ready={department !== '' && itemName.trim().length > 0 && parsed !== null}
       pending={mutation.isPending}
       error={error}
+      onConfirmDuplicate={confirmDuplicate}
       onSubmit={() =>
         department !== '' && parsed !== null
           ? mutation.mutate({

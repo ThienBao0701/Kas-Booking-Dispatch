@@ -37,7 +37,13 @@ export interface RoomWorkCatalog {
   maxQuantity: number;
 }
 
+/**
+ * The "Dọn phòng" form as saved and read: today's counted items (`items`) and,
+ * on an older save, the fixed fields of the form before it.
+ */
 export interface CleaningForm {
+  /** Per item of the branch's room-cleaning list: its name as saved, and how many. */
+  items?: { itemId: string; label: string; quantity: number }[];
   /** Per linen item: ONE type (K / Q / T) and how many — null only on a save from before counts. */
   linen: Record<string, { size: string; quantity: number | null }>;
   /** The clean pieces put into the room — "Đồ sạch cấp cho phòng". */
@@ -50,6 +56,22 @@ export interface CleaningForm {
   note: string | null;
   savedAt?: string;
   savedByName?: string;
+}
+
+/** The form as sent: per item id of the branch's list, how many (0 left out); the flags; the note. */
+export interface CleaningInput {
+  items: Record<string, number>;
+  special: string[];
+  note: string | null;
+}
+
+/** One item of the branch's room-cleaning list, as the worker sees it — no code. */
+export interface CleaningItem {
+  id: string;
+  label: string;
+  unit: string;
+  warehouse: string;
+  available: number;
 }
 
 export interface TaskFinding {
@@ -452,8 +474,10 @@ export const roomWorkApi = {
     api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, note ? { issues, note } : { issues }),
   /** "Bắt đầu dọn" — the one action that starts the cleaning time. */
   start: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/start`, {}),
-  saveCleaning: (id: string, form: CleaningForm) => api.put<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/cleaning`, form),
-  complete: (id: string, form: CleaningForm) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/complete`, form),
+  saveCleaning: (id: string, form: CleaningInput) => api.put<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/cleaning`, form),
+  complete: (id: string, form: CleaningInput) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/complete`, form),
+  /** The items this room's cleaning counts — the branch's list, with what is on hand. */
+  cleaningItems: (id: string) => api.get<{ items: CleaningItem[] }>(`/housekeeping/work/tasks/${id}/cleaning-items`),
   myKpi: (p: { from: string; to: string }) =>
     api.get<{ summary: KpiRow; findings: FindingLine[] }>(`/housekeeping/kpi/me${query({ ...p })}`),
 };

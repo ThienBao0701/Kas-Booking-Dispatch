@@ -1,5 +1,6 @@
 /**
- * Housekeeping warehouses — Kho Linens, Kho Amenities, Kho đồ dùng, thiết bị.
+ * Housekeeping "Kho hàng" — four warehouses: Kho hóa chất & dụng cụ, Đồ dùng
+ * cho khách, Kho đồ vải, Kho đồ dùng khác / Đồ tiêu hao (Amenities).
  * Every balance, receipt, count and damage report is the server's; the screens
  * never compute stock of their own.
  */
@@ -7,20 +8,37 @@ import { api } from './client';
 
 export const INVENTORY_KEY = ['housekeeping', 'inventory'] as const;
 
-export type Warehouse = 'LINEN' | 'AMENITY' | 'EQUIPMENT';
+/** The four, and EQUIPMENT — the former "Kho đồ dùng, thiết bị", whose items wait to be classified. */
+export type Warehouse = 'CHEMICAL_TOOLS' | 'GUEST_SUPPLIES' | 'LINEN' | 'AMENITY' | 'EQUIPMENT';
+
+/** "Kho hàng", in order — the code prefixes 1, 2, 3, 4. */
+export const WAREHOUSES: Warehouse[] = ['CHEMICAL_TOOLS', 'GUEST_SUPPLIES', 'LINEN', 'AMENITY'];
 export type StockState = 'AVAILABLE' | 'DIRTY' | 'IN_LAUNDRY' | 'ISSUED' | 'DAMAGED';
 export type TransferKind = 'LAUNDRY_SEND' | 'LAUNDRY_RETURN' | 'STOCK_ISSUE' | 'STOCK_RETURN';
 export type DamageStatus = 'PENDING' | 'ACKNOWLEDGED' | 'REJECTED';
 
 export const WAREHOUSE_LABELS: Record<Warehouse, string> = {
-  LINEN: 'Kho Linens',
-  AMENITY: 'Kho Amenities',
-  EQUIPMENT: 'Kho đồ dùng, thiết bị',
+  CHEMICAL_TOOLS: 'Kho hóa chất & dụng cụ',
+  GUEST_SUPPLIES: 'Đồ dùng cho khách',
+  LINEN: 'Kho đồ vải',
+  AMENITY: 'Kho đồ dùng khác / Đồ tiêu hao (Amenities)',
+  EQUIPMENT: 'Chưa phân loại (kho đồ dùng, thiết bị cũ)',
 };
 
-/** The states each warehouse keeps, in display order — the server's own rule. */
+/** Short names where four must fit side by side. */
+export const WAREHOUSE_SHORT: Record<Warehouse, string> = {
+  CHEMICAL_TOOLS: 'Hóa chất & dụng cụ',
+  GUEST_SUPPLIES: 'Đồ dùng cho khách',
+  LINEN: 'Đồ vải',
+  AMENITY: 'Đồ tiêu hao',
+  EQUIPMENT: 'Chưa phân loại',
+};
+
+/** The states each warehouse keeps, in display order — the server's own rule: one on-hand quantity, and what was written off. */
 export const WAREHOUSE_STATES: Record<Warehouse, StockState[]> = {
-  LINEN: ['AVAILABLE', 'DIRTY', 'DAMAGED'],
+  CHEMICAL_TOOLS: ['AVAILABLE', 'DAMAGED'],
+  GUEST_SUPPLIES: ['AVAILABLE', 'DAMAGED'],
+  LINEN: ['AVAILABLE', 'DAMAGED'],
   AMENITY: ['AVAILABLE', 'DAMAGED'],
   EQUIPMENT: ['AVAILABLE', 'ISSUED', 'DAMAGED'],
 };
@@ -54,25 +72,29 @@ export interface InventoryItem {
   note: string | null;
   archived: boolean;
   balances: Partial<Record<StockState, number>>;
+  /** A balance in a state the warehouse no longer keeps (dirty linen, issued equipment) — for review. */
+  legacyBalances?: { state: StockState; stateLabel: string; quantity: number }[];
+  /** Still in the former equipment warehouse: waits to be classified. */
+  unclassified?: boolean;
+  /** SYSTEM: the Admin's shared catalog (one row in every branch, its own stock); BRANCH: this branch's own item. */
+  scope?: 'SYSTEM' | 'BRANCH';
+  /** In the branch's room-cleaning list at this position; null: not in it. */
+  cleaningOrder?: number | null;
   pendingDamage: number;
   /** Its stock was set up: counted or moved at least once. */
   opened: boolean;
 }
 
-/** What a "Dọn phòng" field does to the stock. */
-export type FieldMeaning = 'CLEAN_AND_DIRTY' | 'CLEAN_ISSUE' | 'TICK';
-
-/** One field of the "Dọn phòng" form and the ONE item it moves (or none). */
-export interface FormField {
-  catalogKey: string;
-  field: string;
+/** One item the branch's room cleaning may count — with its code, for its managers and the Admin. */
+export interface CleaningChoice {
+  id: string;
   warehouse: Warehouse;
-  meaning: FieldMeaning;
-  meaningLabel: string;
-  /** A grouped replacement: tied only to an item confirmed to BE that kit. */
-  kit: boolean;
-  size: string | null;
-  item: InventoryItem | null;
+  warehouseLabel: string;
+  code: string | null;
+  label: string;
+  unit: string;
+  available: number;
+  cleaningOrder: number | null;
 }
 
 /** A damage report's possible source. */
@@ -187,18 +209,28 @@ export function inventoryExportUrl(p: { branchId?: number; warehouse?: Warehouse
 export const inventoryApi = {
   items: (p: { branchId?: number; warehouse?: Warehouse; includeArchived?: boolean } = {}) =>
     api.get<{ items: InventoryItem[] }>(`${BASE}/items${query({ ...p, includeArchived: p.includeArchived ? 'true' : undefined })}`),
-  createItem: (body: { warehouse: Warehouse; name: string; variant?: string; code?: string; unit: string; lowStockThreshold?: number | null; note?: string }) =>
-    api.post<{ item: InventoryItem }>(`${BASE}/items`, body),
-  /** "Thêm mặt hàng": several new items of one warehouse, all or none. */
-  createItems: (warehouse: Warehouse, items: { name: string; variant?: string; code?: string; unit: string; note?: string }[]) =>
+  /** "Thêm mặt hàng": several new items of one warehouse, by name, all or none — the codes are the server's. */
+  createItems: (warehouse: Warehouse, items: { name: string }[]) =>
     api.post<{ items: InventoryItem[] }>(`${BASE}/items/batch`, { warehouse, items }),
-  addFromCatalog: (warehouse: Warehouse) => api.post<{ added: number }>(`${BASE}/items/from-catalog`, { warehouse }),
-  updateItem: (id: string, body: { code?: string; unit?: string; lowStockThreshold?: number | null; note?: string }) =>
+  /** Unit, threshold, note — or, for an unclassified item, the warehouse it goes into. */
+  updateItem: (id: string, body: { unit?: string; lowStockThreshold?: number | null; note?: string; warehouse?: Warehouse }) =>
     api.patch<{ item: InventoryItem }>(`${BASE}/items/${id}`, body),
+  /** "Mặt hàng dùng khi dọn phòng": the branch's list, and every item it may hold. */
+  cleaningItems: (branchId?: number) => api.get<{ branchId: number; items: CleaningChoice[] }>(`${BASE}/cleaning-items${query({ branchId })}`),
+  setCleaningItems: (itemIds: string[], branchId?: number) =>
+    api.put<{ branchId: number; items: CleaningChoice[] }>(`${BASE}/cleaning-items`, { itemIds, ...(branchId ? { branchId } : {}) }),
   removeItem: (id: string) => api.del<{ removed: boolean; archived: boolean }>(`${BASE}/items/${id}`),
   receipts: (p: { branchId?: number; warehouse?: Warehouse } = {}) => api.get<{ receipts: Receipt[] }>(`${BASE}/receipts${query(p)}`),
   createReceipt: (body: { warehouse: Warehouse; requestId: string; receivedAt?: string; reference?: string; note?: string; lines: { itemId: string; quantity: number; note?: string }[] }) =>
     api.post<{ receipt: Receipt; duplicate: boolean }>(`${BASE}/receipts`, body),
+  /** The Admin's "Nhập kho" for several branches — each with its own items and quantities, all or none. */
+  createMultiReceipt: (body: {
+    warehouse: Warehouse;
+    requestId: string;
+    receivedAt?: string;
+    reference?: string;
+    branches: { branchId: number; lines: { itemId: string; quantity: number }[] }[];
+  }) => api.post<{ receipts: Receipt[]; duplicate: boolean }>(`${BASE}/receipts/multi`, body),
   counts: (p: { branchId?: number; warehouse?: Warehouse; onlyDifferences?: boolean } = {}) =>
     api.get<{ counts: StockCount[] }>(`${BASE}/counts${query({ ...p, onlyDifferences: p.onlyDifferences ? 'true' : undefined })}`),
   createCount: (body: {
@@ -215,8 +247,6 @@ export const inventoryApi = {
     api.post<{ id: string; duplicate: boolean }>(`${BASE}/transfers`, body),
   damage: (p: { branchId?: number; warehouse?: Warehouse; status?: DamageStatus; itemId?: string; from?: string; to?: string } = {}) =>
     api.get<{ reports: DamageReport[] }>(`${BASE}/damage${query(p)}`),
-  mapping: (p: { branchId?: number; warehouse?: Warehouse } = {}) => api.get<{ fields: FormField[] }>(`${BASE}/mapping${query(p)}`),
-  mapItem: (id: string, body: { catalogKey: string | null; confirmKit?: boolean }) => api.put<{ item: InventoryItem }>(`${BASE}/items/${id}/mapping`, body),
   damageSources: (roomNumber?: string) =>
     api.get<{ tasks: (SourceRef & { roomNumber: string; workDate: string })[]; issues: (SourceRef & { statusLabel: string })[] }>(
       `${BASE}/damage/sources${query({ roomNumber })}`,

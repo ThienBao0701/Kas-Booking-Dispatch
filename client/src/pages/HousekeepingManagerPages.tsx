@@ -14,7 +14,7 @@
  * to the manager's branch (and offers only that branch's own workers); these
  * screens only ask. Every action is recorded in the room's history.
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -76,13 +76,14 @@ import { EmptyState } from '../components/EmptyState';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { Modal } from '../components/Modal';
 import { QueryState } from '../components/PageState';
-import { BranchPicker, ReportFilterBar } from '../components/ReportFilter';
+import { ReportFilterBar } from '../components/ReportFilter';
 import { RoomTaskDetail } from '../components/RoomTaskDetail';
 import { PhaseBadge, ReassignDialog, WorkOrderTable } from '../components/HkWorkOrders';
 import { CodeChips, CreateWorkDialog, NoCleanReviewList, WorkGroupCard, WorkGroupEditor } from '../components/HkWorkGroups';
 import { placeName, placeText, placesByFloor } from '../lib/workPlaces';
 import { buildFloors, roomStatus, STATUS_FILTERS, STATUS_ICON_CLASS, type RoomStatusGroup } from '../lib/roomStatus';
 import { hotelName, weekdayOf } from '../lib/hkDisplay';
+import { useScope } from '../hooks/useHkScope';
 import { BarChart, type ChartBucket, type ChartSeries } from '../components/HkCharts';
 import { FloorGrid, StatusLegend } from '../components/HkRoomGrid';
 import { can } from '../auth/capabilities';
@@ -105,7 +106,7 @@ import {
   StateBadge,
   type Tone,
 } from '../components/HkManagerUi';
-import { initialReportFilter, reportBranchId, reportPeriod, type BranchChoice, type ReportFilterValue } from '../lib/reportFilter';
+import { initialReportFilter, reportBranchId, reportPeriod, type ReportFilterValue } from '../lib/reportFilter';
 import { formatVnd } from '../lib/money';
 import { formatDate, formatDateTime, hcmTimeOfDay, hcmToday, hcmTomorrow } from '../lib/format';
 
@@ -119,37 +120,6 @@ const WIDE = 'hidden md:table-cell';
 
 /** "08:42", Asia/Ho_Chi_Minh. */
 const hhmm = (iso: string | null) => (iso ? hcmTimeOfDay(new Date(iso)) : '—');
-
-/* ------------------------------------------------------------------ *
- * The manager's branch (fixed) or the Admin's choice
- * ------------------------------------------------------------------ */
-
-function useScope(allowAll: boolean) {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN';
-  const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), enabled: isAdmin });
-  const [choice, setChoice] = useState<BranchChoice>(allowAll ? 'ALL' : null);
-  const list = branches.data?.branches ?? [];
-  const branchId = isAdmin ? (typeof choice === 'number' ? choice : undefined) : (user?.branch?.id ?? undefined);
-  const ready = !isAdmin || choice !== null;
-  const chosen = typeof choice === 'number' ? list.find((b) => b.id === choice) : undefined;
-  const label = !isAdmin
-    ? user?.branch
-      ? hotelName(user.branch as Branch, false)
-      : '—'
-    : choice === 'ALL'
-      ? 'Tất cả chi nhánh'
-      : chosen
-        ? branchLabel(chosen)
-        : 'Chưa chọn';
-  const picker: ReactNode = isAdmin ? (
-    <div className="w-full min-w-0 sm:w-72">
-      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Chi nhánh</p>
-      <BranchPicker value={choice} onChange={setChoice} branches={list} allowAll={allowAll} />
-    </div>
-  ) : null;
-  return { isAdmin, branchId, ready, picker, label };
-}
 
 function DateField({ date, onDate, max }: { date: string; onDate: (d: string) => void; max?: string }) {
   return (
@@ -485,8 +455,8 @@ export function HkOverviewPage() {
         icon={ClipboardList}
         testId="hk-overview-groups"
         aside={
-          <Link to="/app/hk/rooms?view=groups" className={SECTION_LINK}>
-            Công việc cá nhân <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          <Link to="/app/hk/daily?tab=rooms&view=groups" className={SECTION_LINK}>
+            Công việc mỗi ngày cần làm <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
         }
       >
@@ -496,7 +466,7 @@ export function HkOverviewPage() {
           <ErrorAlert>{toUserMessage(failed)}</ErrorAlert>
         ) : blocks.length === 0 ? (
           <p className="text-sm text-slate-500">
-            Chưa có công việc nào trong ngày{everyBranch ? ' ở các chi nhánh' : ''}. Công việc được tạo ở “Công việc cá nhân”.
+            Chưa có công việc nào trong ngày{everyBranch ? ' ở các chi nhánh' : ''}. Công việc được tạo ở “Công việc mỗi ngày cần làm”.
           </p>
         ) : (
           <div className="space-y-5">
@@ -507,7 +477,7 @@ export function HkOverviewPage() {
                   <GroupSummary key={g.id} group={g} />
                 ))}
                 {b.groups.length > OVERVIEW_GROUPS ? (
-                  <Link to="/app/hk/rooms?view=groups" className={SECTION_LINK}>
+                  <Link to="/app/hk/daily?tab=rooms&view=groups" className={SECTION_LINK}>
                     Xem tất cả {b.groups.length} công việc <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
                   </Link>
                 ) : null}
@@ -1688,8 +1658,8 @@ export function HkStaffPage() {
                   <li className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5">
                     <p className="text-sm font-semibold text-amber-900">{waiting.length} công việc chưa có người nhận</p>
                     <p className="mt-0.5 text-xs text-slate-700">{waiting.map((g) => g.title).join(', ')}</p>
-                    <Link to="/app/hk/rooms?view=groups" className={`${SECTION_LINK} mt-1.5 text-xs`}>
-                      Mở Công việc cá nhân <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                    <Link to="/app/hk/daily?tab=rooms&view=groups" className={`${SECTION_LINK} mt-1.5 text-xs`}>
+                      Mở Công việc mỗi ngày cần làm <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
                     </Link>
                   </li>
                 ) : null}

@@ -121,26 +121,34 @@ const LEGACY_REPLACEMENTS: Record<string, string> = { COMB: 'COMB_COTTON_CAP', C
 
 export const MAX_QUANTITY = 999;
 
+/**
+ * THE "DỌN PHÒNG" FORM AS SENT: per item of the branch's room-cleaning list
+ * (its id), how many went into the room — one count, no clean / dirty pair —
+ * and the special flags and note. Which ids are allowed is the branch's list,
+ * checked against the database when the form is saved.
+ */
 export interface CleaningForm {
-  /** Per linen item: its one type (K / Q / T — King / Queen / Twin) and how many. */
-  linen: Record<string, { size: string; quantity: number }>;
-  /** Per counted item, how many (0 is left out) — the clean pieces put into the room. */
-  quantities: Record<string, number>;
-  /**
-   * "Đồ bẩn thu về" — per linen item, the used pieces taken out of the room
-   * (an explicit 0: none). Bed linen is collected in the size recorded for it.
-   */
-  collected: Record<string, number>;
-  /** The replacement items ticked ✓. */
-  replaced: string[];
+  /** Per item id, how many (> 0 only; a 0 is left out). */
+  items: Record<string, number>;
   /** The "Ghi nhận đặc biệt" ticked. */
   special: string[];
   note: string | null;
 }
 
-/** A saved form as screens and reports read it; `quantity` is null only on linen saved before it had one. */
-export interface StoredCleaning extends Omit<CleaningForm, 'linen'> {
+/**
+ * A saved form as screens and reports read it. `items` is today's form (the
+ * item's name as it was when saved); `linen`, `quantities`, `collected` and
+ * `replaced` are the fixed fields of the form before it — read from older
+ * saves, never written again.
+ */
+export interface StoredCleaning {
+  items: { itemId: string; label: string; quantity: number }[];
   linen: Record<string, { size: string; quantity: number | null }>;
+  quantities: Record<string, number>;
+  collected: Record<string, number>;
+  replaced: string[];
+  special: string[];
+  note: string | null;
   savedAt?: string;
   savedByUserId?: number;
   savedByName?: string;
@@ -183,38 +191,19 @@ function codesOf(raw: unknown, codes: readonly string[], message: string): strin
  * Each linen item is ONE type and a count — never a list of types.
  */
 export function parseCleaningForm(raw: unknown): CleaningForm {
-  const input = (raw ?? {}) as { linen?: unknown; quantities?: unknown; collected?: unknown; replaced?: unknown; special?: unknown; note?: unknown };
-  const linen: CleaningForm['linen'] = {};
-  const linenCodes = LINEN_ITEMS.map((i) => i.code as string);
-  for (const [code, entry] of Object.entries((input.linen ?? {}) as Record<string, unknown>)) {
-    if (!linenCodes.includes(code)) throw ApiError.validation('Đồ vải không hợp lệ.');
-    if (entry === null) continue;
-    const { size, quantity } = (typeof entry === 'object' && !Array.isArray(entry) ? entry : {}) as { size?: unknown; quantity?: unknown };
-    if (!SIZE_CODES.includes(size as string)) throw ApiError.validation('Chọn một loại đồ vải: King, Queen hoặc Twin.');
-    if (!isCount(quantity)) throw ApiError.validation(`Số lượng phải là số nguyên từ 0 đến ${MAX_QUANTITY}.`);
-    linen[code] = { size: size as string, quantity };
-  }
-  const quantities: Record<string, number> = {};
-  const quantityCodes = QUANTITY_ITEMS.map((i) => i.code as string);
-  for (const [code, value] of Object.entries((input.quantities ?? {}) as Record<string, unknown>)) {
-    if (!quantityCodes.includes(code)) throw ApiError.validation('Vật dụng không hợp lệ.');
+  const input = (raw ?? {}) as { items?: unknown; special?: unknown; note?: unknown };
+  const items: Record<string, number> = {};
+  const entries = input.items && typeof input.items === 'object' && !Array.isArray(input.items) ? Object.entries(input.items as Record<string, unknown>) : [];
+  if (entries.length > 100) throw ApiError.validation('Quá nhiều mặt hàng.');
+  for (const [id, value] of entries) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw ApiError.validation('Mặt hàng không hợp lệ.');
     if (!isCount(value)) throw ApiError.validation(`Số lượng phải là số nguyên từ 0 đến ${MAX_QUANTITY}.`);
-    if (value > 0) quantities[code] = value;
+    if (value > 0) items[id] = value;
   }
-  const collected: Record<string, number> = {};
-  for (const [code, value] of Object.entries((input.collected ?? {}) as Record<string, unknown>)) {
-    if (!COLLECTABLE_CODES.includes(code)) throw ApiError.validation('Đồ bẩn thu về không hợp lệ.');
-    if (!isCount(value)) throw ApiError.validation(`Số lượng phải là số nguyên từ 0 đến ${MAX_QUANTITY}.`);
-    // Bed linen is collected in a size: the one chosen for it on the form.
-    if (value > 0 && linenCodes.includes(code) && !linen[code]) throw ApiError.validation('Chọn loại King, Queen hoặc Twin cho đồ bẩn thu về.');
-    // An explicit 0 is kept: "nothing collected" is an answer, not a blank.
-    collected[code] = value;
-  }
-  const replaced = codesOf(input.replaced, REPLACEMENT_CODES, 'Đồ thay thế không hợp lệ.');
   const special = codesOf(input.special, SPECIAL_CODES, 'Ghi nhận đặc biệt không hợp lệ.');
   const note = typeof input.note === 'string' && input.note.trim() ? input.note.trim() : null;
   if (note && note.length > 2000) throw ApiError.validation('Ghi chú quá dài.');
-  return { linen, quantities, collected, replaced, special, note };
+  return { items, special, note };
 }
 
 /**
@@ -238,7 +227,13 @@ export function readCleaning(raw: unknown): StoredCleaning | null {
   }
   const replaced = Array.isArray(r.replaced) ? (r.replaced as string[]).map((c) => LEGACY_REPLACEMENTS[c] ?? c) : [];
   const special = Array.isArray(r.special) ? (r.special as string[]) : [];
+  const items = Array.isArray(r.items)
+    ? (r.items as { itemId?: unknown; label?: unknown; quantity?: unknown }[])
+        .filter((i) => typeof i.itemId === 'string' && typeof i.quantity === 'number')
+        .map((i) => ({ itemId: i.itemId as string, label: typeof i.label === 'string' ? i.label : '—', quantity: i.quantity as number }))
+    : [];
   return {
+    items,
     linen,
     quantities: r.quantities && typeof r.quantities === 'object' ? (r.quantities as Record<string, number>) : {},
     // Saved before "Đồ bẩn thu về" existed: nothing recorded as collected.
@@ -253,7 +248,7 @@ export function readCleaning(raw: unknown): StoredCleaning | null {
 }
 
 /** A room with nothing saved yet. */
-export const EMPTY_CLEANING: StoredCleaning = { linen: {}, quantities: {}, collected: {}, replaced: [], special: [], note: null };
+export const EMPTY_CLEANING: StoredCleaning = { items: [], linen: {}, quantities: {}, collected: {}, replaced: [], special: [], note: null };
 
 const labelOf = (list: readonly { code: string; label: string }[], code: string) => list.find((i) => i.code === code)?.label ?? code;
 
@@ -264,7 +259,11 @@ export function describeCleaning(c: StoredCleaning) {
       const e = c.linen[i.code]!;
       return { item: i.code, label: i.label, size: e.size, sizeLabel: labelOf(LINEN_SIZES, e.size), quantity: e.quantity };
     }),
-    quantities: QUANTITY_ITEMS.filter((i) => c.quantities[i.code]).map((i) => ({ item: i.code, label: i.label, quantity: c.quantities[i.code]! })),
+    // Today's counted items read where the older fixed counts did, so every report shows both.
+    quantities: [
+      ...QUANTITY_ITEMS.filter((i) => c.quantities[i.code]).map((i) => ({ item: i.code, label: i.label, quantity: c.quantities[i.code]! })),
+      ...c.items.map((i) => ({ item: i.itemId, label: i.label, quantity: i.quantity })),
+    ],
     replaced: c.replaced.map((code) => ({ code, label: labelOf(REPLACEMENT_ITEMS, code) })),
     special: c.special.map((code) => {
       const s = SPECIAL_STATUSES.find((x) => x.code === code)!;

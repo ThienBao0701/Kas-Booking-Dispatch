@@ -91,6 +91,16 @@ function SidebarGroup({
   );
 }
 
+/** "Sẽ phát triển" beside a screen not built yet. */
+function NavStatus({ item }: { item: NavItem }) {
+  if (!item.status) return null;
+  return (
+    <span data-testid={`nav-status-${item.to}`} className="ml-1 shrink-0 self-center whitespace-nowrap rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+      {item.status}
+    </span>
+  );
+}
+
 /** A link inside a group — smaller, and active by `linkActive`. */
 function SidebarChildLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
   const location = useLocation();
@@ -107,6 +117,7 @@ function SidebarChildLink({ item, onNavigate }: { item: NavItem; onNavigate?: ()
     >
       <Icon className="mt-0.5 h-4 w-4 flex-shrink-0" aria-hidden="true" />
       <span className="flex-1">{item.label}</span>
+      <NavStatus item={item} />
     </Link>
   );
 }
@@ -140,6 +151,7 @@ function SidebarLink({
     >
       <Icon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
       <span className="flex-1">{item.label}</span>
+      <NavStatus item={item} />
       {showBadge ? (
         <span
           data-testid={`nav-badge-${item.to.replace('/app/', '')}`}
