@@ -436,7 +436,7 @@ describe('what Technical and Housekeeping see', () => {
     renderApp('/app/deliveries');
     expect(await screen.findByTestId('department-delivery-active')).toBeInTheDocument();
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng']);
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Công việc']);
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
   });
 

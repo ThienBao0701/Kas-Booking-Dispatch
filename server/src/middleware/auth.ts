@@ -146,8 +146,8 @@ function supervisorMayReach(req: Request): boolean {
  */
 const HOUSEKEEPING_REPORT_ROUTES = [
   /^\/api\/reception\/reports$/,
-  /^\/api\/reception\/reports\/(options|housekeeping|guest|archive|open-counts)$/,
-  /^\/api\/reception\/reports\/[^/]+\/complete$/,
+  /^\/api\/reception\/reports\/(options|housekeeping|guest|archive|open-counts|assigned|dispatch-staff)$/,
+  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge|assignee)$/,
   /^\/api\/issues$/,
   /^\/api\/issues\/similar$/,
   /^\/api\/confidential-reports(\/|$)/,
@@ -183,6 +183,23 @@ const HOUSEKEEPING_MANAGER_ROUTES = [
   ...HOUSEKEEPING_REPORT_ROUTES,
 ];
 
+/**
+ * WHAT BELL MAY REACH — default deny: its shift at the shift gate, the guest
+ * requests given to it ("Nhận việc", "Hoàn thành"), its own notifications. No
+ * booking, journal, payment or incident screen: each service then keeps it to
+ * what is its own.
+ */
+const BELL_ROUTES = [
+  /^\/api\/auth(\/|$)/,
+  /^\/api\/reception\/shifts\/(options|current|check-in|end-preview|close)$/,
+  /^\/api\/reception\/shifts\/current\/name$/,
+  /^\/api\/reception\/reports\/(assigned|open-counts)$/,
+  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge)$/,
+  /^\/api\/nav-badges$/,
+  /^\/api\/notifications(\/|$)/,
+  /^\/api\/push(\/|$)/,
+];
+
 function housekeepingMayReach(req: Request): boolean {
   const path = req.originalUrl.split('?')[0] ?? '';
   return HOUSEKEEPING_ROUTES.some((route) => route.test(path));
@@ -201,6 +218,10 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
         return;
       }
       if (user.role === 'HOUSEKEEPING' && !housekeepingMayReach(req)) {
+        next(ApiError.forbidden());
+        return;
+      }
+      if (user.role === 'BELL' && !BELL_ROUTES.some((route) => route.test(req.originalUrl.split('?')[0] ?? ''))) {
         next(ApiError.forbidden());
         return;
       }

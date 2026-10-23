@@ -4,6 +4,7 @@ import { env } from './config/env';
 import { prisma } from './db/prisma';
 import { ensureInitialAdmin } from './auth/bootstrapAdmin';
 import { startPushSweep } from './push/pushService';
+import { startHousekeepingShiftCutoff } from './housekeeping/shiftAutoEnd';
 
 async function start(): Promise<void> {
   // Fail fast: a server that cannot reach its database should not accept traffic.
@@ -34,6 +35,8 @@ async function start(): Promise<void> {
 
   // Every department's new notices reach its phones (see pushService).
   startPushSweep();
+  // Housekeepers' shifts end at 20:00 (Asia/Ho_Chi_Minh), caught up after a restart.
+  startHousekeepingShiftCutoff();
 
   registerShutdown(server);
 }

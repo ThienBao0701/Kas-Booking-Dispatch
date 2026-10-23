@@ -32,15 +32,16 @@ function shell(user: unknown, extra: Record<string, (init: RequestInit) => { sta
 const count = (href: string) => screen.queryByTestId(`nav-count-${href}`);
 
 describe('the Admin’s menu', () => {
-  it('splits each category by the department that recorded it — Reception’s under Lễ tân, Housekeeping’s under Buồng phòng — the group only a dot', async () => {
+  it('splits each category by the department that recorded it — Reception’s under Lễ tân, Housekeeping’s under Buồng phòng — each group the sum of its own, nothing twice', async () => {
     shell(ADMIN_USER);
     renderApp('/app/settings');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(await within(nav).findByTestId('nav-dot-Báo cáo vấn đề')).toBeInTheDocument();
-    // No number on the group itself.
+    // 2 + 4 + 1 under Lễ tân, 3 + 1 under Buồng phòng.
+    expect(await within(nav).findByTestId('nav-total-Báo cáo vấn đề')).toHaveTextContent('11');
     expect(within(nav).queryByTestId('nav-badge-reports')).not.toBeInTheDocument();
     await userEvent.click(within(nav).getByTestId('nav-group-Báo cáo vấn đề'));
-    expect(within(nav).getByTestId('nav-dot-Lễ tân')).toBeInTheDocument();
+    expect(within(nav).getByTestId('nav-total-Lễ tân')).toHaveTextContent('7');
+    expect(within(nav).getByTestId('nav-total-Buồng phòng')).toHaveTextContent('4');
     await userEvent.click(within(nav).getByTestId('nav-group-Lễ tân'));
     expect(count('/app/reports?category=GUEST_REQUEST')).toHaveTextContent('2');
     expect(count('/app/reports?category=FACILITY_ISSUE')).toHaveTextContent('4');
@@ -76,7 +77,8 @@ describe('Bộ phận buồng phòng', () => {
     renderApp('/app/hk/store/linens');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
     await userEvent.click(await within(nav).findByTestId('nav-group-Báo cáo vấn đề'));
-    expect(count('/app/hk/reports?category=GUEST_REQUEST')).toHaveTextContent('3');
+    // Its own requests and the desk's routed to Buồng phòng — its page lists both.
+    expect(count('/app/hk/reports?category=GUEST_REQUEST')).toHaveTextContent('5');
     expect(count('/app/hk/reports?category=FACILITY_ISSUE')).toHaveTextContent('5');
     expect(count('/app/hk/reports?category=HOTEL_DELIVERY')).not.toBeInTheDocument();
   });
@@ -85,17 +87,41 @@ describe('Bộ phận buồng phòng', () => {
     const fetchMock = shell(HOUSEKEEPING_USER, { 'GET /api/housekeeping/shift': () => ({ status: 200, body: { shift: null } }) });
     renderApp('/app/hk/reports');
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    expect(await within(nav).findByTestId('nav-count-/app/hk/reports?category=GUEST_REQUEST')).toHaveTextContent('3');
+    expect(await within(nav).findByTestId('nav-count-/app/hk/reports?category=GUEST_REQUEST')).toHaveTextContent('5');
     expect(count('/app/hk/reports?category=FACILITY_ISSUE')).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/issues/summary')).toBe(false);
   });
 });
 
 describe('the desk', () => {
-  it('keeps its one "Báo cáo vấn đề" link and its incident total, unchanged — and asks for no category counts', async () => {
-    const fetchMock = shell(RECEPTIONIST_USER);
+  it('counts everything still open behind its one "Báo cáo vấn đề" link — requests, service quality and incidents, each once', async () => {
+    shell(RECEPTIONIST_USER);
     renderApp('/app/reminders');
-    expect(await screen.findByLabelText('5 sự cố chưa xử lý')).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/reception/reports/open-counts')).toBe(false);
+    // 2 + 3 requests, 1 complaint, 5 incidents.
+    const badge = await screen.findByLabelText('11 mục chưa xử lý, trong đó 5 sự cố');
+    expect(badge).toHaveTextContent('11');
+    expect(badge.closest('a')).toHaveAttribute('href', '/app/reports');
+  });
+
+});
+
+describe('Bell', () => {
+  it('counts the requests given to it and not yet completed — on its own work link, and nothing of the desk', async () => {
+    const fetchMock = shell(
+      { id: 21, username: 'bell1', fullName: 'Bell Một', role: 'BELL', branch: BRANCH, active: true, mustChangePassword: false },
+      {
+        'GET /api/reception/reports/open-counts': () => ({ status: 200, body: { counts: { guestRequest: { reception: 0, housekeeping: 0, mine: 2 }, complaint: 0 } } }),
+        'GET /api/reception/reports/assigned': () => ({ status: 200, body: { reports: [], archiveAfterHours: 12 } }),
+        'GET /api/reception/shifts/current': () => ({ status: 200, body: { session: null } }),
+        'GET /api/reception/shifts/options': () => ({ status: 200, body: { shifts: [] } }),
+      },
+    );
+    renderApp('/app/bell');
+    const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual([expect.stringContaining('Công việc Bell')]);
+    expect(await within(nav).findByLabelText('Công việc Bell: 2 mục cần xử lý')).toBeInTheDocument();
+    // No incident summary, no booking counts' screens, no chat.
+    expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/issues/summary')).toBe(false);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/chat'))).toBe(false);
   });
 });

@@ -27,7 +27,17 @@
  * reason, the person and the instant attached. There is no code path in this
  * file, or in the routes above it, that calls `delete` on a report.
  */
-import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportDepartment, ReportVerdict, ShiftType, UserRole } from '@prisma/client';
+import type { HotelDeliveryDepartment, IssueSeverity, Prisma, PrismaClient, ReportDepartment, ReportVerdict, ShiftType, UserRole, WorkDepartment } from '@prisma/client';
+import { notifyOperational, type OperationalNotice } from '../push/pushService';
+import {
+  WORK_DEPARTMENT_LABELS,
+  departmentOfRole,
+  everyoneOnShift,
+  lockBranchRouting,
+  onShiftStaff,
+  routeRequest,
+  type StaffMember,
+} from './requestRouting';
 import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
@@ -145,7 +155,8 @@ async function correctionWriter(
   actor: ReportActor,
   client: PrismaClient | Prisma.TransactionClient,
 ): Promise<WriterContext> {
-  if (actor.role === 'RECEPTIONIST') return receptionistWriter(actor, client);
+  // Bell completes on its shift too: the shift gate is the desk's and Bell's.
+  if (actor.role === 'RECEPTIONIST' || actor.role === 'BELL') return receptionistWriter(actor, client);
   return { shiftSessionId: null, shiftType: null, name: actor.fullName };
 }
 
@@ -387,6 +398,28 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now(),
           /** "Mức độ"; null (with "Chưa phân mức") only on requests recorded before it existed. */
           severity: row.guestRequest.severity,
           severityLabel: severityLabel(row.guestRequest.severity),
+          /** "Bộ phận nhận việc" as chosen at creation; null on older requests. */
+          receivingDepartment: row.guestRequest.receivingDepartment,
+          receivingDepartmentLabel: row.guestRequest.receivingDepartment ? WORK_DEPARTMENT_LABELS[row.guestRequest.receivingDepartment] : null,
+          /**
+           * "Người xử lý" — the one person who may complete it while set. Null:
+           * not given to anyone (an older request, or nobody was on shift).
+           */
+          assignee: row.guestRequest.assigneeUserId
+            ? {
+                id: row.guestRequest.assigneeUserId,
+                name: row.guestRequest.assigneeNameSnapshot ?? '—',
+                department: row.guestRequest.assigneeDepartment,
+                departmentLabel: row.guestRequest.assigneeDepartment ? WORK_DEPARTMENT_LABELS[row.guestRequest.assigneeDepartment] : null,
+              }
+            : null,
+          assignedAt: row.guestRequest.assignedAt?.toISOString() ?? null,
+          assignedByName: row.guestRequest.assignedByNameSnapshot,
+          /** "Nhận việc" — when the assignee acknowledged it. */
+          acknowledgedAt: row.guestRequest.acknowledgedAt?.toISOString() ?? null,
+          /** The department of whoever completed it — never the receiving one copied. */
+          completedDepartment: row.guestRequest.completedDepartment,
+          completedDepartmentLabel: row.guestRequest.completedDepartment ? WORK_DEPARTMENT_LABELS[row.guestRequest.completedDepartment] : null,
         }
       : null,
 
@@ -543,13 +576,48 @@ export function reportVisibilityWhere(
     return { ...scopedBranchFilter(actor, filter.branchIds ?? filter.branchId), ...(housekeepingOnly ? { originDepartment: 'HOUSEKEEPING' as const } : {}) };
   }
   // Quản lý buồng phòng: its branch's housekeeping records. A housekeeper: its own.
+  // …and the requests the desk routed to Buồng phòng: the manager's branch's, a housekeeper's given to it.
   if (actor.role === 'HOUSEKEEPING_MANAGER') {
-    return { branchId: actor.branchId ?? -1, originDepartment: 'HOUSEKEEPING' };
+    return {
+      branchId: actor.branchId ?? -1,
+      OR: [
+        { originDepartment: 'HOUSEKEEPING' },
+        { guestRequest: { is: { OR: [{ receivingDepartment: 'HOUSEKEEPING' }, { assigneeDepartment: 'HOUSEKEEPING' }] } } },
+      ],
+    };
   }
   if (actor.role === 'HOUSEKEEPING') {
-    return { createdByUserId: actor.id, originDepartment: 'HOUSEKEEPING' };
+    return { OR: [{ createdByUserId: actor.id, originDepartment: 'HOUSEKEEPING' }, { guestRequest: { is: { assigneeUserId: actor.id } } }] };
+  }
+  // Bell: the requests given to it, and nothing else of the journal.
+  if (actor.role === 'BELL') {
+    return { category: 'GUEST_REQUEST', guestRequest: { is: { assigneeUserId: actor.id } } };
   }
   throw ApiError.forbidden('Bạn không có quyền xem báo cáo vận hành lễ tân.');
+}
+
+/**
+ * "BỘ PHẬN" — a guest request by the department it is with: a completed one by
+ * the department that COMPLETED it, an open one by its current assignee's (the
+ * receiving department while nobody holds it). Other categories pass through:
+ * the filter is the request table's.
+ */
+export function workDepartmentWhere(department: WorkDepartment): Prisma.ReceptionOperationalReportWhereInput {
+  return {
+    OR: [
+      { category: { not: 'GUEST_REQUEST' } },
+      {
+        guestRequest: {
+          is: {
+            OR: [
+              { completedAt: { not: null }, completedDepartment: department },
+              { completedAt: null, OR: [{ assigneeDepartment: department }, { assigneeUserId: null, receivingDepartment: department }] },
+            ],
+          },
+        },
+      },
+    ],
+  };
 }
 
 /**
@@ -563,12 +631,14 @@ export async function countOpenReports(actor: ReportActor, client: PrismaClient 
   const count = (where: Prisma.ReceptionOperationalReportWhereInput) =>
     client.receptionOperationalReport.count({ where: { AND: [visible, { voidedAt: null }, where] } });
   const openRequest = { category: 'GUEST_REQUEST' as const, guestRequest: { is: { completedAt: null } } };
-  const [requestReception, requestHousekeeping, complaint] = await Promise.all([
+  const [requestReception, requestHousekeeping, complaint, mine] = await Promise.all([
     count({ ...openRequest, originDepartment: 'RECEPTION' }),
     count({ ...openRequest, originDepartment: 'HOUSEKEEPING' }),
     count({ category: 'CUSTOMER_COMPLAINT', complaint: { is: { completedAt: null } } }),
+    // Open requests given to the reader — Bell's (and every assignee's) own count.
+    count({ category: 'GUEST_REQUEST', guestRequest: { is: { completedAt: null, assigneeUserId: actor.id } } }),
   ]);
-  return { guestRequest: { reception: requestReception, housekeeping: requestHousekeeping }, complaint };
+  return { guestRequest: { reception: requestReception, housekeeping: requestHousekeeping, mine }, complaint };
 }
 
 /* ------------------------------------------------------------------ *
@@ -806,6 +876,8 @@ export interface GuestRequestInput {
   note: string;
   /** "Mức độ" — Trung bình when omitted. */
   severity?: IssueSeverity;
+  /** "Bộ phận nhận việc" — required on every request recorded live (not on "Nhập bù"). */
+  receivingDepartment?: WorkDepartment;
 }
 
 export interface FacilityInput {
@@ -957,7 +1029,16 @@ export async function createReport(
  */
 export async function createReports(
   inputs: CreateReportInput[],
-  target: { branchId?: number; confirmDuplicate?: boolean },
+  target: {
+    branchId?: number;
+    confirmDuplicate?: boolean;
+    /**
+     * "Vẫn lưu, chờ giao" — save a request nobody of its department can receive
+     * now (nobody on shift), unassigned, for a manager to give out later.
+     * Without it such a request is refused with NO_STAFF_ON_SHIFT, naming the department.
+     */
+    allowUnassigned?: boolean;
+  },
   actor: ReportActor,
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
@@ -971,7 +1052,8 @@ export async function createReports(
     if (!branch) throw ApiError.validation('Chi nhánh không hợp lệ hoặc đã ngừng hoạt động.');
     // The desk's open shift, if any: the record appears in its journal, marked.
     const open = await client.receptionShiftSession.findFirst({
-      where: { branchId, closedAt: null },
+      // The DESK's open shift — never a Bell's, which opens at the same gate.
+      where: { branchId, closedAt: null, user: { role: 'RECEPTIONIST' } },
       orderBy: { startedAt: 'desc' },
       select: { id: true, shiftType: true },
     });
@@ -999,17 +1081,70 @@ export async function createReports(
     createdAt: now,
   };
 
-  return client.$transaction(async (tx) => {
+  const created = await client.$transaction(async (tx) => {
     const created: ReportDetail[] = [];
     for (const input of inputs) {
       const task = 'taskId' in input && input.taskId ? await reportedTask(input.taskId, actor, writer.branchId, tx) : null;
       // After the item's own checks: whether it may be reported comes before whether it looks repeated.
       if (isHousekeepingReporter(actor.role) && !target.confirmDuplicate) await assertNotDuplicate(input, writer.branchId, now, tx);
-      const data = await buildCreateData(input, { ...base, category: input.category, task }, tx);
+      const routing = input.category === 'GUEST_REQUEST' ? await routeNewRequest(tx, input.guestRequest.receivingDepartment, writer.branchId, actor, target.allowUnassigned === true) : null;
+      const data = await buildCreateData(input, { ...base, category: input.category, task, routing: routing ? { ...routing, by: { id: actor.id, name: actor.fullName }, at: now } : undefined }, tx);
       created.push(await tx.receptionOperationalReport.create({ data, include: REPORT_INCLUDE }));
     }
     return created;
   });
+  await notifyRequestAssignees(created.filter((r) => r.guestRequest?.assigneeUserId && r.guestRequest.assigneeUserId !== actor.id), client);
+  return created;
+}
+
+/**
+ * "Bộ phận nhận việc" → its receiver, under the branch's routing lock. Nobody of
+ * the department on shift: refused (NO_STAFF_ON_SHIFT, naming it) unless the
+ * writer chose to leave it waiting for a manager to give out.
+ */
+async function routeNewRequest(
+  tx: Prisma.TransactionClient,
+  department: WorkDepartment | undefined,
+  branchId: number,
+  actor: ReportActor,
+  allowUnassigned: boolean,
+): Promise<{ receivingDepartment: WorkDepartment; assignee: StaffMember | null }> {
+  if (!department) throw ApiError.validation('Vui lòng chọn bộ phận nhận việc.');
+  await lockBranchRouting(tx, branchId);
+  const assignee = await routeRequest(tx, branchId, department, actor);
+  if (!assignee && !allowUnassigned) {
+    throw ApiError.conflict(`Hiện không có nhân viên ${WORK_DEPARTMENT_LABELS[department]} nào đang trong ca tại chi nhánh này.`, {
+      reason: 'NO_STAFF_ON_SHIFT',
+      department,
+    });
+  }
+  return { receivingDepartment: department, assignee };
+}
+
+/** Where a request's "Người xử lý" works it. */
+function requestLinkFor(department: WorkDepartment | null): string {
+  if (department === 'BELL') return '/app/bell';
+  if (department === 'HOUSEKEEPING') return '/app/hk/reports?category=GUEST_REQUEST';
+  return '/app/reports?category=GUEST_REQUEST';
+}
+
+/** "Yêu cầu khách mới" — once per assignment (the key carries its instant), pushed at once. */
+async function notifyRequestAssignees(rows: ReportDetail[], client: PrismaClient): Promise<void> {
+  const notices: OperationalNotice[] = rows.flatMap((r) => {
+    const g = r.guestRequest;
+    if (!g?.assigneeUserId || !g.assignedAt) return [];
+    return [
+      {
+        userId: g.assigneeUserId,
+        kind: 'REQUEST_ASSIGNED' as const,
+        title: 'Yêu cầu khách mới',
+        body: `${r.branch.address}: ${requestContent(g).slice(0, 140)}`,
+        link: requestLinkFor(g.assigneeDepartment),
+        dedupeKey: `request-assigned:${r.id}:${g.assignedAt.getTime()}`,
+      },
+    ];
+  });
+  if (notices.length > 0) await notifyOperational(notices, client);
 }
 
 async function buildCreateData(
@@ -1029,6 +1164,8 @@ async function buildCreateData(
     createdAt: Date;
     /** "Nhập bù" only: the manager who actually entered it, and why. */
     lateEntry?: { userId: number; name: string; role: UserRole; reason: string };
+    /** A live guest request: its receiving department and who it was routed to. */
+    routing?: { receivingDepartment: WorkDepartment; assignee: StaffMember | null; by: { id: number; name: string }; at: Date };
   },
   client: PrismaClient | Prisma.TransactionClient,
 ): Promise<Prisma.ReceptionOperationalReportCreateInput> {
@@ -1079,6 +1216,22 @@ async function buildCreateData(
         name and Mã EZ later (`setGuestIdentity`).
       */
       const housekeeping = base.originDepartment === 'HOUSEKEEPING';
+      const routed = base.routing
+        ? {
+            receivingDepartment: base.routing.receivingDepartment,
+            ...(base.routing.assignee
+              ? {
+                  assignee: { connect: { id: base.routing.assignee.id } },
+                  assigneeNameSnapshot: base.routing.assignee.fullName,
+                  assigneeDepartment: base.routing.assignee.department,
+                  assignedAt: base.routing.at,
+                  assignedBy: { connect: { id: base.routing.by.id } },
+                  assignedByNameSnapshot: base.routing.by.name,
+                }
+              : {}),
+          }
+        : // "Nhập bù": the department is kept as recorded; nothing is routed after the fact.
+          { receivingDepartment: input.guestRequest.receivingDepartment ?? null };
       return {
         ...scalars,
         guestRequest: {
@@ -1090,12 +1243,14 @@ async function buildCreateData(
                 roomNumber: base.task?.place ?? optional(input.guestRequest.roomNumber),
                 note: required(input.guestRequest.note, 'nội dung'),
                 severity: newSeverity(input.guestRequest.severity),
+                ...routed,
               }
             : {
                 guestName: required(input.guestRequest.guestName, 'tên khách'),
                 ezCode: optional(input.guestRequest.ezCode),
                 note: required(input.guestRequest.note, 'nội dung'),
                 severity: newSeverity(input.guestRequest.severity),
+                ...routed,
               },
         },
       };
@@ -1310,6 +1465,8 @@ export interface ListReportsFilter {
   onlyVoided?: boolean;
   /** "Mức độ" — requests, complaints and facility entries of that level only. */
   severity?: IssueSeverity;
+  /** "Bộ phận" — guest requests by the department they are with (see `workDepartmentWhere`). */
+  workDepartment?: WorkDepartment;
   take?: number;
 }
 
@@ -1338,7 +1495,11 @@ export function reportWhere(
   }
   if (filter.includeVoided === false) where.voidedAt = null;
   if (filter.onlyVoided) where.voidedAt = { not: null };
-  if (filter.severity) where.AND = [severityWhere(filter.severity)];
+  const narrowed = [
+    ...(filter.severity ? [severityWhere(filter.severity)] : []),
+    ...(filter.workDepartment ? [workDepartmentWhere(filter.workDepartment)] : []),
+  ];
+  if (narrowed.length > 0) where.AND = narrowed;
   return where;
 }
 
@@ -1436,9 +1597,11 @@ export async function listActiveJournal(
   now: Date,
   client: PrismaClient = prisma,
   severity?: IssueSeverity,
+  workDepartment?: WorkDepartment,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
   const where = activeJournalWhere(reportVisibilityWhere(actor), now);
-  const page = await pageByCategory(severity ? { AND: [where, severityWhere(severity)] } : where, ACTIVE_PAGE_SIZE, client);
+  const filters = [...(severity ? [severityWhere(severity)] : []), ...(workDepartment ? [workDepartmentWhere(workDepartment)] : [])];
+  const page = await pageByCategory(filters.length > 0 ? { AND: [where, ...filters] } : where, ACTIVE_PAGE_SIZE, client);
   return { ...page, reports: prioritiseJournal(page.reports) };
 }
 
@@ -1463,6 +1626,8 @@ export async function listArchivedJournal(
     department?: ReportDepartment;
     /** "Loại vấn đề": one of the archived categories; both when absent. */
     category?: ArchivableCategory;
+    /** "Bộ phận" of the request table — the department that completed it. */
+    workDepartment?: WorkDepartment;
   } = {},
   client: PrismaClient = prisma,
 ): Promise<{ reports: ReportDetail[]; totals: Record<ArchivableCategory, number> }> {
@@ -1474,6 +1639,7 @@ export async function listArchivedJournal(
         ...(options.period ? [journalPeriodWhere(options.period)] : []),
         ...(options.severity ? [severityWhere(options.severity)] : []),
         ...(options.category ? [{ category: options.category }] : []),
+        ...(options.workDepartment ? [workDepartmentWhere(options.workDepartment)] : []),
         ...(options.verdict
           ? [
               {
@@ -1499,7 +1665,7 @@ export async function listArchivedJournal(
 export async function listHousekeepingJournal(
   actor: ReportActor,
   now: Date,
-  options: { branchId?: number } = {},
+  options: { branchId?: number; workDepartment?: WorkDepartment } = {},
   client: PrismaClient = prisma,
 ): Promise<ReportDetail[]> {
   const scope = reportVisibilityWhere(actor, { branchId: options.branchId, department: 'HOUSEKEEPING' });
@@ -1507,8 +1673,17 @@ export async function listHousekeepingJournal(
     where: {
       AND: [
         scope,
-        { originDepartment: 'HOUSEKEEPING', voidedAt: null },
-        { category: 'GUEST_REQUEST', OR: [{ guestRequest: { is: { completedAt: null } } }, { createdAt: { gt: archiveCutoff(now) } }] },
+        // Its own journal's, and the desk's requests routed to Buồng phòng (the scope above says whose).
+        {
+          voidedAt: null,
+          OR: [
+            { originDepartment: 'HOUSEKEEPING' },
+            { guestRequest: { is: { OR: [{ receivingDepartment: 'HOUSEKEEPING' }, { assigneeDepartment: 'HOUSEKEEPING' }] } } },
+          ],
+        },
+        // Open at any age; completed: twelve hours from the COMPLETION.
+        { category: 'GUEST_REQUEST', guestRequest: { is: { OR: [{ completedAt: null }, { completedAt: { gt: archiveCutoff(now) } }] } } },
+        ...(options.workDepartment ? [workDepartmentWhere(options.workDepartment)] : []),
       ],
     },
     include: REPORT_INCLUDE,
@@ -2207,7 +2382,23 @@ export async function completeReport(
 ): Promise<ReportDetail> {
   const verdict = parseCompletionVerdict(input);
   const now = clock.now();
-  const current = await loadOwn(id, actor, client);
+  /*
+    "NGƯỜI XỬ LÝ" COMPLETES. A request given to someone is that person's alone
+    to complete — not the Admin who gave it, not a colleague, not the previous
+    holder — and the check is repeated in the write below, so a reassignment
+    landing between the read and the write is refused, not overridden. A
+    request given to nobody (older ones, or saved "chờ giao") keeps the rule
+    it always had.
+  */
+  const peek = await client.guestRequestReport.findUnique({ where: { reportId: id }, select: { assigneeUserId: true, assigneeNameSnapshot: true } });
+  const assignedTo = peek?.assigneeUserId ?? null;
+  if (assignedTo !== null && assignedTo !== actor.id) {
+    throw ApiError.forbidden(`Chỉ người xử lý được giao (${peek?.assigneeNameSnapshot ?? '—'}) mới hoàn thành được yêu cầu này.`);
+  }
+  const current =
+    assignedTo === actor.id
+      ? await client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE })
+      : await loadOwn(id, actor, client);
   const detail =
     current.category === 'GUEST_REQUEST'
       ? current.guestRequest
@@ -2234,7 +2425,11 @@ export async function completeReport(
   };
   const { count } =
     current.category === 'GUEST_REQUEST'
-      ? await client.guestRequestReport.updateMany({ where, data })
+      ? await client.guestRequestReport.updateMany({
+          // Still held by the same person (or still by nobody) at the instant of the write.
+          where: { ...where, assigneeUserId: assignedTo },
+          data: { ...data, completedDepartment: departmentOfRole(actor.role) },
+        })
       : await client.customerComplaintReport.updateMany({ where, data });
   if (count === 0) throw ApiError.conflict('Bản ghi này đã được hoàn thành hoặc đã bị hủy.');
 
@@ -2242,6 +2437,137 @@ export async function completeReport(
     where: { id },
     include: REPORT_INCLUDE,
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * "Người xử lý" — giving a guest request to someone, and "Nhận việc"
+ * ------------------------------------------------------------------ */
+
+/**
+ * WHO MAY GIVE A REQUEST OUT: the Admin and the reception managers within their
+ * branches; a Quản lý buồng phòng at its branch, to its own department's staff.
+ * Giving it out never lets the giver complete it.
+ */
+function assertMayAssign(actor: ReportActor, branchId: number): void {
+  if (actor.role === 'ADMIN' || isReceptionSupervisor(actor.role)) {
+    if (!scopeIncludes(branchScopeOf(actor), branchId)) throw ApiError.branchAccessDenied('Yêu cầu không thuộc phạm vi chi nhánh của bạn.');
+    return;
+  }
+  if (actor.role === 'HOUSEKEEPING_MANAGER' && actor.branchId === branchId) return;
+  throw ApiError.forbidden('Bạn không có quyền giao người xử lý.');
+}
+
+/** Everyone a request at the branch may be given to now — "đang trong ca", by department. */
+export async function dispatchStaff(actor: ReportActor, branchIdRaw: unknown, client: PrismaClient = prisma) {
+  const branchId =
+    actor.role === 'RECEPTIONIST' || actor.role === 'HOUSEKEEPING_MANAGER' || actor.role === 'HOUSEKEEPING'
+      ? actor.branchId ?? -1
+      : assertBranchInScope(actor, branchIdRaw === undefined || branchIdRaw === '' ? undefined : Number(branchIdRaw));
+  const staff = await onShiftStaff(client, branchId);
+  const view = (list: StaffMember[]) => list.map((s) => ({ id: s.id, name: s.fullName, department: s.department }));
+  return {
+    branchId,
+    /** "Đang trong ca" — an open shift at the branch. Not an online status: KAS keeps none. */
+    onShift: {
+      BELL: view(staff.BELL),
+      RECEPTION: view(staff.RECEPTION),
+      HOUSEKEEPING: view([...staff.supervisors, ...staff.HOUSEKEEPING]),
+    },
+  };
+}
+
+/**
+ * "GIAO NGƯỜI XỬ LÝ" — set (or clear) the responsible person of an open guest
+ * request. The person must be on shift at the request's branch (a Quản lý buồng
+ * phòng gives only to Buồng phòng). The write is conditional on the holder the
+ * giver saw, so two givers at once cannot both win; the previous holder loses
+ * "Hoàn thành" the same instant. Audited (ASSIGN) and notified once.
+ */
+export async function assignRequest(
+  id: string,
+  input: { assigneeUserId: number | null },
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail> {
+  const row = await client.receptionOperationalReport.findUnique({ where: { id }, include: REPORT_INCLUDE });
+  if (!row || row.category !== 'GUEST_REQUEST' || !row.guestRequest) throw ApiError.notFound('Không tìm thấy yêu cầu.');
+  assertMayAssign(actor, row.branchId);
+  if (row.voidedAt) throw ApiError.conflict('Yêu cầu đã bị hủy.');
+  if (row.guestRequest.completedAt) throw ApiError.conflict('Yêu cầu đã hoàn thành — không giao lại được.');
+  let person: StaffMember | null = null;
+  if (input.assigneeUserId !== null) {
+    const staff = await onShiftStaff(client, row.branchId);
+    const pool = actor.role === 'HOUSEKEEPING_MANAGER' ? [...staff.supervisors, ...staff.HOUSEKEEPING] : everyoneOnShift(staff);
+    person = pool.find((s) => s.id === input.assigneeUserId) ?? null;
+    if (!person) throw ApiError.validation('Nhân viên này không đang trong ca tại chi nhánh của yêu cầu.');
+  }
+  const before = row.guestRequest;
+  if ((person?.id ?? null) === before.assigneeUserId) return row;
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.guestRequestReport.updateMany({
+      where: { reportId: id, completedAt: null, assigneeUserId: before.assigneeUserId, report: { is: { voidedAt: null } } },
+      data: {
+        assigneeUserId: person?.id ?? null,
+        assigneeNameSnapshot: person?.fullName ?? null,
+        assigneeDepartment: person?.department ?? null,
+        assignedAt: person ? now : null,
+        assignedByUserId: person ? actor.id : null,
+        assignedByNameSnapshot: person ? actor.fullName : null,
+        acknowledgedAt: null,
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Yêu cầu vừa được giao hoặc hoàn thành ở nơi khác. Vui lòng tải lại.');
+    await tx.receptionReportAudit.create({
+      data: {
+        branchId: row.branchId,
+        reportId: id,
+        action: 'ASSIGN',
+        field: 'assignee',
+        oldValue: before.assigneeNameSnapshot,
+        newValue: person?.fullName ?? null,
+        actorUserId: actor.id,
+        actorNameSnapshot: actor.fullName,
+        actorRole: actor.role,
+        createdAt: now,
+      },
+    });
+  });
+  const updated = await client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+  if (person && person.id !== actor.id) await notifyRequestAssignees([updated], client);
+  return updated;
+}
+
+/** "NHẬN VIỆC" — the assignee acknowledges a request given to it. Once; only its own. */
+export async function acknowledgeRequest(id: string, actor: ReportActor, clock: Clock = getClock(), client: PrismaClient = prisma): Promise<ReportDetail> {
+  const now = clock.now();
+  const { count } = await client.guestRequestReport.updateMany({
+    where: { reportId: id, assigneeUserId: actor.id, completedAt: null, acknowledgedAt: null, report: { is: { voidedAt: null } } },
+    data: { acknowledgedAt: now },
+  });
+  const row = await client.receptionOperationalReport.findUnique({ where: { id }, include: REPORT_INCLUDE });
+  if (!row?.guestRequest) throw ApiError.notFound('Không tìm thấy yêu cầu.');
+  if (count === 0) {
+    if (row.guestRequest.assigneeUserId !== actor.id) throw ApiError.forbidden('Yêu cầu này không được giao cho bạn.');
+    if (row.guestRequest.completedAt || row.voidedAt) throw ApiError.conflict('Yêu cầu đã hoàn thành hoặc đã bị hủy.');
+  }
+  return row;
+}
+
+/** The requests given to the reader — open, and completed in the last 12 hours (from the completion). */
+export async function listAssignedRequests(actor: ReportActor, now: Date, client: PrismaClient = prisma): Promise<ReportDetail[]> {
+  const rows = await client.receptionOperationalReport.findMany({
+    where: {
+      category: 'GUEST_REQUEST',
+      voidedAt: null,
+      guestRequest: { is: { assigneeUserId: actor.id, OR: [{ completedAt: null }, { completedAt: { gt: archiveCutoff(now) } }] } },
+    },
+    include: REPORT_INCLUDE,
+    orderBy: { createdAt: 'desc' },
+    take: ACTIVE_PAGE_SIZE,
+  });
+  return prioritiseJournal(rows);
 }
 
 /* ------------------------------------------------------------------ *

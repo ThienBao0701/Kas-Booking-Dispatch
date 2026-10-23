@@ -32,7 +32,7 @@ import type { PrismaClient } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { ApiError } from '../lib/errors';
 import { getClock, type Clock } from '../lib/clock';
-import { findOpenSession, isShiftRole, type ShiftActor, type ShiftSessionRow } from './shiftService';
+import { findOpenSession, opensShift, type ShiftActor, type ShiftSessionRow } from './shiftService';
 import { pendingWork, type PendingWork } from './handoverNoteService';
 import { shiftCashSummary, type CashSummary } from '../reception/cashService';
 
@@ -63,8 +63,8 @@ export async function endShiftPreview(
   actor: ShiftActor,
   client: PrismaClient = prisma,
 ): Promise<EndShiftPreview> {
-  if (!isShiftRole(actor.role)) {
-    throw ApiError.forbidden('Chỉ lễ tân mới kết thúc được ca làm việc.');
+  if (!opensShift(actor.role)) {
+    throw ApiError.forbidden('Chỉ lễ tân và Bell mới kết thúc được ca làm việc.');
   }
   if (actor.branchId == null) {
     throw ApiError.branchAccessDenied('Tài khoản chưa được gán chi nhánh.');
@@ -127,8 +127,8 @@ export async function endShift(
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<EndShiftResult> {
-  if (!isShiftRole(actor.role)) {
-    throw ApiError.forbidden('Chỉ lễ tân mới kết thúc được ca làm việc.');
+  if (!opensShift(actor.role)) {
+    throw ApiError.forbidden('Chỉ lễ tân và Bell mới kết thúc được ca làm việc.');
   }
   const now = clock.now();
 

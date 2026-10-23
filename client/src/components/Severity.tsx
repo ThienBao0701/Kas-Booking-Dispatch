@@ -8,6 +8,7 @@
  * the label on every record; the fallback words here only fill a selector
  * before the server has answered.
  */
+import { WORK_DEPARTMENT_OPTIONS, type WorkDepartment } from '../api/receptionReports';
 import type { Severity } from '../api/receptionReports';
 import { SEVERITY_OPTIONS } from '../lib/severity';
 
@@ -72,6 +73,42 @@ export function SeverityPicker({
         })}
       </div>
     </fieldset>
+  );
+}
+
+/**
+ * "BỘ PHẬN" — a guest request by the department it is with: a completed one by
+ * the department that completed it, an open one by its current receiver. The
+ * SERVER applies it, beside "Mức độ".
+ */
+export function WorkDepartmentFilter({
+  value,
+  onChange,
+  testId = 'department-filter',
+  className = '',
+}: {
+  value: WorkDepartment | '';
+  onChange: (value: WorkDepartment | '') => void;
+  testId?: string;
+  className?: string;
+}) {
+  return (
+    <label className={`block text-sm font-medium text-slate-700 ${className}`}>
+      <span className="mb-1.5 block">Bộ phận</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as WorkDepartment | '')}
+        data-testid={testId}
+        className="block min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm font-normal text-slate-900 hover:border-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+      >
+        <option value="">Tất cả bộ phận</option>
+        {WORK_DEPARTMENT_OPTIONS.map((o) => (
+          <option key={o.code} value={o.code}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

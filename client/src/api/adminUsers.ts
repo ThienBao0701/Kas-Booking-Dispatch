@@ -26,7 +26,9 @@ export type ManageableRole =
   | 'RECEPTION_MANAGER'
   | 'RECEPTION_GENERAL_MANAGER'
   | 'HOUSEKEEPING_MANAGER'
-  | 'TECHNICAL_GENERAL_MANAGER';
+  | 'TECHNICAL_GENERAL_MANAGER'
+  /** Bell: exactly one branch, like a receptionist. */
+  | 'BELL';
 
 /**
  * The accounts with NO single branch — the global departments, and the two

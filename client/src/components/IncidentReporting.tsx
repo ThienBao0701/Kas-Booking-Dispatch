@@ -977,10 +977,10 @@ export function IncidentTable({
     className: 'w-[1%] whitespace-nowrap',
     render: statusCell,
   };
-  /** "Người sửa" from the attempts themselves, never from the reporter. */
+  /** "Người xử lý" from the attempts themselves, never from the reporter. */
   const repairer: DataColumn<Issue> = {
     key: 'repairer',
-    header: 'Người sửa',
+    header: 'Người xử lý',
     secondary: true,
     className: 'min-w-[6rem]',
     render: (i) => {

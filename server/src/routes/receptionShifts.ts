@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getClock } from '../lib/clock';
 import { ApiError } from '../lib/errors';
 import { requireAuth, requirePasswordChanged, requireRole } from '../middleware/auth';
-import { checkInShift, findOpenSession, serializeShiftSession } from '../shift/shiftService';
+import { checkInShift, findOpenSession, renameOpenShift, serializeShiftSession } from '../shift/shiftService';
 import { endShift, endShiftPreview } from '../shift/endShiftService';
 import { handoverShift, serializeHandoverResult } from '../shift/handoverService';
 import {
@@ -70,6 +70,9 @@ function actor(user: UserWithBranch) {
 /** Only a receptionist works a shift. */
 const requireReception = requireRole('RECEPTIONIST');
 
+/** The shift gate itself — opening, naming and ending a shift — is the desk's and Bell's. */
+const requireShiftWorker = requireRole('RECEPTIONIST', 'BELL');
+
 /**
  * Reception shift check-in.
  *
@@ -121,7 +124,18 @@ export function createReceptionShiftsRouter(): Router {
   });
 
   // POST /api/reception/shifts/check-in — open a shift (closes the previous one).
-  router.post('/reception/shifts/check-in', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  // PATCH /api/reception/shifts/current/name — the name on the open shift, by its own person. Nothing else changes.
+  router.patch('/reception/shifts/current/name', requireAuth, requirePasswordChanged, requireShiftWorker, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const { receptionistName } = z.object({ receptionistName: z.string().max(400) }).parse(req.body ?? {});
+      const clock = getClock();
+      const session = await renameOpenShift(actor(user), receptionistName, clock);
+      res.json({ session: serializeShiftSession(session, clock.now()) });
+    })().catch(next);
+  });
+
+  router.post('/reception/shifts/check-in', requireAuth, requirePasswordChanged, requireShiftWorker, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const input = checkInSchema.parse(req.body ?? {});
@@ -140,7 +154,7 @@ export function createReceptionShiftsRouter(): Router {
     that in the browser would mean three more requests and a second copy of the
     rule the reminder is based on.
   */
-  router.get('/reception/shifts/end-preview', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  router.get('/reception/shifts/end-preview', requireAuth, requirePasswordChanged, requireShiftWorker, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const now = getClock().now();
@@ -172,7 +186,7 @@ export function createReceptionShiftsRouter(): Router {
     same instant and records a reason. Folding the two together would make every
     ordinary 14:00 invent an incoming receptionist who has not arrived yet.
   */
-  router.post('/reception/shifts/close', requireAuth, requirePasswordChanged, requireReception, (req, res, next) => {
+  router.post('/reception/shifts/close', requireAuth, requirePasswordChanged, requireShiftWorker, (req, res, next) => {
     (async () => {
       const user = req.currentUser!;
       const clock = getClock();

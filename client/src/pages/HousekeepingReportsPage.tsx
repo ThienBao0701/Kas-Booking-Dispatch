@@ -14,6 +14,8 @@
  * Reception's here. A housekeeper sees what it reported; the Quản lý buồng
  * phòng, its branch's; the Admin reads any branch's, without writing.
  */
+import { WorkDepartmentFilter } from '../components/Severity';
+import type { WorkDepartment } from '../api/receptionReports';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -72,9 +74,11 @@ export function HousekeepingReportsPage() {
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list(), enabled: isAdmin });
 
   const options = useQuery({ queryKey: ['reception', 'reports', 'options'], queryFn: () => reportsApi.options(), staleTime: 60 * 60 * 1000 });
+  // "Bộ phận" on the request table — the server filters.
+  const [department, setDepartment] = useState<WorkDepartment | ''>('');
   const journal = useQuery({
-    queryKey: [...HK_JOURNAL_KEY, branchId ?? null],
-    queryFn: () => reportsApi.housekeeping({ branchId }),
+    queryKey: [...HK_JOURNAL_KEY, branchId ?? null, department],
+    queryFn: () => reportsApi.housekeeping({ branchId, ...(department ? { workDepartment: department } : {}) }),
     refetchOnWindowFocus: true,
   });
   const deliveries = useDeliveries('active', null, category === 'HOTEL_DELIVERY', branchId, undefined, isAdmin ? 'HOUSEKEEPING' : undefined);
@@ -138,6 +142,7 @@ export function HousekeepingReportsPage() {
               <GuestRequestForm bare onCancel={() => setAdding(false)} onCreated={created('Đã thêm yêu cầu của khách.')} />
             </Modal>
           ) : null}
+          <WorkDepartmentFilter value={department} onChange={setDepartment} testId="hk-department" className="mb-3 w-full sm:w-60" />
           <GuestRequestTable
             rows={of('GUEST_REQUEST')}
             title="Danh sách vấn đề khách yêu cầu"

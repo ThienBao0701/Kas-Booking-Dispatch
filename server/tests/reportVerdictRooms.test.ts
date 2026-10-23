@@ -100,7 +100,7 @@ describe('"Hoàn thành" — Đúng / Sai, one rule', () => {
   it('applies the same rule to a guest request, and the archive splits by it', async () => {
     await letan1.post('/api/reception/shifts/check-in').send({ shiftType: 'A', receptionistName: 'Nguyễn A' });
     const make = async (note: string) =>
-      (await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'Khách', note } })).body.report.id as string;
+      (await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'Khách', note, receivingDepartment: 'RECEPTION' } })).body.report.id as string;
     const right = await make('Gửi balo');
     const wrong = await make('Báo nhầm phòng');
     expect((await letan1.post(`/api/reception/reports/${wrong}/complete`).send({})).status).toBe(422);

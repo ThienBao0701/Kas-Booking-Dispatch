@@ -13,6 +13,12 @@ export function useIsReception(): boolean {
   return user?.role === 'RECEPTIONIST';
 }
 
+/** Who opens a shift at the shift gate: Lễ tân, and Bell. */
+export function useWorksShift(): boolean {
+  const { user } = useAuth();
+  return user?.role === 'RECEPTIONIST' || user?.role === 'BELL';
+}
+
 /**
  * The receptionist's open shift, read from the SERVER rather than held in React
  * state, so a refresh, a second tab and a reopened laptop all agree on who is
@@ -23,7 +29,7 @@ export function useIsReception(): boolean {
  * five-second poll would be twelve times the traffic for no visible difference.
  */
 export function useShiftSession() {
-  const enabled = useIsReception();
+  const enabled = useWorksShift();
   return useQuery({
     queryKey: SHIFT_SESSION_KEY,
     queryFn: () => shiftsApi.current(),

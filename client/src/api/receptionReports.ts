@@ -112,6 +112,33 @@ export interface GuestRequestDetail {
   /** "Mức độ"; null ("Chưa phân mức") on requests recorded before it existed. */
   severity: Severity | null;
   severityLabel: string;
+  /** "Bộ phận nhận việc" as chosen at creation; null on older requests. */
+  receivingDepartment?: WorkDepartment | null;
+  receivingDepartmentLabel?: string | null;
+  /** "Người xử lý" — the one person who may complete it while set. */
+  assignee?: { id: number; name: string; department: WorkDepartment | null; departmentLabel: string | null } | null;
+  assignedAt?: string | null;
+  assignedByName?: string | null;
+  /** "Nhận việc" — when the assignee acknowledged it. */
+  acknowledgedAt?: string | null;
+  /** The department of whoever completed it. */
+  completedDepartment?: WorkDepartment | null;
+  completedDepartmentLabel?: string | null;
+}
+
+/** The departments that receive and complete guest requests. */
+export type WorkDepartment = 'BELL' | 'RECEPTION' | 'HOUSEKEEPING';
+
+export const WORK_DEPARTMENT_OPTIONS: { code: WorkDepartment; label: string }[] = [
+  { code: 'BELL', label: 'Bell' },
+  { code: 'RECEPTION', label: 'Lễ tân' },
+  { code: 'HOUSEKEEPING', label: 'Buồng phòng' },
+];
+
+/** Who is "đang trong ca" at a branch, by department — an open shift, not an online status. */
+export interface DispatchStaff {
+  branchId: number;
+  onShift: Record<WorkDepartment, { id: number; name: string; department: WorkDepartment }[]>;
 }
 
 /**
@@ -344,6 +371,8 @@ export interface NewGuestRequestInput {
 
   note: string;
   severity?: Severity;
+  /** "Bộ phận nhận việc" — required on every request recorded live. */
+  receivingDepartment?: WorkDepartment;
 }
 
 export interface NewComplaintInput {
@@ -442,8 +471,21 @@ export const reportsApi = {
    * Requests and service-quality reports, across shifts: unfinished at any age,
    * or completed within 12 hours of receipt. The server clock decides.
    */
-  active: (params: { severity?: Severity } = {}) =>
+  active: (params: { severity?: Severity; workDepartment?: WorkDepartment } = {}) =>
     api.get<ActiveJournalResponse>(`/reception/reports/active${query(params)}`),
+
+  /** The requests given to the reader: open, and completed in the last 12 hours. */
+  assigned: () => api.get<{ reports: OperationalReport[]; archiveAfterHours: number }>('/reception/reports/assigned'),
+
+  /** Who is "đang trong ca" at the branch (a supervisor names it). */
+  dispatchStaff: (branchId?: number) => api.get<DispatchStaff>(`/reception/reports/dispatch-staff${query({ branchId })}`),
+
+  /** "Giao người xử lý" — null clears it (the request waits to be given out). */
+  assign: (id: string, assigneeUserId: number | null) =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/assignee`, { assigneeUserId }),
+
+  /** "Nhận việc" — by the person it is given to. */
+  acknowledge: (id: string) => api.post<{ report: OperationalReport }>(`/reception/reports/${id}/acknowledge`, {}),
 
   /**
    * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —
@@ -462,12 +504,14 @@ export const reportsApi = {
       department?: 'HOUSEKEEPING';
       /** "Loại vấn đề": one archived category; both when absent. */
       category?: 'GUEST_REQUEST' | 'CUSTOMER_COMPLAINT';
+      /** "Bộ phận" — the department that completed it. */
+      workDepartment?: WorkDepartment;
     } = {},
   ) =>
     api.get<ArchivedJournalResponse>(`/reception/reports/archive${query(params)}`),
 
   /** Bộ phận buồng phòng's live journal — its requests still open (or just completed) and its room services. */
-  housekeeping: (params: { branchId?: number } = {}) =>
+  housekeeping: (params: { branchId?: number; workDepartment?: WorkDepartment } = {}) =>
     api.get<{ reports: OperationalReport[]; archiveAfterHours: number }>(`/reception/reports/housekeeping${query(params)}`),
 
   /** "Mã EZ" → the guest's name, from the newest record carrying it; `guest` null when none does. */
@@ -480,7 +524,7 @@ export const reportsApi = {
    * receptionist's branch is its open shift's.
    */
   /** `confirmDuplicate`: "Vẫn gửi" after the server's POSSIBLE_DUPLICATE warning. */
-  create: (input: NewReportInput & { branchId?: number; confirmDuplicate?: boolean }) =>
+  create: (input: NewReportInput & { branchId?: number; confirmDuplicate?: boolean; allowUnassigned?: boolean }) =>
     api.post<{ report: OperationalReport }>('/reception/reports', input),
 
   /** "Nhập thông tin khách" — Reception names the guest of a request Bộ phận buồng phòng recorded. */
@@ -489,7 +533,7 @@ export const reportsApi = {
 
   /** What is still open, by category and department — inside the reader's own visibility. */
   openCounts: () =>
-    api.get<{ counts: { guestRequest: { reception: number; housekeeping: number }; complaint: number } }>('/reception/reports/open-counts'),
+    api.get<{ counts: { guestRequest: { reception: number; housekeeping: number; mine?: number }; complaint: number } }>('/reception/reports/open-counts'),
 
   update: (id: string, patch: UpdateReportInput) =>
     api.patch<{ report: OperationalReport }>(`/reception/reports/${id}`, patch),
@@ -604,6 +648,8 @@ export const adminReportsApi = {
     to?: string;
     /** "Mức độ" — on II, III and IV. */
     severity?: Severity;
+    /** "Bộ phận" — guest requests by the department they are with. */
+    workDepartment?: WorkDepartment;
   }) =>
     api.get<AdminOperationalResponse>(`/admin/reports/operational${query(params)}`),
 };

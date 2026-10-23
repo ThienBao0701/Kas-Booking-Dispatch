@@ -150,9 +150,12 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     expect(within(dialog).getByTestId('guest-request-severity')).toBeInTheDocument();
     expect(within(dialog).getByTestId('guest-request-form-add')).toBeDisabled();
     await userEvent.type(within(dialog).getByTestId('guest-request-content'), 'Thêm khăn');
+    // "Bộ phận nhận việc" is required here too.
+    expect(within(dialog).getByTestId('guest-request-form-add')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('guest-request-department-HOUSEKEEPING'));
     await userEvent.click(within(dialog).getByTestId('guest-request-form-add'));
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Thêm khăn', severity: 'MEDIUM' } });
+    expect(posted[0]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Thêm khăn', severity: 'MEDIUM', receivingDepartment: 'HOUSEKEEPING' } });
   });
 
   it('warns of a possible duplicate the server found — without its details — and sends it only when confirmed', async () => {
@@ -181,13 +184,14 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     await userEvent.click(await screen.findByTestId('hk-report-add'));
     const dialog = await screen.findByRole('dialog');
     await userEvent.type(within(dialog).getByTestId('guest-request-content'), 'Khách xin thêm khăn');
+    await userEvent.click(within(dialog).getByTestId('guest-request-department-HOUSEKEEPING'));
     await userEvent.click(within(dialog).getByTestId('guest-request-form-add'));
     const warning = await within(dialog).findByTestId('guest-request-form-duplicate');
     expect(warning).toHaveTextContent('Bộ phận lễ tân có thể đã ghi nhận');
     expect(posted).toHaveLength(1);
     await userEvent.click(within(warning).getByTestId('guest-request-form-confirm-duplicate'));
     await waitFor(() => expect(posted).toHaveLength(2));
-    expect(posted[1]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Khách xin thêm khăn', severity: 'MEDIUM' }, confirmDuplicate: true });
+    expect(posted[1]).toEqual({ category: 'GUEST_REQUEST', guestRequest: { note: 'Khách xin thêm khăn', severity: 'MEDIUM', receivingDepartment: 'HOUSEKEEPING' }, confirmDuplicate: true });
   });
 
   it('follows the branch’s incidents and reports a new one, without correcting, returning or deleting any', async () => {

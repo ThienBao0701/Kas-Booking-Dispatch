@@ -56,6 +56,8 @@ export async function sessionsForBusinessDates(
     where: {
       ...(params.branchId !== undefined ? { branchId: params.branchId } : {}),
       startedAt: { gte: windowStart, lt: windowEnd },
+      // Bell opens its shift at the same gate; the desk's shift reports are Lễ tân's.
+      user: { role: { not: 'BELL' } },
     },
     select: {
       id: true,

@@ -10,6 +10,7 @@ import { ChatBoxPage } from '../pages/ChatBoxPage';
 import { AdminHousekeepingPage } from '../pages/AdminHousekeepingPage';
 import { DepartmentDeliveriesPage } from '../pages/DepartmentDeliveriesPage';
 import { HousekeepingInspectionPage } from '../pages/HousekeepingInspectionPage';
+import { BellWorkPage } from '../pages/BellWorkPage';
 import { RoomCollectionsPage } from '../pages/RoomCollectionsPage';
 import { TechnicalStatisticsPage } from '../pages/TechnicalStatisticsPage';
 import { ChatConversationPage } from '../pages/ChatConversationPage';
@@ -132,6 +133,8 @@ function RoleLanding() {
   }
   if (user?.role === 'BOOKING_DEPARTMENT') return <Navigate to="/app/charge-documents" replace />;
   if (user?.role === 'HOUSEKEEPING') return <Navigate to="/app/inspections" replace />;
+  // Bell: the requests given to it.
+  if (user?.role === 'BELL') return <Navigate to="/app/bell" replace />;
   if (user?.role === 'HOUSEKEEPING_MANAGER') return <Navigate to="/app/hk/overview" replace />;
   // The supervision layer opens on its reports.
   if (user?.role === 'RECEPTION_MANAGER' || user?.role === 'RECEPTION_GENERAL_MANAGER') {
@@ -313,6 +316,7 @@ export function AppRoutes() {
             The server is the boundary; these gates only render a forbidden page.
           */}
           <Route path="inspections" element={<RequireRole role="HOUSEKEEPING"><HousekeepingInspectionPage /></RequireRole>} />
+          <Route path="bell" element={<RequireRole role="BELL"><BellWorkPage /></RequireRole>} />
           {/* A room is worked by its housekeeper — or by the Quản lý buồng phòng who took its group. */}
           <Route path="inspections/room/:id" element={<RequireRole role={ROOM_WORKER_ROLES}><HousekeepingRoomPage /></RequireRole>} />
           <Route path="my-kpi" element={<RequireRole role="HOUSEKEEPING"><HousekeepingKpiPage /></RequireRole>} />

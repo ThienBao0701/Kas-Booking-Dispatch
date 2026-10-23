@@ -213,7 +213,7 @@ export const inventoryApi = {
   createItems: (warehouse: Warehouse, items: { name: string }[]) =>
     api.post<{ items: InventoryItem[] }>(`${BASE}/items/batch`, { warehouse, items }),
   /** Unit, threshold, note — or, for an unclassified item, the warehouse it goes into. */
-  updateItem: (id: string, body: { unit?: string; lowStockThreshold?: number | null; note?: string; warehouse?: Warehouse }) =>
+  updateItem: (id: string, body: { name?: string; unit?: string; lowStockThreshold?: number | null; note?: string; warehouse?: Warehouse }) =>
     api.patch<{ item: InventoryItem }>(`${BASE}/items/${id}`, body),
   /** "Mặt hàng dùng khi dọn phòng": the branch's list, and every item it may hold. */
   cleaningItems: (branchId?: number) => api.get<{ branchId: number; items: CleaningChoice[] }>(`${BASE}/cleaning-items${query({ branchId })}`),

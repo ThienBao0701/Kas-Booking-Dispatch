@@ -108,6 +108,8 @@ const workGroupSchema = z.object({
   requestId: z.string().max(64).optional(),
   name: z.string().max(500).optional(),
   items: z.array(groupItemSchema).max(50),
+  // "Giao cho": a housekeeper at once ("Được giao"); absent or null: the pool ("Tự nhận").
+  assigneeUserId: z.number().int().positive().nullable().optional(),
 });
 
 const claimSchema = z.object({ taskIds: z.array(z.string().min(1).max(100)).min(1).max(50) });

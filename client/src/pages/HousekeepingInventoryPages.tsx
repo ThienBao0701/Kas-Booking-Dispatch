@@ -311,9 +311,26 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
                 </div>
               ) : (
                 <ul className="space-y-2" data-testid="inventory-items">
-                  {shown.map((i) => (
-                    <ItemCard key={i.id} item={i} states={states} onMore={manager && !i.archived ? () => setDialog({ kind: 'actions', item: i }) : undefined} />
-                  ))}
+                  {shown.map((i) => {
+                    /*
+                      WHO MANAGES WHICH ITEM (the server checks again): a Quản lý
+                      buồng phòng its branch's own items — and, on a shared one,
+                      only its threshold and note; the Admin the shared catalog.
+                    */
+                    const live = !i.archived;
+                    const mayEdit = live && (manager || (scope.isAdmin && i.scope === 'SYSTEM'));
+                    const mayRemove = live && ((manager && i.scope !== 'SYSTEM') || (scope.isAdmin && i.scope === 'SYSTEM'));
+                    return (
+                      <ItemCard
+                        key={i.id}
+                        item={i}
+                        states={states}
+                        onEdit={mayEdit ? () => setDialog({ kind: 'item', item: i }) : undefined}
+                        onRemove={mayRemove ? () => setDialog({ kind: 'remove', item: i }) : undefined}
+                        onMore={manager && live ? () => setDialog({ kind: 'actions', item: i }) : undefined}
+                      />
+                    );
+                  })}
                 </ul>
               )}
             </QueryState>
@@ -405,19 +422,15 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
                 testId={`inventory-classify-${dialog.item.id}`}
               />
             ) : null}
-            <SheetButton icon={Pencil} label="Sửa thông tin" onClick={() => setDialog({ kind: 'item', item: dialog.item })} testId={`inventory-edit-${dialog.item.id}`} />
+            {/* "Sửa" and "Xóa" are on the card itself. */}
             <SheetButton icon={ShieldAlert} label="Báo hỏng" onClick={() => setDialog({ kind: 'damage', item: dialog.item })} testId={`inventory-damage-${dialog.item.id}`} />
-            {/* A shared item is the Admin's: the branch neither removes nor renames it. */}
-            {dialog.item.scope === 'SYSTEM' ? null : (
-              <SheetButton icon={Trash2} label="Xóa" tone="danger" onClick={() => setDialog({ kind: 'remove', item: dialog.item })} testId={`inventory-remove-${dialog.item.id}`} />
-            )}
           </div>
         </Modal>
       ) : null}
-      {dialog?.kind === 'remove' ? <RemoveDialog item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} /> : null}
+      {dialog?.kind === 'remove' ? <RemoveDialog item={dialog.item} admin={scope.isAdmin} onClose={() => setDialog(null)} onDone={refresh} /> : null}
       {dialog?.kind === 'item' ? (
         dialog.item ? (
-          <ItemDialog item={dialog.item} onClose={() => setDialog(null)} onDone={refresh} />
+          <ItemDialog item={dialog.item} admin={scope.isAdmin} onClose={() => setDialog(null)} onDone={refresh} />
         ) : (
           <NewItemsDialog warehouse={warehouse} onClose={() => setDialog(null)} onDone={refresh} />
         )
@@ -435,8 +448,20 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
   );
 }
 
-/** One item: its name, one figure per state, and — for its manager — "⋯". */
-function ItemCard({ item: i, states, onMore }: { item: InventoryItem; states: StockState[]; onMore?: () => void }) {
+/** One item: its name, one figure per state, and — for whoever manages it — "Sửa", "Xóa" and "⋯". */
+function ItemCard({
+  item: i,
+  states,
+  onMore,
+  onEdit,
+  onRemove,
+}: {
+  item: InventoryItem;
+  states: StockState[];
+  onMore?: () => void;
+  onEdit?: () => void;
+  onRemove?: () => void;
+}) {
   return (
     <li className={`rounded-xl border bg-white px-4 py-3 ${i.archived ? 'border-line-subtle opacity-70' : 'border-line-subtle'}`} data-testid={`inventory-item-${i.id}`}>
       <div className="flex items-start gap-2">
@@ -478,6 +503,22 @@ function ItemCard({ item: i, states, onMore }: { item: InventoryItem; states: St
         ))}
       </dl>
       <LegacyNote item={i} />
+      {onEdit || onRemove ? (
+        <div className="mt-2 flex flex-wrap justify-end gap-1 border-t border-line-subtle pt-2">
+          {onEdit ? (
+            <RowAction onClick={onEdit} testId={`inventory-edit-${i.id}`}>
+              <Pencil className="h-3 w-3" aria-hidden="true" />
+              Sửa
+            </RowAction>
+          ) : null}
+          {onRemove ? (
+            <RowAction onClick={onRemove} tone="danger" testId={`inventory-remove-${i.id}`}>
+              <Trash2 className="h-3 w-3" aria-hidden="true" />
+              Xóa
+            </RowAction>
+          ) : null}
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -499,7 +540,7 @@ function LegacyNote({ item }: { item: InventoryItem }) {
  * Dialogs
  * ------------------------------------------------------------------ */
 
-function RemoveDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+function RemoveDialog({ item, admin = false, onClose, onDone }: { item: InventoryItem; admin?: boolean; onClose: () => void; onDone: (m: string) => Promise<void> }) {
   const remove = useMutation({
     mutationFn: () => inventoryApi.removeItem(item.id),
     onSuccess: async ({ removed }) => onDone(removed ? 'Đã xóa mặt hàng.' : 'Mặt hàng đã có lịch sử — đã chuyển sang “Ngừng sử dụng”.'),
@@ -521,7 +562,17 @@ function RemoveDialog({ item, onClose, onDone }: { item: InventoryItem; onClose:
         </>
       }
     >
-      <p className="text-sm text-slate-700">Mặt hàng đã từng nhập, xuất hay kiểm kho sẽ chỉ chuyển sang “Ngừng sử dụng” — lịch sử được giữ.</p>
+      <p className="text-sm text-slate-700" data-testid="inventory-remove-explain">
+        <span className="font-semibold">
+          {item.code ? `${item.code} ` : ''}
+          {item.label}
+        </span>{' '}
+        {admin
+          ? 'sẽ bị bỏ khỏi danh mục dùng chung ở mọi chi nhánh.'
+          : 'sẽ bị bỏ khỏi danh mục của chi nhánh.'}{' '}
+        Mặt hàng chưa từng dùng được xóa hẳn; mặt hàng đã từng nhập, xuất, kiểm kho hay báo hỏng chỉ chuyển sang “Ngừng sử dụng” — tồn kho và
+        toàn bộ lịch sử được giữ nguyên, và không còn chọn được trong các phiếu mới.
+      </p>
       {remove.isError ? (
         <div className="mt-3">
           <ErrorAlert>{toUserMessage(remove.error)}</ErrorAlert>
@@ -532,15 +583,24 @@ function RemoveDialog({ item, onClose, onDone }: { item: InventoryItem; onClose:
 }
 
 /**
- * "SỬA THÔNG TIN" — the unit, the "sắp hết" level and a note. The name is what
- * the stock IS and the code is the system's, so both stay.
+ * "SỬA" — what each manager may change, the code never (it is the system's):
+ *   Quản lý buồng phòng, its branch's own item  name, unit, "sắp hết", note
+ *   Quản lý buồng phòng, a shared item          "sắp hết" and note (the branch's)
+ *   Admin, a shared item                        name and unit, in every branch
+ * Stock and history are never touched by an edit.
  */
-function ItemDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+function ItemDialog({ item, admin = false, onClose, onDone }: { item: InventoryItem; admin?: boolean; onClose: () => void; onDone: (m: string) => Promise<void> }) {
+  const catalog = admin || item.scope !== 'SYSTEM';
+  const [name, setName] = useState(item.name);
   const [unit, setUnit] = useState(item.unit);
   const [threshold, setThreshold] = useState(item.lowStockThreshold === null ? '' : String(item.lowStockThreshold));
   const [note, setNote] = useState(item.note ?? '');
   const save = useMutation({
-    mutationFn: () => inventoryApi.updateItem(item.id, { unit: unit.trim(), lowStockThreshold: threshold.trim() ? Number(threshold) : null, note: note.trim() }),
+    mutationFn: () =>
+      inventoryApi.updateItem(item.id, {
+        ...(catalog ? { name: name.trim(), unit: unit.trim() } : {}),
+        ...(admin ? {} : { lowStockThreshold: threshold.trim() ? Number(threshold) : null, note: note.trim() }),
+      }),
     onSuccess: ({ item: saved }) => onDone(`Đã lưu ${saved.label}.`),
   });
   return (
@@ -553,24 +613,45 @@ function ItemDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: (
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => save.mutate()} disabled={!unit.trim()} loading={save.isPending} data-testid="inventory-item-save">
+          <Button
+            onClick={() => save.mutate()}
+            disabled={!unit.trim() || !name.trim() || save.isPending}
+            loading={save.isPending}
+            data-testid="inventory-item-save"
+          >
             Lưu
           </Button>
         </>
       }
     >
+      {admin ? (
+        <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">Mặt hàng dùng chung — tên và đơn vị tính đổi ở mọi chi nhánh. Tồn kho và lịch sử giữ nguyên.</p>
+      ) : !catalog ? (
+        <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">Mặt hàng dùng chung do Admin quản lý — chi nhánh sửa ngưỡng sắp hết và ghi chú của mình.</p>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <Input label="Mã mặt hàng" value={item.code ?? '—'} disabled data-testid="inventory-item-code" />
-        <Input label="Tên mặt hàng" value={item.label} disabled data-testid="inventory-item-name" />
-        <Input label="Đơn vị tính" value={unit} onChange={(e) => setUnit(e.target.value)} data-testid="inventory-item-unit" />
         <Input
-          label="Báo sắp hết khi còn (nếu cần)"
-          inputMode="numeric"
-          value={threshold}
-          onChange={(e) => setThreshold(e.target.value.replace(/\D/g, ''))}
-          data-testid="inventory-item-threshold"
+          label="Tên mặt hàng"
+          value={catalog ? name : item.label}
+          onChange={(e) => setName(e.target.value)}
+          disabled={!catalog}
+          maxLength={200}
+          data-testid="inventory-item-name"
         />
-        <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="inventory-item-note" />
+        <Input label="Đơn vị tính" value={unit} onChange={(e) => setUnit(e.target.value)} disabled={!catalog} maxLength={30} data-testid="inventory-item-unit" />
+        {admin ? null : (
+          <>
+            <Input
+              label="Báo sắp hết khi còn (nếu cần)"
+              inputMode="numeric"
+              value={threshold}
+              onChange={(e) => setThreshold(e.target.value.replace(/\D/g, ''))}
+              data-testid="inventory-item-threshold"
+            />
+            <Input label="Ghi chú" value={note} onChange={(e) => setNote(e.target.value)} data-testid="inventory-item-note" />
+          </>
+        )}
       </div>
       {save.isError ? (
         <div className="mt-3">

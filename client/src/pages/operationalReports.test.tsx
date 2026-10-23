@@ -423,7 +423,7 @@ describe('the overview', () => {
     const requests = within(overview).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách ký gửi')).toBeInTheDocument();
     // OVERVIEW = COMPACT: no times, no handling, no controls.
-    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái', 'Người xử lý']);
     expect(within(within(requests).getByTestId('row-g1')).getByText('EZ305')).toBeInTheDocument();
     expect(within(within(requests).getByTestId('row-g1')).getByText('Gửi balo đen, 14h lấy')).toBeInTheDocument();
     // The status is the words and nothing beneath them.
@@ -1781,12 +1781,20 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     }
     expect(within(form).queryByText(/Ký gửi|Số phòng/)).not.toBeInTheDocument();
 
-    // Mã EZ is optional; a name and the content are not.
+    // Mã EZ is optional; a name, the content and "Bộ phận nhận việc" are not.
     const add = within(form).getByTestId('guest-request-form-add');
     await userEvent.type(within(form).getByTestId('guest-request-guest'), 'K');
     expect(add).toBeDisabled();
     await userEvent.type(within(form).getByTestId('guest-request-content'), 'Gửi hành lý');
+    expect(add).toBeDisabled();
+    expect(within(form).getByTestId('guest-request-department')).toHaveTextContent('Bộ phận nhận việc');
+    expect(within(form).getAllByRole('radio', { name: /Bell|Lễ tân|Buồng phòng/ }).map((r) => r.textContent)).toEqual(['Bell', 'Lễ tân', 'Buồng phòng']);
+    await userEvent.click(within(form).getByTestId('guest-request-department-BELL'));
     expect(add).toBeEnabled();
+    // Under the content: when a report is worth making at all.
+    expect(within(form).getByTestId('guest-request-content-hint')).toHaveTextContent(
+      'Chỉ báo cáo những vấn đề cần theo dõi hoặc có thời gian thực hiện kéo dài. Những vấn đề có thể xử lý ngay thì không cần tạo báo cáo.',
+    );
   });
 
   it('records a new request as "Đã tiếp nhận", with its Mã EZ, and shows it at once', async () => {
@@ -1815,12 +1823,13 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     await userEvent.type(screen.getByTestId('guest-request-guest'), 'Khách ký gửi');
     await userEvent.type(screen.getByTestId('guest-request-ez'), 'EZ305');
     await userEvent.type(screen.getByTestId('guest-request-content'), 'Gửi balo đen, 14h lấy');
+    await userEvent.click(screen.getByTestId('guest-request-department-RECEPTION'));
     await userEvent.click(screen.getByTestId('guest-request-form-add'));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toEqual({
       category: 'GUEST_REQUEST',
-      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy', severity: 'MEDIUM' },
+      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy', severity: 'MEDIUM', receivingDepartment: 'RECEPTION' },
     });
 
     const table = await screen.findByTestId('guest-request-table');
@@ -1833,7 +1842,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     expect(within(table).getByTestId('complete-g1')).toBeInTheDocument();
   });
 
-  it('shows exactly the seven columns, and no creator', async () => {
+  it('shows exactly the eight columns — "Người xử lý" beside "Trạng thái" — and no creator', async () => {
     installApiMock(
       shellRoutes(RECEPTIONIST_USER, {
         'GET /api/reception/reports?shiftSessionId=s1': () => ({
@@ -1854,6 +1863,7 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
       'Mã EZ',
       'Nội dung',
       'Trạng thái',
+      'Người xử lý',
       'Cách xử lý (nếu có)',
     ]);
     expect(within(table).queryByText('Người tạo')).not.toBeInTheDocument();
@@ -2264,8 +2274,8 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     // A finished incident is a closed record: nothing left to correct.
     expect(within(row).queryByText('Sửa vấn đề')).not.toBeInTheDocument();
     expect(cellAt('Thời gian hoàn thành')).toBe(formatDateTime('2026-09-19T04:30:00.000Z'));
-    // "Người sửa" comes from the attempt, not from who reported it.
-    expect(cellAt('Người sửa')).toContain('Bảo');
+    // "Người xử lý" comes from the attempt, not from who reported it.
+    expect(cellAt('Người xử lý')).toContain('Bảo');
   });
 
   it('keeps the repair history one click down at every width, now that "Lần sửa" is gone', async () => {
@@ -2427,7 +2437,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
       'Sự cố',
       'Nguyên nhân',
       'Thời gian báo cáo',
-      'Người sửa',
+      'Người xử lý',
       'Thời gian hoàn thành',
       'Trạng thái',
       'Thao tác',
@@ -2514,7 +2524,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     const cellAt = await facilityRowCells(twiceRepaired());
     expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
     expect(cellAt('Trạng thái')).not.toContain('Xác nhận');
-    expect(cellAt('Người sửa')).toContain('Minh');
+    expect(cellAt('Người xử lý')).toContain('Minh');
     expect(cellAt('Nguyên nhân')).toBe('Rò rỉ ống đồng');
     // "Lần sửa" is not a reception column: the attempts are one click down.
     expect(cellAt('Lần sửa')).toBeUndefined();
@@ -2530,7 +2540,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     const cellAt = await facilityRowCells(twiceRepaired({ inspectionEnabled: true }));
     expect(cellAt('Trạng thái')).toContain('Đã hoàn thành');
     expect(cellAt('Trạng thái')).toContain('Xác nhận: Đã xác nhận');
-    expect(cellAt('Người sửa')).toContain('Minh');
+    expect(cellAt('Người xử lý')).toContain('Minh');
   });
 
   /** OVERVIEW = COMPACT: the five facts, and nothing to open. */
@@ -2549,7 +2559,7 @@ describe('sự cố cơ sở vật chất đang xử lý', () => {
     const board = within(overview).getByTestId('facility-board');
     expect(await within(board).findByText('Máy lạnh không lạnh')).toBeInTheDocument();
     expect(headersOf(board)).toEqual(['STT', 'Khu vực', 'Mức độ', 'Sự cố', 'Nguyên nhân', 'Trạng thái']);
-    for (const detailOnly of ['Lần sửa', 'Người sửa', 'Thời gian báo cáo', 'Thời gian hoàn thành']) {
+    for (const detailOnly of ['Lần sửa', 'Người xử lý', 'Thời gian báo cáo', 'Thời gian hoàn thành']) {
       expect(within(board).queryByRole('columnheader', { name: detailOnly })).not.toBeInTheDocument();
     }
     expect(within(board).getByText('Rò rỉ ống đồng')).toBeInTheDocument();
@@ -2846,7 +2856,7 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     const page = await screen.findByTestId('completed-issues');
     const requests = within(page).getByTestId('guest-request-table');
     expect(await within(requests).findByText('Khách Cũ')).toBeInTheDocument();
-    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái']);
+    expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái', 'Người xử lý']);
     expect(within(requests).getByText('Đã hoàn thành')).toBeInTheDocument();
     // Who entered it and who completed it — from the accounts.
     expect(within(requests).getByText('Nguyễn Văn A')).toBeInTheDocument();
@@ -3057,8 +3067,60 @@ describe('"Mức độ" on II, III and IV', () => {
     await userEvent.type(screen.getByTestId('guest-request-guest'), 'Khách A');
     await userEvent.type(screen.getByTestId('guest-request-content'), 'Thêm gối');
     await userEvent.click(screen.getByTestId('guest-request-severity-LOW'));
+    await userEvent.click(screen.getByTestId('guest-request-department-HOUSEKEEPING'));
     await userEvent.click(screen.getByTestId('guest-request-form-add'));
     await waitFor(() => expect(posted).toHaveLength(1));
     expect((posted[0] as { guestRequest: { severity: string } }).guestRequest.severity).toBe('LOW');
+  });
+});
+
+describe('"Bộ phận" beside "Mức độ", and the name on the shift chip', () => {
+  it('asks the server for one department’s requests, keeping the level chosen', async () => {
+    const asked: string[] = [];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'GET /api/reception/reports/active': () => ({ status: 200, body: { reports: [], archiveAfterHours: 12 } }),
+        'GET /api/reception/reports/active?severity=HIGH': () => {
+          asked.push('HIGH');
+          return { status: 200, body: { reports: [], archiveAfterHours: 12 } };
+        },
+        'GET /api/reception/reports/active?severity=HIGH&workDepartment=BELL': () => {
+          asked.push('HIGH+BELL');
+          return { status: 200, body: { reports: [], archiveAfterHours: 12 } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    await openCategory('GUEST_REQUEST');
+    const department = await screen.findByTestId('reception-department');
+    expect(within(department).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tất cả bộ phận', 'Bell', 'Lễ tân', 'Buồng phòng']);
+    await userEvent.selectOptions(screen.getByTestId('reception-severity'), 'HIGH');
+    await userEvent.selectOptions(department, 'BELL');
+    await waitFor(() => expect(asked).toContain('HIGH+BELL'));
+  });
+
+  it('lets the receptionist correct the name on its shift — and only the name', async () => {
+    const renamed: unknown[] = [];
+    installApiMock(
+      shellRoutes(RECEPTIONIST_USER, {
+        'PATCH /api/reception/shifts/current/name': (init) => {
+          renamed.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { session: { ...session(), receptionistName: 'Nguyễn Văn Nam' } } };
+        },
+      }),
+    );
+    renderApp('/app/reports');
+    const chip = await screen.findByTestId('shift-indicator');
+    await userEvent.click(within(chip).getByTestId('shift-name-edit'));
+    const dialog = await screen.findByRole('dialog', { name: 'Sửa tên trên ca' });
+    // One field: the name. The shift and its times are not offered for change.
+    expect(within(dialog).getAllByRole('textbox')).toHaveLength(1);
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument();
+    const input = within(dialog).getByTestId('shift-name-input');
+    await userEvent.clear(input);
+    await userEvent.type(input, 'Nguyễn Văn Nam');
+    await userEvent.click(within(dialog).getByTestId('shift-name-save'));
+    await waitFor(() => expect(renamed).toEqual([{ receptionistName: 'Nguyễn Văn Nam' }]));
+    expect(await within(screen.getByTestId('shift-indicator')).findByText('Nguyễn Văn Nam')).toBeInTheDocument();
   });
 });

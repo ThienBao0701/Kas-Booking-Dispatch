@@ -824,7 +824,7 @@ describe('each category is a table', () => {
       'Trạng thái',
       'Người báo',
       'Thời gian báo cáo',
-      'Người sửa',
+      'Người xử lý',
       'Hoàn thành',
       'Lần sửa',
       'Cập nhật',

@@ -15,6 +15,7 @@ export const ROLE_DISPLAY_LABELS: Record<UserRole, string> = {
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
   HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
   TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
+  BELL: 'Bell',
 };
 
 export function roleLabel(role: UserRole | null | undefined): string | null {

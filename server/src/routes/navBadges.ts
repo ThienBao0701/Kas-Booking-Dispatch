@@ -68,6 +68,8 @@ export function createNavBadgesRouter(): Router {
         user.role === 'TECHNICAL_MANAGER' ||
         user.role === 'TECHNICAL_GENERAL_MANAGER' ||
         user.role === 'HOUSEKEEPING' ||
+        // Bell has a branch but no booking screen: its count is its own requests (open-counts).
+        user.role === 'BELL' ||
         // The reception supervisors are branchless too and have no booking
         // screen; falling through would count every order on every branch.
         user.role === 'RECEPTION_MANAGER' ||

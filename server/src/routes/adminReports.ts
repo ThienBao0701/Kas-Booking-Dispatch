@@ -156,6 +156,8 @@ const drillDownQuery = z
     to: isoDay.optional(),
     // "Mức độ" on the three categories that carry one.
     severity: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
+    // "Bộ phận" on the guest requests: the completing department, or the current one while open.
+    workDepartment: z.enum(['BELL', 'RECEPTION', 'HOUSEKEEPING']).optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -501,6 +503,7 @@ export function createAdminReportsRouter(): Router {
         branchIds,
         category: q.category,
         severity: q.severity,
+        workDepartment: q.workDepartment,
         includeVoided: false,
         ...periodScope,
       };

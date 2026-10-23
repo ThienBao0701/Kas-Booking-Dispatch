@@ -144,7 +144,7 @@ async function seedFullDay(agent: Agent, name: string, { end = true }: { end?: b
 
   const request = await agent.post('/api/reception/reports').send({
     category: 'GUEST_REQUEST',
-    guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ777', note: 'Balo đen' },
+    guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ777', note: 'Balo đen', receivingDepartment: 'RECEPTION' },
   });
   expect(request.status).toBe(201);
 

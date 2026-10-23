@@ -21,7 +21,7 @@ import { SourceTag } from './SourceTag';
 import { RecordLateEntryBadge } from './LateEntry';
 import { GUEST_REQUEST_EDIT, SERVICE_QUALITY_EDIT, roomServiceEditFields } from '../lib/recordEdit';
 import { CheckCircle2, Pencil, Trash2 } from 'lucide-react';
-import { type OperationalReport, type RoomServiceType } from '../api/receptionReports';
+import { WORK_DEPARTMENT_OPTIONS, type OperationalReport, type RoomServiceType } from '../api/receptionReports';
 import { DataTable, RowAction, type DataColumn } from './DataTable';
 import { Actions } from './RecordRowActions';
 import { useAuth } from '../auth/AuthProvider';
@@ -37,7 +37,9 @@ import { formatVnd } from '../lib/money';
 import { actorColumns } from '../lib/issueActors';
 import { completionText } from '../lib/completionVerdict';
 import { formatDateTime, formatHcmDateTimeSeconds } from '../lib/format';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { QueryState } from './PageState';
+import { REQUEST_ASSIGNER_ROLES, mayAcknowledgeRequest, mayCompleteRequest, outsideViewerJournal } from '../lib/requestWork';
 import { reportsApi } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
@@ -140,7 +142,7 @@ const statusBadge = (tone: 'amber' | 'emerald', text: string) => (
   </span>
 );
 
-/** "Đã tiếp nhận" until the server has stamped a completion time. */
+/** "Đã tiếp nhận" until the server has stamped a completion time — then who completed it, in which department, when. */
 function RequestCompletion({ row }: { row: OperationalReport }) {
   const request = row.guestRequest;
   if (row.voided || !request) return <span className="text-slate-300">—</span>;
@@ -149,7 +151,129 @@ function RequestCompletion({ row }: { row: OperationalReport }) {
     <>
       <span className="block text-slate-600">{formatDateTime(request.completedAt)}</span>
       <span className="mt-0.5 block">{statusBadge('emerald', 'Đã hoàn thành')}</span>
+      {request.completedByName ? (
+        <span className="mt-0.5 block text-xs text-slate-500" data-testid={`request-completed-by-${row.id}`}>
+          {request.completedByName}
+          {request.completedDepartmentLabel ? ` · ${request.completedDepartmentLabel}` : ''}
+        </span>
+      ) : null}
     </>
+  );
+}
+
+/**
+ * "NGƯỜI XỬ LÝ" — who the request is given to (and in which department), or
+ * "Chưa giao"; "Nhận việc" for that person, "Giao" for whoever gives work out.
+ */
+function RequestAssignee({
+  row,
+  mayAssign,
+  onAssign,
+  onAcknowledge,
+  acknowledging,
+}: {
+  row: OperationalReport;
+  mayAssign: boolean;
+  onAssign: () => void;
+  onAcknowledge: () => void;
+  acknowledging: boolean;
+}) {
+  const request = row.guestRequest;
+  const { user } = useAuth();
+  if (row.voided || !request) return <span className="text-slate-300">—</span>;
+  const assignee = request.assignee;
+  return (
+    <div className="space-y-1" data-testid={`request-assignee-${row.id}`}>
+      {assignee ? (
+        <span className="block font-medium text-slate-800">
+          {assignee.name}
+          {assignee.departmentLabel ? <span className="block text-xs font-normal text-slate-500">{assignee.departmentLabel}</span> : null}
+        </span>
+      ) : (
+        <span className="block italic text-amber-800">Chưa giao{request.receivingDepartmentLabel ? ` · ${request.receivingDepartmentLabel}` : ''}</span>
+      )}
+      {assignee && !request.completed ? (
+        <span className="block text-xs text-slate-500">{request.acknowledgedAt ? 'Đã nhận việc' : 'Chờ nhận việc'}</span>
+      ) : null}
+      {mayAcknowledgeRequest(row, user) ? (
+        <RowAction onClick={onAcknowledge} disabled={acknowledging} testId={`acknowledge-${row.id}`}>
+          <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+          Nhận việc
+        </RowAction>
+      ) : null}
+      {mayAssign && !request.completed ? (
+        <RowAction onClick={onAssign} testId={`assign-${row.id}`}>
+          <Pencil className="h-3 w-3" aria-hidden="true" />
+          {assignee ? 'Đổi người xử lý' : 'Giao người xử lý'}
+        </RowAction>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * "GIAO NGƯỜI XỬ LÝ" — the staff "đang trong ca" at the request's branch (a Quản
+ * lý buồng phòng gives only to Buồng phòng). The previous person loses
+ * "Hoàn thành" the moment this is saved — the server checks it again.
+ */
+function AssignRequestDialog({ report, onClose, onSaved }: { report: OperationalReport; onClose: () => void; onSaved: () => Promise<void> }) {
+  const role = useAuth().user?.role;
+  const staff = useQuery({ queryKey: ['reception', 'dispatch-staff', report.branchId], queryFn: () => reportsApi.dispatchStaff(report.branchId) });
+  const [choice, setChoice] = useState<string>(report.guestRequest?.assignee ? String(report.guestRequest.assignee.id) : '');
+  const save = useMutation({
+    mutationFn: () => reportsApi.assign(report.id, choice === '' ? null : Number(choice)),
+    onSuccess: onSaved,
+  });
+  const groups = WORK_DEPARTMENT_OPTIONS.filter((d) => role !== 'HOUSEKEEPING_MANAGER' || d.code === 'HOUSEKEEPING');
+  const current = report.guestRequest?.assignee ? String(report.guestRequest.assignee.id) : '';
+  return (
+    <Modal
+      open
+      title="Giao người xử lý"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={choice === current || save.isPending} loading={save.isPending} data-testid="assign-save">
+            Lưu
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-3 text-sm text-slate-600">{report.guestRequest?.content}</p>
+      <QueryState isLoading={staff.isLoading} isError={staff.isError} error={staff.error} onRetry={() => void staff.refetch()}>
+        <label className="block text-sm font-medium text-slate-700">
+          Người xử lý (đang trong ca tại chi nhánh)
+          <select
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+            data-testid="assign-select"
+            className="mt-1 block min-h-[2.75rem] w-full rounded-xl border border-line-strong bg-white px-3 py-2 text-sm"
+          >
+            <option value="">— Chưa giao (chờ giao) —</option>
+            {groups.map((d) => (
+              <optgroup key={d.code} label={d.label}>
+                {(staff.data?.onShift[d.code] ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+        {staff.data && groups.every((d) => staff.data.onShift[d.code].length === 0) ? (
+          <p className="mt-2 text-sm text-amber-800">Hiện không có nhân viên nào đang trong ca tại chi nhánh này.</p>
+        ) : null}
+      </QueryState>
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 
@@ -170,21 +294,25 @@ function RequestHandling({
   const request = row.guestRequest;
   const { user } = useAuth();
   if (row.voided || !request) return <span className="text-xs text-slate-300">—</span>;
-  // Bộ phận buồng phòng's request: followed here, completed by Housekeeping.
-  if (isForeignRecord(row, user)) {
-    return <p className="whitespace-pre-wrap break-words text-slate-700">{request.completed ? completionText(request) || '—' : 'Buồng phòng xử lý'}</p>;
-  }
+  // Another department's record (Bộ phận buồng phòng's, at the desk): followed here, never corrected.
+  const foreign = outsideViewerJournal(row, user);
+  // Who holds it, when it is not the viewer's to complete.
+  const holder = request.assignee ? `${request.assignee.name} xử lý` : isForeignRecord(row, user) ? 'Buồng phòng xử lý' : 'Chờ giao người xử lý';
   return (
     <div className="space-y-1.5">
       {request.completed ? (
         <p className="whitespace-pre-wrap break-words text-slate-700">{completionText(request) || '—'}</p>
-      ) : (
+      ) : mayCompleteRequest(row, user) ? (
         <RowAction onClick={onComplete} testId={`complete-${row.id}`}>
           <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
           Hoàn thành
         </RowAction>
+      ) : (
+        <p className="text-slate-500" data-testid={`request-holder-${row.id}`}>
+          {holder}
+        </p>
       )}
-      {canEdit ? (
+      {canEdit && !foreign ? (
         <div className="flex flex-wrap gap-y-1">
           <RowAction onClick={onEdit} testId={`edit-${row.id}`}>
             <Pencil className="h-3 w-3" aria-hidden="true" />
@@ -235,7 +363,31 @@ export function GuestRequestTable({
   const { editing, setEditing, setVoiding, voidNode } = useRowActions(onChanged, onToast);
   const [completing, setCompleting] = useState<string | null>(null);
   const [identifying, setIdentifying] = useState<OperationalReport | null>(null);
+  const [assigning, setAssigning] = useState<OperationalReport | null>(null);
   const role = useAuth().user?.role;
+  const mayAssign = role !== undefined && REQUEST_ASSIGNER_ROLES.includes(role);
+  const acknowledge = useMutation({
+    mutationFn: (id: string) => reportsApi.acknowledge(id),
+    onSuccess: async () => {
+      await onChanged();
+      onToast('Đã nhận việc.');
+    },
+    onError: (e) => onToast(toUserMessage(e)),
+  });
+  const assignee: DataColumn<OperationalReport> = {
+    key: 'assignee',
+    header: 'Người xử lý',
+    className: 'min-w-[7rem] max-w-[11rem] break-words',
+    render: (r) => (
+      <RequestAssignee
+        row={r}
+        mayAssign={mayAssign}
+        onAssign={() => setAssigning(r)}
+        onAcknowledge={() => acknowledge.mutate(r.id)}
+        acknowledging={acknowledge.isPending}
+      />
+    ),
+  };
   // Bộ phận buồng phòng is never shown a guest — the server sends it none either.
   const housekeeping = role === 'HOUSEKEEPING' || role === 'HOUSEKEEPING_MANAGER';
   // Reception (and its supervisors) name the guest of a request Bộ phận buồng phòng recorded — the server checks again.
@@ -314,8 +466,12 @@ export function GuestRequestTable({
       className: 'w-[1%] whitespace-nowrap',
       render: (r) => summaryStatus(r.guestRequest?.completed),
     },
+    assignee,
   ];
-  if (showActors) summaryColumns.splice(-1, 0, ...actorColumns<OperationalReport>((r) => r.createdByName, (r) => r.guestRequest?.completedByName));
+  // Who entered and who completed it, just before "Trạng thái" ("Người xử lý" follows it).
+  if (showActors) {
+    summaryColumns.splice(summaryColumns.findIndex((c) => c.key === 'status'), 0, ...actorColumns<OperationalReport>((r) => r.createdByName, (r) => r.guestRequest?.completedByName));
+  }
 
   const detailColumns: DataColumn<OperationalReport>[] = [
     ...lead,
@@ -325,6 +481,7 @@ export function GuestRequestTable({
       className: 'min-w-[6.5rem]',
       render: (r) => <RequestCompletion row={r} />,
     },
+    assignee,
     {
       key: 'resolution',
       header: 'Cách xử lý (nếu có)',
@@ -362,6 +519,17 @@ export function GuestRequestTable({
         emptyMessage="Bản ghi sẽ hiện ngay tại đây sau khi bạn bấm Thêm."
       />
       {voidNode}
+      {assigning ? (
+        <AssignRequestDialog
+          report={assigning}
+          onClose={() => setAssigning(null)}
+          onSaved={async () => {
+            setAssigning(null);
+            await onChanged();
+            onToast('Đã giao người xử lý.');
+          }}
+        />
+      ) : null}
       {identifying ? (
         <GuestIdentityDialog
           report={identifying}

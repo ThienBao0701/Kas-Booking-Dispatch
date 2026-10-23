@@ -35,6 +35,10 @@ import {
   lateEntryReceptionists,
   lateEntrySessions,
   listActiveJournal,
+  listAssignedRequests,
+  dispatchStaff,
+  assignRequest,
+  acknowledgeRequest,
   listArchivedJournal,
   listDeletedReports,
   listEditHistory,
@@ -129,6 +133,9 @@ const paymentSchema = z.object({
   note: text(2000).optional(),
 });
 
+/** Bell, Lễ tân, Buồng phòng — the departments that receive and complete requests. */
+const WORK_DEPARTMENT = z.enum(['BELL', 'RECEPTION', 'HOUSEKEEPING']);
+
 const guestRequestSchema = z.object({
   // Reception names the guest; Bộ phận buồng phòng names the room or area instead (the service decides which).
   guestName: text(200).optional(),
@@ -136,6 +143,8 @@ const guestRequestSchema = z.object({
   roomNumber: text(80).optional(),
   note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
   severity: SEVERITY.optional(),
+  // "Bộ phận nhận việc" — required by the service on every live request; a correction never changes it.
+  receivingDepartment: WORK_DEPARTMENT.optional(),
 });
 
 /**
@@ -228,7 +237,7 @@ function parseCreateInputs(body: unknown): CreateReportInput[] {
 
 const updateSchema = z.object({
   payment: paymentSchema.partial().optional(),
-  guestRequest: guestRequestSchema.partial().optional(),
+  guestRequest: guestRequestSchema.omit({ receivingDepartment: true }).partial().optional(),
   complaint: complaintSchema.partial().optional(),
   roomService: roomServiceSchema.partial().optional(),
   delivery: deliverySchema.partial().optional(),
@@ -327,6 +336,8 @@ const archiveSchema = z
     department: z.enum(['RECEPTION', 'HOUSEKEEPING']).optional(),
     // "Loại vấn đề": the archived journal categories.
     category: z.enum(['GUEST_REQUEST', 'CUSTOMER_COMPLAINT']).optional(),
+    // "Bộ phận" of the request table: the department that completed it.
+    workDepartment: WORK_DEPARTMENT.optional(),
   })
   .refine((q) => (q.from === undefined) === (q.to === undefined), {
     message: 'Cần chọn cả ngày bắt đầu và ngày kết thúc.',
@@ -339,8 +350,8 @@ const archiveSchema = z
 
 const openingCashSchema = z.object({ openingCash: money });
 
-/** II and IV on the desk's screen, optionally one level only. */
-const activeSchema = z.object({ severity: SEVERITY.optional() });
+/** II and IV on the desk's screen, optionally one level and one department only. */
+const activeSchema = z.object({ severity: SEVERITY.optional(), workDepartment: WORK_DEPARTMENT.optional() });
 
 function actor(user: UserWithBranch & { managedBranchIds?: number[] }) {
   return {
@@ -375,8 +386,17 @@ const requireHousekeepingJournal = requireRole('ADMIN', 'HOUSEKEEPING', 'HOUSEKE
 /** Who names the guest of a Housekeeping request: Reception (its branch) and its supervisors (their scope). */
 const requireGuestIdentifier = requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER');
 
-/** "Hoàn thành": the desk, and Bộ phận buồng phòng on its own records (the service checks whose). */
-const requireCompleter = requireRole('RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER');
+/**
+ * "Hoàn thành": the desk, Bộ phận buồng phòng and Bell — and of a request given
+ * to someone, only that person (the service checks, at the write).
+ */
+const requireCompleter = requireRole('RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER', 'BELL');
+
+/** Who can be given a request — and so reads the ones given to it and presses "Nhận việc". */
+const requireAssignable = requireRole('RECEPTIONIST', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER', 'BELL');
+
+/** "Giao người xử lý": the Admin, the reception managers, a Quản lý buồng phòng (the service scopes each). */
+const requireAssigner = requireRole('ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING_MANAGER');
 
 /** A supervisor names its target branch; a receptionist's is its shift's. */
 const targetSchema = z.object({ branchId: z.number().int().positive().optional() });
@@ -450,7 +470,7 @@ export function createReceptionReportsRouter(): Router {
       const user = req.currentUser!;
       const now = getClock().now();
       const q = activeSchema.parse(req.query);
-      const { reports, totals } = await listActiveJournal(actor(user), now, undefined, q.severity);
+      const { reports, totals } = await listActiveJournal(actor(user), now, undefined, q.severity, q.workDepartment);
       res.json({
         reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)),
         // Each category's full count: the list is a page, and the screen says so.
@@ -488,6 +508,7 @@ export function createReceptionReportsRouter(): Router {
         severity: q.severity,
         department: q.department,
         category: q.category,
+        workDepartment: q.workDepartment,
       });
       res.json({
         reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)),
@@ -504,17 +525,60 @@ export function createReceptionReportsRouter(): Router {
     department's only, whatever the role; the Admin may name a branch.
   */
   // GET /api/reception/reports/open-counts — what is still open, by category and department (the menu's counts).
-  router.get('/reception/reports/open-counts', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
+  router.get(
+    '/reception/reports/open-counts',
+    requireAuth,
+    requirePasswordChanged,
+    requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER', 'BELL'),
+    (req, res, next) => {
+      (async () => {
+        res.json({ counts: await countOpenReports(actor(req.currentUser!)) });
+      })().catch(next);
+    },
+  );
+
+  // GET /api/reception/reports/assigned — the requests given to the reader: open, and completed in the last 12 hours.
+  router.get('/reception/reports/assigned', requireAuth, requirePasswordChanged, requireAssignable, (req, res, next) => {
     (async () => {
-      res.json({ counts: await countOpenReports(actor(req.currentUser!)) });
+      const now = getClock().now();
+      const reports = await listAssignedRequests(actor(req.currentUser!), now);
+      res.json({ reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)), archiveAfterHours: COMPLETION_ARCHIVE_HOURS });
+    })().catch(next);
+  });
+
+  // GET /api/reception/reports/dispatch-staff?branchId — who is "đang trong ca" at the branch, by department.
+  router.get('/reception/reports/dispatch-staff', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
+    (async () => {
+      res.json(await dispatchStaff(actor(req.currentUser!), req.query.branchId));
+    })().catch(next);
+  });
+
+  // POST /api/reception/reports/:id/assignee — set (or clear, with null) the request's "Người xử lý".
+  router.post('/reception/reports/:id/assignee', requireAuth, requirePasswordChanged, requireAssigner, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const input = z.object({ assigneeUserId: z.number().int().positive().nullable() }).parse(req.body ?? {});
+      const clock = getClock();
+      const updated = await assignRequest(req.params.id!, input, actor(user), clock);
+      res.json({ report: serializeReport(updated, clock.now(), user.role) });
+    })().catch(next);
+  });
+
+  // POST /api/reception/reports/:id/acknowledge — "Nhận việc" by the person it is given to.
+  router.post('/reception/reports/:id/acknowledge', requireAuth, requirePasswordChanged, requireAssignable, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const clock = getClock();
+      const updated = await acknowledgeRequest(req.params.id!, actor(user), clock);
+      res.json({ report: serializeReport(updated, clock.now(), user.role) });
     })().catch(next);
   });
 
   router.get('/reception/reports/housekeeping', requireAuth, requirePasswordChanged, requireHousekeepingJournal, (req, res, next) => {
     (async () => {
-      const q = z.object({ branchId: z.coerce.number().int().positive().optional() }).parse(req.query);
+      const q = z.object({ branchId: z.coerce.number().int().positive().optional(), workDepartment: WORK_DEPARTMENT.optional() }).parse(req.query);
       const now = getClock().now();
-      const reports = await listHousekeepingJournal(actor(req.currentUser!), now, { branchId: q.branchId });
+      const reports = await listHousekeepingJournal(actor(req.currentUser!), now, { branchId: q.branchId, workDepartment: q.workDepartment });
       res.json({ reports: reports.map((r) => serializeReport(r, now, req.currentUser!.role)), archiveAfterHours: COMPLETION_ARCHIVE_HOURS });
     })().catch(next);
   });
@@ -536,10 +600,12 @@ export function createReceptionReportsRouter(): Router {
       const user = req.currentUser!;
       const inputs = parseCreateInputs(req.body);
       const { branchId } = targetSchema.parse(req.body ?? {});
-      // "Vẫn gửi" after a possible-duplicate warning.
-      const { confirmDuplicate } = z.object({ confirmDuplicate: z.boolean().optional() }).parse(req.body ?? {});
+      // "Vẫn gửi" after a possible-duplicate warning; "Vẫn lưu, chờ giao" when nobody of the department is on shift.
+      const { confirmDuplicate, allowUnassigned } = z
+        .object({ confirmDuplicate: z.boolean().optional(), allowUnassigned: z.boolean().optional() })
+        .parse(req.body ?? {});
       const clock = getClock();
-      const created = await createReports(inputs, { branchId, confirmDuplicate }, actor(user), clock);
+      const created = await createReports(inputs, { branchId, confirmDuplicate, allowUnassigned }, actor(user), clock);
       const reports = created.map((r) => serializeReport(r, clock.now(), req.currentUser!.role));
       res.status(201).json({ report: reports[0], reports });
     })().catch(next);

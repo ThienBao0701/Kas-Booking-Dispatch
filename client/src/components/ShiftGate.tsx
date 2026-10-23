@@ -18,7 +18,7 @@
  */
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Clock3, LogOut, Repeat2 } from 'lucide-react';
+import { Clock3, LogOut, Pencil, Repeat2 } from 'lucide-react';
 import { shiftsApi, type ShiftSession, type ShiftType } from '../api/shifts';
 import { useAuth } from '../auth/AuthProvider';
 import {
@@ -27,11 +27,13 @@ import {
   SHIFT_SESSION_KEY,
   useIsReception,
   useShiftSession,
+  useWorksShift,
 } from '../hooks/useShiftSession';
 import { Button } from './Button';
 import { Input } from './Input';
 import { Modal } from './Modal';
 import { ErrorAlert } from './ErrorAlert';
+import { toUserMessage } from '../api/errors';
 import { hcmTimeOfDay, formatDateTime } from '../lib/format';
 import { formatVnd } from '../lib/money';
 
@@ -49,11 +51,14 @@ import { formatVnd } from '../lib/money';
  * work shifts, and there is nothing to hand over before checking in.
  */
 export function ShiftIndicator() {
+  const worksShift = useWorksShift();
+  // "Đổi ca" hands the desk to another receptionist — Lễ tân's alone.
   const isReception = useIsReception();
   const { data } = useShiftSession();
   const [handoverOpen, setHandoverOpen] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
-  if (!isReception) return null;
+  const [renaming, setRenaming] = useState(false);
+  if (!worksShift) return null;
 
   const session = data?.session ?? null;
   if (!session) return null;
@@ -69,19 +74,32 @@ export function ShiftIndicator() {
         <span className="text-slate-400">·</span>
         <span>{session.shiftWindow}</span>
         <span className="text-slate-400">·</span>
-        <span className="max-w-[12rem] truncate">{session.receptionistName}</span>
+        {/* The name typed at check-in — the one part of the chip its person may correct. */}
+        <button
+          type="button"
+          onClick={() => setRenaming(true)}
+          title="Sửa tên trên ca"
+          aria-label={`Tên trên ca: ${session.receptionistName}. Sửa tên`}
+          data-testid="shift-name-edit"
+          className="inline-flex max-w-[12rem] items-center gap-1 rounded-md px-1 text-slate-700 underline decoration-dotted underline-offset-2 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        >
+          <span className="truncate">{session.receptionistName}</span>
+          <Pencil className="h-3 w-3 shrink-0 text-slate-400" aria-hidden="true" />
+        </button>
       </div>
-      <button
-        type="button"
-        onClick={() => setHandoverOpen(true)}
-        aria-label="Đổi ca"
-        title="Đổi ca"
-        data-testid="shift-handover-open"
-        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-      >
-        <Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />
-        <span className="hidden md:inline">Đổi ca</span>
-      </button>
+      {isReception ? (
+        <button
+          type="button"
+          onClick={() => setHandoverOpen(true)}
+          aria-label="Đổi ca"
+          title="Đổi ca"
+          data-testid="shift-handover-open"
+          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        >
+          <Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />
+          <span className="hidden md:inline">Đổi ca</span>
+        </button>
+      ) : null}
       {/*
         "KẾT THÚC CA" — a shift ending normally, beside "Đổi ca".
 
@@ -106,6 +124,7 @@ export function ShiftIndicator() {
         <ShiftHandoverDialog session={session} onClose={() => setHandoverOpen(false)} />
       ) : null}
       {endOpen ? <EndShiftDialog onClose={() => setEndOpen(false)} /> : null}
+      {renaming ? <ShiftNameDialog current={session.receptionistName} onClose={() => setRenaming(false)} /> : null}
     </>
   );
 }
@@ -126,6 +145,55 @@ export function ShiftIndicator() {
  * NO TIME IS SENT. The instant displayed is what the operator READS; the server
  * stamps the real one.
  */
+/**
+ * "SỬA TÊN TRÊN CA" — the name typed at check-in, and nothing else: the shift,
+ * its times and the account stay. The server keeps the old and new name.
+ */
+function ShiftNameDialog({ current, onClose }: { current: string; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(current);
+  const save = useMutation({
+    mutationFn: () => shiftsApi.rename(name.trim()),
+    onSuccess: ({ session }) => {
+      queryClient.setQueryData(SHIFT_SESSION_KEY, { session });
+      onClose();
+    },
+  });
+  const ready = name.trim().length > 0 && name.trim() !== current && !save.isPending;
+  return (
+    <Modal
+      open
+      title="Sửa tên trên ca"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Hủy
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={!ready} loading={save.isPending} data-testid="shift-name-save">
+            Lưu
+          </Button>
+        </>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (ready) save.mutate();
+        }}
+      >
+        <Input label="Họ tên trên ca" value={name} maxLength={200} onChange={(e) => setName(e.target.value)} autoFocus data-testid="shift-name-input" />
+        <p className="mt-2 text-xs text-slate-500">Chỉ đổi tên hiển thị của ca này. Ca, giờ làm và tài khoản đăng nhập giữ nguyên.</p>
+      </form>
+      {save.isError ? (
+        <div className="mt-3">
+          <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
 function EndShiftDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -439,7 +507,7 @@ function ShiftHandoverDialog({
  *   over and over; the banner is the reminder instead.
  */
 export function ShiftGate() {
-  const isReception = useIsReception();
+  const isReception = useWorksShift();
   const { data, isSuccess } = useShiftSession();
   const session = data?.session ?? null;
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);

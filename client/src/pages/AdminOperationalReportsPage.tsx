@@ -32,7 +32,8 @@
  * A TABLE, NOT A STACK OF CARDS. The full record, correction history and all,
  * is one click down inside the row.
  */
-import { SeverityFilter } from '../components/Severity';
+import { SeverityFilter, WorkDepartmentFilter } from '../components/Severity';
+import type { WorkDepartment } from '../api/receptionReports';
 import type { Severity } from '../api/receptionReports';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -160,6 +161,9 @@ export function AdminOperationalReportsPage() {
   const [severityChoice, setSeverity] = useState<{ category: ReportCategory | null; value: Severity | '' }>({ category, value: '' });
   const levelled = category === 'GUEST_REQUEST' || category === 'FACILITY_ISSUE' || category === 'CUSTOMER_COMPLAINT';
   const severity = levelled && severityChoice.category === category && severityChoice.value ? severityChoice.value : undefined;
+  /** "Bộ phận" on the guest requests — cleared with the category, like "Mức độ". */
+  const [departmentChoice, setDepartment] = useState<{ category: ReportCategory | null; value: WorkDepartment | '' }>({ category, value: '' });
+  const department = category === 'GUEST_REQUEST' && departmentChoice.category === category && departmentChoice.value ? departmentChoice.value : undefined;
   const [exportOpen, setExportOpen] = useState(false);
   /** "+ Báo cáo vấn đề": the branch → category → form dialog. */
   const [creating, setCreating] = useState(false);
@@ -217,10 +221,11 @@ export function AdminOperationalReportsPage() {
     to: range.to,
     shiftType: filter.shiftType || undefined,
     ...(severity && category !== 'FACILITY_ISSUE' ? { severity } : {}),
+    ...(department ? { workDepartment: department } : {}),
   };
 
   const data = useQuery({
-    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to, filter.shiftType, severity ?? ''],
+    queryKey: ['admin', 'operational-reports', branch, category, range.from, range.to, filter.shiftType, severity ?? '', department ?? ''],
     queryFn: () => adminReportsApi.operational(filters),
     enabled: branch !== null && rangeValid,
   });
@@ -329,12 +334,12 @@ export function AdminOperationalReportsPage() {
           testId="admin-filters"
         />
         {levelled ? (
-          <SeverityFilter
-            value={severity ?? ''}
-            onChange={(value) => setSeverity({ category, value })}
-            testId="admin-severity"
-            className="mb-4 sm:w-60"
-          />
+          <div className="mb-4 flex flex-wrap gap-3">
+            <SeverityFilter value={severity ?? ''} onChange={(value) => setSeverity({ category, value })} testId="admin-severity" className="w-full sm:w-60" />
+            {category === 'GUEST_REQUEST' ? (
+              <WorkDepartmentFilter value={department ?? ''} onChange={(value) => setDepartment({ category, value })} testId="admin-department" className="w-full sm:w-60" />
+            ) : null}
+          </div>
         ) : null}
       </QueryState>
 

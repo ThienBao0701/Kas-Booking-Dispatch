@@ -514,7 +514,7 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
   async function newRequest(agent: Agent) {
     const res = await agent.post('/api/reception/reports').send({
       category: 'GUEST_REQUEST',
-      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy' },
+      guestRequest: { guestName: 'Khách ký gửi', ezCode: 'EZ305', note: 'Gửi balo đen, 14h lấy', receivingDepartment: 'RECEPTION' },
     });
     expect(res.status).toBe(201);
     return res.body.report as { id: string };
@@ -555,6 +555,10 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
 
     setClock({ now: () => hcm('2026-09-19', '14:02') });
     await checkIn(letanB, 'B', 'Nguyễn B');
+    // It was the desk-A receptionist's; the next shift completes it once it is given to them.
+    expect((await complete(letanB, created.id, { resolution: 'x' })).status).toBe(403);
+    const letanBId = (await testPrisma.user.findUniqueOrThrow({ where: { username: 'letan1b' } })).id;
+    expect((await admin.post(`/api/reception/reports/${created.id}/assignee`).send({ assigneeUserId: letanBId })).status).toBe(200);
     const done = await complete(letanB, created.id, { resolution: '  Đã trả balo cho khách  ' });
     expect(done.status).toBe(200);
 
@@ -605,7 +609,7 @@ describe('vấn đề khách yêu cầu thực hiện: đã tiếp nhận → đ
     setClock({ now: () => hcm('2026-09-19', '10:05') });
     await checkIn(letan, 'A', 'Nguyễn A');
     const post = (guestRequest: Record<string, unknown>) =>
-      letan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest });
+      letan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { receivingDepartment: 'RECEPTION', ...guestRequest } });
 
     expect((await post({ guestName: 'K', note: '  ' })).status).toBe(422);
     expect((await post({ guestName: ' ', note: 'Gửi hành lý' })).status).toBe(422);

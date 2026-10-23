@@ -89,6 +89,10 @@ enum UserRole {
   /// never all branches by the role alone) and hands each one on: to a Quản lý
   /// kỹ thuật ("Nhân sự") or straight to an in-house technician ("Kĩ thuật").
   TECHNICAL_GENERAL_MANAGER
+  /// "Bell" — the branch's bell staff. Bound to ONE branch like a receptionist
+  /// (`User.branchId`), works a shift opened at the same shift gate, and sees
+  /// only the guest requests given to it. No booking, payment or journal screen.
+  BELL
 }
 
 /// Where a daily room work item stands — separate from the room's operational
@@ -658,6 +662,9 @@ model User {
   issueDispatchesReceived  HotelIssueDispatch[]          @relation("DispatchManager")
   issueDispatchesCompleted HotelIssueDispatch[]          @relation("DispatchCompletedBy")
   guestRequestsCompleted   GuestRequestReport[]          @relation("GuestRequestCompletedBy")
+  guestRequestsAssigned    GuestRequestReport[]          @relation("GuestRequestAssignee")
+  guestRequestsGivenOut    GuestRequestReport[]          @relation("GuestRequestAssignedBy")
+  workGroupsGivenOut       HousekeepingWorkGroup[]       @relation("WorkGroupAssignedBy")
   complaintsCompleted      CustomerComplaintReport[]     @relation("ComplaintCompletedBy")
   operationalReportAudits  ReceptionReportAudit[]        @relation("ReportAuditActor")
   issueEdits               HotelIssueEdit[]              @relation("IssueEditActor")
@@ -2742,6 +2749,12 @@ enum ReceptionReportAuditAction {
   /// checked in to, so its missed records can be entered on it. Carries the
   /// session (`shiftSessionId`) and no `reportId`; `reason` is required.
   SHIFT_BACKFILL
+  /// The responsible person of a guest request was set or changed. `oldValue`
+  /// / `newValue` are the people, `field` = "assignee".
+  ASSIGN
+  /// The name on an open shift was corrected by its own receptionist. Carries
+  /// the session (`shiftSessionId`) and no `reportId`.
+  SHIFT_NAME
 }
 
 /// ONE ENTRY IN THE RECEPTION OPERATIONAL JOURNAL — "Báo cáo vấn đề".
@@ -2954,14 +2967,39 @@ model GuestRequestReport {
   /// "Mức độ" — null only on requests recorded before it was asked for.
   severity                IssueSeverity?
 
+  /// "Bộ phận nhận việc" — chosen at creation, never rewritten by a later
+  /// assignment or completion. Null on requests recorded before it was asked.
+  receivingDepartment    WorkDepartment?
+  /// "Người xử lý" — the ONE person who may complete it while set. Every change
+  /// is an ASSIGN audit row; the previous person loses "Hoàn thành" at once.
+  assigneeUserId         Int?
+  assigneeNameSnapshot   String?
+  /// The assignee's department at assignment — the department the request is
+  /// with now (the "Bộ phận" filter of an open request).
+  assigneeDepartment     WorkDepartment?
+  assignedAt             DateTime?
+  assignedByUserId       Int?
+  assignedByNameSnapshot String?
+  /// "Nhận việc" — the assignee acknowledged it.
+  acknowledgedAt         DateTime?
+  /// The department of whoever pressed "Hoàn thành" — the "Bộ phận" filter of a
+  /// completed request. Null on completions recorded before it was stored.
+  completedDepartment    WorkDepartment?
+
   report           ReceptionOperationalReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   completedBy      User?                      @relation("GuestRequestCompletedBy", fields: [completedByUserId], references: [id])
+  assignee         User?                      @relation("GuestRequestAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  assignedBy       User?                      @relation("GuestRequestAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
   completedSession ReceptionShiftSession?     @relation("GuestRequestCompletedSession", fields: [completedShiftSessionId], references: [id], onDelete: SetNull)
 
   /// "What is still outstanding?" — the open-requests query.
   @@index([completedAt])
   @@index([completedByUserId])
   @@index([completedShiftSessionId])
+  /// "What is given to me and still open?" — Bell's and each assignee's list.
+  @@index([assigneeUserId, completedAt])
+  @@index([receivingDepartment])
+  @@index([completedDepartment])
 }
 
 /// "SỰ CỐ CƠ SỞ VẬT CHẤT ĐANG XỬ LÝ" — a POINTER, and nothing else.
@@ -3357,6 +3395,10 @@ model HousekeepingWorkSession {
   startedAt DateTime
   /// Null while the workday is open ("Kết thúc ca" closes it).
   endedAt   DateTime?
+  /// How it ended: null — "Kết thúc ca" (and every workday before this was
+  /// recorded); "NO_WORK" — the server, when the housekeeper's work and the
+  /// branch's pool ran out; "CUTOFF_20H" — the server, at 20:00.
+  endReason String?
 
   user     User                      @relation("HousekeepingSessionUser", fields: [userId], references: [id])
   segments HousekeepingWorkSegment[]
@@ -3633,6 +3675,9 @@ model HousekeepingWorkGroup {
   assigneeUserId        Int?
   assigneeNameSnapshot  String?
   acceptedAt            DateTime?
+  assignedByUserId       Int?
+  assignedByNameSnapshot String?
+  assignedAt             DateTime?
   createdByUserId       Int
   createdByNameSnapshot String
   createdAt             DateTime
@@ -3641,6 +3686,10 @@ model HousekeepingWorkGroup {
   branch    Branch                 @relation(fields: [branchId], references: [id])
   assignee  User?                  @relation("WorkGroupAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
   createdBy User                   @relation("WorkGroupCreatedBy", fields: [createdByUserId], references: [id])
+  /// Who gave it out ("Được giao") — null when the housekeeper took it itself
+  /// ("Tự nhận"), or on groups given out before this was recorded (then a held
+  /// group with no `acceptedAt` is read as given out).
+  assignedBy User?                 @relation("WorkGroupAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
   tasks     HousekeepingRoomTask[]
 
   @@unique([branchId, workDate, number])
@@ -3710,6 +3759,17 @@ enum NotificationKind {
   HOUSEKEEPING_ASSIGNED
   /// "Dọn lại phòng …" — a failed room sent back to a worker.
   HOUSEKEEPING_RECLEAN
+  /// "Yêu cầu khách mới" — a guest request routed to this person.
+  REQUEST_ASSIGNED
+}
+
+/// A department that RECEIVES and COMPLETES guest requests. Separate from
+/// `ReportDepartment` (which journal a record belongs to): a request recorded
+/// by Reception may be received by Bell and completed by Housekeeping.
+enum WorkDepartment {
+  RECEPTION
+  HOUSEKEEPING
+  BELL
 }
 
 /// "VII. BÁO CÁO CÁC VẤN ĐỀ VÀ TÌNH HÌNH QUAN TRỌNG" — the four kinds.

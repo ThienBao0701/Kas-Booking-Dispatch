@@ -81,8 +81,13 @@ afterAll(async () => {
   await resetAll();
 });
 
+/** "Bộ phận nhận việc" as each writer would choose it here: the desk for itself, Buồng phòng for itself. */
+const deptOf = (agent: Agent) => (agent === letan1 || agent === letan2 ? 'RECEPTION' : 'HOUSEKEEPING');
 const guestRequest = (agent: Agent, guestName = 'Khách 301', ezCode = 'EZ301') =>
-  agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName, ezCode, roomNumber: '301', note: `Thêm gối cho ${guestName}` } });
+  agent.post('/api/reception/reports').send({
+    category: 'GUEST_REQUEST',
+    guestRequest: { guestName, ezCode, roomNumber: '301', note: `Thêm gối cho ${guestName}`, receivingDepartment: deptOf(agent) },
+  });
 const hkJournal = async (agent: Agent, query = '') =>
   ((await agent.get(`/api/reception/reports/housekeeping${query}`)).body.reports ?? []) as { id: string; category: string }[];
 const checkIn = async (agent: Agent) =>
@@ -106,7 +111,7 @@ describe('A. what Bộ phận buồng phòng records', () => {
       shiftSessionId: null,
     });
     // A branch named in the request is not read.
-    const named = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', branchId: cn2, guestRequest: { roomNumber: '301', note: 'x' } });
+    const named = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', branchId: cn2, guestRequest: { roomNumber: '301', note: 'x', receivingDepartment: 'HOUSEKEEPING' } });
     expect(named.body.report.branchId).toBe(cn1);
     // The manager records at its own branch.
     expect((await guestRequest(qlbp1, 'Khách 303')).body.report).toMatchObject({ branchId: cn1, sourceLabel: 'Quản lý buồng phòng · QL Buồng 1', createdByRole: 'HOUSEKEEPING_MANAGER' });
@@ -160,22 +165,28 @@ describe('B. Reception follows Housekeeping’s records — it does not act on t
 });
 
 describe('C. who sees and completes what', () => {
-  it('a housekeeper follows its own; the manager its branch’s — completes them — and never another branch’s', async () => {
+  it('a housekeeper follows its own; the manager its branch’s; only the person it is given to completes it — never another branch', async () => {
     await startShiftAt(lan, cn1);
     await startShiftAt(hoa, cn1);
     const mine = (await guestRequest(lan)).body.report.id as string;
     const hers = (await guestRequest(hoa, 'Khách 302')).body.report.id as string;
+    // No supervisor on shift: shared between the two housekeepers on shift, one each.
+    const holderOf = async (id: string) => (await testPrisma.guestRequestReport.findUniqueOrThrow({ where: { reportId: id } })).assigneeUserId;
+    expect(await holderOf(mine)).toBe((await testPrisma.user.findUniqueOrThrow({ where: { username: 'lan' } })).id);
+    expect(await holderOf(hers)).toBe((await testPrisma.user.findUniqueOrThrow({ where: { username: 'hoa' } })).id);
     expect((await hkJournal(lan)).map((r) => r.id)).toEqual([mine]);
     expect((await hkJournal(qlbp1)).map((r) => r.id).sort()).toEqual([mine, hers].sort());
     expect(await hkJournal(qlbp2)).toEqual([]);
     expect((await qlbp2.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
     expect((await lan.post(`/api/reception/reports/${hers}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
-    const done = await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT', resolution: 'Đã mang gối' });
+    // The manager follows it but is not its "Người xử lý".
+    expect((await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
+    const done = await lan.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT', resolution: 'Đã mang gối' });
     expect(done.status).toBe(200);
-    expect(done.body.report.guestRequest).toMatchObject({ completed: true, completedByName: 'QL Buồng 1' });
+    expect(done.body.report.guestRequest).toMatchObject({ completed: true, completedByName: 'Chị Lan', completedDepartment: 'HOUSEKEEPING' });
     // Completed once.
-    expect((await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(409);
-    // Twelve hours after it was received: "Hoàn thành vấn đề" — Housekeeping's own; Reception and the Admin follow it.
+    expect((await lan.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(409);
+    // Twelve hours after it was completed: "Hoàn thành vấn đề" — Housekeeping's own; Reception and the Admin follow it.
     at('2026-10-05', '22:00');
     const archived = (await qlbp1.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id);
     expect(archived).toEqual([mine]);
@@ -299,7 +310,8 @@ describe('G. completed records stay reachable by the Admin — and by no one out
     expect((await letan1.post(`/api/reception/reports/${desk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
     await startShiftAt(lan, cn1);
     const hk = (await guestRequest(lan, 'Khách Buồng')).body.report.id as string;
-    expect((await qlbp1.post(`/api/reception/reports/${hk}/complete`).send({ verdict: 'INCORRECT', incorrectReason: 'Khách đã tự xử lý' })).status).toBe(200);
+    // Given to Chị Lan (the housekeeper on shift): hers to complete.
+    expect((await lan.post(`/api/reception/reports/${hk}/complete`).send({ verdict: 'INCORRECT', incorrectReason: 'Khách đã tự xử lý' })).status).toBe(200);
     at('2026-10-05', '22:00');
     const archive = async (agent: Agent, query = '') => ((await agent.get(`/api/reception/reports/archive${query}`)).body.reports as { id: string }[]).map((r) => r.id);
     // The Admin: both departments by default, Housekeeping's on request — each under its verdict.
@@ -437,7 +449,7 @@ describe('K. "+ Báo cáo vấn đề" from a room — no guest from Housekeepin
     return g.body.group.items[0].id as string;
   };
   const fromRoom = (agent: Agent, taskId: string, extra: Record<string, unknown> = {}) =>
-    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', taskId, guestRequest: { note: 'Khách xin thêm khăn', severity: 'HIGH', ...extra } });
+    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', taskId, guestRequest: { note: 'Khách xin thêm khăn', severity: 'HIGH', receivingDepartment: deptOf(agent), ...extra } });
   const setGuest = (agent: Agent, id: string, body: Record<string, unknown> = { guestName: 'Nguyễn Văn B', ezCode: 'EZ900' }) => agent.patch(`/api/reception/reports/${id}/guest`).send(body);
 
   it('1. records the request from the room with no guest — a guest name sent from Housekeeping is not stored', async () => {
@@ -460,7 +472,7 @@ describe('K. "+ Báo cáo vấn đề" from a room — no guest from Housekeepin
     // Not the room's work and not the stock: the item is as it was.
     expect(await testPrisma.housekeepingRoomTask.findUniqueOrThrow({ where: { id: task } })).toMatchObject({ state: 'NOT_STARTED' });
     // Without an item: the content alone is enough — still no guest stored.
-    const plain = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note: 'x', guestName: 'Khách bịa', ezCode: 'EZ-Y' } });
+    const plain = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note: 'x', guestName: 'Khách bịa', ezCode: 'EZ-Y', receivingDepartment: 'HOUSEKEEPING' } });
     expect(plain.status).toBe(201);
     expect(plain.body.report.guestRequest).toMatchObject({ guestName: null, ezCode: null, roomNumber: null });
   });
@@ -554,7 +566,7 @@ describe('K. "+ Báo cáo vấn đề" from a room — no guest from Housekeepin
 
 describe('L. a Housekeeping request: the content and "Mức độ" — nothing else asked', () => {
   const report = (agent: Agent, guestRequest: Record<string, unknown>) =>
-    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest });
+    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { receivingDepartment: deptOf(agent), ...guestRequest } });
 
   it('records it from content and severity alone — no room, guest or Mã EZ, no reception shift; branch, reporter and time from the server', async () => {
     await startShiftAt(lan, cn1);
@@ -571,7 +583,7 @@ describe('L. a Housekeeping request: the content and "Mức độ" — nothing e
       guestRequest: { content: 'Khách cần thêm nước', severity: 'HIGH', guestName: null, ezCode: null, roomNumber: null },
     });
     // A time sent from the browser is not read.
-    const timed = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', createdAt: '2020-01-01T00:00:00.000Z', guestRequest: { note: 'x' } });
+    const timed = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', createdAt: '2020-01-01T00:00:00.000Z', guestRequest: { note: 'x', receivingDepartment: 'HOUSEKEEPING' } });
     expect(timed.body.report.createdAt).toBe(hcm('2026-10-05', '09:44').toISOString());
     // The manager too.
     expect((await report(qlbp1, { note: 'Khách hỏi giờ dọn phòng' })).status).toBe(201);
@@ -591,9 +603,9 @@ describe('L. a Housekeeping request: the content and "Mức độ" — nothing e
     // Housekeeping reads none of it — list, summary or trail.
     const hk = ((await qlbp1.get('/api/reception/reports/housekeeping')).body.reports as { id: string }[]).find((r) => r.id === created.id)!;
     expect(JSON.stringify(hk)).not.toMatch(/Trần Thị C|EZ5/);
-    // Completed by Housekeeping, as before; Reception still cannot.
+    // Completed by its "Người xử lý" in Housekeeping; Reception still cannot.
     expect((await letan1.post(`/api/reception/reports/${created.id}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
-    const done = await qlbp1.post(`/api/reception/reports/${created.id}/complete`).send({ verdict: 'CORRECT', resolution: 'Đã mang nước' });
+    const done = await lan.post(`/api/reception/reports/${created.id}/complete`).send({ verdict: 'CORRECT', resolution: 'Đã mang nước' });
     expect(done.status).toBe(200);
     expect(done.body.report.guestRequest).toMatchObject({ completed: true });
   });
@@ -608,7 +620,7 @@ describe('L. a Housekeeping request: the content and "Mức độ" — nothing e
 
 describe('M. one table per category, and possible duplicates across departments', () => {
   const request = (agent: Agent, note: string, extra: Record<string, unknown> = {}) =>
-    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note, ...extra } });
+    agent.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note, receivingDepartment: deptOf(agent), ...extra } });
 
   it('keeps Bộ phận buồng phòng’s shiftless requests beside a chosen Reception shift — never a shift invented, each record once', async () => {
     await checkIn(letan1);
@@ -630,7 +642,10 @@ describe('M. one table per category, and possible duplicates across departments'
 
   it('warns Bộ phận buồng phòng of a possible duplicate — of either department — without its details; confirmed, it is recorded', async () => {
     await checkIn(letan1);
-    expect((await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'Khách VIP 909', ezCode: 'EZ909', note: 'Khách cần thêm 2 chai nước!' } })).status).toBe(201);
+    expect(
+      (await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'Khách VIP 909', ezCode: 'EZ909', note: 'Khách cần thêm 2 chai nước!', receivingDepartment: 'RECEPTION' } }))
+        .status,
+    ).toBe(201);
     await startShiftAt(lan, cn1);
     // The same content, written differently.
     const dup = await request(lan, '  khách cần thêm 2 chai nước ');
@@ -639,7 +654,7 @@ describe('M. one table per category, and possible duplicates across departments'
     expect(dup.body.error.message).toContain('lễ tân');
     expect(JSON.stringify(dup.body)).not.toMatch(/VIP 909|EZ909|chai nước|Lễ tân Một/);
     // Confirmed as a separate issue: recorded, nothing merged.
-    const confirmed = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note: 'Khách cần thêm 2 chai nước' }, confirmDuplicate: true });
+    const confirmed = await lan.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { note: 'Khách cần thêm 2 chai nước', receivingDepartment: 'HOUSEKEEPING' }, confirmDuplicate: true });
     expect(confirmed.status).toBe(201);
     expect(await testPrisma.receptionOperationalReport.count()).toBe(2);
     // The same department's own: warned too.
@@ -654,7 +669,7 @@ describe('M. one table per category, and possible duplicates across departments'
     at('2026-10-06', '10:30');
     expect((await request(lan, 'Khách cần thêm 2 chai nước')).status).toBe(201);
     // Reception is not stopped by this check.
-    expect((await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'K', note: 'Khách cần thêm gối' } })).status).toBe(201);
+    expect((await letan1.post('/api/reception/reports').send({ category: 'GUEST_REQUEST', guestRequest: { guestName: 'K', note: 'Khách cần thêm gối', receivingDepartment: 'RECEPTION' } })).status).toBe(201);
   });
 
   it('warns of the same delivery for the same department — not for another department', async () => {
@@ -684,7 +699,9 @@ describe('N. what is still open, by category and department — the menu’s cou
   const counts = async (agent: Agent) => {
     const res = await agent.get('/api/reception/reports/open-counts');
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    return res.body.counts as { guestRequest: { reception: number; housekeeping: number }; complaint: number };
+    // `mine` (the reader's own open requests) is checked in workflowDepartments.test.ts.
+    const c = res.body.counts as { guestRequest: { reception: number; housekeeping: number; mine: number }; complaint: number };
+    return { guestRequest: { reception: c.guestRequest.reception, housekeeping: c.guestRequest.housekeeping }, complaint: c.complaint };
   };
 
   it('counts each open record once, under the department that recorded it, inside each reader’s own scope', async () => {
@@ -707,7 +724,7 @@ describe('N. what is still open, by category and department — the menu’s cou
     expect(await counts(lan)).toEqual({ guestRequest: { reception: 0, housekeeping: 1 }, complaint: 0 });
     // Completed or withdrawn: no longer counted — the badge follows the workflow.
     expect((await letan1.post(`/api/reception/reports/${desk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
-    expect((await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    expect((await lan.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
     expect(await counts(admin)).toEqual({ guestRequest: { reception: 1, housekeeping: 1 }, complaint: 1 });
     expect(await counts(qlbp1)).toEqual({ guestRequest: { reception: 0, housekeeping: 0 }, complaint: 0 });
   });

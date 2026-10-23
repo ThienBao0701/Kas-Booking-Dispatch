@@ -23,7 +23,9 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useDebounced } from '../hooks/useDebounced';
 import {
+  WORK_DEPARTMENT_OPTIONS,
   reportsApi,
+  type WorkDepartment,
   type DeliveryDepartment,
   type NewReportInput,
   type NewRoomServiceInput,
@@ -69,9 +71,11 @@ interface FormShellProps {
   onCancel?: () => void;
   /** The server warned of a possible duplicate: "Vẫn gửi" sends it as a separate issue. */
   onConfirmDuplicate?: () => void;
+  /** Nobody of the chosen department is on shift: "Vẫn lưu, chờ giao" saves it unassigned. */
+  onConfirmUnassigned?: () => void;
 }
 
-function FormShell({ title, testId, ready, pending, error, onSubmit, children, bare, onCancel, onConfirmDuplicate }: FormShellProps) {
+function FormShell({ title, testId, ready, pending, error, onSubmit, children, bare, onCancel, onConfirmDuplicate, onConfirmUnassigned }: FormShellProps) {
   return (
     <form
       data-testid={testId}
@@ -83,7 +87,15 @@ function FormShell({ title, testId, ready, pending, error, onSubmit, children, b
     >
       {bare ? null : <p className="text-sm font-semibold text-slate-800">{title}</p>}
       {children}
-      {error && onConfirmDuplicate ? (
+      {error && onConfirmUnassigned ? (
+        <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950" role="alert" data-testid={`${testId}-no-staff`}>
+          <p>{error}</p>
+          <p className="text-xs">Chọn bộ phận khác, hoặc lưu để quản lý giao người xử lý sau.</p>
+          <Button type="button" variant="secondary" onClick={onConfirmUnassigned} loading={pending} data-testid={`${testId}-save-unassigned`}>
+            Vẫn lưu, chờ giao
+          </Button>
+        </div>
+      ) : error && onConfirmDuplicate ? (
         <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950" role="alert" data-testid={`${testId}-duplicate`}>
           <p>{error}</p>
           <Button type="button" variant="secondary" onClick={onConfirmDuplicate} loading={pending} data-testid={`${testId}-confirm-duplicate`}>
@@ -117,22 +129,82 @@ function useCreateReport(onCreated: () => void | Promise<void>, branchId?: numbe
   const [error, setError] = useState<string | null>(null);
   // The input the server warned may duplicate an existing report — "Vẫn gửi" sends it again, confirmed.
   const [duplicateOf, setDuplicateOf] = useState<NewReportInput | null>(null);
+  // The request nobody of its department could receive — "Vẫn lưu, chờ giao" saves it unassigned.
+  const [unassignedOf, setUnassignedOf] = useState<NewReportInput | null>(null);
   // "Nhập bù" submits the same form to its own endpoint (see lib/reportSubmit).
   const override = useReportSubmitOverride();
   const mutation = useMutation({
-    mutationFn: (input: NewReportInput & { confirmDuplicate?: boolean }) => (override ? override(input) : reportsApi.create({ ...input, branchId })),
+    mutationFn: (input: NewReportInput & { confirmDuplicate?: boolean; allowUnassigned?: boolean }) =>
+      override ? override(input) : reportsApi.create({ ...input, branchId }),
     onSuccess: async () => {
       setError(null);
       setDuplicateOf(null);
+      setUnassignedOf(null);
       await onCreated();
     },
     onError: (e, input) => {
       setError(toUserMessage(e));
       setDuplicateOf(e instanceof ApiError && e.code === 'POSSIBLE_DUPLICATE' ? input : null);
+      const noStaff = e instanceof ApiError && (e.details as { reason?: string } | undefined)?.reason === 'NO_STAFF_ON_SHIFT';
+      setUnassignedOf(noStaff ? input : null);
     },
   });
   const confirmDuplicate = duplicateOf ? () => mutation.mutate({ ...duplicateOf, confirmDuplicate: true }) : undefined;
-  return { mutation, error, setError, confirmDuplicate };
+  const confirmUnassigned = unassignedOf ? () => mutation.mutate({ ...unassignedOf, allowUnassigned: true }) : undefined;
+  return { mutation, error, setError, confirmDuplicate, confirmUnassigned };
+}
+
+/**
+ * "BỘ PHẬN NHẬN VIỆC" — required, beside "Mức độ". Under it, who is "đang
+ * trong ca" at the branch in each department (an open shift — not an online
+ * status), so the desk sees before saving when a department has nobody.
+ */
+function DepartmentPicker({ value, onChange, branchId }: { value: WorkDepartment | ''; onChange: (value: WorkDepartment) => void; branchId?: number }) {
+  const staff = useQuery({
+    queryKey: ['reception', 'dispatch-staff', branchId ?? null],
+    queryFn: () => reportsApi.dispatchStaff(branchId),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const onShift = staff.data?.onShift;
+  const nobody = value !== '' && onShift !== undefined && onShift[value].length === 0;
+  return (
+    <fieldset data-testid="guest-request-department">
+      <legend className="mb-1.5 block text-sm font-medium text-slate-700">
+        Bộ phận nhận việc <span className="text-rose-600">*</span>
+      </legend>
+      <div role="radiogroup" aria-label="Bộ phận nhận việc" className="inline-flex overflow-hidden rounded-xl border border-line-strong">
+        {WORK_DEPARTMENT_OPTIONS.map((o, i) => {
+          const on = value === o.code;
+          return (
+            <button
+              key={o.code}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => onChange(o.code)}
+              data-testid={`guest-request-department-${o.code}`}
+              className={`inline-flex min-h-[2.5rem] items-center px-3.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
+                i > 0 ? 'border-l border-line-strong' : ''
+              } ${on ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      {onShift ? (
+        <p className="mt-1 text-xs text-slate-500" data-testid="guest-request-on-shift">
+          Đang trong ca: {WORK_DEPARTMENT_OPTIONS.map((o) => `${o.label} ${onShift[o.code].length}`).join(' · ')}
+        </p>
+      ) : null}
+      {nobody ? (
+        <p className="mt-1 text-xs font-medium text-amber-800" role="status" data-testid="guest-request-no-staff-hint">
+          Hiện không có nhân viên {WORK_DEPARTMENT_OPTIONS.find((o) => o.code === value)?.label} nào đang trong ca tại chi nhánh này.
+        </p>
+      ) : null}
+    </fieldset>
+  );
 }
 
 /** A multi-line field with the same look as `Input`. */
@@ -192,11 +264,13 @@ export function GuestRequestForm({
   const [ezCode, setEzCode] = useState('');
   const [content, setContent] = useState('');
   const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
-  const { mutation, error, confirmDuplicate } = useCreateReport(async () => {
+  const [department, setDepartment] = useState<WorkDepartment | ''>('');
+  const { mutation, error, confirmDuplicate, confirmUnassigned } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
     setContent('');
     setSeverity(DEFAULT_SEVERITY);
+    setDepartment('');
     await onCreated();
   }, branchId);
 
@@ -206,16 +280,17 @@ export function GuestRequestForm({
       testId="guest-request-form"
       bare={bare}
       onCancel={onCancel}
-      ready={(housekeeping || guestName.trim().length > 0) && content.trim().length > 0}
+      ready={(housekeeping || guestName.trim().length > 0) && content.trim().length > 0 && department !== ''}
       pending={mutation.isPending}
       error={error}
       onConfirmDuplicate={confirmDuplicate}
+      onConfirmUnassigned={confirmUnassigned}
       onSubmit={() =>
         mutation.mutate({
           category: 'GUEST_REQUEST',
           guestRequest: housekeeping
-            ? { note: content.trim(), severity }
-            : { guestName: guestName.trim(), ezCode: ezCode.trim() || undefined, note: content.trim(), severity },
+            ? { note: content.trim(), severity, receivingDepartment: department || undefined }
+            : { guestName: guestName.trim(), ezCode: ezCode.trim() || undefined, note: content.trim(), severity, receivingDepartment: department || undefined },
         })
       }
     >
@@ -230,14 +305,22 @@ export function GuestRequestForm({
           <Input label="Mã EZ" value={ezCode} onChange={(e) => setEzCode(e.target.value)} data-testid="guest-request-ez" />
         </div>
       )}
-      <SeverityPicker value={severity} onChange={setSeverity} testId="guest-request-severity" />
-      <TextArea
-        label="Nội dung"
-        value={content}
-        onChange={setContent}
-        maxLength={2000}
-        testId="guest-request-content"
-      />
+      <div className="flex flex-wrap gap-x-6 gap-y-3">
+        <SeverityPicker value={severity} onChange={setSeverity} testId="guest-request-severity" />
+        <DepartmentPicker value={department} onChange={setDepartment} branchId={branchId} />
+      </div>
+      <div>
+        <TextArea
+          label="Nội dung"
+          value={content}
+          onChange={setContent}
+          maxLength={2000}
+          testId="guest-request-content"
+        />
+        <p className="mt-1 text-xs text-slate-500" data-testid="guest-request-content-hint">
+          Chỉ báo cáo những vấn đề cần theo dõi hoặc có thời gian thực hiện kéo dài. Những vấn đề có thể xử lý ngay thì không cần tạo báo cáo.
+        </p>
+      </div>
     </FormShell>
   );
 }

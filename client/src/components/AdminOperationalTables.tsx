@@ -598,7 +598,7 @@ export function AdminFacilityJournalTable({ rows, title, grouped, onEdit, onDele
     },
     {
       key: 'repairer',
-      header: 'Người sửa',
+      header: 'Người xử lý',
       className: 'whitespace-nowrap',
       render: (r) => text(r.facility?.issue.repairerName),
     },

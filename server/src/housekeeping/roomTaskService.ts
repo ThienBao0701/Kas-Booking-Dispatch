@@ -26,6 +26,7 @@ import { createInspection, type HousekeepingActor } from './roomIssueService';
 import { ROOM_COLLECTION_STATUS_LABELS, ROOM_ISSUE_TYPE_LABELS } from './roomIssueTypes';
 import { ROOM_REVIEW_LABELS, ROOM_WORK_STATE_LABELS, assertStatusCode, parseCleaningForm, readCleaning } from './roomTaskCatalog';
 import { accountBranch, openSegmentFor } from './workShiftService';
+import { endShiftIfNoWork } from './shiftAutoEnd';
 import { applyCleaningItems, itemLabel } from './inventoryLedger';
 import { cleaningItemsOfBranch, cleaningLines } from './inventoryService';
 import { can } from '../auth/capabilities';
@@ -960,8 +961,11 @@ export function saveCleaning(actor: HousekeepingActor, id: string, raw: unknown,
 }
 
 /** "HOÀN THÀNH DỌN PHÒNG": the form, the end time and the duration from the inspection. */
-export function completeTask(actor: HousekeepingActor, id: string, raw: unknown, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
-  return writeCleaning(actor, id, raw, true, clock, client);
+export async function completeTask(actor: HousekeepingActor, id: string, raw: unknown, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
+  const task = await writeCleaning(actor, id, raw, true, clock, client);
+  // The last of the housekeeper's work, with nothing left to take: its shift ends (see shiftAutoEnd).
+  const shiftEnded = actor.role === 'HOUSEKEEPING' ? await endShiftIfNoWork(actor.id, task.branchId, task.workDate, clock, client) : false;
+  return { ...task, shiftEnded };
 }
 
 /* ------------------------------------------------------------------ *

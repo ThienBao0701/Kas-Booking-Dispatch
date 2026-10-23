@@ -105,7 +105,7 @@ async function closeShift(agent: Agent) {
 async function request(agent: Agent, guestName = 'Khách A') {
   const res = await agent.post('/api/reception/reports').send({
     category: 'GUEST_REQUEST',
-    guestRequest: { guestName, ezCode: 'EZ1', note: 'Gửi balo' },
+    guestRequest: { guestName, ezCode: 'EZ1', note: 'Gửi balo', receivingDepartment: 'RECEPTION' },
   });
   expect(res.status).toBe(201);
   return res.body.report.id as string;
@@ -159,7 +159,7 @@ async function issueIds(agent: Agent, scope: 'active' | 'archive'): Promise<stri
 /* ================================================================== */
 
 describe('the 12-hour completion archive (II and IV)', () => {
-  it('keeps a completed record active until 12 hours after it was RECEIVED, then archives it', async () => {
+  it('keeps a completed request active until 12 hours after its COMPLETION (a service-quality report: after receipt), then archives it', async () => {
     at('2026-09-25', '08:00');
     await checkIn(letanA, 'A', 'Đức');
     at('2026-09-25', '10:00');
@@ -174,14 +174,18 @@ describe('the 12-hour completion archive (II and IV)', () => {
     expect(await activeIds(letanA)).toEqual(expect.arrayContaining([req, cq]));
     expect(await archiveIds(letanA)).toEqual([]);
 
-    // 21:59 — still under 12 hours after RECEIPT (the completion time is irrelevant).
+    // 21:59 — under 12 hours after receipt and after completion: both active.
     at('2026-09-25', '21:59');
     expect(await activeIds(letanA)).toEqual(expect.arrayContaining([req, cq]));
 
-    // 22:00 — exactly 12 hours after 10:00: archived, and no longer active.
+    // 22:00 — 12 hours after RECEIPT: the service-quality report is archived; the request, completed at 11:00, stays.
     at('2026-09-25', '22:00');
-    expect(await activeIds(letanA)).not.toContain(req);
+    expect(await activeIds(letanA)).toContain(req);
     expect(await activeIds(letanA)).not.toContain(cq);
+
+    // 23:00 — 12 hours after the request's COMPLETION: archived too.
+    at('2026-09-25', '23:00');
+    expect(await activeIds(letanA)).not.toContain(req);
     const archive = await letanA.get('/api/reception/reports/archive');
     expect(archive.body.reports.map((r: { id: string }) => r.id)).toEqual(expect.arrayContaining([req, cq]));
     expect(archive.body.totals).toEqual({ GUEST_REQUEST: 1, CUSTOMER_COMPLAINT: 1 });
@@ -426,9 +430,9 @@ describe('the completion archive, narrowed by BUSINESS date — the day of the s
     at('2026-09-24', '10:00');
     const unfinished = await complaint(letanA, 'Chưa xong');
 
-    at('2026-09-25', '21:59'); // under 12 hours after 10:00
+    at('2026-09-25', '22:59'); // under 12 hours after its completion at 11:00
     expect(idsOf(await archiveIn(letanA, '2026-09-24', '2026-09-25'))).toEqual([]);
-    at('2026-09-25', '22:00'); // exactly 12 hours: now eligible — and in range
+    at('2026-09-25', '23:00'); // exactly 12 hours after the completion: now eligible — and in range
     expect(idsOf(await archiveIn(letanA, '2026-09-24', '2026-09-25'))).toEqual([recent]);
     // The unfinished one, received on the 24th, stays active however the dates are set.
     expect(await activeIds(letanA)).toContain(unfinished);

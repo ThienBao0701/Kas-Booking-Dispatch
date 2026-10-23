@@ -564,7 +564,9 @@ describe('Quản lý buồng phòng — Tình trạng phòng', () => {
       ],
     });
     expect(posted[0]!.requestId.length).toBeGreaterThanOrEqual(8);
-  });
+    // No "Giao cho" chosen: no assignee is sent — the group waits in the pool (the exact body above).
+    // A long interactive flow (~3.5 s alone): its own timeout, so a loaded full run does not cut it short.
+  }, 15_000);
 
   it('does not offer a room or area that is still in an open item — until its work is resolved — and reloads them on a conflict', async () => {
     let created = 0;

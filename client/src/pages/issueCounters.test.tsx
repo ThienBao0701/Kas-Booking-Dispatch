@@ -94,7 +94,8 @@ describe('Issue counters — sidebar badge', () => {
     });
     renderApp('/app/dashboard');
     // The group says only that something inside waits — no total repeated beside it.
-    expect(await screen.findByTestId('nav-dot-Báo cáo vấn đề')).toHaveAttribute('aria-label', 'Có mục cần xử lý');
+    // The group shows the sum of its categories (here only the 4 incidents are open) — each counted once.
+    expect(await screen.findByTestId('nav-total-Báo cáo vấn đề')).toHaveTextContent('4');
     expect(screen.queryByLabelText('4 sự cố chưa xử lý')).not.toBeInTheDocument();
     await userEvent.click(screen.getByTestId('nav-group-Báo cáo vấn đề'));
     await userEvent.click(screen.getByTestId('nav-group-Lễ tân'));
@@ -115,7 +116,8 @@ describe('Issue counters — sidebar badge', () => {
       'GET /api/issues?pageSize=100': () => listBody([issue()]),
     });
     renderApp('/app/new');
-    const badge = await screen.findByLabelText('2 sự cố chưa xử lý');
+    // No open-counts answered here: the link counts the 2 unresolved incidents alone.
+    const badge = await screen.findByLabelText('2 mục chưa xử lý, trong đó 2 sự cố');
     /*
       On "Báo cáo vấn đề" — reception has no standalone "Báo cáo sự cố" entry
       any more, and the count followed incident reporting there rather than

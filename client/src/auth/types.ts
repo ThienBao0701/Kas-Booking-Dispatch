@@ -34,7 +34,9 @@ export type UserRole =
   /** "Quản lý buồng phòng" — the housekeeping of exactly one branch (`branch`). */
   | 'HOUSEKEEPING_MANAGER'
   /** "Tổng quản lý kỹ thuật" — the incidents of its ticked branches, handed to a Quản lý kỹ thuật or a technician. */
-  | 'TECHNICAL_GENERAL_MANAGER';
+  | 'TECHNICAL_GENERAL_MANAGER'
+  /** "Bell" — one branch, a shift at the shift gate, and the guest requests given to it. */
+  | 'BELL';
 
 /** How each role is named to a person. */
 export const ROLE_LABEL: Record<UserRole, string> = {
@@ -48,6 +50,7 @@ export const ROLE_LABEL: Record<UserRole, string> = {
   RECEPTION_GENERAL_MANAGER: 'Tổng quản lý lễ tân',
   HOUSEKEEPING_MANAGER: 'Quản lý buồng phòng',
   TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
+  BELL: 'Bell',
 };
 
 /**

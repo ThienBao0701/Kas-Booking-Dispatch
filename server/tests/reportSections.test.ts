@@ -26,11 +26,13 @@ function groups(rows: Partial<SerializedReport>[]): Record<OperationalReportCate
 }
 
 describe('completionArchiveRows', () => {
-  it('takes what is finished and received 12 hours or more ago — and nothing else', () => {
+  it('takes what is finished 12 hours or more ago (a request: from its completion; the rest: from receipt) — and nothing else', () => {
     const rows = completionArchiveRows(
       groups([
-        { id: 'req-old-done', category: 'GUEST_REQUEST', createdAt: OLD, guestRequest: { completed: true } as never },
-        { id: 'req-recent-done', category: 'GUEST_REQUEST', createdAt: RECENT, guestRequest: { completed: true } as never },
+        { id: 'req-old-done', category: 'GUEST_REQUEST', createdAt: OLD, guestRequest: { completed: true, completedAt: OLD } as never },
+        { id: 'req-recent-done', category: 'GUEST_REQUEST', createdAt: RECENT, guestRequest: { completed: true, completedAt: RECENT } as never },
+        // Received long ago, completed a moment ago: still active — the 12 hours run from the completion.
+        { id: 'req-old-just-done', category: 'GUEST_REQUEST', createdAt: OLD, guestRequest: { completed: true, completedAt: RECENT } as never },
         { id: 'req-old-open', category: 'GUEST_REQUEST', createdAt: OLD, guestRequest: { completed: false } as never },
         { id: 'qa-old-done', category: 'CUSTOMER_COMPLAINT', createdAt: OLD, complaint: { completed: true } as never },
         {

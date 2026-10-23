@@ -125,6 +125,9 @@ describe('"Hoàn thành" waits for the manager', () => {
     await setUp('101', lanId);
     const [task] = await boardTasks();
     await clean(lan, task!.id, '08:00', '08:30', FORM_1);
+    // Her last room with nothing left to take: her shift ended by itself (shiftAutoEnd) — back on shift to read her list.
+    expect(await testPrisma.housekeepingWorkSession.findFirst({ where: { userId: lanId, endedAt: null } })).toBeNull();
+    await onShift(lan);
     // 2. Off the worker's list of rooms to clean — but still its own record.
     expect((await lan.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks).toEqual([]);
     expect((await lan.get(`/api/housekeeping/work/tasks/${task!.id}`)).body.task).toMatchObject({ state: 'COMPLETED', review: { status: 'PENDING', label: 'Chờ đánh giá' } });
@@ -207,6 +210,8 @@ describe('"Không đạt" and the re-clean cycle', () => {
     // 14. Chị Hoa sees "cần dọn lại" and the reason; Chị Lan sees nothing.
     // (A housekeeper's list is its shift's: Chị Hoa is on shift at the branch.)
     await onShift(hoa);
+    // Chị Lan's shift ended with her last room (shiftAutoEnd): back on shift to read her list.
+    await onShift(lan);
     expect((await lan.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks).toEqual([]);
     const mine = (await hoa.get(`/api/housekeeping/work?date=${DAY}`)).body.tasks;
     expect(mine).toEqual([expect.objectContaining({ id: failed.body.reclean.id, cycleNumber: 2, reclean: expect.objectContaining({ reason: 'Thiếu khăn tắm' }) })]);

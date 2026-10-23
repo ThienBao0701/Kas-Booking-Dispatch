@@ -45,7 +45,8 @@ import {
   type RoomServiceType,
   type Severity,
 } from '../api/receptionReports';
-import { SeverityFilter } from '../components/Severity';
+import { SeverityFilter, WorkDepartmentFilter } from '../components/Severity';
+import type { WorkDepartment } from '../api/receptionReports';
 import { useIsReception, useShiftSession } from '../hooks/useShiftSession';
 import { Toast } from '../components/Toast';
 import { Button } from '../components/Button';
@@ -110,6 +111,9 @@ function ReceptionJournal() {
   const [severity, setSeverity] = useState<Severity | ''>('');
   const levelled = category === 'GUEST_REQUEST' || category === 'FACILITY_ISSUE' || category === 'CUSTOMER_COMPLAINT';
   const level = levelled && severity ? severity : undefined;
+  /** "Bộ phận" on the request table — the server filters; the overview never does. */
+  const [department, setDepartment] = useState<WorkDepartment | ''>('');
+  const byDepartment = category === 'GUEST_REQUEST' && department ? department : undefined;
 
   const options = useQuery({
     queryKey: ['reception', 'reports', 'options'],
@@ -147,8 +151,8 @@ function ReceptionJournal() {
     it. The server clock decides; this screen only asks.
   */
   const active = useQuery({
-    queryKey: [...ACTIVE_REPORTS_KEY, sessionId, level ?? ''],
-    queryFn: () => reportsApi.active(level ? { severity: level } : {}),
+    queryKey: [...ACTIVE_REPORTS_KEY, sessionId, level ?? '', byDepartment ?? ''],
+    queryFn: () => reportsApi.active({ ...(level ? { severity: level } : {}), ...(byDepartment ? { workDepartment: byDepartment } : {}) }),
     enabled: sessionId !== null,
     refetchOnWindowFocus: true,
   });
@@ -304,7 +308,12 @@ function ReceptionJournal() {
       ) : (
         <CategoryShell title={title(category)} description={CATEGORY_HINTS[category]}>
           {levelled ? (
-            <SeverityFilter value={severity} onChange={setSeverity} testId="reception-severity" className="sm:w-60" />
+            <div className="flex flex-wrap gap-3">
+              <SeverityFilter value={severity} onChange={setSeverity} testId="reception-severity" className="w-full sm:w-60" />
+              {category === 'GUEST_REQUEST' ? (
+                <WorkDepartmentFilter value={department} onChange={setDepartment} testId="reception-department" className="w-full sm:w-60" />
+              ) : null}
+            </div>
           ) : null}
           {/*
             THE FORM AND ITS TABLE ARE OUTSIDE THE QUERY STATE for the form's sake.

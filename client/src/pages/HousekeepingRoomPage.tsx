@@ -33,7 +33,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Ban, Check, ClipboardCheck, Hourglass, Megaphone, Minus, Pencil, Play, Plus, Save, Sparkles, UserRoundPlus } from 'lucide-react';
-import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
+import { HOUSEKEEPING_SHIFT_KEY, ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
 import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type CleaningInput, type CleaningItem, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
@@ -178,7 +178,10 @@ export function HousekeepingRoomPage() {
                 onReport={() => setReporting(true)}
                 onSaved={(next, done) => {
                   refresh(next);
-                  setToast(done ? 'Đã hoàn thành dọn phòng.' : 'Đã lưu tạm.');
+                  const ended = done && (next as RoomTask & { shiftEnded?: boolean }).shiftEnded === true;
+                  // The server ended the shift (nothing left to do or take): the screens follow it.
+                  if (ended) void queryClient.invalidateQueries({ queryKey: HOUSEKEEPING_SHIFT_KEY });
+                  setToast(ended ? 'Đã hoàn thành dọn phòng. Bạn đã hết việc — ca làm việc được tự động kết thúc.' : done ? 'Đã hoàn thành dọn phòng.' : 'Đã lưu tạm.');
                 }}
               />
             )}

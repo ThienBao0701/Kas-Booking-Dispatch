@@ -379,12 +379,19 @@ export const TECHNICAL_NAV: NavItem[] = [
  * and screens are untouched). The server confines the role to its routes.
  */
 export const HOUSEKEEPING_NAV: NavItem[] = [
-  // The rooms given to this account today — "Kiểm phòng" and "Dọn phòng".
-  { to: '/app/inspections', label: 'Buồng phòng', icon: ClipboardCheck },
+  // The rooms given to this account today — "Kiểm phòng" and "Dọn phòng". "Công việc": the
+  // screen's name; the department, its role and its data are still Bộ phận buồng phòng's.
+  { to: '/app/inspections', label: 'Công việc', icon: ClipboardCheck },
   // Its own reports — and its own findings and the money collected against them, nobody else's.
   housekeepingReportGroup({ to: '/app/my-kpi', label: 'Kiểm tra phòng & KPI', icon: Wallet }),
   HOUSEKEEPING_COMPLETED_GROUP,
 ];
+
+/**
+ * Bell: the guest requests given to it — "Nhận việc", "Hoàn thành". No booking,
+ * journal or payment screen: the server confines the role to these routes.
+ */
+export const BELL_NAV: NavItem[] = [{ to: '/app/bell', label: 'Công việc Bell', icon: ConciergeBell }];
 
 /** Quản lý buồng phòng: its one branch's housekeeping, then its reports. */
 export const HOUSEKEEPING_MANAGER_NAV: NavItem[] = [
@@ -413,6 +420,7 @@ export function navForRole(role: UserRole | undefined): NavItem[] {
   if (role === 'TECHNICAL_MANAGER' || role === 'TECHNICAL_GENERAL_MANAGER') return TECHNICAL_MANAGER_NAV;
   if (role === 'HOUSEKEEPING') return HOUSEKEEPING_NAV;
   if (role === 'HOUSEKEEPING_MANAGER') return HOUSEKEEPING_MANAGER_NAV;
+  if (role === 'BELL') return BELL_NAV;
   if (role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER') return RECEPTION_MANAGER_NAV;
   // Receptionist, and anything unrecognised: never the Chứng từ menu.
   return RECEPTIONIST_NAV;
@@ -434,6 +442,7 @@ export function titleForPath(pathname: string): string {
     ...TECHNICAL_MANAGER_NAV,
     ...HOUSEKEEPING_NAV,
     ...HOUSEKEEPING_MANAGER_NAV,
+    ...BELL_NAV,
     // Screens kept off the menu still have their title.
     ...HOUSEKEEPING_MANAGER_SCREENS,
     ...RECEPTION_MANAGER_NAV,

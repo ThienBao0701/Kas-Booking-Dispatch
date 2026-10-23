@@ -152,6 +152,7 @@ export function SettingsPage() {
  */
 const DEPARTMENTS: UserRole[] = [
   'RECEPTIONIST',
+  'BELL',
   'RECEPTION_MANAGER',
   'RECEPTION_GENERAL_MANAGER',
   'HOUSEKEEPING_MANAGER',
@@ -177,6 +178,7 @@ const DEPARTMENT_TITLE: Record<UserRole, string> = {
   TECHNICAL_GENERAL_MANAGER: 'Tổng quản lý kỹ thuật',
   BOOKING_DEPARTMENT: 'Bộ phận đặt phòng',
   ADMIN: 'Admin / Quản trị',
+  BELL: 'Bell',
 };
 
 const TECHNICIAN_BRANCHES_TITLE = 'Chi nhánh được giao việc';
@@ -261,7 +263,7 @@ function EditUserModal({
   const [fullName, setFullName] = useState(user.fullName);
   const [branchId, setBranchId] = useState<number>(user.branch?.id ?? 0);
   const [branchSet, setBranchSet] = useState<number[]>((user.managedBranches ?? []).map((b) => b.id));
-  const needsBranch = user.role === 'RECEPTIONIST';
+  const needsBranch = user.role === 'RECEPTIONIST' || user.role === 'BELL';
   const needsBranchSet = requiresBranchSet(user.role);
   // Kỹ thuật viên: its "giao việc" branches — sent once at least one is ticked.
   const technician = isTechnicianBranchRole(user.role);
@@ -618,6 +620,7 @@ function CreateUserModal({
             }
           >
             <option value="RECEPTIONIST">Lễ tân</option>
+            <option value="BELL">Bell</option>
             <option value="BOOKING_DEPARTMENT">Bộ phận đặt phòng</option>
             <option value="TECHNICAL">Bộ phận kỹ thuật</option>
             <option value="TECHNICAL_MANAGER">Quản lý kỹ thuật</option>

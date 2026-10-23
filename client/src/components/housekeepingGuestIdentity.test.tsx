@@ -79,11 +79,11 @@ function renderTable(
 }
 
 describe('a Housekeeping request at the desk', () => {
-  it('reads in six compact columns — no room, no action column — the source and time once, beneath the content', async () => {
+  it('reads in compact columns — no room, no action column — the source and time once, beneath the content', async () => {
     renderTable(RECEPTIONIST_USER, [hkRequest()], {}, 'summary');
     const table = await screen.findByTestId('guest-request-table');
     await screen.findByTestId('identify-r1');
-    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái']);
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái', 'Người xử lý']);
     expect(table).not.toHaveTextContent('Khu vực');
     expect(table).not.toHaveTextContent('Phòng - 101');
     expect(screen.getByTestId('request-guest-r1')).toHaveTextContent('Chưa xác định khách');
@@ -126,7 +126,7 @@ describe('a Housekeeping request at the desk', () => {
   it('shows Housekeeping no guest columns and no way to name one', async () => {
     renderTable(HOUSEKEEPING_USER, [hkRequest()], {}, 'summary');
     const table = await screen.findByTestId('guest-request-table');
-    await waitFor(() => expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual(['STT', 'Mức độ', 'Nội dung', 'Trạng thái']));
+    await waitFor(() => expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual(['STT', 'Mức độ', 'Nội dung', 'Trạng thái', 'Người xử lý']));
     expect(screen.queryByText('Chưa xác định khách')).not.toBeInTheDocument();
     expect(screen.queryByTestId('identify-r1')).not.toBeInTheDocument();
   });
@@ -144,7 +144,16 @@ describe('a Housekeeping request at the desk', () => {
     renderTable(RECEPTIONIST_USER, [hkRequest()]);
     const table = await screen.findByTestId('guest-request-table');
     await screen.findByTestId('identify-r1');
-    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Trạng thái', 'Cách xử lý (nếu có)']);
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent).filter(Boolean)).toEqual([
+      'STT',
+      'Tên khách',
+      'Mức độ',
+      'Mã EZ',
+      'Nội dung',
+      'Trạng thái',
+      'Người xử lý',
+      'Cách xử lý (nếu có)',
+    ]);
     // Bộ phận buồng phòng completes its own request; the desk follows it.
     expect(within(table).getByText('Buồng phòng xử lý')).toBeInTheDocument();
   });

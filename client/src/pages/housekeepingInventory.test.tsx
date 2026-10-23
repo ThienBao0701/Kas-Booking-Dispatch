@@ -425,15 +425,17 @@ describe('keeping the items, and the Admin’s damage filters', () => {
     // "Xuất Excel" opens the file of this warehouse.
     expect(within(manage).getByTestId('inventory-export')).toHaveAttribute('href', '/api/housekeeping/inventory/export.xlsx?warehouse=LINEN');
     await userEvent.keyboard('{Escape}');
-    await userEvent.click(await screen.findByTestId('inventory-more-towel'));
+    // "Sửa" is on the card itself — no menu to open first.
     await userEvent.click(await screen.findByTestId('inventory-edit-towel'));
     const dialog = await screen.findByRole('dialog', { name: 'Sửa Khăn tắm' });
-    expect(within(dialog).getByTestId('inventory-item-name')).toBeDisabled();
+    // The branch's own item: its name and unit are editable; the code never is.
+    expect(within(dialog).getByTestId('inventory-item-name')).toBeEnabled();
+    expect(within(dialog).getByTestId('inventory-item-name')).toHaveValue('Khăn tắm');
     expect(within(dialog).getByTestId('inventory-item-code')).toBeDisabled();
     expect(within(dialog).getByTestId('inventory-item-code')).toHaveValue('3.001');
     await userEvent.type(within(dialog).getByTestId('inventory-item-threshold'), '5');
     await userEvent.click(within(dialog).getByTestId('inventory-item-save'));
-    await waitFor(() => expect(patched).toEqual([{ unit: 'cái', lowStockThreshold: 5, note: '' }]));
+    await waitFor(() => expect(patched).toEqual([{ name: 'Khăn tắm', unit: 'cái', lowStockThreshold: 5, note: '' }]));
     // Archived items: off the list until asked for, then marked and without actions.
     await userEvent.click(await screen.findByTestId('inventory-manage-open'));
     await userEvent.click(await screen.findByTestId('inventory-show-archived'));
@@ -907,4 +909,121 @@ describe('the receipt checklist, in each of the four warehouses — every item r
       expect(within(dialog).queryByPlaceholderText(/Ghi chú/)).not.toBeInTheDocument();
     });
   }
+});
+
+describe('"Sửa" and "Xóa" on every item card — in all four warehouses, for whoever manages the item', () => {
+  const WAREHOUSE_PAGES = [
+    ['chemicals', 'CHEMICAL_TOOLS'],
+    ['guest-supplies', 'GUEST_SUPPLIES'],
+    ['linens', 'LINEN'],
+    ['amenities', 'AMENITY'],
+  ] as const;
+
+  for (const [path, warehouse] of WAREHOUSE_PAGES) {
+    it(`${warehouse}: the manager edits and removes its branch's own item; a shared one only its threshold and note, never removed`, async () => {
+      const own = item('own', { warehouse, name: 'Cây lau sàn', label: 'Cây lau sàn', code: '1.004', scope: 'BRANCH' });
+      const shared = item('shared', { warehouse, name: 'Bao tay', label: 'Bao tay', code: '1.001', scope: 'SYSTEM' });
+      const patched: unknown[] = [];
+      const removed: string[] = [];
+      installApiMock(
+        shell(MANAGER, {
+          [`GET /api/housekeeping/inventory/items?warehouse=${warehouse}`]: () => ({ status: 200, body: { items: [own, shared] } }),
+          [`GET /api/housekeeping/inventory/receipts?warehouse=${warehouse}`]: () => ({ status: 200, body: { receipts: [] } }),
+          'PATCH /api/housekeeping/inventory/items/own': (init) => {
+            patched.push(JSON.parse(String(init.body)));
+            return { status: 200, body: { item: { ...own, name: 'Cây lau sàn lớn', label: 'Cây lau sàn lớn' } } };
+          },
+          'DELETE /api/housekeeping/inventory/items/own': () => {
+            removed.push('own');
+            return { status: 200, body: { removed: false, archived: true } };
+          },
+        }),
+      );
+      renderApp(`/app/hk/store/${path}`);
+      // Visible on the card — no menu to open first.
+      expect(await screen.findByTestId('inventory-edit-own')).toHaveTextContent('Sửa');
+      expect(screen.getByTestId('inventory-remove-own')).toHaveTextContent('Xóa');
+      // The shared item: "Sửa" (its threshold and note), no "Xóa".
+      expect(screen.getByTestId('inventory-edit-shared')).toBeInTheDocument();
+      expect(screen.queryByTestId('inventory-remove-shared')).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByTestId('inventory-edit-own'));
+      const dialog = await screen.findByRole('dialog', { name: 'Sửa Cây lau sàn' });
+      expect(within(dialog).getByTestId('inventory-item-code')).toBeDisabled();
+      const name = within(dialog).getByTestId('inventory-item-name');
+      await userEvent.clear(name);
+      expect(within(dialog).getByTestId('inventory-item-save')).toBeDisabled();
+      await userEvent.type(name, 'Cây lau sàn lớn');
+      await userEvent.click(within(dialog).getByTestId('inventory-item-save'));
+      await waitFor(() => expect(patched).toEqual([{ name: 'Cây lau sàn lớn', unit: 'cái', lowStockThreshold: null, note: '' }]));
+
+      await userEvent.click(await screen.findByTestId('inventory-remove-own'));
+      const confirm = await screen.findByRole('dialog', { name: /Xóa Cây lau sàn/ });
+      // It says what goes and what stays — and needs its own confirmation.
+      expect(within(confirm).getByTestId('inventory-remove-explain')).toHaveTextContent('1.004 Cây lau sàn');
+      expect(within(confirm).getByTestId('inventory-remove-explain')).toHaveTextContent('tồn kho và toàn bộ lịch sử được giữ nguyên');
+      expect(removed).toEqual([]);
+      await userEvent.click(within(confirm).getByTestId('inventory-remove-confirm'));
+      await waitFor(() => expect(removed).toEqual(['own']));
+    });
+  }
+
+  it('shows the manager no shared-item name or unit to change', async () => {
+    const shared = item('shared', { name: 'Bao tay', label: 'Bao tay', code: '3.001', scope: 'SYSTEM', lowStockThreshold: 2, note: 'Tầng 2' });
+    const patched: unknown[] = [];
+    installApiMock(
+      shell(MANAGER, {
+        [LINEN_ITEMS]: () => ({ status: 200, body: { items: [shared] } }),
+        [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
+        'PATCH /api/housekeeping/inventory/items/shared': (init) => {
+          patched.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { item: shared } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    await userEvent.click(await screen.findByTestId('inventory-edit-shared'));
+    const dialog = await screen.findByRole('dialog', { name: 'Sửa Bao tay' });
+    expect(within(dialog).getByTestId('inventory-item-name')).toBeDisabled();
+    expect(within(dialog).getByTestId('inventory-item-unit')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('inventory-item-save'));
+    // Only what is the branch's own is sent.
+    await waitFor(() => expect(patched).toEqual([{ lowStockThreshold: 2, note: 'Tầng 2' }]));
+  });
+
+  it('gives the Admin "Sửa" and "Xóa" on shared items — name and unit, in every branch — and none on a branch-only item', async () => {
+    const shared = item('s1', { name: 'Bao tay', label: 'Bao tay', code: '3.001', scope: 'SYSTEM' });
+    const local = item('l1', { name: 'Khăn riêng', label: 'Khăn riêng', code: '3.004', scope: 'BRANCH' });
+    const patched: unknown[] = [];
+    installApiMock(
+      shell(ADMIN_USER, {
+        'GET /api/housekeeping/inventory/items?warehouse=LINEN&branchId=1': () => ({ status: 200, body: { items: [shared, local] } }),
+        'GET /api/housekeeping/inventory/receipts?warehouse=LINEN&branchId=1': () => ({ status: 200, body: { receipts: [] } }),
+        'PATCH /api/housekeeping/inventory/items/s1': (init) => {
+          patched.push(JSON.parse(String(init.body)));
+          return { status: 200, body: { item: { ...shared, name: 'Găng tay', label: 'Găng tay', unit: 'đôi' } } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    // The Admin reads one branch at a time here.
+    await userEvent.click(await screen.findByTestId('inventory-branch'));
+    await userEvent.click(await screen.findByTestId('branch-option-1'));
+    expect(await screen.findByTestId('inventory-edit-s1')).toBeInTheDocument();
+    expect(screen.getByTestId('inventory-remove-s1')).toBeInTheDocument();
+    expect(screen.queryByTestId('inventory-edit-l1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('inventory-remove-l1')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('inventory-edit-s1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Sửa Bao tay' });
+    expect(dialog).toHaveTextContent('tên và đơn vị tính đổi ở mọi chi nhánh');
+    expect(within(dialog).queryByTestId('inventory-item-threshold')).not.toBeInTheDocument();
+    const name = within(dialog).getByTestId('inventory-item-name');
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Găng tay');
+    const unit = within(dialog).getByTestId('inventory-item-unit');
+    await userEvent.clear(unit);
+    await userEvent.type(unit, 'đôi');
+    await userEvent.click(within(dialog).getByTestId('inventory-item-save'));
+    await waitFor(() => expect(patched).toEqual([{ name: 'Găng tay', unit: 'đôi' }]));
+  });
 });

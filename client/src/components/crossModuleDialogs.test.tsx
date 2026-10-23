@@ -335,6 +335,7 @@ describe('Nhập bù', () => {
     const form = await screen.findByTestId('guest-request-form');
     await userEvent.type(within(form).getByTestId('guest-request-guest'), 'Khách Minh');
     await userEvent.type(within(form).getByTestId('guest-request-content'), 'Thêm gối');
+    await userEvent.click(within(form).getByTestId('guest-request-department-RECEPTION'));
     await userEvent.click(within(form).getByTestId('guest-request-form-add'));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));

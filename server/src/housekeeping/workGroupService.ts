@@ -84,6 +84,13 @@ export function serializeGroup(row: GroupRow, opts: { money: boolean; viewerId?:
       : started
         ? { code: 'IN_PROGRESS' as const, label: 'Đang thực hiện' }
         : { code: 'ACCEPTED' as const, label: row.acceptedAt ? 'Đã nhận' : 'Đã giao' };
+  /*
+    "ĐƯỢC GIAO" or "TỰ NHẬN" — how the holder came to hold it. Given out by a
+    manager: `assignedByUserId` is set (and, on groups given out before it was
+    recorded, the holder never pressed "Nhận": no `acceptedAt`). Taken from the
+    pool by the housekeeper itself: no assigner, and an `acceptedAt`.
+  */
+  const origin = !row.assigneeUserId ? null : row.assignedByUserId !== null || row.acceptedAt === null ? ('ASSIGNED' as const) : ('SELF' as const);
   return {
     id: row.id,
     branchId: row.branchId,
@@ -95,6 +102,12 @@ export function serializeGroup(row: GroupRow, opts: { money: boolean; viewerId?:
     assignee: row.assigneeUserId ? { id: row.assigneeUserId, name: row.assigneeNameSnapshot ?? '—' } : null,
     acceptedAt: row.acceptedAt?.toISOString() ?? null,
     status,
+    origin,
+    originLabel: origin === 'ASSIGNED' ? 'Được giao' : origin === 'SELF' ? 'Tự nhận' : null,
+    /** Given out and not yet acknowledged with "Nhận việc". */
+    awaitingAcceptance: origin === 'ASSIGNED' && row.acceptedAt === null,
+    assignedByName: row.assignedByNameSnapshot,
+    assignedAt: row.assignedAt?.toISOString() ?? null,
     /** "Tầng 1", "Tầng 2 (Khu Suite)", "Rooftop" — null for a place with no floor. */
     floors: floors.filter((f): f is string => f !== null),
     counts: {
@@ -314,6 +327,12 @@ export interface CreateWorkGroupInput {
   requestId?: unknown;
   name?: unknown;
   items: unknown;
+  /**
+   * "Giao cho": a housekeeper of the branch to give the group to at once
+   * ("Được giao"). Absent / empty: the group waits in the pool for a
+   * housekeeper to take ("Tự nhận").
+   */
+  assigneeUserId?: unknown;
 }
 
 /**
@@ -338,6 +357,8 @@ export async function createWorkGroup(
   }
   const items = normalizePlaces(input.items, branch.code);
   await assertRoomsFree(client, branch.id, workDate, items);
+  // The same eligibility as "Giao": a housekeeper of this branch's staff.
+  const person = await assignee(input.assigneeUserId, branch.id, client);
 
   const now = clock.now();
   for (let attempt = 0; ; attempt += 1) {
@@ -356,12 +377,25 @@ export async function createWorkGroup(
             createdByUserId: actor.id,
             createdByNameSnapshot: actor.fullName,
             createdAt: now,
+            ...(person
+              ? {
+                  assigneeUserId: person.id,
+                  assigneeNameSnapshot: person.fullName,
+                  assignedByUserId: actor.id,
+                  assignedByNameSnapshot: actor.fullName,
+                  assignedAt: now,
+                }
+              : {}),
           },
         });
-        await createItems(tx, { ...group, assigneeUserId: null, assigneeNameSnapshot: null }, items, 0, actor, now);
+        await createItems(tx, { ...group, assigneeUserId: person?.id ?? null, assigneeNameSnapshot: person?.fullName ?? null }, items, 0, actor, now);
         return group.id;
       });
-      return { duplicate: false, group: serializeGroup(await loadGroup(id, client), { money: true }) };
+      const created = await loadGroup(id, client);
+      if (person) {
+        await notifyAssignee(person.id, branch.id, created.tasks.filter(live).map((t) => ({ id: t.id, roomNumber: t.roomNumber })), now, client);
+      }
+      return { duplicate: false, group: serializeGroup(created, { money: true }) };
     } catch (error) {
       if (!(error instanceof PrismaNS.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
       const target = JSON.stringify(error.meta?.target ?? '');
@@ -471,7 +505,15 @@ export async function assignWorkGroup(
   await client.$transaction(async (tx) => {
     const { count } = await tx.housekeepingWorkGroup.updateMany({
       where: { id, assigneeUserId: row.assigneeUserId },
-      data: { assigneeUserId: person?.id ?? null, assigneeNameSnapshot: person?.fullName ?? null, acceptedAt: null },
+      data: {
+        assigneeUserId: person?.id ?? null,
+        assigneeNameSnapshot: person?.fullName ?? null,
+        acceptedAt: null,
+        // "Được giao": who gave it out, and when; cleared when it goes back to the pool.
+        assignedByUserId: person ? actor.id : null,
+        assignedByNameSnapshot: person ? actor.fullName : null,
+        assignedAt: person ? now : null,
+      },
     });
     if (count === 0) throw ApiError.conflict('Công việc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
     for (const t of movable) {
@@ -613,6 +655,23 @@ export async function acceptWorkGroup(actor: HousekeepingActor, id: string, cloc
   const free = row.tasks.filter((t) => live(t) && t.assigneeUserId === null && t.state === 'NOT_STARTED' && t.reviewResult === null);
   if (row.tasks.filter(live).length === 0) throw ApiError.conflict('Công việc này không còn phòng nào để làm.');
   const now = clock.now();
+  /*
+    "NHẬN VIỆC" ON A GROUP GIVEN TO THIS HOUSEKEEPER — an acknowledgement: it
+    records when, and changes who holds nothing. Only the person it was given to;
+    anyone else falls through to the pool rule below, which refuses a held group.
+  */
+  if (row.assigneeUserId === actor.id) {
+    if (row.acceptedAt) return serializeGroup(row, { money: false, viewerId: actor.id });
+    await client.$transaction(async (tx) => {
+      const { count } = await tx.housekeepingWorkGroup.updateMany({ where: { id, branchId, assigneeUserId: actor.id, acceptedAt: null }, data: { acceptedAt: now } });
+      if (count === 0) return;
+      for (const t of row.tasks.filter((x) => live(x) && x.assigneeUserId === actor.id && x.acceptedAt === null)) {
+        await tx.housekeepingRoomTask.updateMany({ where: { id: t.id, assigneeUserId: actor.id, acceptedAt: null }, data: { acceptedAt: now } });
+        await recordEvent(tx, t.id, 'ACCEPTED', actor, now, { toId: actor.id, toName: actor.fullName, group: row.number, acknowledged: true });
+      }
+    });
+    return serializeGroup(await loadGroup(id, client), { money: false, viewerId: actor.id });
+  }
   try {
     await client.$transaction(async (tx) => {
       const { count } = await tx.housekeepingWorkGroup.updateMany({

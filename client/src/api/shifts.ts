@@ -159,6 +159,9 @@ export const shiftsApi = {
    */
   close: () => api.post<EndShiftResult>('/reception/shifts/close', {}),
 
+  /** The name on the open shift — corrected by its own person; nothing else changes. */
+  rename: (receptionistName: string) => api.patch<{ session: ShiftSession }>('/reception/shifts/current/name', { receptionistName }),
+
   endPreview: () => api.get<EndShiftPreview>('/reception/shifts/end-preview'),
 
   /**

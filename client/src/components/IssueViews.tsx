@@ -496,7 +496,7 @@ export function IssueLifecycleDetail({ issue, showBranch = true }: { issue: Issu
               <IssueStageBadge issue={issue} />
             </dd>
           </div>
-          <Field label="Người sửa" value={technician} wrap empty="Chưa có" />
+          <Field label="Người xử lý" value={technician} wrap empty="Chưa có" />
           <Field label="Số lần sửa" value={String(issue.attempts.length)} wrap />
           <Field label="Tiếp nhận" value={acceptedAt ? formatDateTime(acceptedAt) : null} wrap empty="—" />
           <Field label="Hoàn thành" value={finishedAt ? formatDateTime(finishedAt) : null} wrap empty="—" />

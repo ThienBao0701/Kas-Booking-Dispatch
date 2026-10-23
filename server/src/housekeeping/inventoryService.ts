@@ -138,6 +138,8 @@ function assertDistinct(keys: string[], labelOf: (i: number) => string): void {
 }
 
 const isUniqueViolation = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
+/** A row still referenced (a movement, a receipt line…) — never deleted, never cascaded. */
+const isReferenced = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003';
 
 /* ------------------------------------------------------------------ *
  * Items
@@ -331,18 +333,80 @@ async function createSharedItems(actor: HousekeepingActor, input: { warehouse: u
  * may be CLASSIFIED once into one of the four (`warehouse`): it keeps its id,
  * balances and history, and gets that warehouse's next code.
  */
+/**
+ * "Tên mặt hàng" as edited: required, and never a second ACTIVE item of the same
+ * name (and size) where it lives — the existing one is named, nothing is merged.
+ * `others` says where to look: the branch's own items, or — for a shared item —
+ * every branch, leaving out the shared item's own rows.
+ */
+async function editedName(
+  client: PrismaClient,
+  raw: unknown,
+  item: { warehouse: InventoryWarehouse; variant: string },
+  others: Prisma.InventoryItemWhereInput,
+): Promise<string> {
+  const name = textOf(raw, 200, 'Tên mặt hàng');
+  if (!name) throw ApiError.validation('Vui lòng nhập tên mặt hàng.');
+  const taken = await client.inventoryItem.findFirst({
+    where: { AND: [others, { warehouse: item.warehouse, variant: item.variant, archivedAt: null, name: { equals: name, mode: 'insensitive' } }] },
+    select: { name: true, code: true, branch: { select: { address: true } } },
+  });
+  if (taken) throw ApiError.conflict(`${taken.branch.address} đã có “${taken.code ? `${taken.code} ` : ''}${taken.name}” trong kho này — không đổi được sang tên trùng.`);
+  return name;
+}
+
+/**
+ * THE ADMIN EDITS A SHARED ITEM — its name and unit, the same in every branch,
+ * in one write over its rows (an archived branch row keeps what it was). The
+ * code never changes; stock, movements, receipts and counts are untouched. The
+ * "sắp hết" level and the note are each branch's own, not the Admin's.
+ */
+async function updateSharedItem(id: string, input: { name?: unknown; unit?: unknown; lowStockThreshold?: unknown; note?: unknown; warehouse?: unknown }, client: PrismaClient) {
+  const item = await client.inventoryItem.findUnique({ where: { id }, select: { scope: true, code: true, warehouse: true, variant: true, archivedAt: true } });
+  if (!item) throw ApiError.notFound('Không tìm thấy mặt hàng.');
+  if (item.scope !== 'SYSTEM' || !item.code) throw ApiError.forbidden('Mặt hàng riêng chi nhánh do Quản lý buồng phòng của chi nhánh đó quản lý.');
+  if (item.archivedAt) throw ApiError.conflict('Mặt hàng đã ngừng sử dụng.');
+  if (input.lowStockThreshold !== undefined || input.note !== undefined || input.warehouse !== undefined) {
+    throw ApiError.validation('Ngưỡng sắp hết và ghi chú là của từng chi nhánh — Admin sửa tên và đơn vị tính.');
+  }
+  const data: Prisma.InventoryItemUpdateManyMutationInput = {};
+  if (input.name !== undefined) data.name = await editedName(client, input.name, item, { NOT: { scope: 'SYSTEM', code: item.code } });
+  if (input.unit !== undefined) {
+    const unit = textOf(input.unit, 30, 'Đơn vị');
+    if (!unit) throw ApiError.validation('Vui lòng nhập đơn vị tính.');
+    data.unit = unit;
+  }
+  try {
+    const { count } = await client.inventoryItem.updateMany({ where: { scope: 'SYSTEM', warehouse: item.warehouse, code: item.code, archivedAt: null }, data });
+    if (count === 0) throw ApiError.conflict('Mặt hàng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+  } catch (e) {
+    if (isUniqueViolation(e)) throw ApiError.conflict('Một chi nhánh đã có mặt hàng cùng tên đang dùng — chưa đổi được.');
+    throw e;
+  }
+  return serializeItem(await client.inventoryItem.findUniqueOrThrow({ where: { id }, select: ITEM_SELECT }));
+}
+
 export async function updateItem(
   actor: HousekeepingActor,
   id: string,
-  input: { unit?: unknown; lowStockThreshold?: unknown; note?: unknown; warehouse?: unknown },
+  input: { name?: unknown; unit?: unknown; lowStockThreshold?: unknown; note?: unknown; warehouse?: unknown },
   client: PrismaClient = defaultPrisma,
 ) {
+  if (actor.role === 'ADMIN') return updateSharedItem(id, input, client);
   const branch = await managerBranch(actor, client);
-  const item = await client.inventoryItem.findUnique({ where: { id }, select: { branchId: true, archivedAt: true, warehouse: true, scope: true, unit: true } });
+  const item = await client.inventoryItem.findUnique({
+    where: { id },
+    select: { branchId: true, archivedAt: true, warehouse: true, scope: true, unit: true, name: true, variant: true },
+  });
   if (!item || item.branchId !== branch.id) throw ApiError.notFound('Không tìm thấy mặt hàng.');
   if (item.archivedAt) throw ApiError.conflict('Mặt hàng đã ngừng sử dụng.');
   // A shared item is the Admin's: its name, code and unit are the same everywhere; the branch keeps its own threshold and note.
-  if (item.scope === 'SYSTEM' && (input.warehouse !== undefined || (input.unit !== undefined && textOf(input.unit, 30, 'Đơn vị') !== item.unit))) {
+  if (
+    item.scope === 'SYSTEM' &&
+    (input.warehouse !== undefined ||
+      (input.unit !== undefined && textOf(input.unit, 30, 'Đơn vị') !== item.unit) ||
+      (input.name !== undefined && textOf(input.name, 200, 'Tên mặt hàng') !== item.name))
+  ) {
     throw ApiError.forbidden('Mặt hàng dùng chung do Admin quản lý — chỉ sửa được ngưỡng sắp hết và ghi chú.');
   }
   if (input.warehouse !== undefined) {
@@ -359,7 +423,11 @@ export async function updateItem(
     });
     return serializeItem(moved);
   }
-  const data: Prisma.InventoryItemUpdateInput = {};
+  const data: Prisma.InventoryItemUpdateManyMutationInput = {};
+  if (input.name !== undefined && item.scope !== 'SYSTEM') {
+    // The branch's own item: not the same name as another active item of this branch's warehouse.
+    data.name = await editedName(client, input.name, item, { branchId: branch.id, NOT: { id } });
+  }
   if (input.unit !== undefined) {
     const unit = textOf(input.unit, 30, 'Đơn vị');
     if (!unit) throw ApiError.validation('Vui lòng nhập đơn vị tính.');
@@ -368,11 +436,32 @@ export async function updateItem(
   if (input.lowStockThreshold !== undefined) data.lowStockThreshold = thresholdOf(input.lowStockThreshold);
   if (input.note !== undefined) data.note = textOf(input.note, 500, 'Ghi chú');
   try {
-    return serializeItem(await client.inventoryItem.update({ where: { id }, data, select: ITEM_SELECT }));
+    // Only while still in use: a stale screen cannot edit an item archived meanwhile.
+    const { count } = await client.inventoryItem.updateMany({ where: { id, branchId: branch.id, archivedAt: null }, data });
+    if (count === 0) throw ApiError.conflict('Mặt hàng đã ngừng sử dụng hoặc vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
   } catch (e) {
-    if (isUniqueViolation(e)) throw ApiError.conflict('Mặt hàng vừa được thay đổi ở nơi khác. Vui lòng tải lại.');
+    if (isUniqueViolation(e)) throw ApiError.conflict('Kho đã có mặt hàng cùng tên đang dùng — chưa đổi được.');
     throw e;
   }
+  return serializeItem(await client.inventoryItem.findUniqueOrThrow({ where: { id }, select: ITEM_SELECT }));
+}
+
+/**
+ * Removes a row never used; ARCHIVES one with history — and one that gains
+ * history at the very moment of the delete (the database refuses the delete;
+ * it is archived instead). Nothing it points at is ever deleted with it.
+ */
+async function deleteOrArchive(client: PrismaClient | Prisma.TransactionClient, id: string, used: boolean): Promise<'removed' | 'archived'> {
+  if (!used) {
+    try {
+      await client.inventoryItem.delete({ where: { id } });
+      return 'removed';
+    } catch (e) {
+      if (!isReferenced(e)) throw e;
+    }
+  }
+  await client.inventoryItem.updateMany({ where: { id, archivedAt: null }, data: { archivedAt: new Date() } });
+  return 'archived';
 }
 
 /**
@@ -394,12 +483,8 @@ export async function removeItem(actor: HousekeepingActor, id: string, client: P
   if (!item || item.branchId !== branch.id) throw ApiError.notFound('Không tìm thấy mặt hàng.');
   if (item.scope === 'SYSTEM') throw ApiError.forbidden('Mặt hàng dùng chung do Admin quản lý — chi nhánh không xóa được.');
   const used = Object.values(item._count).some((n) => n > 0);
-  if (!used) {
-    await client.inventoryItem.delete({ where: { id } });
-    return { removed: true, archived: false };
-  }
-  if (!item.archivedAt) await client.inventoryItem.update({ where: { id }, data: { archivedAt: new Date() } });
-  return { removed: false, archived: true };
+  const outcome = await deleteOrArchive(client, id, used);
+  return { removed: outcome === 'removed', archived: outcome === 'archived' };
 }
 
 /**
@@ -414,14 +499,10 @@ async function removeSharedItem(id: string, client: PrismaClient) {
     select: { id: true, archivedAt: true, _count: { select: { movements: true, receiptLines: true, countLines: true, transferLines: true, damageReports: true } } },
   });
   let archived = 0;
-  await client.$transaction(async (tx) => {
-    for (const row of rows) {
-      if (Object.values(row._count).some((n) => n > 0)) {
-        archived += 1;
-        if (!row.archivedAt) await tx.inventoryItem.update({ where: { id: row.id }, data: { archivedAt: new Date() } });
-      } else await tx.inventoryItem.delete({ where: { id: row.id } });
-    }
-  });
+  // One row at a time, each on its own: a row that gains history mid-way is archived, the others still go.
+  for (const row of rows) {
+    if ((await deleteOrArchive(client, row.id, Object.values(row._count).some((n) => n > 0))) === 'archived') archived += 1;
+  }
   return { removed: archived === 0, archived: archived > 0 };
 }
 

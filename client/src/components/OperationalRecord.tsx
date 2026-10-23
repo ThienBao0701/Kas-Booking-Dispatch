@@ -176,7 +176,7 @@ export function OperationalRecordDetail({
             {row.facility.issue.inspectionEnabled ? (
               <Field label="Nghiệm thu">{row.facility.issue.inspectionLabel}</Field>
             ) : null}
-            <Field label="Người sửa">{row.facility.issue.repairerName}</Field>
+            <Field label="Người xử lý">{row.facility.issue.repairerName}</Field>
             <Field label="SĐT kỹ thuật">
               {row.facility.issue.attempts[row.facility.issue.attempts.length - 1]?.technicianPhone ??
                 row.facility.issue.technicianPhone}

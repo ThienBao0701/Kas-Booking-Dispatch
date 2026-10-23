@@ -12,6 +12,13 @@
  * server-stamped `createdAt` (the incident's own `createdAt` for III) — never a
  * technician's acceptance or completion, a shift start or a browser clock.
  *
+ * II (GUEST REQUESTS) COUNT FROM THE COMPLETION instead: a completed request
+ * stays in the active list for 12 hours after its server-stamped `completedAt`
+ * — whoever did it and when stay in view for the next shift — and only then
+ * reaches the archive. A request taken a day ago and completed a minute ago is
+ * therefore still active, not archived on the spot. It still never counts as
+ * unresolved: the menu counts read `completedAt`, not this list.
+ *
  * NOTHING MOVES. No row is copied, deleted or rewritten when it crosses the
  * line; it is simply matched by the other query. Its report time, completion,
  * employee, resolution, repair history and audit trail are exactly as they were.
@@ -45,12 +52,7 @@ const completedJournal: Prisma.ReceptionOperationalReportWhereInput = {
   ],
 };
 
-const unfinishedJournal: Prisma.ReceptionOperationalReportWhereInput = {
-  OR: [
-    { guestRequest: { is: { completedAt: null } } },
-    { complaint: { is: { completedAt: null } } },
-  ],
-};
+const unfinishedComplaint: Prisma.ReceptionOperationalReportWhereInput = { complaint: { is: { completedAt: null } } };
 
 /**
  * II and IV, ACTIVE: every live record of the branch that is unfinished, or was
@@ -69,7 +71,15 @@ export function activeJournalWhere(
     AND: [
       scope,
       { category: { in: [...ARCHIVABLE_CATEGORIES] } },
-      { voidedAt: null, OR: [unfinishedJournal, { createdAt: { gt: cutoff } }] },
+      {
+        voidedAt: null,
+        OR: [
+          // II: open, or completed less than 12 hours ago.
+          { category: 'GUEST_REQUEST', guestRequest: { is: { OR: [{ completedAt: null }, { completedAt: { gt: cutoff } }] } } },
+          // IV: open, or received less than 12 hours ago.
+          { category: 'CUSTOMER_COMPLAINT', OR: [unfinishedComplaint, { createdAt: { gt: cutoff } }] },
+        ],
+      },
     ],
   };
 }
@@ -95,12 +105,20 @@ export function archivedJournalWhere(
   now: Date,
   received?: ReceivedWindow | null,
 ): Prisma.ReceptionOperationalReportWhereInput {
+  const cutoff = archiveCutoff(now);
   return {
     AND: [
       scope,
       { category: { in: [...ARCHIVABLE_CATEGORIES] } },
-      { voidedAt: null, createdAt: { lte: archiveCutoff(now) } },
-      completedJournal,
+      {
+        voidedAt: null,
+        OR: [
+          // II: completed at least 12 hours ago.
+          { category: 'GUEST_REQUEST', guestRequest: { is: { completedAt: { lte: cutoff } } } },
+          // IV: completed, and received at least 12 hours ago.
+          { category: 'CUSTOMER_COMPLAINT', createdAt: { lte: cutoff }, ...completedJournal },
+        ],
+      },
       ...(received ? [{ createdAt: { gte: received.start, lt: received.end } }] : []),
     ],
   };

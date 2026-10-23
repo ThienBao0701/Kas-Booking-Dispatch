@@ -130,7 +130,8 @@ export function completionArchiveRows(
     if (r.voided) return false;
     switch (r.category) {
       case 'GUEST_REQUEST':
-        return !!r.guestRequest?.completed && old(r.createdAt);
+        // Twelve hours from the COMPLETION, as the active list keeps it (completionArchive.ts).
+        return !!r.guestRequest?.completed && !!r.guestRequest.completedAt && old(r.guestRequest.completedAt);
       case 'CUSTOMER_COMPLAINT':
         return !!r.complaint?.completed && old(r.createdAt);
       case 'FACILITY_ISSUE':

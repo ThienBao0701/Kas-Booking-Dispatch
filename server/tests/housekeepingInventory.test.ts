@@ -365,6 +365,8 @@ describe('D. "Hoàn thành" takes the counts out of the on-hand stock', () => {
   it('never moves the stock twice — a double "Hoàn thành" is one completion', async () => {
     const { towel } = await stock(20);
     const room = await cleaning('102');
+    // A second room still in hand, so the first completion does not end the shift (shiftAutoEnd).
+    await cleaning('103');
     const form = { items: { [towel.id]: 2 } };
     const both = await Promise.all([room.complete(form), room.complete(form)]);
     expect(both.map((r) => r.status).sort()).toEqual([200, 409]);

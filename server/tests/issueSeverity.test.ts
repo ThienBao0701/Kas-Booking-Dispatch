@@ -60,7 +60,7 @@ const at = (hhmm: string) => setClock({ now: () => hcm(DAY, hhmm) });
 async function request(guestName: string, severity?: string, agent: Agent = letan1) {
   const res = await agent
     .post('/api/reception/reports')
-    .send({ category: 'GUEST_REQUEST', guestRequest: { guestName, note: 'Cần thêm gối', ...(severity ? { severity } : {}) } });
+    .send({ category: 'GUEST_REQUEST', guestRequest: { guestName, note: 'Cần thêm gối', receivingDepartment: 'RECEPTION', ...(severity ? { severity } : {}) } });
   expect(res.status).toBe(201);
   return res.body.report as { id: string; guestRequest: { severity: string | null; severityLabel: string } };
 }

@@ -83,6 +83,15 @@ export function isShiftRole(role: UserRole): boolean {
 }
 
 /**
+ * WHO OPENS A SHIFT AT THE SHIFT GATE: Lễ tân, and Bell — so "who is on shift
+ * at this branch" has one answer for both desks. Handover, order proofs and
+ * handover notes stay the receptionist's (`isShiftRole`).
+ */
+export function opensShift(role: UserRole): boolean {
+  return role === 'RECEPTIONIST' || role === 'BELL';
+}
+
+/**
  * The receptionist's open session, or null. Never returns another user's.
  *
  * A session stays OPEN past its grace end on purpose — it is still the answer to
@@ -119,8 +128,8 @@ export async function checkInShift(
   clock: Clock = getClock(),
   client: PrismaClient = prisma,
 ): Promise<ShiftSessionRow> {
-  if (!isShiftRole(actor.role)) {
-    throw ApiError.forbidden('Chỉ lễ tân mới bắt đầu được ca làm việc.');
+  if (!opensShift(actor.role)) {
+    throw ApiError.forbidden('Chỉ lễ tân và Bell mới bắt đầu được ca làm việc.');
   }
   if (actor.branchId == null) {
     throw ApiError.branchAccessDenied('Tài khoản chưa được gán chi nhánh.');
@@ -169,6 +178,50 @@ export async function checkInShift(
     }
     throw error;
   }
+}
+
+/**
+ * "SỬA TÊN TRÊN CA" — the name typed at check-in, corrected by the person on
+ * that open shift. ONLY the name: the shift, its times, the account and the
+ * branch are never touched. The old and new names are kept (SHIFT_NAME audit),
+ * and the write is guarded on the session still being open and theirs.
+ */
+export async function renameOpenShift(
+  actor: ShiftActor,
+  rawName: unknown,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ShiftSessionRow> {
+  if (!opensShift(actor.role)) throw ApiError.forbidden('Chỉ lễ tân và Bell mới sửa được tên trên ca.');
+  const name = typeof rawName === 'string' ? rawName.trim() : '';
+  if (!name) throw ApiError.validation('Vui lòng nhập họ tên.');
+  if (name.length > 200) throw ApiError.validation('Họ tên quá dài.');
+  const session = await requireOpenSession(actor, client);
+  if (session.receptionistName === name) return session;
+  const now = clock.now();
+  await client.$transaction(async (tx) => {
+    const { count } = await tx.receptionShiftSession.updateMany({
+      where: { id: session.id, userId: actor.id, closedAt: null },
+      data: { receptionistName: name },
+    });
+    if (count === 0) throw ApiError.conflict('Ca làm việc vừa kết thúc. Vui lòng tải lại trang.');
+    await tx.receptionReportAudit.create({
+      data: {
+        branchId: session.branchId,
+        shiftSessionId: session.id,
+        action: 'SHIFT_NAME',
+        field: 'receptionistName',
+        oldValue: session.receptionistName,
+        newValue: name,
+        actorUserId: actor.id,
+        actorNameSnapshot: actor.fullName,
+        actorShiftType: session.shiftType,
+        actorRole: actor.role,
+        createdAt: now,
+      },
+    });
+  });
+  return (await findOpenSession(actor.id, client))!;
 }
 
 /**

@@ -504,6 +504,10 @@ export function CreateWorkDialog({
   const day = useDayTasks(branchId, date);
   const taken = useMemo(() => openPlaceKeys(day.data?.tasks ?? []), [day.data]);
   const [name, setName] = useState('');
+  // "Giao cho": a housekeeper of the branch, or '' — the pool, for a housekeeper to take.
+  const [assigneeId, setAssigneeId] = useState('');
+  const staff = useQuery({ queryKey: [...ROOM_WORK_KEY, 'staff', branchId], queryFn: () => roomWorkApi.staff({ branchId }) });
+  const assigneeName = staff.data?.staff.find((s) => String(s.id) === assigneeId)?.fullName;
   // The draft lives here, not in the picker: the review and back keep every value.
   const [sections, setSections] = useState<FloorSection[]>([{ key: 1, group: '' }]);
   const [places, setPlaces] = useState<PlaceDraft[]>([]);
@@ -519,6 +523,7 @@ export function CreateWorkDialog({
         requestId: requestId.current,
         ...(name.trim() ? { name: name.trim() } : {}),
         items: places.map(placeInput),
+        ...(assigneeId ? { assigneeUserId: Number(assigneeId) } : {}),
       }),
     onSuccess: async (r) => {
       await queryClient.invalidateQueries({ queryKey: ROOM_WORK_KEY });
@@ -582,6 +587,9 @@ export function CreateWorkDialog({
               <p className="text-sm text-slate-700">
                 <span className="font-semibold">Tầng / khu vực:</span> {groups.join(', ')}
               </p>
+              <p className="text-sm text-slate-700" data-testid="work-review-assignee">
+                <span className="font-semibold">Giao cho:</span> {assigneeName ? `${assigneeName} (Được giao)` : 'Để nhân viên tự nhận'}
+              </p>
               {draftsByFloor(ordered).map((floor) => (
                 <section key={floor.heading} className="overflow-hidden rounded-xl border border-line" data-testid={`work-review-floor-${floor.heading}`}>
                   <h3 className="border-b border-line-subtle bg-slate-50 px-3 py-1.5 text-sm font-semibold text-slate-900">{floor.heading}</h3>
@@ -619,6 +627,17 @@ export function CreateWorkDialog({
                   placeholder="Ví dụ: Tổng vệ sinh buổi sáng"
                   data-testid="work-name"
                 />
+              </label>
+              <label className={LABEL} htmlFor="work-assignee">
+                Giao cho
+                <select id="work-assignee" className={FIELD} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} data-testid="work-assignee">
+                  <option value="">Để nhân viên tự nhận</option>
+                  {(staff.data?.staff ?? []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.fullName}
+                    </option>
+                  ))}
+                </select>
               </label>
               <PlacePicker areas={a} sections={sections} onSections={setSections} value={places} onChange={setPlaces} taken={taken} />
             </div>
@@ -695,6 +714,17 @@ export function WorkGroupCard({
               {group.assignee ? <span className="font-semibold text-slate-900">{group.assignee.name}</span> : <span className="text-slate-500">Chưa giao</span>}
             </span>
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{group.status.label}</span>
+            {/* How the holder came to hold it: given out by a manager, or taken from the pool. */}
+            {group.origin ? (
+              <span
+                data-testid={`group-origin-${group.number}`}
+                title={group.origin === 'ASSIGNED' && group.assignedByName ? `Giao bởi ${group.assignedByName}` : undefined}
+                className={`rounded-full px-2 py-0.5 text-xs font-semibold ${group.origin === 'ASSIGNED' ? 'bg-blue-100 text-blue-800' : 'bg-emerald-100 text-emerald-800'}`}
+              >
+                {group.originLabel}
+                {group.awaitingAcceptance ? ' · chờ nhận việc' : ''}
+              </span>
+            ) : null}
           </p>
           {group.floors.length > 0 ? <p className="mt-0.5 text-sm text-slate-600">{group.floors.join(' · ')}</p> : null}
         </div>

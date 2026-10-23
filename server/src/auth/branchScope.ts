@@ -103,6 +103,7 @@ export function branchScopeOf(actor: ScopeSubject): BranchScope {
       return actor.managedBranchIds ?? [];
     // Lễ tân, Buồng phòng and Quản lý buồng phòng: the one branch on the account.
     case 'RECEPTIONIST':
+    case 'BELL':
     case 'HOUSEKEEPING':
     case 'HOUSEKEEPING_MANAGER':
       return actor.branchId !== null ? [actor.branchId] : [];

@@ -291,8 +291,8 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(within(current).getByTestId('shift-hotel')).toHaveTextContent('Khách sạn: 05 Trương Định');
     expect(document.body).not.toHaveTextContent(/Chi nhánh \d/);
     const nav = await screen.findByRole('navigation', { name: 'Điều hướng chính' });
-    // Its work, then its own reports (with its KPI) and its completed issues — folded groups.
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Buồng phòng']);
+    // Its work ("Công việc" — the department is still Bộ phận buồng phòng), then its own reports and completed issues.
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Công việc']);
     expect(within(nav).getByTestId('nav-group-Báo cáo vấn đề')).toBeInTheDocument();
     expect(within(nav).getByTestId('nav-group-Hoàn thành vấn đề')).toBeInTheDocument();
 
@@ -400,6 +400,38 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     renderApp('/app/inspections');
     expect(await screen.findByTestId('shift-start')).toBeInTheDocument();
     expect(screen.queryByText('Tài khoản chưa được gán chi nhánh')).not.toBeInTheDocument();
+  });
+
+  it('marks "Được giao" and "Tự nhận" apart — and lets the housekeeper a group was given to press "Nhận việc"', async () => {
+    const acked: string[] = [];
+    const given = group('g4', 4, [item('w6', { roomNumber: '401', floor: '4', assignee: MINE, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
+      assignee: MINE,
+      status: { code: 'ACCEPTED', label: 'Đã giao' },
+      origin: 'ASSIGNED',
+      originLabel: 'Được giao',
+      awaitingAcceptance: true,
+      assignedByName: 'Quản lý',
+    });
+    const taken = { ...G3, origin: 'SELF', originLabel: 'Tự nhận', awaitingAcceptance: false };
+    installApiMock(
+      routes({
+        [GROUPS]: () => ({ status: 200, body: { working: true, groups: [G1, given, taken] } }),
+        'POST /api/housekeeping/work/groups/g4/accept': () => {
+          acked.push('g4');
+          return { status: 200, body: { group: { ...given, acceptedAt: new Date().toISOString(), awaitingAcceptance: false, status: { code: 'ACCEPTED', label: 'Đã nhận' } } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections');
+    expect(await screen.findByTestId('group-origin-4')).toHaveTextContent('Được giao · chờ nhận việc');
+    expect(screen.getByTestId('group-origin-3')).toHaveTextContent('Tự nhận');
+    // A pool group has no origin yet — it is free to take.
+    expect(screen.queryByTestId('group-origin-1')).not.toBeInTheDocument();
+    // Only the one given to this housekeeper offers "Nhận việc"; another's group is not offered at all.
+    expect(screen.queryByTestId('group-acknowledge-3')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('group-acknowledge-4'));
+    await userEvent.click(await screen.findByTestId('group-accept-confirm'));
+    await waitFor(() => expect(acked).toEqual(['g4']));
   });
 
   it('"Nhận công việc" confirms the whole group, every place in it, and takes it', async () => {

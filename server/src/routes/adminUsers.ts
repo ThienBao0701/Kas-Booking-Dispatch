@@ -28,6 +28,8 @@ const MANAGEABLE_ROLES = [
   'HOUSEKEEPING_MANAGER',
   // Tổng quản lý kỹ thuật: a SET of ticked branches, like a Quản lý kỹ thuật.
   'TECHNICAL_GENERAL_MANAGER',
+  // Bell: exactly ONE branch, held in `branchId` like a receptionist's.
+  'BELL',
 ] as const;
 
 /**
@@ -76,6 +78,7 @@ const ROLE_LABELS: Record<(typeof MANAGEABLE_ROLES)[number], string> = {
   RECEPTION_MANAGER: 'quản lý lễ tân',
   RECEPTION_GENERAL_MANAGER: 'tổng quản lý lễ tân',
   HOUSEKEEPING_MANAGER: 'quản lý buồng phòng',
+  BELL: 'bell',
 };
 
 const createUserSchema = z
@@ -99,6 +102,10 @@ const createUserSchema = z
   })
   .refine((v) => v.role !== 'HOUSEKEEPING_MANAGER' || v.branchId !== undefined, {
     message: 'Quản lý buồng phòng phải được gán đúng một chi nhánh.',
+    path: ['branchId'],
+  })
+  .refine((v) => v.role !== 'BELL' || v.branchId !== undefined, {
+    message: 'Tài khoản Bell phải thuộc một chi nhánh.',
     path: ['branchId'],
   })
   .refine((v) => !GLOBAL_ROLES.includes(v.role) || v.branchId === undefined, {
