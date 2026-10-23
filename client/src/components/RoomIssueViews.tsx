@@ -304,10 +304,6 @@ export function CollectionDialog({
       }
     >
       <div className="space-y-3">
-        <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-          Khoản thu này tách riêng khỏi sổ thanh toán và không làm thay đổi tiền mặt trong ca.
-        </p>
-
         <fieldset>
           <legend className="mb-1 text-sm font-medium text-slate-700">Trạng thái thu tiền</legend>
           <div className="flex flex-wrap gap-2">
@@ -477,11 +473,16 @@ export function RoomIssueSummaryStrip({ summary }: { summary: RoomIssueSummary }
           </div>
         ))}
       </div>
-      <p className="border-t border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">
-        Khoản thu buồng phòng tách riêng khỏi sổ thanh toán; không tính vào tiền mặt trong ca.
-        {summary.pendingAmount > 0 ? ` Đã ghi nhận chờ thu: ${formatVnd(summary.pendingAmount)}.` : ''}
-        {summary.uncollectibleAmount > 0 ? ` Không thu được: ${formatVnd(summary.uncollectibleAmount)}.` : ''}
-      </p>
+      {summary.pendingAmount > 0 || summary.uncollectibleAmount > 0 ? (
+        <p className="border-t border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">
+          {[
+            summary.pendingAmount > 0 ? `Đã ghi nhận chờ thu: ${formatVnd(summary.pendingAmount)}.` : '',
+            summary.uncollectibleAmount > 0 ? `Không thu được: ${formatVnd(summary.uncollectibleAmount)}.` : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        </p>
+      ) : null}
     </div>
   );
 }

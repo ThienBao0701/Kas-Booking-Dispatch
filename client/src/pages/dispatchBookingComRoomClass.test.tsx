@@ -464,3 +464,95 @@ describe('dispatch gating', () => {
     expect(select).toHaveValue('');
   });
 });
+
+/* ================================================================== */
+/* What Reception receives: the edited note, the payment, no extra field */
+/* ================================================================== */
+
+describe('what the dispatch carries to the branch', () => {
+  const sent = (fetchMock: ReturnType<typeof mount>) => {
+    const call = fetchMock.mock.calls.find(([u, i]) => String(u) === '/api/admin/bookings/dispatch' && (i as RequestInit)?.method === 'POST');
+    return call ? JSON.parse(String((call[1] as RequestInit).body)) : undefined;
+  };
+  const DISPATCHED = { 'POST /api/admin/bookings/dispatch': () => ({ status: 201, body: { booking: { id: 'created-1' } } }) };
+
+  it('sends the Admin’s edit of "Ghi chú PMS" as the stored note — the exact latest text, once', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview(), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    const note = (await screen.findByTestId('bcom-pms-note')) as HTMLTextAreaElement;
+    await waitFor(() => expect(note.value).toContain('1STAN'));
+    await user.clear(note);
+    await user.type(note, 'GHI CHU CU');
+    await user.clear(note);
+    await user.type(note, 'BK 6312474567 GHI CHU MOI DA SUA');
+    await user.click(screen.getByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock).adminPmsNote).toBe('BK 6312474567 GHI CHU MOI DA SUA');
+  });
+
+  it('sends no stored note when the generated one was kept — Reception generates the same one', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview(), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    await waitFor(() => expect((screen.getByTestId('bcom-pms-note') as HTMLTextAreaElement).value).toContain('1STAN'));
+    await user.click(screen.getByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock).adminPmsNote).toBeNull();
+  });
+
+  it('has no "Ghi chú / Yêu cầu đặc biệt" field — the extracted request still travels — and keeps the payment chosen', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview({ paymentStatus: 'PAY_AFTER', specialRequest: 'Khách đến lúc 14:00' }), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    const payment = (await screen.findByTestId('dispatch-payment')) as HTMLSelectElement;
+    expect(screen.queryByText('Ghi chú / Yêu cầu đặc biệt')).not.toBeInTheDocument();
+    expect(screen.getByTestId('bcom-pms-note-card')).toHaveTextContent('Ghi chú PMS');
+    // PAY BEFORE CHECK-IN first; the extracted PAY AFTER kept, not reset.
+    expect(within(payment).getAllByRole('option').map((o) => o.textContent)).toEqual(['PAY BEFORE CHECK-IN', 'PAY AFTER CHECK-IN']);
+    expect(payment).toHaveValue('PAY_AFTER');
+    await user.click(screen.getByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock)).toMatchObject({ paymentStatus: 'PAY_AFTER', specialRequest: 'Khách đến lúc 14:00' });
+  });
+
+  it('starts at PAY BEFORE CHECK-IN when the extraction gives it, and stays editable', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview({ paymentStatus: 'PAY_BEFORE' }), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    const payment = (await screen.findByTestId('dispatch-payment')) as HTMLSelectElement;
+    expect(payment).toHaveValue('PAY_BEFORE');
+    await user.selectOptions(payment, 'PAY_AFTER');
+    await user.click(screen.getByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock).paymentStatus).toBe('PAY_AFTER');
+  });
+
+  it('starts at PAY BEFORE CHECK-IN when the paste established no policy — PAY AFTER still selectable and sent as chosen', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview({ paymentStatus: null }), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    const payment = (await screen.findByTestId('dispatch-payment')) as HTMLSelectElement;
+    expect(payment).toHaveValue('PAY_BEFORE');
+    await user.selectOptions(payment, 'PAY_AFTER');
+    expect(payment).toHaveValue('PAY_AFTER');
+    await user.click(screen.getByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock).paymentStatus).toBe('PAY_AFTER');
+  });
+
+  it('sends the default PAY BEFORE CHECK-IN untouched when the Admin keeps it', async () => {
+    const fetchMock = mount(RESOLVED_STAN, preview({ paymentStatus: null }), DISPATCHED);
+    const user = userEvent.setup();
+    renderApp('/app/dispatch');
+    await extract(user);
+    await user.click(await screen.findByRole('button', { name: /Gửi xuống chi nhánh/ }));
+    await waitFor(() => expect(sent(fetchMock)).toBeDefined());
+    expect(sent(fetchMock).paymentStatus).toBe('PAY_BEFORE');
+  });
+});

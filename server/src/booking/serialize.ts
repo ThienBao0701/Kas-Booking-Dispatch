@@ -125,7 +125,8 @@ export function serializeParsedPreview(
       checkOut: parsed.checkOut,
       currency: parsed.currency,
       totalAmount: parsed.totalAmount,
-      paymentStatus: parsed.paymentStatus,
+      // A policy the paste established — or null, and the review starts at its own default.
+      paymentStatus: parsed.paymentStatusKnown ? parsed.paymentStatus : null,
       specialRequest: parsed.specialRequest,
       parserVersion: parsed.parserVersion,
     },

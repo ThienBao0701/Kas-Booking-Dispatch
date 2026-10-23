@@ -30,6 +30,7 @@ import {
   type CreateReportInput,
   guestByEz,
   listHousekeepingJournal,
+  countOpenReports,
   setGuestIdentity,
   lateEntryReceptionists,
   lateEntrySessions,
@@ -502,6 +503,13 @@ export function createReceptionReportsRouter(): Router {
     journal: its open (and recently completed) guest requests. Its own
     department's only, whatever the role; the Admin may name a branch.
   */
+  // GET /api/reception/reports/open-counts — what is still open, by category and department (the menu's counts).
+  router.get('/reception/reports/open-counts', requireAuth, requirePasswordChanged, requireJournalWriter, (req, res, next) => {
+    (async () => {
+      res.json({ counts: await countOpenReports(actor(req.currentUser!)) });
+    })().catch(next);
+  });
+
   router.get('/reception/reports/housekeeping', requireAuth, requirePasswordChanged, requireHousekeepingJournal, (req, res, next) => {
     (async () => {
       const q = z.object({ branchId: z.coerce.number().int().positive().optional() }).parse(req.query);

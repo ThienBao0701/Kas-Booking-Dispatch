@@ -38,6 +38,7 @@ const BY_BRANCH = [
 
 const ADMIN_SUMMARY = {
   totalUnresolved: 4,
+  byDepartment: { reception: 3, housekeeping: 1 },
   newCount: 2,
   inProgressCount: 1,
   awaitingInspectionCount: 1,
@@ -84,7 +85,7 @@ function listBody(issues: unknown[]) {
 }
 
 describe('Issue counters — sidebar badge', () => {
-  it('shows the unresolved count on the Issues menu item (admin)', async () => {
+  it('shows the unresolved incidents on their own categories — Reception’s and Housekeeping’s — not as one total on the group (admin)', async () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
@@ -92,9 +93,17 @@ describe('Issue counters — sidebar badge', () => {
       'GET /api/admin/dashboard/summary': () => ({ status: 200, body: DASHBOARD_SUMMARY }),
     });
     renderApp('/app/dashboard');
-    // Accessible, not colour-only: the number is exposed via an aria-label.
-    // 2 new + 1 being repaired + 1 repaired and awaiting inspection: all unresolved.
-    expect(await screen.findByLabelText('4 sự cố chưa xử lý')).toHaveTextContent('4');
+    // The group says only that something inside waits — no total repeated beside it.
+    expect(await screen.findByTestId('nav-dot-Báo cáo vấn đề')).toHaveAttribute('aria-label', 'Có mục cần xử lý');
+    expect(screen.queryByLabelText('4 sự cố chưa xử lý')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('nav-group-Báo cáo vấn đề'));
+    await userEvent.click(screen.getByTestId('nav-group-Lễ tân'));
+    // Accessible, not colour-only: each count names its category. 3 reported by Reception …
+    expect(screen.getByTestId('nav-count-/app/reports?category=FACILITY_ISSUE')).toHaveTextContent('3');
+    expect(screen.getByTestId('nav-count-/app/reports?category=FACILITY_ISSUE')).toHaveAttribute('aria-label', expect.stringContaining('3 mục cần xử lý'));
+    // … and 1 by Bộ phận buồng phòng, under its own entry — together the 4 unresolved, none twice.
+    await userEvent.click(screen.getByTestId('nav-group-Buồng phòng'));
+    expect(screen.getByTestId('nav-count-/app/hk/reports?category=FACILITY_ISSUE')).toHaveTextContent('1');
   });
 
   it('receptionist sees only their own branch count', async () => {
@@ -256,12 +265,15 @@ describe('Issue counters — come from status, not list length', () => {
     installApiMock({
       'GET /api/auth/me': () => ({ status: 200, body: { user: ADMIN_USER } }),
       'GET /api/notifications/unread-count': () => ({ status: 200, body: { count: 0 } }),
-      'GET /api/issues/summary': () => ({ status: 200, body: { summary: { totalUnresolved: 2, newCount: 2, inProgressCount: 0, byBranch: [branch(1, '05 Trương Định', 2, 0)] } } }),
+      'GET /api/issues/summary': () => ({
+        status: 200,
+        body: { summary: { totalUnresolved: 2, byDepartment: { reception: 2, housekeeping: 0 }, newCount: 2, inProgressCount: 0, byBranch: [branch(1, '05 Trương Định', 2, 0)] } },
+      }),
       'GET /api/issues?pageSize=100': () =>
         listBody([issue({ id: 'a', status: 'NEW' }), issue({ id: 'b', status: 'NEW' }), issue({ id: 'c', status: 'RESOLVED' })]),
     });
     renderApp('/app/issues');
-    // Badge = 2 (unresolved), not 3 (list length).
-    expect(await screen.findByLabelText('2 sự cố chưa xử lý')).toBeInTheDocument();
+    // Badge = 2 (unresolved, all reported by Reception), not 3 (list length). The page is inside the group: it is open.
+    expect(await screen.findByTestId('nav-count-/app/reports?category=FACILITY_ISSUE')).toHaveTextContent('2');
   });
 });

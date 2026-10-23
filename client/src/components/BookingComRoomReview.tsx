@@ -70,6 +70,9 @@ export interface BookingComRoomReviewProps {
   booking: Omit<PmsNoteInput, 'rooms'> & { rooms: readonly ReviewRoomView[] };
   /** The branch whose internal codes are being offered. */
   branchId: number | undefined;
+  /** "Ghi chú PMS" as the Admin edited it (null: the generated note) — held by the page, which sends it. */
+  pmsNoteEdit?: string | null;
+  onPmsNoteEdit?: (text: string) => void;
   /**
    * The picker is disabled while this is true.
    *
@@ -88,6 +91,8 @@ export function BookingComRoomReview({
   branchId,
   branchDirty = false,
   onRoomClassChanged,
+  pmsNoteEdit,
+  onPmsNoteEdit,
 }: BookingComRoomReviewProps) {
   /**
    * The branch's active room classes — the existing source of truth, keyed by
@@ -246,7 +251,7 @@ export function BookingComRoomReview({
         ) : null}
       </Card>
 
-      <PmsNoteCard booking={booking} />
+      <PmsNoteCard booking={booking} edit={pmsNoteEdit ?? null} onEdit={onPmsNoteEdit} />
     </>
   );
 }
@@ -261,20 +266,11 @@ export function BookingComRoomReview({
  * note wins: silently keeping a stale edit over a corrected note is how a
  * wrong room code would reach the hotel system.
  */
-function PmsNoteCard({ booking }: { booking: PmsNoteInput }) {
+function PmsNoteCard({ booking, edit, onEdit }: { booking: PmsNoteInput; edit: string | null; onEdit?: (text: string) => void }) {
   const generated = buildPmsNote(booking);
   const generatedText = generated.ok ? generated.text ?? '' : '';
-
-  const [edit, setEdit] = useState<string | null>(null);
-  const [editedFrom, setEditedFrom] = useState<string>(generatedText);
   const [copyState, setCopyState] = useState<'idle' | 'ok' | 'fail'>('idle');
-
-  // Drop the edit when the generated note moves on beneath it.
-  if (edit !== null && editedFrom !== generatedText) {
-    setEdit(null);
-    setEditedFrom(generatedText);
-  }
-
+  // The page drops an edit made on a generated note that has since changed.
   const text = edit ?? generatedText;
 
   const onCopy = async () => {
@@ -309,10 +305,8 @@ function PmsNoteCard({ booking }: { booking: PmsNoteInput }) {
           aria-label="Ghi chú PMS"
           rows={3}
           value={text}
-          onChange={(e) => {
-            setEdit(e.target.value);
-            setEditedFrom(generatedText);
-          }}
+          onChange={(e) => onEdit?.(e.target.value)}
+          readOnly={!onEdit}
           className={`${inputClass} whitespace-pre-wrap font-mono`}
         />
       ) : (

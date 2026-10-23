@@ -146,7 +146,7 @@ function supervisorMayReach(req: Request): boolean {
  */
 const HOUSEKEEPING_REPORT_ROUTES = [
   /^\/api\/reception\/reports$/,
-  /^\/api\/reception\/reports\/(options|housekeeping|guest|archive)$/,
+  /^\/api\/reception\/reports\/(options|housekeeping|guest|archive|open-counts)$/,
   /^\/api\/reception\/reports\/[^/]+\/complete$/,
   /^\/api\/issues$/,
   /^\/api\/issues\/similar$/,

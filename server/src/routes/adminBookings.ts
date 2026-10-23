@@ -62,6 +62,8 @@ const bookingComDispatchSchema = z.object({
   totalAmount: z.number().int().nullable().optional().default(null),
   paymentStatus: z.enum(['PAY_BEFORE', 'PAY_AFTER']),
   specialRequest: z.string().max(5000).nullable().optional().default(null),
+  // The "Ghi chú PMS" as the Admin edited it on the review; absent when it kept the generated note.
+  adminPmsNote: z.string().trim().max(2000).nullable().optional().default(null),
   rooms: z
     .array(
       z.object({

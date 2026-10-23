@@ -309,38 +309,16 @@ async function createSharedItems(actor: HousekeepingActor, input: { warehouse: u
   const warehouse = activeWarehouseOf(input.warehouse);
   const raw = Array.isArray(input.items) ? (input.items as ItemInput[]) : [];
   if (raw.length === 0) throw ApiError.validation('Vui lòng nhập ít nhất một mặt hàng.');
-  if (raw.length > MAX_NEW_ITEMS) throw ApiError.validation(`Tối đa ${MAX_NEW_ITEMS} mặt hàng mỗi lần.`);
-  const names = raw.map((r, i) => {
-    const name = textOf(r.name, 200, 'Tên mặt hàng');
-    if (!name) throw ApiError.validation(`Dòng ${i + 1}: vui lòng nhập tên mặt hàng.`);
-    return name;
-  });
-  const fold = (v: string) => v.normalize('NFC').toLocaleLowerCase('vi');
-  assertDistinct(names.map(fold), (i) => names[i]!);
-  const branches = await client.branch.findMany({ where: { active: true }, select: { id: true, address: true }, orderBy: { branchNumber: 'asc' } });
-  const taken = await client.inventoryItem.findMany({
-    where: { warehouse, archivedAt: null, variant: '', name: { in: names, mode: 'insensitive' } },
-    select: { name: true, branch: { select: { address: true } } },
-  });
-  if (taken.length > 0) {
-    throw ApiError.conflict(`${taken[0]!.branch.address} đã có mặt hàng “${taken[0]!.name}” trong kho này — không mặt hàng nào được lưu.`);
-  }
+  const names = newItemNames(raw);
+  await assertNamesFree(client, warehouse, names, 'ALL');
+  const branches = await activeBranchIds(client);
   try {
-    const created = await client.$transaction(async (tx) => {
-      const out = [];
-      for (const name of names) {
-        const code = itemCode(warehouse, await nextCodeNumber(tx, warehouse));
-        for (const branch of branches) {
-          const row = await tx.inventoryItem.create({
-            data: { branchId: branch.id, warehouse, name, variant: '', unit: 'cái', code, scope: 'SYSTEM', createdByUserId: actor.id, createdByNameSnapshot: actor.fullName },
-            select: ITEM_SELECT,
-          });
-          if (branch === branches[0]) out.push(row);
-        }
-      }
-      return out;
+    const firstRows = await client.$transaction(async (tx) => {
+      const created = await insertSharedItems(tx, actor, warehouse, names, branches);
+      return names.map((n) => created.get(n)!.get(branches[0]!)!.id);
     });
-    return created.map(serializeItem);
+    const rows = await client.inventoryItem.findMany({ where: { id: { in: firstRows } }, select: ITEM_SELECT });
+    return firstRows.map((id) => serializeItem(rows.find((r) => r.id === id)!));
   } catch (e) {
     if (isUniqueViolation(e)) throw ApiError.conflict('Một chi nhánh đã có mặt hàng cùng tên đang dùng — không mặt hàng nào được lưu.');
     throw e;
@@ -540,13 +518,25 @@ export async function cleaningLines(tx: Prisma.TransactionClient, branchId: numb
   return items.map((item) => ({ item, quantity: quantities[item.id]! }));
 }
 
+/**
+ * A NEW ITEM NAMED IN A RECEIPT — created and received in the same save.
+ * `quantity` for a manager's receipt; `quantities` (per chosen branch) for
+ * the Admin's.
+ */
+export interface NewReceiptItem {
+  name: unknown;
+  quantity?: unknown;
+  quantities?: { branchId: unknown; quantity: unknown }[];
+}
+
 export interface ReceiptInput {
   warehouse: unknown;
   requestId: unknown;
   receivedAt?: unknown;
   reference?: unknown;
   note?: unknown;
-  lines: { itemId: unknown; quantity: unknown; note?: unknown }[];
+  lines?: { itemId: unknown; quantity: unknown; note?: unknown }[];
+  newItems?: NewReceiptItem[];
 }
 
 const RECEIPT_INCLUDE = {
@@ -568,7 +558,130 @@ function serializeReceipt(r: Prisma.InventoryReceiptGetPayload<{ include: typeof
   };
 }
 
-/** ONE delivery of many items — the header, every line and every movement, or nothing. */
+/** What a receipt line and a movement need of an item. */
+const LEDGER_SELECT = { id: true, branchId: true, warehouse: true, name: true, variant: true, unit: true, archivedAt: true } as const;
+type LedgerRow = Prisma.InventoryItemGetPayload<{ select: typeof LEDGER_SELECT }>;
+
+const foldName = (v: string) => v.normalize('NFC').toLocaleLowerCase('vi');
+
+/** New items' names: each given, each once. */
+function newItemNames(raw: { name?: unknown }[]): string[] {
+  if (raw.length > MAX_NEW_ITEMS) throw ApiError.validation(`Tối đa ${MAX_NEW_ITEMS} mặt hàng mới mỗi lần.`);
+  const names = raw.map((r, i) => {
+    const name = textOf(r.name, 200, 'Tên mặt hàng');
+    if (!name) throw ApiError.validation(`Mặt hàng mới ${i + 1}: vui lòng nhập tên.`);
+    return name;
+  });
+  assertDistinct(names.map(foldName), (i) => names[i]!);
+  return names;
+}
+
+/**
+ * A NEW NAME THAT IS ALREADY AN ACTIVE ITEM where it would be created refuses
+ * the whole save, naming that item (and its id, so the screen can take it
+ * instead) — never a second item of the same name, never a silent merge.
+ * 'ALL': a shared item, which every active branch would get.
+ */
+async function assertNamesFree(client: PrismaClient, warehouse: InventoryWarehouse, names: string[], branchIds: number[] | 'ALL') {
+  if (names.length === 0) return;
+  const taken = await client.inventoryItem.findFirst({
+    where: { warehouse, archivedAt: null, variant: '', name: { in: names, mode: 'insensitive' }, ...(branchIds === 'ALL' ? {} : { branchId: { in: branchIds } }) },
+    select: { id: true, name: true, code: true, branchId: true, branch: { select: { address: true } } },
+  });
+  if (taken) {
+    throw new ApiError(
+      'CONFLICT',
+      `${taken.branch.address} đã có “${taken.code ? `${taken.code} ` : ''}${taken.name}” trong kho này — chọn mặt hàng đó thay vì tạo mới. Chưa có gì được lưu.`,
+      { existingItemId: taken.id, branchId: taken.branchId, name: taken.name, code: taken.code },
+    );
+  }
+}
+
+const activeBranchIds = async (client: PrismaClient) =>
+  (await client.branch.findMany({ where: { active: true }, select: { id: true }, orderBy: { branchNumber: 'asc' } })).map((b) => b.id);
+
+/** The branch's OWN new items (scope BRANCH), coded under the warehouse's one numbering. */
+async function insertBranchItems(tx: Prisma.TransactionClient, actor: HousekeepingActor, branchId: number, warehouse: InventoryWarehouse, names: string[]) {
+  const out: LedgerRow[] = [];
+  for (const name of names) {
+    const code = itemCode(warehouse, await nextCodeNumber(tx, warehouse));
+    out.push(
+      await tx.inventoryItem.create({
+        data: { branchId, warehouse, name, variant: '', unit: 'cái', code, scope: 'BRANCH', createdByUserId: actor.id, createdByNameSnapshot: actor.fullName },
+        select: LEDGER_SELECT,
+      }),
+    );
+  }
+  return out;
+}
+
+/**
+ * THE ADMIN'S SHARED ITEMS: one code each and one row in every active branch
+ * (scope SYSTEM). No stock: a branch receives only what a receipt gives it.
+ * name → branch → its row.
+ */
+async function insertSharedItems(tx: Prisma.TransactionClient, actor: HousekeepingActor, warehouse: InventoryWarehouse, names: string[], branchIds: number[]) {
+  const out = new Map<string, Map<number, LedgerRow>>();
+  for (const name of names) {
+    const code = itemCode(warehouse, await nextCodeNumber(tx, warehouse));
+    const rows = new Map<number, LedgerRow>();
+    for (const branchId of branchIds) {
+      rows.set(
+        branchId,
+        await tx.inventoryItem.create({
+          data: { branchId, warehouse, name, variant: '', unit: 'cái', code, scope: 'SYSTEM', createdByUserId: actor.id, createdByNameSnapshot: actor.fullName },
+          select: LEDGER_SELECT,
+        }),
+      );
+    }
+    out.set(name, rows);
+  }
+  return out;
+}
+
+function receivedAtOf(raw: unknown, now: Date): Date {
+  if (raw === undefined || raw === null || raw === '') return now;
+  const at = new Date(String(raw));
+  if (Number.isNaN(at.getTime())) throw ApiError.validation('Thời gian nhận hàng không hợp lệ.');
+  if (at.getTime() > now.getTime() + 5 * 60_000) throw ApiError.validation('Thời gian nhận hàng không thể ở tương lai.');
+  return at;
+}
+
+/** One branch's receipt: the header, every line and its movement — inside the caller's transaction. */
+async function writeReceipt(
+  tx: Prisma.TransactionClient,
+  actor: HousekeepingActor,
+  head: { branchId: number; warehouse: InventoryWarehouse; requestId: string; receivedAt: Date; reference: string | null; note: string | null; now: Date },
+  entries: { item: LedgerRow; quantity: number; note?: string | null }[],
+): Promise<string> {
+  const receipt = await tx.inventoryReceipt.create({
+    data: {
+      branchId: head.branchId,
+      warehouse: head.warehouse,
+      requestId: head.requestId,
+      receivedAt: head.receivedAt,
+      reference: head.reference,
+      note: head.note,
+      createdByUserId: actor.id,
+      createdByNameSnapshot: actor.fullName,
+      createdAt: head.now,
+      lines: { create: entries.map((e) => ({ itemId: e.item.id, quantity: e.quantity, note: e.note ?? null })) },
+    },
+  });
+  await applyMovements(
+    tx,
+    entries.map((e) => ({ item: e.item, state: 'AVAILABLE', delta: e.quantity, type: 'RECEIPT', sourceKey: `RECEIPT:${receipt.id}`, receiptId: receipt.id })),
+    actor,
+    head.now,
+  );
+  return receipt.id;
+}
+
+/**
+ * ONE DELIVERY OF MANY ITEMS — the items ticked, and new ones named with their
+ * quantity, created as the branch's own and received in the same save: the new
+ * items, the header, every line and every movement, or nothing. Once per request.
+ */
 export async function createReceipt(actor: HousekeepingActor, input: ReceiptInput, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   const branch = await managerBranch(actor, client);
   const warehouse = activeWarehouseOf(input.warehouse);
@@ -576,39 +689,29 @@ export async function createReceipt(actor: HousekeepingActor, input: ReceiptInpu
   const again = await client.inventoryReceipt.findUnique({ where: { requestId }, include: RECEIPT_INCLUDE });
   if (again) return { receipt: serializeReceipt(again), duplicate: true };
   const lines = Array.isArray(input.lines) ? input.lines : [];
-  const items = await lineItems(client, branch.id, warehouse, lines.map((l) => l.itemId));
+  const fresh = Array.isArray(input.newItems) ? input.newItems : [];
+  if (lines.length + fresh.length === 0) throw ApiError.validation('Vui lòng chọn ít nhất một mặt hàng.');
+  if (lines.length + fresh.length > MAX_LINES) throw ApiError.validation(`Tối đa ${MAX_LINES} dòng.`);
+  const items = lines.length > 0 ? await lineItems(client, branch.id, warehouse, lines.map((l) => l.itemId)) : [];
   assertDistinct(items.map((i) => i.id), (i) => itemLabel(items[i]!));
   const quantities = lines.map((l, i) => quantityOf(l.quantity, `Số lượng của ${itemLabel(items[i]!)}`));
+  const names = newItemNames(fresh);
+  const freshQuantities = fresh.map((f, i) => quantityOf(f.quantity, `Số lượng của ${names[i]}`));
+  await assertNamesFree(client, warehouse, names, [branch.id]);
   const now = clock.now();
-  let receivedAt = now;
-  if (input.receivedAt !== undefined && input.receivedAt !== null && input.receivedAt !== '') {
-    receivedAt = new Date(String(input.receivedAt));
-    if (Number.isNaN(receivedAt.getTime())) throw ApiError.validation('Thời gian nhận hàng không hợp lệ.');
-    if (receivedAt.getTime() > now.getTime() + 5 * 60_000) throw ApiError.validation('Thời gian nhận hàng không thể ở tương lai.');
-  }
+  const receivedAt = receivedAtOf(input.receivedAt, now);
   try {
     const id = await client.$transaction(async (tx) => {
-      const receipt = await tx.inventoryReceipt.create({
-        data: {
-          branchId: branch.id,
-          warehouse,
-          requestId,
-          receivedAt,
-          reference: textOf(input.reference, 100, 'Số phiếu / tham chiếu'),
-          note: textOf(input.note, 1000, 'Ghi chú'),
-          createdByUserId: actor.id,
-          createdByNameSnapshot: actor.fullName,
-          createdAt: now,
-          lines: { create: lines.map((l, i) => ({ itemId: items[i]!.id, quantity: quantities[i]!, note: textOf(l.note, 300, 'Ghi chú dòng') })) },
-        },
-      });
-      await applyMovements(
+      const created = await insertBranchItems(tx, actor, branch.id, warehouse, names);
+      return writeReceipt(
         tx,
-        items.map((item, i) => ({ item, state: 'AVAILABLE', delta: quantities[i]!, type: 'RECEIPT', sourceKey: `RECEIPT:${receipt.id}`, receiptId: receipt.id })),
         actor,
-        now,
+        { branchId: branch.id, warehouse, requestId, receivedAt, reference: textOf(input.reference, 100, 'Số phiếu / tham chiếu'), note: textOf(input.note, 1000, 'Ghi chú'), now },
+        [
+          ...items.map((item, i) => ({ item, quantity: quantities[i]!, note: textOf(lines[i]!.note, 300, 'Ghi chú dòng') })),
+          ...created.map((item, i) => ({ item, quantity: freshQuantities[i]! })),
+        ],
       );
-      return receipt.id;
     });
     return { receipt: serializeReceipt(await client.inventoryReceipt.findUniqueOrThrow({ where: { id }, include: RECEIPT_INCLUDE })), duplicate: false };
   } catch (e) {
@@ -616,6 +719,7 @@ export async function createReceipt(actor: HousekeepingActor, input: ReceiptInpu
     if (isUniqueViolation(e)) {
       const first = await client.inventoryReceipt.findUnique({ where: { requestId }, include: RECEIPT_INCLUDE });
       if (first) return { receipt: serializeReceipt(first), duplicate: true };
+      throw ApiError.conflict('Một mặt hàng cùng tên vừa được tạo ở nơi khác — tải lại rồi chọn mặt hàng đó. Chưa có gì được lưu.');
     }
     throw e;
   }
@@ -627,14 +731,16 @@ export interface MultiReceiptInput {
   receivedAt?: unknown;
   reference?: unknown;
   note?: unknown;
-  branches: { branchId: unknown; lines: { itemId: unknown; quantity: unknown; note?: unknown }[] }[];
+  branches: { branchId: unknown; lines?: { itemId: unknown; quantity: unknown; note?: unknown }[] }[];
+  newItems?: NewReceiptItem[];
 }
 
 /**
  * THE ADMIN'S "NHẬP KHO" FOR SEVERAL BRANCHES — each chosen branch with ITS OWN
  * items and quantities (never one figure copied to all), one receipt per branch
- * under the same reference, all or none, once per request. Each branch's
- * receipt and movements are that branch's alone, exactly as its manager's.
+ * under the same reference, all or none, once per request. A new item named
+ * here joins the SHARED catalog (every active branch gets its row) and only the
+ * branches given a quantity receive it.
  */
 export async function createMultiBranchReceipt(actor: HousekeepingActor, input: MultiReceiptInput, clock: Clock = getClock(), client: PrismaClient = defaultPrisma) {
   if (actor.role !== 'ADMIN') throw ApiError.forbidden('Chỉ Admin nhập kho cho nhiều chi nhánh.');
@@ -647,7 +753,7 @@ export async function createMultiBranchReceipt(actor: HousekeepingActor, input: 
   const plan = async (t: MultiReceiptInput['branches'][number]) => {
     const branch = await managedBranch(actor, t.branchId, client);
     const lines = Array.isArray(t.lines) ? t.lines : [];
-    const items = await lineItems(client, branch.id, warehouse, lines.map((l) => l.itemId));
+    const items = lines.length > 0 ? await lineItems(client, branch.id, warehouse, lines.map((l) => l.itemId)) : [];
     assertDistinct(items.map((i) => i.id), (i) => itemLabel(items[i]!));
     const quantities = lines.map((l, i) => quantityOf(l.quantity, `Số lượng của ${itemLabel(items[i]!)}`));
     return { branch, lines, items, quantities };
@@ -655,42 +761,49 @@ export async function createMultiBranchReceipt(actor: HousekeepingActor, input: 
   const plans: Awaited<ReturnType<typeof plan>>[] = [];
   for (const t of targets) plans.push(await plan(t));
   assertDistinct(plans.map((p) => String(p.branch.id)), (i) => `Chi nhánh #${plans[i]!.branch.id}`);
+  // A retry is answered before anything else: its new names now exist.
   const again = await client.inventoryReceipt.findMany({ where: { requestId: { in: plans.map((p) => keyOf(p.branch.id)) } }, include: RECEIPT_INCLUDE });
   if (again.length > 0) return { receipts: again.map(serializeReceipt), duplicate: true };
-  const now = clock.now();
-  let receivedAt = now;
-  if (input.receivedAt !== undefined && input.receivedAt !== null && input.receivedAt !== '') {
-    receivedAt = new Date(String(input.receivedAt));
-    if (Number.isNaN(receivedAt.getTime())) throw ApiError.validation('Thời gian nhận hàng không hợp lệ.');
-    if (receivedAt.getTime() > now.getTime() + 5 * 60_000) throw ApiError.validation('Thời gian nhận hàng không thể ở tương lai.');
+  // New items: each with a quantity for at least one chosen branch, and only for chosen branches.
+  const fresh = Array.isArray(input.newItems) ? input.newItems : [];
+  const names = newItemNames(fresh);
+  const chosen = new Set(plans.map((p) => p.branch.id));
+  const freshQuantities = fresh.map((f, i) => {
+    const per = Array.isArray(f.quantities) ? f.quantities : [];
+    const map = new Map<number, number>();
+    for (const q of per) {
+      const branchId = Number(q.branchId);
+      if (!chosen.has(branchId)) throw ApiError.validation(`${names[i]}: chi nhánh nhận hàng chưa được chọn.`);
+      if (map.has(branchId)) throw ApiError.validation(`${names[i]}: một chi nhánh chỉ một số lượng.`);
+      map.set(branchId, quantityOf(q.quantity, `Số lượng của ${names[i]}`));
+    }
+    if (map.size === 0) throw ApiError.validation(`${names[i]}: nhập số lượng cho ít nhất một chi nhánh.`);
+    return map;
+  });
+  for (const p of plans) {
+    if (p.lines.length === 0 && !freshQuantities.some((m) => m.has(p.branch.id))) {
+      throw ApiError.validation('Mỗi chi nhánh được chọn cần ít nhất một mặt hàng nhập.');
+    }
   }
+  await assertNamesFree(client, warehouse, names, 'ALL');
+  const now = clock.now();
+  const receivedAt = receivedAtOf(input.receivedAt, now);
   const reference = textOf(input.reference, 100, 'Số phiếu / tham chiếu');
   const note = textOf(input.note, 1000, 'Ghi chú');
+  const everyBranch = names.length > 0 ? await activeBranchIds(client) : [];
   try {
     const ids = await client.$transaction(async (tx) => {
+      const shared = await insertSharedItems(tx, actor, warehouse, names, everyBranch);
       const out: string[] = [];
       for (const p of plans) {
-        const receipt = await tx.inventoryReceipt.create({
-          data: {
-            branchId: p.branch.id,
-            warehouse,
-            requestId: keyOf(p.branch.id),
-            receivedAt,
-            reference,
-            note,
-            createdByUserId: actor.id,
-            createdByNameSnapshot: actor.fullName,
-            createdAt: now,
-            lines: { create: p.lines.map((l, i) => ({ itemId: p.items[i]!.id, quantity: p.quantities[i]!, note: textOf(l.note, 300, 'Ghi chú dòng') })) },
-          },
-        });
-        await applyMovements(
-          tx,
-          p.items.map((item, i) => ({ item, state: 'AVAILABLE', delta: p.quantities[i]!, type: 'RECEIPT', sourceKey: `RECEIPT:${receipt.id}`, receiptId: receipt.id })),
-          actor,
-          now,
-        );
-        out.push(receipt.id);
+        const entries = [
+          ...p.items.map((item, i) => ({ item, quantity: p.quantities[i]!, note: textOf(p.lines[i]!.note, 300, 'Ghi chú dòng') })),
+          ...names.flatMap((name, i) => {
+            const quantity = freshQuantities[i]!.get(p.branch.id);
+            return quantity === undefined ? [] : [{ item: shared.get(name)!.get(p.branch.id)!, quantity }];
+          }),
+        ];
+        out.push(await writeReceipt(tx, actor, { branchId: p.branch.id, warehouse, requestId: keyOf(p.branch.id), receivedAt, reference, note, now }, entries));
       }
       return out;
     });
@@ -700,6 +813,7 @@ export async function createMultiBranchReceipt(actor: HousekeepingActor, input: 
     if (isUniqueViolation(e)) {
       const first = await client.inventoryReceipt.findMany({ where: { requestId: { in: plans.map((p) => keyOf(p.branch.id)) } }, include: RECEIPT_INCLUDE });
       if (first.length > 0) return { receipts: first.map(serializeReceipt), duplicate: true };
+      throw ApiError.conflict('Một mặt hàng cùng tên vừa được tạo ở nơi khác — tải lại rồi chọn mặt hàng đó. Chưa có gì được lưu.');
     }
     throw e;
   }

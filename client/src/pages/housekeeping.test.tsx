@@ -923,8 +923,17 @@ describe('Reception — thu tiền buồng phòng', () => {
     expect(summary).toHaveTextContent('700.000 ₫');
     expect(screen.getByTestId('room-filter-PENDING')).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByTestId('room-filter-PENDING')).toHaveTextContent('2');
-    // Kept apart from the payment ledger, and says so.
-    expect(summary).toHaveTextContent('tách riêng khỏi sổ thanh toán');
+    // The explanations of the ledger separation are gone — from the summary, the page and the collection dialog.
+    for (const gone of [
+      'Khoản thu buồng phòng tách riêng khỏi sổ thanh toán; không tính vào tiền mặt trong ca.',
+      'Xử lý thu tiền cho từng vấn đề Bộ phận buồng phòng ghi nhận. Khoản thu này tách riêng khỏi sổ thanh toán.',
+    ]) {
+      expect(document.body).not.toHaveTextContent(gone);
+    }
+    expect(document.body).not.toHaveTextContent('tách riêng khỏi sổ thanh toán');
+    await userEvent.click(screen.getAllByTestId(/^collect-/)[0]!);
+    expect(await screen.findByTestId('collection-status-COLLECTED')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('tiền mặt trong ca');
   });
 
   it('is in the receptionist’s menu, and the old chat entry is not', async () => {

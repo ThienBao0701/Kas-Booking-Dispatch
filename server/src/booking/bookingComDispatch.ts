@@ -97,6 +97,12 @@ export interface BookingComDispatchRequest {
   totalAmount: number | null;
   paymentStatus: 'PAY_BEFORE' | 'PAY_AFTER';
   specialRequest: string | null;
+  /**
+   * "Ghi chú PMS" as the Admin edited it on the review, stored so Reception
+   * reads exactly that text. Null when the Admin kept the generated note —
+   * Reception then sees it generated from the booking, as before.
+   */
+  adminPmsNote?: string | null;
   rooms: BookingComDispatchRoom[];
   /** Present only when the Admin explicitly chose the type on the review screen. */
   businessType?: 'DIRECT' | 'PARTNER';
@@ -311,6 +317,7 @@ export async function dispatchBookingComReview(
         currency: parsed.currency,
         paymentStatus: request.paymentStatus,
         specialRequest: request.specialRequest,
+        adminPmsNote: request.adminPmsNote?.trim() ? request.adminPmsNote.trim() : null,
         rawText: request.rawText,
         // Dispatched in one step: the review happened in the browser, so there
         // is no draft for an Admin to come back to.

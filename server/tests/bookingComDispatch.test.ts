@@ -30,6 +30,8 @@ import {
   loginAgent,
 } from './helpers/auth';
 import { loadActiveMapping } from '../src/room/roomClassResolver';
+import { parseBooking } from '../src/booking/parser';
+import { serializeParsedPreview } from '../src/booking/serialize';
 
 const fixture = (name: string): string =>
   fs.readFileSync(path.join(__dirname, 'fixtures', 'booking', name), 'utf8');
@@ -673,5 +675,79 @@ describe('who may dispatch', () => {
       .send(body);
     expect(res.status).toBe(401);
     expect(await testPrisma.booking.count()).toBe(0);
+  });
+});
+
+/* ================================================================== */
+/* "Ghi chú PMS": the Admin's edit is what Reception receives          */
+/* ================================================================== */
+
+describe('the PMS note the Admin edited', () => {
+  it('reaches the branch exactly as edited — stored once, read back by Reception — and the payment stays its own', async () => {
+    const base = await payloadFrom(ONE_ROOM);
+    const res = await dispatch({ ...base, paymentStatus: 'PAY_AFTER', adminPmsNote: '  BK 999_1STAN_3 ĐÊM GHI CHU DA SUA  ' });
+    expect(res.status, JSON.stringify(res.body).slice(0, 400)).toBe(201);
+    const id = res.body.booking.id as string;
+    const stored = await testPrisma.booking.findUniqueOrThrow({ where: { id } });
+    expect(stored.adminPmsNote).toBe('BK 999_1STAN_3 ĐÊM GHI CHU DA SUA');
+    expect(stored.paymentStatus).toBe('PAY_AFTER');
+    // The branch's receptionist reads the edited note — not one rebuilt from the original fields.
+    await createReceptionist(base.branchId, { username: 'le-tan-pms', mustChangePassword: false });
+    const { agent } = await loginAgent(app, 'le-tan-pms', RECEPTIONIST_PASSWORD);
+    const seen = await agent.get(`/api/bookings/${id}`);
+    expect(seen.status, JSON.stringify(seen.body).slice(0, 300)).toBe(200);
+    expect(seen.body.booking).toMatchObject({ adminPmsNote: 'BK 999_1STAN_3 ĐÊM GHI CHU DA SUA', paymentStatus: 'PAY_AFTER' });
+    // The same reservation again: refused as a duplicate — the note is never appended twice.
+    expect((await dispatch({ ...base, adminPmsNote: 'KHAC' })).status).toBe(409);
+    expect((await testPrisma.booking.findUniqueOrThrow({ where: { id } })).adminPmsNote).toBe('BK 999_1STAN_3 ĐÊM GHI CHU DA SUA');
+  });
+
+  it('stores no note when the Admin kept the generated one — Reception generates it as before', async () => {
+    const base = await payloadFrom(ONE_ROOM);
+    const res = await dispatch({ ...base, paymentStatus: 'PAY_BEFORE' });
+    expect(res.status).toBe(201);
+    const stored = await testPrisma.booking.findUniqueOrThrow({ where: { id: res.body.booking.id as string } });
+    expect(stored.adminPmsNote).toBeNull();
+    expect(stored.paymentStatus).toBe('PAY_BEFORE');
+    expect((await dispatch({ ...(await payloadFrom(TWO_ROOMS_QTY)), adminPmsNote: '   ' })).status).toBe(201);
+    expect(await testPrisma.booking.count({ where: { adminPmsNote: { not: null } } })).toBe(0);
+  });
+});
+
+describe('the payment policy — the source’s kept, the Admin’s choice stored, nothing marked paid', () => {
+  it('extracts the policy the paste establishes — the form default never replaces it', async () => {
+    // The card-hidden sentence: prepaid.
+    expect((await preview(ONE_ROOM)).booking.paymentStatus).toBe('PAY_BEFORE');
+    // A Booking.com page without it: collected at the property — still PAY AFTER, as before.
+    expect((await preview(fixture('08-pay-after-no-trigger.txt'))).booking.paymentStatus).toBe('PAY_AFTER');
+    await testPrisma.booking.deleteMany({ where: { status: 'DRAFT' } });
+  });
+
+  it('reports no policy when the parse established none — the form starts at its own default', () => {
+    const parsed = parseBooking(ONE_ROOM, []);
+    expect(serializeParsedPreview(parsed, 'BOOKING_COM', []).booking.paymentStatus).toBe('PAY_BEFORE');
+    expect(serializeParsedPreview({ ...parsed, paymentStatusKnown: false }, 'BOOKING_COM', []).booking.paymentStatus).toBeNull();
+  });
+
+  it('stores an explicit PAY AFTER over a prepaid source — through dispatch and the Reception view — and records no payment', async () => {
+    const base = await payloadFrom(ONE_ROOM);
+    expect(base.paymentStatus).toBe('PAY_BEFORE');
+    const before = await testPrisma.receptionPayment.count();
+    const res = await dispatch({ ...base, paymentStatus: 'PAY_AFTER' });
+    expect(res.status, JSON.stringify(res.body).slice(0, 400)).toBe(201);
+    const id = res.body.booking.id as string;
+    const stored = await testPrisma.booking.findUniqueOrThrow({ where: { id } });
+    expect(stored.paymentStatus).toBe('PAY_AFTER');
+    await createReceptionist(base.branchId, { username: 'le-tan-pay', mustChangePassword: false });
+    const { agent } = await loginAgent(app, 'le-tan-pay', RECEPTIONIST_PASSWORD);
+    expect((await agent.get(`/api/bookings/${id}`)).body.booking.paymentStatus).toBe('PAY_AFTER');
+    // PAY BEFORE is a policy, not a payment: the booking's lifecycle is the same, and no money is recorded.
+    const prepaid = await dispatch({ ...(await payloadFrom(TWO_ROOMS_QTY)), paymentStatus: 'PAY_BEFORE' });
+    expect(prepaid.status).toBe(201);
+    const other = await testPrisma.booking.findUniqueOrThrow({ where: { id: prepaid.body.booking.id as string } });
+    expect(other.paymentStatus).toBe('PAY_BEFORE');
+    expect(other.status).toBe(stored.status);
+    expect(other.completedAt).toBeNull();
+    expect(await testPrisma.receptionPayment.count()).toBe(before);
   });
 });

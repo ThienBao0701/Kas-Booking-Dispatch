@@ -487,6 +487,10 @@ export const reportsApi = {
   setGuest: (id: string, body: { guestName: string; ezCode?: string }) =>
     api.patch<{ report: OperationalReport }>(`/reception/reports/${id}/guest`, body),
 
+  /** What is still open, by category and department — inside the reader's own visibility. */
+  openCounts: () =>
+    api.get<{ counts: { guestRequest: { reception: number; housekeeping: number }; complaint: number } }>('/reception/reports/open-counts'),
+
   update: (id: string, patch: UpdateReportInput) =>
     api.patch<{ report: OperationalReport }>(`/reception/reports/${id}`, patch),
 

@@ -55,7 +55,6 @@ export function RoomCollectionsPage() {
     <div className="space-y-4">
       <PageHeader
         title="Buồng phòng"
-        description="Xử lý thu tiền cho từng vấn đề Bộ phận buồng phòng ghi nhận. Khoản thu này tách riêng khỏi sổ thanh toán."
         actions={
           <Button variant="secondary" onClick={() => void list.refetch()} aria-label="Làm mới">
             <RefreshCw className={`h-4 w-4 ${list.isFetching ? 'animate-spin' : ''}`} aria-hidden="true" />

@@ -582,6 +582,8 @@ export interface BranchIssueSummary {
 /** Unresolved-issue summary within the caller's branch scope. */
 export interface IssueSummary {
   totalUnresolved: number;
+  /** The same unresolved incidents by who reported them — each counted once. */
+  byDepartment?: { reception: number; housekeeping: number };
   newCount: number;
   inProgressCount: number;
   awaitingInspectionCount: number;

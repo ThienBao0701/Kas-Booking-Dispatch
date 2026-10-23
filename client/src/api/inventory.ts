@@ -221,7 +221,15 @@ export const inventoryApi = {
     api.put<{ branchId: number; items: CleaningChoice[] }>(`${BASE}/cleaning-items`, { itemIds, ...(branchId ? { branchId } : {}) }),
   removeItem: (id: string) => api.del<{ removed: boolean; archived: boolean }>(`${BASE}/items/${id}`),
   receipts: (p: { branchId?: number; warehouse?: Warehouse } = {}) => api.get<{ receipts: Receipt[] }>(`${BASE}/receipts${query(p)}`),
-  createReceipt: (body: { warehouse: Warehouse; requestId: string; receivedAt?: string; reference?: string; note?: string; lines: { itemId: string; quantity: number; note?: string }[] }) =>
+  /** Ticked items and new ones (the branch's own, created in the same save) — all or none. */
+  createReceipt: (body: {
+    warehouse: Warehouse;
+    requestId: string;
+    receivedAt?: string;
+    reference?: string;
+    lines: { itemId: string; quantity: number }[];
+    newItems?: { name: string; quantity: number }[];
+  }) =>
     api.post<{ receipt: Receipt; duplicate: boolean }>(`${BASE}/receipts`, body),
   /** The Admin's "Nhập kho" for several branches — each with its own items and quantities, all or none. */
   createMultiReceipt: (body: {
@@ -230,6 +238,8 @@ export const inventoryApi = {
     receivedAt?: string;
     reference?: string;
     branches: { branchId: number; lines: { itemId: string; quantity: number }[] }[];
+    /** New shared items, received only by the branches given a quantity. */
+    newItems?: { name: string; quantities: { branchId: number; quantity: number }[] }[];
   }) => api.post<{ receipts: Receipt[]; duplicate: boolean }>(`${BASE}/receipts/multi`, body),
   counts: (p: { branchId?: number; warehouse?: Warehouse; onlyDifferences?: boolean } = {}) =>
     api.get<{ counts: StockCount[] }>(`${BASE}/counts${query({ ...p, onlyDifferences: p.onlyDifferences ? 'true' : undefined })}`),

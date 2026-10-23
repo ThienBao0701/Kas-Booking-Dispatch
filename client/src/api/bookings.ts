@@ -414,7 +414,8 @@ export interface ExtractResponse {
     checkOut: string | null;
     currency: string;
     totalAmount: number | null;
-    paymentStatus: PaymentStatus;
+    /** The policy the paste established; null when it established none. */
+    paymentStatus: PaymentStatus | null;
     specialRequest: string | null;
     parserVersion: string;
   };
@@ -446,6 +447,8 @@ export interface BookingComDispatchPayload {
   totalAmount: number | null;
   paymentStatus: PaymentStatus;
   specialRequest: string | null;
+  /** "Ghi chú PMS" as the Admin edited it; null when the generated note was kept. */
+  adminPmsNote?: string | null;
   rooms: {
     roomIndex: number;
     roomType: string | null;

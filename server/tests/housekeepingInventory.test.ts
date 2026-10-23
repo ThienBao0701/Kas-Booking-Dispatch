@@ -905,3 +905,171 @@ describe('P. the Admin’s shared catalog and the branch’s own items', () => {
     expect((await admin.post(`${INV}/receipts/multi`).send({ ...body, requestId: rid(), branches: [] })).status).toBe(422);
   });
 });
+
+describe('Q. a receipt naming new items — created and received in one save', () => {
+  const shared = (names: string[], warehouse = 'LINEN', agent: Agent = admin) => agent.post(`${INV}/items/batch`).send({ warehouse, items: names.map((name) => ({ name })) });
+  const activeBranches = () => testPrisma.branch.count({ where: { active: true } });
+  const receiveNew = (body: Record<string, unknown>, agent: Agent = manager1) => agent.post(`${INV}/receipts`).send({ warehouse: 'LINEN', requestId: rid(), lines: [], ...body });
+  const nothingSaved = async () => {
+    expect(await testPrisma.inventoryReceipt.count()).toBe(0);
+    expect(await testPrisma.inventoryMovement.count()).toBe(0);
+  };
+
+  it('the manager: ticked items and several new ones in ONE receipt — the new ones its branch’s own, coded by the server — once, whatever retries', async () => {
+    const [towel] = await create('LINEN', ['Khăn tắm']);
+    const requestId = rid();
+    const body = { requestId, lines: [{ itemId: towel!.id, quantity: 4 }], newItems: [{ name: 'Gối ôm', quantity: 6 }, { name: 'Khăn mặt', quantity: 10 }] };
+    const res = await receiveNew(body);
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.receipt.lines.map((l: { label: string; quantity: number }) => [l.label, l.quantity])).toEqual([
+      ['Khăn tắm', 4],
+      ['Gối ôm', 6],
+      ['Khăn mặt', 10],
+    ]);
+    const mine = (await items(manager1, '?warehouse=LINEN')).sort((x, y) => x.code!.localeCompare(y.code!));
+    expect(mine.map((i) => [i.name, i.code, i.scope, i.balances.AVAILABLE])).toEqual([
+      ['Khăn tắm', '3.001', 'BRANCH', 4],
+      ['Gối ôm', '3.002', 'BRANCH', 6],
+      ['Khăn mặt', '3.003', 'BRANCH', 10],
+    ]);
+    // Another branch sees none of them.
+    expect(await items(manager2, '?warehouse=LINEN')).toEqual([]);
+    // The same request again — or twice at once: no second item, no second piece of stock.
+    const again = await Promise.all([receiveNew(body), receiveNew(body)]);
+    expect(again.map((r) => r.body.duplicate)).toEqual([true, true]);
+    expect(await testPrisma.inventoryItem.count()).toBe(3);
+    expect(await testPrisma.inventoryReceipt.count()).toBe(1);
+    expect(await testPrisma.inventoryMovement.count()).toBe(3);
+    // The receipt carries no note of its own.
+    expect((await testPrisma.inventoryReceipt.findFirstOrThrow()).note).toBeNull();
+  });
+
+  it('two identical first submissions racing: one receipt, the new item created once', async () => {
+    const body = { requestId: rid(), newItems: [{ name: 'Gối ôm', quantity: 2 }] };
+    const both = await Promise.all([receiveNew(body), receiveNew(body)]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 201]);
+    expect(await testPrisma.inventoryItem.count({ where: { name: 'Gối ôm' } })).toBe(1);
+    expect(await balance('Gối ôm', 'AVAILABLE')).toBe(2);
+    // The losing attempt spent no code.
+    expect((await create('LINEN', ['Chăn']))[0]!.code).toBe('3.002');
+  });
+
+  it('saves nothing when any part is wrong — no item, no code spent, no stock', async () => {
+    const [towel] = await create('LINEN', ['Khăn tắm']);
+    const ok = { name: 'Gối ôm', quantity: 2 };
+    for (const bad of [
+      { newItems: [ok, { name: '  ', quantity: 1 }] },
+      { newItems: [ok, { name: 'Chăn', quantity: 0 }] },
+      { newItems: [ok, { name: 'Chăn', quantity: 1.5 }] },
+      { newItems: [ok, { name: 'Chăn' }] },
+      { newItems: [ok, { name: 'gối ÔM', quantity: 1 }] },
+      { newItems: [ok], lines: [{ itemId: towel!.id, quantity: 0 }] },
+      { newItems: [ok], lines: [{ itemId: 'no-such-item', quantity: 1 }] },
+      { newItems: [ok], warehouse: 'NOPE' },
+      { newItems: [] },
+    ]) {
+      const res = await receiveNew(bad);
+      expect(res.status, JSON.stringify(bad)).toBe(422);
+    }
+    await nothingSaved();
+    expect((await items(manager1, '?warehouse=LINEN')).map((i) => i.name)).toEqual(['Khăn tắm']);
+    expect((await create('LINEN', ['Chăn']))[0]!.code).toBe('3.002');
+  });
+
+  it('never creates a name already in use — it names the existing item for the screen to take — and never merges', async () => {
+    const [towel] = await create('LINEN', ['Khăn tắm']);
+    const res = await receiveNew({ newItems: [{ name: 'Gối', quantity: 1 }, { name: ' khăn TẮM ', quantity: 3 }] });
+    expect(res.status).toBe(409);
+    expect(res.body.error.message).toContain('3.001 Khăn tắm');
+    expect(res.body.error.details).toMatchObject({ existingItemId: towel!.id, code: '3.001' });
+    await nothingSaved();
+    expect(await testPrisma.inventoryItem.count()).toBe(1);
+    // Another branch's own item of that name is not this branch's: its own is created.
+    await create('LINEN', ['Ga giường'], manager2);
+    expect((await receiveNew({ newItems: [{ name: 'Ga giường', quantity: 2 }] })).status).toBe(201);
+    expect(await testPrisma.inventoryItem.count({ where: { name: 'Ga giường' } })).toBe(2);
+  });
+
+  it('keeps the manager to its own branch — a branch named in the body is ignored — and gives other roles nothing new', async () => {
+    const res = await receiveNew({ branchId: cn2, newItems: [{ name: 'Gối ôm', quantity: 2 }] });
+    expect(res.status).toBe(201);
+    const row = await testPrisma.inventoryItem.findFirstOrThrow({ where: { name: 'Gối ôm' } });
+    expect([row.branchId, row.scope]).toEqual([cn1, 'BRANCH']);
+    expect(await items(manager2, '?warehouse=LINEN')).toEqual([]);
+    // The several-branch receipt is the Admin's alone.
+    const multi = { warehouse: 'LINEN', requestId: rid(), branches: [{ branchId: cn2, lines: [] }], newItems: [{ name: 'Chăn', quantities: [{ branchId: cn2, quantity: 1 }] }] };
+    expect((await manager1.post(`${INV}/receipts/multi`).send(multi)).status).toBe(403);
+    for (const agent of [lan, letan1, tech]) expect((await receiveNew({ newItems: [{ name: 'Chăn', quantity: 1 }] }, agent)).status).toBe(403);
+    expect(await testPrisma.inventoryItem.count({ where: { name: 'Chăn' } })).toBe(0);
+  });
+
+  it('the Admin: a new item joins the shared catalog in every branch — stock only where a quantity was given — once per request', async () => {
+    await shared(['Khăn tắm']);
+    const towel1 = (await items(manager1, '?warehouse=LINEN'))[0]!;
+    const body = {
+      warehouse: 'LINEN',
+      requestId: rid(),
+      branches: [
+        { branchId: cn1, lines: [{ itemId: towel1.id, quantity: 5 }] },
+        { branchId: cn2, lines: [] },
+      ],
+      newItems: [
+        { name: 'Gối ôm', quantities: [{ branchId: cn2, quantity: 6 }] },
+        { name: 'Dép', quantities: [{ branchId: cn1, quantity: 2 }, { branchId: cn2, quantity: 3 }] },
+      ],
+    };
+    const res = await admin.post(`${INV}/receipts/multi`).send(body);
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.receipts).toHaveLength(2);
+    for (const [name, code] of [
+      ['Gối ôm', '3.002'],
+      ['Dép', '3.003'],
+    ]) {
+      const rows = await testPrisma.inventoryItem.findMany({ where: { name } });
+      expect(rows).toHaveLength(await activeBranches());
+      expect(rows.every((r) => r.scope === 'SYSTEM' && r.code === code)).toBe(true);
+    }
+    const stockOf = async (agent: Agent) => Object.fromEntries((await items(agent, '?warehouse=LINEN')).map((i) => [i.name, i.balances.AVAILABLE]));
+    expect(await stockOf(manager1)).toEqual({ 'Khăn tắm': 5, 'Gối ôm': 0, Dép: 2 });
+    expect(await stockOf(manager2)).toEqual({ 'Khăn tắm': 0, 'Gối ôm': 6, Dép: 3 });
+    // No branch outside the receipt holds any stock.
+    expect(await testPrisma.inventoryBalance.count({ where: { quantity: { gt: 0 }, item: { branchId: { notIn: [cn1, cn2] } } } })).toBe(0);
+    // Again: the same receipts, nothing created twice.
+    const again = await admin.post(`${INV}/receipts/multi`).send(body);
+    expect(again.body.duplicate).toBe(true);
+    expect(await testPrisma.inventoryItem.count({ where: { name: 'Gối ôm' } })).toBe(await activeBranches());
+    expect(await testPrisma.inventoryMovement.count()).toBe(4);
+  });
+
+  it('the Admin: refuses the whole receipt for a wrong part — nothing created, nothing received', async () => {
+    await create('LINEN', ['Ga giường'], manager2);
+    const base = { warehouse: 'LINEN', branches: [{ branchId: cn1, lines: [] }] };
+    const cases: [number, Record<string, unknown>][] = [
+      [422, { newItems: [{ name: 'Gối ôm', quantities: [{ branchId: cn2, quantity: 1 }] }] }],
+      [422, { newItems: [{ name: 'Gối ôm', quantities: [] }] }],
+      [422, { newItems: [{ name: 'Gối ôm', quantities: [{ branchId: cn1, quantity: 0 }] }] }],
+      [422, { newItems: [{ name: 'Gối ôm', quantities: [{ branchId: cn1, quantity: 1 }, { branchId: cn1, quantity: 2 }] }] }],
+      [422, { branches: [{ branchId: cn1, lines: [] }, { branchId: cn2, lines: [] }], newItems: [{ name: 'Gối ôm', quantities: [{ branchId: cn1, quantity: 1 }] }] }],
+      [422, {}],
+      // Any branch's active item of that name — even a branch outside the receipt.
+      [409, { newItems: [{ name: 'ga GIƯỜNG', quantities: [{ branchId: cn1, quantity: 1 }] }] }],
+    ];
+    for (const [status, bad] of cases) {
+      const res = await admin.post(`${INV}/receipts/multi`).send({ ...base, requestId: rid(), ...bad });
+      expect(res.status, JSON.stringify(bad)).toBe(status);
+    }
+    await nothingSaved();
+    expect(await testPrisma.inventoryItem.count({ where: { scope: 'SYSTEM' } })).toBe(0);
+  });
+
+  it('codes new items racing from several receipts uniquely and in sequence', async () => {
+    const results = await Promise.all([
+      ...Array.from({ length: 4 }, (_, i) => receiveNew({ newItems: [{ name: `Mới ${i}`, quantity: 1 }] }, manager1)),
+      ...Array.from({ length: 3 }, (_, i) => receiveNew({ newItems: [{ name: `Khác ${i}`, quantity: 1 }] }, manager2)),
+      admin.post(`${INV}/receipts/multi`).send({ warehouse: 'LINEN', requestId: rid(), branches: [{ branchId: cn1, lines: [] }], newItems: [{ name: 'Chung', quantities: [{ branchId: cn1, quantity: 1 }] }] }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(Array(8).fill(201));
+    const codes = [...new Set((await testPrisma.inventoryItem.findMany({ select: { code: true } })).map((r) => r.code))].sort();
+    expect(codes).toEqual(['3.001', '3.002', '3.003', '3.004', '3.005', '3.006', '3.007', '3.008']);
+  });
+});

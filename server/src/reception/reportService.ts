@@ -552,6 +552,25 @@ export function reportVisibilityWhere(
   throw ApiError.forbidden('Bạn không có quyền xem báo cáo vận hành lễ tân.');
 }
 
+/**
+ * WHAT IS STILL OPEN, BY CATEGORY AND DEPARTMENT — the menu's per-category
+ * counts. Guest requests and service-quality reports not yet completed
+ * ("Đã tiếp nhận"), live, inside exactly the reader's own visibility (the rule
+ * every list uses), each counted once under the department that recorded it.
+ */
+export async function countOpenReports(actor: ReportActor, client: PrismaClient = prisma) {
+  const visible = reportVisibilityWhere(actor);
+  const count = (where: Prisma.ReceptionOperationalReportWhereInput) =>
+    client.receptionOperationalReport.count({ where: { AND: [visible, { voidedAt: null }, where] } });
+  const openRequest = { category: 'GUEST_REQUEST' as const, guestRequest: { is: { completedAt: null } } };
+  const [requestReception, requestHousekeeping, complaint] = await Promise.all([
+    count({ ...openRequest, originDepartment: 'RECEPTION' }),
+    count({ ...openRequest, originDepartment: 'HOUSEKEEPING' }),
+    count({ category: 'CUSTOMER_COMPLAINT', complaint: { is: { completedAt: null } } }),
+  ]);
+  return { guestRequest: { reception: requestReception, housekeeping: requestHousekeeping }, complaint };
+}
+
 /* ------------------------------------------------------------------ *
  * Validation
  * ------------------------------------------------------------------ */

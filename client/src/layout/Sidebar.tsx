@@ -4,6 +4,7 @@ import { Building2, ChevronDown } from 'lucide-react';
 import { useAuth } from '../auth/AuthProvider';
 import { useIssueSummary } from '../hooks/useIssueSummary';
 import { useNavBadges } from '../hooks/useNavBadges';
+import { useOpenReportCounts } from '../hooks/useOpenReportCounts';
 import { navForRole, type NavItem } from './navigation';
 
 /**
@@ -26,6 +27,27 @@ function containsActive(item: NavItem, location: Location): boolean {
   return (item.children ?? []).some((c) => (c.children ? containsActive(c, location) : linkActive(c.to, location)));
 }
 
+/** A link's own count, if it has one. */
+type BadgeOf = (item: NavItem) => number | undefined;
+
+/** Some link inside the group has something waiting. */
+function anyBadge(item: NavItem, badgeOf: BadgeOf | undefined): boolean {
+  return (item.children ?? []).some((c) => (c.children ? anyBadge(c, badgeOf) : (badgeOf?.(c) ?? 0) > 0));
+}
+
+/** The compact count beside a link: its own figure, never its group's. */
+function CountBadge({ count, testId, label }: { count: number; testId: string; label: string }) {
+  return (
+    <span
+      data-testid={testId}
+      aria-label={label}
+      className="ml-1 inline-flex min-w-[1.25rem] shrink-0 items-center justify-center self-center rounded-full bg-red-600 px-1.5 py-0.5 text-[11px] font-bold leading-none text-white"
+    >
+      {count > 99 ? '99+' : count}
+    </span>
+  );
+}
+
 /**
  * A COLLAPSIBLE GROUP ("Báo cáo vấn đề" → "Lễ tân" → …). Open while the page on
  * screen is inside it, so the reader always sees where they are; a click
@@ -37,12 +59,15 @@ function SidebarGroup({
   depth,
   badge,
   badgeLabel,
+  badgeOf,
 }: {
   item: NavItem;
   onNavigate?: () => void;
   depth: number;
   badge?: number;
   badgeLabel?: string;
+  /** Each link's own count: the group shows only a dot that something inside waits. */
+  badgeOf?: BadgeOf;
 }) {
   const location = useLocation();
   const inside = containsActive(item, location);
@@ -52,6 +77,7 @@ function SidebarGroup({
   }, [inside]);
   const Icon = item.icon;
   const showBadge = typeof badge === 'number' && badge > 0;
+  const waiting = !showBadge && anyBadge(item, badgeOf);
   return (
     <div>
       <button
@@ -73,6 +99,8 @@ function SidebarGroup({
           >
             {badge > 99 ? '99+' : badge}
           </span>
+        ) : waiting ? (
+          <span data-testid={`nav-dot-${item.label}`} aria-label="Có mục cần xử lý" className="h-2 w-2 shrink-0 rounded-full bg-red-600" />
         ) : null}
         <ChevronDown className={`h-4 w-4 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
       </button>
@@ -80,9 +108,9 @@ function SidebarGroup({
         <div className="ml-4 mt-0.5 space-y-0.5 border-l border-line pl-2">
           {(item.children ?? []).map((child) =>
             child.children ? (
-              <SidebarGroup key={child.to} item={child} onNavigate={onNavigate} depth={depth + 1} />
+              <SidebarGroup key={child.to} item={child} onNavigate={onNavigate} depth={depth + 1} badgeOf={badgeOf} />
             ) : (
-              <SidebarChildLink key={child.to} item={child} onNavigate={onNavigate} />
+              <SidebarChildLink key={child.to} item={child} onNavigate={onNavigate} badge={badgeOf?.(child)} />
             ),
           )}
         </div>
@@ -102,7 +130,7 @@ function NavStatus({ item }: { item: NavItem }) {
 }
 
 /** A link inside a group — smaller, and active by `linkActive`. */
-function SidebarChildLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
+function SidebarChildLink({ item, onNavigate, badge }: { item: NavItem; onNavigate?: () => void; badge?: number }) {
   const location = useLocation();
   const active = linkActive(item.to, location);
   const Icon = item.icon;
@@ -118,6 +146,7 @@ function SidebarChildLink({ item, onNavigate }: { item: NavItem; onNavigate?: ()
       <Icon className="mt-0.5 h-4 w-4 flex-shrink-0" aria-hidden="true" />
       <span className="flex-1">{item.label}</span>
       <NavStatus item={item} />
+      {badge ? <CountBadge count={badge} testId={`nav-count-${item.to}`} label={`${item.label}: ${badge} mục cần xử lý`} /> : null}
     </Link>
   );
 }
@@ -165,6 +194,11 @@ function SidebarLink({
   );
 }
 
+/** Every link's address in a menu, groups opened. */
+function flatLinks(items: NavItem[]): string[] {
+  return items.flatMap((i) => (i.children ? flatLinks(i.children) : [i.to]));
+}
+
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { user } = useAuth();
   const nav = navForRole(user?.role);
@@ -184,6 +218,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   */
   const badges = useNavBadges(!!user);
   const counts = badges.data?.counts;
+  // The reports still open, by category — for the menus that list the categories.
+  const role = user?.role;
+  const open = useOpenReportCounts(
+    role === 'ADMIN' || role === 'RECEPTION_MANAGER' || role === 'RECEPTION_GENERAL_MANAGER' || role === 'HOUSEKEEPING' || role === 'HOUSEKEEPING_MANAGER',
+  ).data?.counts;
+  const incidents = summary.data?.summary;
 
   /*
     THE UNRESOLVED-INCIDENT BADGE FOLLOWS INCIDENT REPORTING.
@@ -195,8 +235,36 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   */
   const incidentHost = '/app/reports';
 
+  /*
+    EACH REPORT CATEGORY ITS OWN COUNT, each record under ONE entry of the menu.
+    Where the menu also has Bộ phận buồng phòng's own entries (the Admin's),
+    Reception's entries count Reception's records and Housekeeping's count
+    Housekeeping's; where it has not (the reception managers'), Reception's
+    entries count both, as their pages list both.
+  */
+  const all = flatLinks(nav);
+  const splitHousekeeping = all.includes('/app/hk/reports?category=GUEST_REQUEST');
+  function reportBadgeOf(item: NavItem): number | undefined {
+    switch (item.to) {
+      case '/app/reports?category=GUEST_REQUEST':
+        return open ? open.guestRequest.reception + (splitHousekeeping ? 0 : open.guestRequest.housekeeping) : undefined;
+      case '/app/hk/reports?category=GUEST_REQUEST':
+        return open?.guestRequest.housekeeping;
+      case '/app/reports?category=CUSTOMER_COMPLAINT':
+        return open?.complaint;
+      case '/app/reports?category=FACILITY_ISSUE':
+        return incidents ? (splitHousekeeping ? incidents.byDepartment?.reception : incidents.totalUnresolved) : undefined;
+      case '/app/hk/reports?category=FACILITY_ISSUE':
+        // The Admin: Housekeeping's reports; a Quản lý buồng phòng: its branch's board, every one.
+        return incidents ? (role === 'ADMIN' ? incidents.byDepartment?.housekeeping : incidents.totalUnresolved) : undefined;
+      default:
+        return undefined;
+    }
+  }
+
   function badgeFor(item: NavItem): number | undefined {
-    if (item.to === incidentHost) return unresolved;
+    // A group with its categories counts them one by one; the single link (the desk's) keeps its total.
+    if (item.to === incidentHost) return item.children ? undefined : unresolved;
     if (!counts) return undefined;
     switch (item.to) {
       // Reception's "Đơn mới" and Admin's "Chờ chi nhánh tạo" are the same
@@ -247,7 +315,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
               onNavigate={onNavigate}
               depth={0}
               badge={badgeFor(item)}
-              {...(item.to === incidentHost ? { badgeLabel: `${unresolved} sự cố chưa xử lý` } : {})}
+              badgeOf={reportBadgeOf}
             />
           ) : (
             <SidebarLink

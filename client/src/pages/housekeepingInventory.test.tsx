@@ -1,7 +1,7 @@
 /**
  * "KHO HÀNG", ON SCREEN — four warehouses, coded items — and the manager's daily work.
  *
- *   1. "Nhập kho": many items in ONE "Lưu phiếu nhập", each item once
+ *   1. "Nhập kho": a checklist of the warehouse and new items, in ONE "Lưu phiếu nhập"
  *   2. "Kiểm kho": the manager counts blind — no book figure, no difference — and gives a reason when asked
  *   3. "Báo hỏng": quantity no more than there is, a reason, sent once
  *   4. the Admin: every branch's stock, and the damage report to review
@@ -67,44 +67,60 @@ const KING = item('king', { name: 'Ga giường King', label: 'Ga giường King
 const LINEN_ITEMS = 'GET /api/housekeeping/inventory/items?warehouse=LINEN';
 const RECEIPTS = 'GET /api/housekeeping/inventory/receipts?warehouse=LINEN';
 
-describe('"Nhập kho" — one delivery, many items', () => {
-  it('saves every line in ONE "Lưu phiếu nhập" — an item already on a line is not offered again', async () => {
+describe('"Nhập kho" — one checklist of the warehouse, new items in the same save', () => {
+  const PILLOW = item('pillow', { name: 'Vỏ gối', label: 'Vỏ gối', code: '3.003' });
+  const receiptRoutes = (posted: Record<string, unknown>[]) =>
+    shell(MANAGER, {
+      [LINEN_ITEMS]: () => ({ status: 200, body: { items: [TOWEL, KING, PILLOW] } }),
+      [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
+      'POST /api/housekeeping/inventory/receipts': (init) => {
+        const body = JSON.parse(String(init.body));
+        posted.push(body);
+        return { status: 201, body: { duplicate: false, receipt: { id: 'r1', lines: [...body.lines, ...body.newItems] } } };
+      },
+    });
+
+  it('lists every item with a tick — the quantity opens only when ticked — and sends the ticked ones only, with no note', async () => {
     const posted: Record<string, unknown>[] = [];
-    installApiMock(
-      shell(MANAGER, {
-        [LINEN_ITEMS]: () => ({ status: 200, body: { items: [TOWEL, KING] } }),
-        [RECEIPTS]: () => ({ status: 200, body: { receipts: [] } }),
-        'POST /api/housekeeping/inventory/receipts': (init) => {
-          const body = JSON.parse(String(init.body));
-          posted.push(body);
-          return { status: 201, body: { duplicate: false, receipt: { id: 'r1', lines: body.lines } } };
-        },
-      }),
-    );
+    installApiMock(receiptRoutes(posted));
     renderApp('/app/hk/store/linens');
     await userEvent.click(await screen.findByTestId('inventory-receive-open'));
     const dialog = await screen.findByRole('dialog');
     const save = within(dialog).getByTestId('receipt-save');
     expect(save).toBeDisabled();
-    await userEvent.selectOptions(within(dialog).getByTestId('receipt-item-0'), 'towel');
-    await userEvent.type(within(dialog).getByTestId('receipt-qty-0'), '20');
-    await userEvent.click(within(dialog).getByTestId('receipt-add-line'));
-    // The towel is on the first line: the second offers the sheet only.
-    const second = within(dialog).getByTestId('receipt-item-1');
-    expect(within(second).getAllByRole('option').map((o) => o.textContent)).toEqual(['— Chọn mặt hàng —', 'Ga giường King (cái)']);
-    await userEvent.selectOptions(second, 'king');
-    // A line without its quantity holds the save.
+    // No "Chọn mặt hàng" dropdown: every item is there, its code and unit with it.
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(within(dialog).getAllByTestId(/^receipt-row-/)).toHaveLength(3);
+    expect(within(dialog).getByTestId('receipt-row-king')).toHaveTextContent('3.002');
+    expect(within(dialog).getByTestId('receipt-row-king')).toHaveTextContent('cái');
+    for (const id of ['towel', 'king', 'pillow']) expect(within(dialog).getByTestId(`receipt-qty-${id}`)).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('receipt-check-towel'));
+    expect(within(dialog).getByTestId('receipt-qty-towel')).toBeEnabled();
+    await userEvent.type(within(dialog).getByTestId('receipt-qty-towel'), '20');
+    // Ticked by its name too; without a quantity it holds the save.
+    await userEvent.click(within(dialog).getByText('Ga giường King'));
     expect(save).toBeDisabled();
-    await userEvent.type(within(dialog).getByTestId('receipt-qty-1'), '5');
+    await userEvent.type(within(dialog).getByTestId('receipt-qty-king'), '5');
     expect(within(dialog).getByTestId('receipt-count')).toHaveTextContent('2 mặt hàng');
-    // Only the date and time, the items, their quantities and an optional note are asked.
+    // Ticked then unticked: not sent, its figure forgotten.
+    await userEvent.click(within(dialog).getByTestId('receipt-check-pillow'));
+    await userEvent.type(within(dialog).getByTestId('receipt-qty-pillow'), '9');
+    await userEvent.click(within(dialog).getByTestId('receipt-check-pillow'));
+    expect(within(dialog).getByTestId('receipt-qty-pillow')).toHaveValue('');
+    // Search narrows the list, accents optional; what is ticked stays ticked.
+    await userEvent.type(within(dialog).getByTestId('receipt-search'), 'ga giuong');
+    expect(within(dialog).getAllByTestId(/^receipt-row-/).map((r) => r.dataset.testid)).toEqual(['receipt-row-king']);
+    await userEvent.clear(within(dialog).getByTestId('receipt-search'));
+    expect(within(dialog).getByTestId('receipt-ticked')).toHaveTextContent('Đã chọn 2/3');
+    // Only the date and time, the items and their quantities: no note anywhere.
     expect(within(dialog).getByTestId('receipt-at')).toBeInTheDocument();
-    expect(within(dialog).queryByLabelText(/Số phiếu|Ghi chú phiếu/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/Ghi chú|Số phiếu/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByPlaceholderText(/Ghi chú/)).not.toBeInTheDocument();
     await userEvent.click(save);
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).not.toHaveProperty('reference');
     expect(posted[0]).not.toHaveProperty('note');
-    expect(posted[0]).toMatchObject({
+    expect(posted[0]).toEqual({
       warehouse: 'LINEN',
       receivedAt: expect.any(String),
       requestId: expect.any(String),
@@ -112,7 +128,68 @@ describe('"Nhập kho" — one delivery, many items', () => {
         { itemId: 'towel', quantity: 20 },
         { itemId: 'king', quantity: 5 },
       ],
+      newItems: [],
     });
+  });
+
+  it('adds new items by name and quantity only — several, each removable — saved with the ticked ones in ONE request', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(receiptRoutes(posted));
+    renderApp('/app/hk/store/linens');
+    await userEvent.click(await screen.findByTestId('inventory-receive-open'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByTestId('receipt-check-towel'));
+    await userEvent.type(within(dialog).getByTestId('receipt-qty-towel'), '2');
+    const add = within(dialog).getByRole('button', { name: 'Thêm mặt hàng mới' });
+    await userEvent.click(add);
+    await userEvent.click(add);
+    await userEvent.click(add);
+    // A row asks a name and a quantity — no code, unit or note.
+    expect(within(within(dialog).getByTestId('receipt-new-row-0')).getAllByRole('textbox')).toHaveLength(2);
+    await userEvent.type(within(dialog).getByTestId('receipt-new-name-0'), 'Gối ôm');
+    await userEvent.type(within(dialog).getByTestId('receipt-new-qty-0-own'), '4');
+    await userEvent.type(within(dialog).getByTestId('receipt-new-name-1'), 'Bỏ đi');
+    await userEvent.type(within(dialog).getByTestId('receipt-new-name-2'), 'Khăn mặt');
+    await userEvent.type(within(dialog).getByTestId('receipt-new-qty-2-own'), '10');
+    await userEvent.click(within(dialog).getByTestId('receipt-new-remove-1'));
+    expect(within(dialog).getAllByTestId(/^receipt-new-row-/)).toHaveLength(2);
+    // A new row with no quantity holds the save.
+    await userEvent.click(add);
+    await userEvent.type(within(dialog).getByTestId('receipt-new-name-2'), 'Dép');
+    expect(within(dialog).getByTestId('receipt-save')).toBeDisabled();
+    expect(within(dialog).getByTestId('receipt-problem')).toHaveTextContent('Nhập số lượng cho “Dép”.');
+    await userEvent.click(within(dialog).getByTestId('receipt-new-remove-2'));
+    expect(within(dialog).getByTestId('receipt-count')).toHaveTextContent('3 mặt hàng');
+    await userEvent.click(within(dialog).getByTestId('receipt-save'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({
+      lines: [{ itemId: 'towel', quantity: 2 }],
+      newItems: [
+        { name: 'Gối ôm', quantity: 4 },
+        { name: 'Khăn mặt', quantity: 10 },
+      ],
+    });
+  });
+
+  it('never creates a name already in the warehouse — it shows that item and takes it instead', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(receiptRoutes(posted));
+    renderApp('/app/hk/store/linens');
+    await userEvent.click(await screen.findByTestId('inventory-receive-open'));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Thêm mặt hàng mới' }));
+    await userEvent.type(within(dialog).getByTestId('receipt-new-name-0'), '  khăn TẮM ');
+    await userEvent.type(within(dialog).getByTestId('receipt-new-qty-0-own'), '6');
+    expect(within(dialog).getByTestId('receipt-new-dup-0')).toHaveTextContent('Đã có “3.001 Khăn tắm”');
+    expect(within(dialog).getByTestId('receipt-save')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('receipt-new-use-0'));
+    // The row is gone; the existing towel is ticked with its quantity.
+    expect(within(dialog).queryByTestId('receipt-new-row-0')).not.toBeInTheDocument();
+    expect(within(dialog).getByTestId('receipt-check-towel')).toBeChecked();
+    expect(within(dialog).getByTestId('receipt-qty-towel')).toHaveValue('6');
+    await userEvent.click(within(dialog).getByTestId('receipt-save'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ lines: [{ itemId: 'towel', quantity: 6 }], newItems: [] });
   });
 });
 
@@ -465,7 +542,7 @@ describe('damage sources, the room-cleaning list and the opening count', () => {
     expect(posted[0]).toMatchObject({ roomNumber: '102', taskId: 'task-102', issueId: 'issue-9' });
   });
 
-  it('chooses and orders the items of the room-cleaning form — codes shown to the manager — and saves the list in one request', async () => {
+  it('ticks the items of the room-cleaning form — codes shown to the manager — keeping the saved order, and saves the list in one request', async () => {
     const saved: unknown[] = [];
     const choice = (id: string, warehouse: string, code: string, label: string, cleaningOrder: number | null) => ({
       id,
@@ -498,17 +575,18 @@ describe('damage sources, the room-cleaning list and the opening count', () => {
     expect(screen.queryByTestId('inventory-from-catalog')).not.toBeInTheDocument();
     await userEvent.click(await screen.findByTestId('inventory-cleaning-open'));
     const dialog = await screen.findByRole('dialog', { name: 'Mặt hàng dùng khi dọn phòng' });
-    const chosen = await within(dialog).findByTestId('cleaning-items-chosen');
-    expect(chosen).toHaveTextContent('3.001Khăn tắm');
-    // Water joins, then goes first.
+    // The saved item is ticked; no separate "Đã chọn" list, no reorder buttons.
+    expect(await within(dialog).findByTestId('cleaning-pick-towel')).toBeChecked();
+    expect(within(dialog).getByTestId('cleaning-pick-king')).not.toBeChecked();
+    expect(within(dialog).queryByText(/Đã chọn/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByTestId('cleaning-items-chosen')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /lên|xuống/ })).not.toBeInTheDocument();
+    // Water, then the sheet: the saved towel stays first, the new ones follow in warehouse order.
     await userEvent.click(within(dialog).getByTestId('cleaning-pick-water'));
-    await userEvent.click(within(dialog).getByTestId('cleaning-up-water'));
-    expect(within(within(dialog).getByTestId('cleaning-items-chosen')).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      expect.stringContaining('Nước suối'),
-      expect.stringContaining('Khăn tắm'),
-    ]);
+    await userEvent.click(within(dialog).getByTestId('cleaning-pick-king'));
+    expect(within(dialog).getByTestId('cleaning-pick-water')).toBeChecked();
     await userEvent.click(within(dialog).getByTestId('cleaning-items-save'));
-    await waitFor(() => expect(saved).toEqual([{ itemIds: ['water', 'towel'] }]));
+    await waitFor(() => expect(saved).toEqual([{ itemIds: ['towel', 'king', 'water'] }]));
   });
 
   it('classifies an item of the former equipment warehouse into one of the four', async () => {
@@ -644,7 +722,7 @@ describe('the Admin’s shared catalog and receipts for several branches', () =>
     await waitFor(() => expect(posted).toEqual([{ warehouse: 'LINEN', items: [{ name: 'Khăn tắm' }] }]));
   });
 
-  it('receives for chosen branches, each with its own quantities — never one figure copied to all', async () => {
+  it('receives for chosen branches, each with its own ticks and quantities — and a new shared item only where given a quantity', async () => {
     const posted: Record<string, unknown>[] = [];
     installApiMock(
       ADMIN_ROUTES({
@@ -661,10 +739,17 @@ describe('the Admin’s shared catalog and receipts for several branches', () =>
     await userEvent.click(await within(dialog).findByTestId('multi-receipt-branch-1'));
     await userEvent.click(within(dialog).getByTestId('multi-receipt-branch-2'));
     // Each branch lists its own items — CN2's own one only under CN2.
-    expect(await within(dialog).findByTestId('multi-receipt-qty-2-local-2')).toBeInTheDocument();
+    expect(await within(dialog).findByTestId('multi-receipt-2-row-local-2')).toBeInTheDocument();
     expect(within(within(dialog).getByTestId('multi-receipt-lines-1')).queryByText('Khăn riêng')).not.toBeInTheDocument();
-    await userEvent.type(await within(dialog).findByTestId('multi-receipt-qty-1-towel'), '5');
-    await userEvent.type(within(dialog).getByTestId('multi-receipt-qty-2-towel-2'), '3');
+    await userEvent.click(await within(dialog).findByTestId('multi-receipt-1-check-towel'));
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-1-qty-towel'), '5');
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-2-check-towel-2'));
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-2-qty-towel-2'), '3');
+    // A new item: one quantity box per chosen branch; CN1 left empty receives none.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Thêm mặt hàng mới' }));
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-name-0'), 'Gối ôm');
+    expect(within(dialog).getByTestId('multi-receipt-new-qty-0-1')).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-qty-0-2'), '6');
     await userEvent.click(within(dialog).getByTestId('multi-receipt-save'));
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).toMatchObject({
@@ -674,8 +759,51 @@ describe('the Admin’s shared catalog and receipts for several branches', () =>
         { branchId: 1, lines: [{ itemId: 'towel', quantity: 5 }] },
         { branchId: 2, lines: [{ itemId: 'towel-2', quantity: 3 }] },
       ],
+      newItems: [{ name: 'Gối ôm', quantities: [{ branchId: 2, quantity: 6 }] }],
     });
+    expect(posted[0]).not.toHaveProperty('note');
     expect(await screen.findByText('Đã nhập kho cho 2 chi nhánh.')).toBeInTheDocument();
+  });
+
+  it('sends a branch with only a new item, drops a branch taken off — and offers the shared item a new name repeats', async () => {
+    const posted: Record<string, unknown>[] = [];
+    installApiMock(
+      ADMIN_ROUTES({
+        'POST /api/housekeeping/inventory/receipts/multi': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { receipts: [{ id: 'r1' }], duplicate: false } };
+        },
+      }),
+    );
+    renderApp('/app/hk/store/linens');
+    await userEvent.click(await screen.findByTestId('inventory-multi-receipt-open'));
+    const dialog = await screen.findByRole('dialog', { name: /Nhập kho cho các chi nhánh/ });
+    await userEvent.click(await within(dialog).findByTestId('multi-receipt-branch-1'));
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-branch-2'));
+    await userEvent.click(await within(dialog).findByTestId('multi-receipt-1-check-towel'));
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-1-qty-towel'), '5');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Thêm mặt hàng mới' }));
+    // The shared towel exists in both branches: taken there, never created twice.
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-name-0'), 'Khăn tắm');
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-qty-0-2'), '4');
+    expect(within(dialog).getByTestId('multi-receipt-new-dup-0')).toHaveTextContent('3.001 Khăn tắm');
+    expect(within(dialog).getByTestId('multi-receipt-save')).toBeDisabled();
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-new-use-0'));
+    expect(within(dialog).getByTestId('multi-receipt-2-qty-towel-2')).toHaveValue('4');
+    // CN1 taken off: its tick goes with it.
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-branch-1'));
+    expect(within(dialog).getByTestId('multi-receipt-save')).toHaveTextContent('Lưu phiếu nhập (1 chi nhánh)');
+    // A branch with only a new item is sent.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Thêm mặt hàng mới' }));
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-name-0'), 'Gối ôm');
+    await userEvent.type(within(dialog).getByTestId('multi-receipt-new-qty-0-2'), '2');
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-2-check-towel-2'));
+    await userEvent.click(within(dialog).getByTestId('multi-receipt-save'));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({
+      branches: [{ branchId: 2, lines: [] }],
+      newItems: [{ name: 'Gối ôm', quantities: [{ branchId: 2, quantity: 2 }] }],
+    });
   });
 
   it('marks shared and branch items, and gives the manager no "Xóa" on a shared one', async () => {
@@ -697,4 +825,86 @@ describe('the Admin’s shared catalog and receipts for several branches', () =>
     expect(await screen.findByTestId('inventory-edit-towel')).toBeInTheDocument();
     expect(screen.queryByTestId('inventory-remove-towel')).not.toBeInTheDocument();
   });
+});
+
+describe('the receipt checklist, in each of the four warehouses — every item readable beside its own quantity box', () => {
+  const LONG = 'Khăn tắm cotton cao cấp dệt hoa văn chìm loại dày dùng cho phòng Suite gia đình hướng biển';
+  const many = (prefix: string, warehouse: string, branch: typeof BRANCH) =>
+    Array.from({ length: 25 }, (_, n) =>
+      item(`${prefix}-${n}`, {
+        branch,
+        warehouse,
+        name: n === 0 ? LONG : `Mặt hàng ${n}`,
+        label: n === 0 ? LONG : `Mặt hàng ${n}`,
+        code: `${n === 0 ? '4.10023' : '4.'}${String(n).padStart(3, '0')}`,
+        unit: n === 1 ? 'chai lớn' : 'cái',
+        scope: 'SYSTEM',
+      }),
+    );
+  const WAREHOUSES = [
+    ['chemicals', 'CHEMICAL_TOOLS'],
+    ['guest-supplies', 'GUEST_SUPPLIES'],
+    ['linens', 'LINEN'],
+    ['amenities', 'AMENITY'],
+  ] as const;
+
+  /** Three columns: the tick, the item (may shrink and wrap), a bounded quantity with its unit beside the box. */
+  function expectRowLayout(row: HTMLElement, box: HTMLElement) {
+    expect(row.className).toContain('sm:grid-cols-[auto_minmax(0,1fr)_10rem]');
+    const label = row.querySelector('label')!;
+    expect(label).toHaveTextContent(LONG);
+    expect(label.textContent).toContain('4.10023000');
+    expect(within(label).getByText(LONG).className).toContain('break-words');
+    // The label names the tick; the box has its own accessible name, the unit right beside it — not over the label.
+    expect(label).toHaveAttribute('for', row.querySelector('input[type="checkbox"]')!.id);
+    expect(box).toHaveAccessibleName(expect.stringContaining(LONG));
+    expect(box.className).not.toContain('w-24');
+    expect(box.nextElementSibling).toHaveTextContent('cái');
+    // The list scrolls inside the dialog however many items there are.
+    expect(row.parentElement!.className).toContain('overflow-y-auto');
+  }
+
+  for (const [path, warehouse] of WAREHOUSES) {
+    it(`${warehouse}, the Admin's: a checklist per branch — many items, two branches, kept apart`, async () => {
+      installApiMock(
+        shell(ADMIN_USER, {
+          'GET /api/branches': () => ({ status: 200, body: { branches: [BRANCH, BRANCH2] } }),
+          [`GET /api/housekeeping/inventory/items?warehouse=${warehouse}&branchId=1`]: () => ({ status: 200, body: { items: many('a', warehouse, BRANCH) } }),
+          [`GET /api/housekeeping/inventory/items?warehouse=${warehouse}&branchId=2`]: () => ({ status: 200, body: { items: many('b', warehouse, BRANCH2) } }),
+        }),
+      );
+      renderApp(`/app/hk/store/${path}`);
+      await userEvent.click(await screen.findByTestId('inventory-multi-receipt-open'));
+      const dialog = await screen.findByRole('dialog', { name: /Nhập kho cho các chi nhánh/ });
+      await userEvent.click(await within(dialog).findByTestId('multi-receipt-branch-1'));
+      await userEvent.click(within(dialog).getByTestId('multi-receipt-branch-2'));
+      expectRowLayout(await within(dialog).findByTestId('multi-receipt-1-row-a-0'), within(dialog).getByTestId('multi-receipt-1-qty-a-0'));
+      expect(within(dialog).getByTestId('multi-receipt-1-qty-a-1').nextElementSibling).toHaveTextContent('chai lớn');
+      // Every item of both branches is there to tick.
+      expect(within(dialog).getAllByTestId(/^multi-receipt-1-row-/)).toHaveLength(25);
+      expect(within(dialog).getAllByTestId(/^multi-receipt-2-row-/)).toHaveLength(25);
+      // The last row of the second branch, ticked and filled, stays its own.
+      await userEvent.click(within(dialog).getByTestId('multi-receipt-2-check-b-24'));
+      await userEvent.type(within(dialog).getByTestId('multi-receipt-2-qty-b-24'), '7');
+      expect(within(dialog).getByTestId('multi-receipt-1-qty-a-24')).toHaveValue('');
+      expect(within(dialog).getByTestId('multi-receipt-1-qty-a-24')).toBeDisabled();
+      expect(within(dialog).getByTestId('multi-receipt-save')).toHaveTextContent('Lưu phiếu nhập (1 chi nhánh)');
+      expect(within(dialog).queryByPlaceholderText(/Ghi chú/)).not.toBeInTheDocument();
+    });
+
+    it(`${warehouse}, the manager's: one checklist of 25 items, no note`, async () => {
+      installApiMock(
+        shell(MANAGER, {
+          [`GET /api/housekeeping/inventory/items?warehouse=${warehouse}`]: () => ({ status: 200, body: { items: many('m', warehouse, BRANCH) } }),
+          [`GET /api/housekeeping/inventory/receipts?warehouse=${warehouse}`]: () => ({ status: 200, body: { receipts: [] } }),
+        }),
+      );
+      renderApp(`/app/hk/store/${path}`);
+      await userEvent.click(await screen.findByTestId('inventory-receive-open'));
+      const dialog = await screen.findByRole('dialog');
+      expectRowLayout(within(dialog).getByTestId('receipt-row-m-0'), within(dialog).getByTestId('receipt-qty-m-0'));
+      expect(within(dialog).getAllByTestId(/^receipt-row-/)).toHaveLength(25);
+      expect(within(dialog).queryByPlaceholderText(/Ghi chú/)).not.toBeInTheDocument();
+    });
+  }
 });

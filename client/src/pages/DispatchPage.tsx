@@ -15,6 +15,7 @@ import { Button } from '../components/Button';
 import { ErrorAlert } from '../components/ErrorAlert';
 import { PageHeader } from '../components/PageState';
 import { formatMoney } from '../lib/format';
+import { buildPmsNote } from '../lib/pmsNote';
 
 interface NightDraft {
   stayDate: string;
@@ -61,6 +62,9 @@ function stayDatesBetween(checkIn: string, checkOut: string): string[] {
   return out;
 }
 
+/** The form's own starting payment, used only when the paste established no policy. */
+const DEFAULT_PAYMENT_STATUS: FormState['paymentStatus'] = 'PAY_BEFORE';
+
 /** The extraction preview, as the editable review the Admin works on. */
 function toForm(res: ExtractResponse): FormState {
   return {
@@ -71,7 +75,8 @@ function toForm(res: ExtractResponse): FormState {
     checkInDate: res.booking.checkIn ?? '',
     checkOutDate: res.booking.checkOut ?? '',
     totalAmount: res.booking.totalAmount != null ? String(res.booking.totalAmount) : '',
-    paymentStatus: res.booking.paymentStatus,
+    // The source's policy is kept as found; the default never replaces it.
+    paymentStatus: res.booking.paymentStatus ?? DEFAULT_PAYMENT_STATUS,
     specialRequest: res.booking.specialRequest ?? '',
     rooms: res.rooms.map((r) => ({
       roomIndex: r.roomIndex,
@@ -109,6 +114,7 @@ function buildDispatch(
   businessType: BusinessType | null,
   manuallyConfirmed: boolean,
   acknowledgedWarningCodes: string[],
+  adminPmsNote: string | null,
 ): BookingComDispatchPayload {
   return {
     rawText,
@@ -121,7 +127,9 @@ function buildDispatch(
     checkOutDate: form.checkOutDate || null,
     totalAmount: parseAmount(form.totalAmount),
     paymentStatus: form.paymentStatus,
+    // No longer shown on this form; the extracted request still feeds the note's arrival line.
     specialRequest: form.specialRequest || null,
+    adminPmsNote,
     rooms: form.rooms.map((r) => ({
       roomIndex: r.roomIndex,
       roomType: r.roomType || null,
@@ -203,6 +211,12 @@ export function DispatchPage() {
   /** The pasted text, kept for the dispatch: the server re-parses it itself. */
   const [reviewRawText, setReviewRawText] = useState('');
   const [form, setForm] = useState<FormState | null>(null);
+  /**
+   * The Admin's edit of "Ghi chú PMS", with the generated note it was made on.
+   * Sent with the booking so Reception reads exactly this text; dropped when
+   * the generated note itself changes beneath it (a corrected room code wins).
+   */
+  const [pmsEdit, setPmsEdit] = useState<{ text: string; from: string } | null>(null);
   const [branchId, setBranchId] = useState<number | undefined>(undefined);
   const [warnings, setWarnings] = useState<WarningView[]>([]);
   const [quality, setQuality] = useState<ParserQuality | null>(null);
@@ -246,6 +260,7 @@ export function DispatchPage() {
       // A new extraction REPLACES whatever was on screen. There is nothing to
       // clean up in the database, because the previous review was never there.
       setForm(toForm(res));
+      setPmsEdit(null);
       setReviewRawText(text);
       setWarnings(res.warnings);
       setBranchId(res.branchConfident && res.suggestedBranch ? res.suggestedBranch.id : undefined);
@@ -404,6 +419,7 @@ export function DispatchPage() {
           businessType,
           businessTypeManuallyConfirmed,
           ackCodes,
+          pmsNoteEdit !== null && pmsNoteEdit.trim() !== generatedPmsNote.trim() ? pmsNoteEdit.trim() : null,
         ),
       );
       navigate(`/app/booking/${res.booking.id}`);
@@ -457,6 +473,13 @@ export function DispatchPage() {
       businessType: businessType ?? undefined,
     };
   }, [form, selectedBranch, businessType]);
+  const generatedPmsNote = useMemo(() => {
+    if (!notePreview) return '';
+    const note = buildPmsNote(notePreview);
+    return note.ok ? (note.text ?? '') : '';
+  }, [notePreview]);
+  // The edit counts only while it was made on the note now generated.
+  const pmsNoteEdit = pmsEdit && pmsEdit.from === generatedPmsNote ? pmsEdit.text : null;
 
   const roomsMapped = form ? everyRoomHasPmsCode(form.rooms) : false;
 
@@ -645,15 +668,10 @@ export function DispatchPage() {
           <Field label="Trả phòng"><input type="date" className={inputClass} value={form.checkOutDate} onChange={(e) => onDateChange('checkOutDate', e.target.value)} /></Field>
           <Field label="Tổng tiền (VND)"><input inputMode="numeric" className={inputClass} value={form.totalAmount} onChange={(e) => updateForm({ totalAmount: e.target.value })} /></Field>
           <Field label="Thanh toán">
-            <select className={inputClass} value={form.paymentStatus} onChange={(e) => updateForm({ paymentStatus: e.target.value as FormState['paymentStatus'] })}>
-              <option value="PAY_AFTER">PAY AFTER CHECK-IN</option>
+            <select className={inputClass} value={form.paymentStatus} onChange={(e) => updateForm({ paymentStatus: e.target.value as FormState['paymentStatus'] })} data-testid="dispatch-payment">
               <option value="PAY_BEFORE">PAY BEFORE CHECK-IN</option>
+              <option value="PAY_AFTER">PAY AFTER CHECK-IN</option>
             </select>
-          </Field>
-        </div>
-        <div className="mt-4">
-          <Field label="Ghi chú / Yêu cầu đặc biệt">
-            <textarea className={inputClass} rows={2} value={form.specialRequest} onChange={(e) => updateForm({ specialRequest: e.target.value })} />
           </Field>
         </div>
       </Card>
@@ -711,6 +729,8 @@ export function DispatchPage() {
           // order will actually be validated against.
           branchId={branchId}
           onRoomClassChanged={applyRoomClass}
+          pmsNoteEdit={pmsNoteEdit}
+          onPmsNoteEdit={(text) => setPmsEdit({ text, from: generatedPmsNote })}
         />
       ) : null}
 

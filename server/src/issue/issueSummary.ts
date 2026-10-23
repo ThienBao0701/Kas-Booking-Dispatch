@@ -43,6 +43,12 @@ export interface BranchIssueSummary {
 
 export interface IssueSummary {
   totalUnresolved: number;
+  /**
+   * The same unresolved incidents split by who REPORTED them — Bộ phận buồng
+   * phòng or anyone else (Reception, a supervisor) — so each is counted once,
+   * under one menu category. Sums to `totalUnresolved`.
+   */
+  byDepartment: { reception: number; housekeeping: number };
   newCount: number;
   inProgressCount: number;
   awaitingInspectionCount: number;
@@ -78,6 +84,7 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
     where,
     _count: { _all: true },
   });
+  const byHousekeeping = await prisma.hotelIssue.count({ where: { AND: [where, { reportedBy: { role: { in: ['HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'] } } }] } });
 
   const newByBranch = new Map<number, number>();
   const inProgressByBranch = new Map<number, number>();
@@ -107,8 +114,10 @@ export async function computeIssueSummary(actor: Actor): Promise<IssueSummary> {
   const newCount = byBranch.reduce((s, b) => s + b.newCount, 0);
   const inProgressCount = byBranch.reduce((s, b) => s + b.inProgressCount, 0);
   const awaitingInspectionCount = byBranch.reduce((s, b) => s + b.awaitingInspectionCount, 0);
+  const totalUnresolved = newCount + inProgressCount + awaitingInspectionCount;
   return {
-    totalUnresolved: newCount + inProgressCount + awaitingInspectionCount,
+    totalUnresolved,
+    byDepartment: { reception: totalUnresolved - byHousekeeping, housekeeping: byHousekeeping },
     newCount,
     inProgressCount,
     awaitingInspectionCount,

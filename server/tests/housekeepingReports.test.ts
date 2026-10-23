@@ -679,3 +679,48 @@ describe('M. one table per category, and possible duplicates across departments'
     }
   });
 });
+
+describe('N. what is still open, by category and department — the menu’s counts', () => {
+  const counts = async (agent: Agent) => {
+    const res = await agent.get('/api/reception/reports/open-counts');
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body.counts as { guestRequest: { reception: number; housekeeping: number }; complaint: number };
+  };
+
+  it('counts each open record once, under the department that recorded it, inside each reader’s own scope', async () => {
+    await checkIn(letan1);
+    const desk = (await guestRequest(letan1, 'Khách A')).body.report.id as string;
+    await guestRequest(letan1, 'Khách B');
+    expect((await letan1.post('/api/reception/reports').send({ category: 'CUSTOMER_COMPLAINT', complaint: { guestName: 'K', description: 'Ồn' } })).status).toBe(201);
+    await startShiftAt(lan, cn1);
+    const mine = (await guestRequest(lan, 'Khách C')).body.report.id as string;
+    await startShiftAt(hoa, cn2);
+    await guestRequest(hoa, 'Khách D');
+    // The Admin: every branch, each department once.
+    expect(await counts(admin)).toEqual({ guestRequest: { reception: 2, housekeeping: 2 }, complaint: 1 });
+    // The desk: its branch, both departments; another branch's desk: only its own branch's.
+    expect(await counts(letan1)).toEqual({ guestRequest: { reception: 2, housekeeping: 1 }, complaint: 1 });
+    expect(await counts(letan2)).toEqual({ guestRequest: { reception: 0, housekeeping: 1 }, complaint: 0 });
+    // Housekeeping: its own department only — the manager its branch, a housekeeper its own.
+    expect(await counts(qlbp1)).toEqual({ guestRequest: { reception: 0, housekeeping: 1 }, complaint: 0 });
+    expect(await counts(qlbp2)).toEqual({ guestRequest: { reception: 0, housekeeping: 1 }, complaint: 0 });
+    expect(await counts(lan)).toEqual({ guestRequest: { reception: 0, housekeeping: 1 }, complaint: 0 });
+    // Completed or withdrawn: no longer counted — the badge follows the workflow.
+    expect((await letan1.post(`/api/reception/reports/${desk}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    expect((await qlbp1.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(200);
+    expect(await counts(admin)).toEqual({ guestRequest: { reception: 1, housekeeping: 1 }, complaint: 1 });
+    expect(await counts(qlbp1)).toEqual({ guestRequest: { reception: 0, housekeeping: 0 }, complaint: 0 });
+  });
+
+  it('splits the unresolved incidents by who reported them — each once, summing to the total', async () => {
+    await checkIn(letan1);
+    expect((await letan1.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '301', description: 'Vòi sen rò nước' })).status).toBe(201);
+    expect((await letan1.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '302', description: 'Máy lạnh kêu' })).status).toBe(201);
+    await startShiftAt(lan, cn1);
+    expect((await lan.post('/api/issues').send({ areaCategory: 'ROOM', roomNumber: '401', description: 'Đèn hỏng' })).status).toBe(201);
+    const summary = (await admin.get('/api/issues/summary')).body.summary as { totalUnresolved: number; byDepartment: { reception: number; housekeeping: number } };
+    expect(summary).toMatchObject({ totalUnresolved: 3, byDepartment: { reception: 2, housekeeping: 1 } });
+    // Another branch's desk sees none of them.
+    expect((await letan2.get('/api/issues/summary')).body.summary).toMatchObject({ totalUnresolved: 0, byDepartment: { reception: 0, housekeeping: 0 } });
+  });
+});

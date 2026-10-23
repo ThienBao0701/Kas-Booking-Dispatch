@@ -16,14 +16,12 @@
  */
 import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   Boxes,
   ClipboardCheck,
   FileSpreadsheet,
-  ArrowDown,
-  ArrowUp,
   FolderInput,
   History,
   ListChecks,
@@ -120,12 +118,13 @@ function useInventoryScope(allowAll: boolean) {
   return { isAdmin, isManager: user?.role === 'HOUSEKEEPING_MANAGER', branchId, ready, picker };
 }
 
+const itemsQuery = (warehouse: Warehouse | undefined, branchId: number | undefined, includeArchived = false) => ({
+  queryKey: [...INVENTORY_KEY, 'items', warehouse ?? 'ALL', branchId ?? null, includeArchived],
+  queryFn: () => inventoryApi.items({ warehouse, branchId, includeArchived }),
+});
+
 function useItems(warehouse: Warehouse | undefined, branchId: number | undefined, enabled = true, includeArchived = false) {
-  return useQuery({
-    queryKey: [...INVENTORY_KEY, 'items', warehouse ?? 'ALL', branchId ?? null, includeArchived],
-    queryFn: () => inventoryApi.items({ warehouse, branchId, includeArchived }),
-    enabled,
-  });
+  return useQuery({ ...itemsQuery(warehouse, branchId, includeArchived), enabled });
 }
 
 /** "Xuất Excel" — the stock, the damage reports and the count differences of the scope shown. */
@@ -367,7 +366,7 @@ export function WarehousePage({ warehouse }: { warehouse: Warehouse }) {
                 <SheetButton
                   icon={ListChecks}
                   label="Mặt hàng dùng khi dọn phòng"
-                  hint="Chọn và sắp xếp các mặt hàng hiện trên form dọn phòng của chi nhánh."
+                  hint="Chọn các mặt hàng hiện trên form dọn phòng của chi nhánh."
                   onClick={() => setDialog({ kind: 'cleaning' })}
                   testId="inventory-cleaning-open"
                 />
@@ -587,32 +586,314 @@ function ItemDialog({ item, onClose, onDone }: { item: InventoryItem; onClose: (
  * for EACH its own quantities of its own items (an empty box: none received).
  * Saved once, all or none — one receipt per branch, nothing copied between them.
  */
+/** Search ignores case and accents: "khan tam" finds "Khăn tắm". */
+const searchFold = (v: string) => v.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/đ/g, 'd');
+/** A new name against the catalog, compared as the server compares them. */
+const nameFold = (v: string) => v.normalize('NFC').toLocaleLowerCase('vi').trim();
+const quantityOk = (v: string) => /^\d+$/.test(v) && Number(v) >= 1;
+
+/** Tick or untick: a ticked item's key holds its quantity (empty until typed). */
+function toggleKey(p: Record<string, string>, key: string): Record<string, string> {
+  const next = { ...p };
+  if (key in next) delete next[key];
+  else next[key] = '';
+  return next;
+}
+
+/**
+ * THE WAREHOUSE'S ITEMS AS ONE CHECKLIST — tick what came, type how many. The
+ * quantity box opens only for a ticked item; nothing unticked is ever sent.
+ * Three columns: the tick, the item (code above, the name wrapping in its own
+ * space) and a bounded quantity with its unit; a narrow screen puts the
+ * quantity under the name. The list scrolls on its own, however long.
+ */
+function ItemChecklist({
+  items,
+  picked,
+  onToggle,
+  onQty,
+  idPrefix,
+  context,
+}: {
+  items: InventoryItem[];
+  /** itemId → the quantity typed; present = ticked. */
+  picked: Record<string, string>;
+  onToggle: (itemId: string) => void;
+  onQty: (itemId: string, value: string) => void;
+  idPrefix: string;
+  /** The branch, in each box's accessible name, where several are on screen. */
+  context?: string;
+}) {
+  const [search, setSearch] = useState('');
+  const q = searchFold(search.trim());
+  const shown = q ? items.filter((i) => searchFold(`${i.code ?? ''} ${i.label}`).includes(q)) : items;
+  const ticked = items.filter((i) => i.id in picked).length;
+  if (items.length === 0) return <p className="text-sm text-slate-500">Chưa có mặt hàng nào trong kho này — thêm mặt hàng mới bên dưới.</p>;
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Tìm mặt hàng…"
+          aria-label={`Tìm mặt hàng${context ? ` — ${context}` : ''}`}
+          className={`${CONTROL} min-w-0 flex-1`}
+          data-testid={`${idPrefix}-search`}
+        />
+        <span className="shrink-0 text-sm text-slate-600" data-testid={`${idPrefix}-ticked`}>
+          Đã chọn {ticked}/{items.length}
+        </span>
+      </div>
+      <ul className="mt-2 max-h-[min(28rem,55vh)] divide-y divide-line-subtle overflow-y-auto overscroll-contain rounded-lg border border-line-subtle px-3" data-testid={`${idPrefix}-list`}>
+        {shown.map((i) => {
+          const on = i.id in picked;
+          const value = picked[i.id] ?? '';
+          const invalid = on && value !== '' && !quantityOk(value);
+          const checkId = `${idPrefix}-check-${i.id}`;
+          const qtyId = `${idPrefix}-qty-${i.id}`;
+          return (
+            <li key={i.id} className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 py-2 sm:grid-cols-[auto_minmax(0,1fr)_10rem]" data-testid={`${idPrefix}-row-${i.id}`}>
+              <input
+                type="checkbox"
+                id={checkId}
+                checked={on}
+                onChange={() => {
+                  onToggle(i.id);
+                  // Ticked: straight to its quantity.
+                  if (!on) requestAnimationFrame(() => document.getElementById(qtyId)?.focus());
+                }}
+                className="h-5 w-5 accent-brand-600"
+                data-testid={checkId}
+              />
+              <label htmlFor={checkId} className="min-w-0 cursor-pointer text-sm text-slate-800">
+                {i.code ? <span className="block font-mono text-xs text-slate-500">{i.code}</span> : null}
+                <span className="block break-words">{i.label}</span>
+              </label>
+              <div className="col-start-2 flex min-w-0 items-center gap-2 sm:col-start-auto">
+                <input
+                  id={qtyId}
+                  inputMode="numeric"
+                  value={value}
+                  disabled={!on}
+                  onChange={(e) => onQty(i.id, e.target.value.replace(/\D/g, ''))}
+                  placeholder="0"
+                  aria-label={`Số lượng ${i.label}${context ? ` — ${context}` : ''}`}
+                  aria-invalid={invalid || (on && value === '') || undefined}
+                  data-testid={qtyId}
+                  className={`${CONTROL} text-right tabular-nums disabled:bg-slate-50 disabled:text-slate-400 ${invalid ? 'border-red-400' : ''}`}
+                />
+                <span className="w-12 shrink-0 truncate text-xs text-slate-500" title={i.unit}>
+                  {i.unit}
+                </span>
+              </div>
+            </li>
+          );
+        })}
+        {shown.length === 0 ? <li className="py-3 text-sm text-slate-500">Không có mặt hàng khớp “{search.trim()}”.</li> : null}
+      </ul>
+    </div>
+  );
+}
+
+/** A new item named in a receipt: its name and its quantity per column (the branch's own, or each chosen branch). */
+interface FreshRow {
+  key: number;
+  name: string;
+  qty: Record<string, string>;
+}
+
+/** What stops the new rows being saved, or null. */
+function freshProblem(rows: FreshRow[], columns: string[], existingOf: (name: string) => InventoryItem | undefined): string | null {
+  for (const r of rows) {
+    if (!r.name.trim()) return 'Nhập tên cho mọi mặt hàng mới (hoặc bỏ dòng trống).';
+    const typed = columns.map((c) => r.qty[c] ?? '').filter((v) => v !== '');
+    if (typed.length === 0) return `Nhập số lượng cho “${r.name.trim()}”.`;
+    if (!typed.every(quantityOk)) return 'Số lượng phải là số nguyên từ 1.';
+    if (existingOf(r.name)) return `“${r.name.trim()}” đã có trong kho — chọn mặt hàng có sẵn thay vì tạo mới.`;
+  }
+  const names = rows.map((r) => nameFold(r.name));
+  if (new Set(names).size < names.length) return 'Hai mặt hàng mới trùng tên.';
+  return null;
+}
+
+/**
+ * "+ THÊM MẶT HÀNG MỚI" — an item not yet in the catalog, created and received
+ * in the same save: a name and a quantity, nothing else (the code is the
+ * server's, the unit "cái"). A name already in the catalog is never created
+ * again: the row shows that item and offers to take it instead.
+ */
+function NewReceiptItems({
+  rows,
+  onRows,
+  columns,
+  existingOf,
+  canUse,
+  onUse,
+  idPrefix,
+  hint,
+}: {
+  rows: FreshRow[];
+  onRows: (f: (rs: FreshRow[]) => FreshRow[]) => void;
+  /** One quantity per column. */
+  columns: { id: string; label: string }[];
+  existingOf: (name: string) => InventoryItem | undefined;
+  canUse: (row: FreshRow, item: InventoryItem) => boolean;
+  onUse: (row: FreshRow, item: InventoryItem) => void;
+  idPrefix: string;
+  hint: ReactNode;
+}) {
+  const set = (key: number, patch: (r: FreshRow) => FreshRow) => onRows((rs) => rs.map((x) => (x.key === key ? patch(x) : x)));
+  return (
+    <section className="mt-4 rounded-xl border border-dashed border-line-subtle p-3" data-testid={`${idPrefix}-new`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-slate-900">Mặt hàng chưa có trong kho</h3>
+        <Button
+          variant="secondary"
+          className="min-h-[2.75rem]"
+          onClick={() => onRows((rs) => [...rs, { key: (rs.at(-1)?.key ?? 0) + 1, name: '', qty: {} }])}
+          data-testid={`${idPrefix}-new-add`}
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          Thêm mặt hàng mới
+        </Button>
+      </div>
+      <p className="mt-1 text-xs text-slate-500">{hint}</p>
+      {rows.length > 0 ? (
+        <ul className="mt-3 space-y-3">
+          {rows.map((r, i) => {
+            const match = r.name.trim() ? existingOf(r.name) : undefined;
+            return (
+              <li key={r.key} className="rounded-lg bg-slate-50 p-3" data-testid={`${idPrefix}-new-row-${i}`}>
+                <div className="flex items-end gap-2">
+                  <div className="min-w-0 flex-1">
+                    <Input
+                      label={`Tên mặt hàng mới ${i + 1}`}
+                      value={r.name}
+                      maxLength={200}
+                      onChange={(e) => set(r.key, (x) => ({ ...x, name: e.target.value }))}
+                      data-testid={`${idPrefix}-new-name-${i}`}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRows((rs) => rs.filter((x) => x.key !== r.key))}
+                    className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-red-700"
+                    aria-label={`Bỏ mặt hàng mới ${i + 1}`}
+                    data-testid={`${idPrefix}-new-remove-${i}`}
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </div>
+                <div className={`mt-2 grid gap-2 ${columns.length > 1 ? 'sm:grid-cols-2' : ''}`}>
+                  {columns.map((c) => {
+                    const v = r.qty[c.id] ?? '';
+                    return (
+                      <label key={c.id} className="flex min-w-0 items-center gap-2 text-sm text-slate-700">
+                        <span className="min-w-0 flex-1 break-words">{c.label}</span>
+                        <span className="w-24 shrink-0">
+                          <input
+                            inputMode="numeric"
+                            value={v}
+                            onChange={(e) => set(r.key, (x) => ({ ...x, qty: { ...x.qty, [c.id]: e.target.value.replace(/\D/g, '') } }))}
+                            placeholder="0"
+                            aria-label={`Số lượng ${r.name.trim() || `mặt hàng mới ${i + 1}`} — ${c.label}`}
+                            aria-invalid={(v !== '' && !quantityOk(v)) || undefined}
+                            data-testid={`${idPrefix}-new-qty-${i}-${c.id}`}
+                            className={`${CONTROL} text-right tabular-nums`}
+                          />
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {match ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900" role="status" data-testid={`${idPrefix}-new-dup-${i}`}>
+                    <span className="min-w-0 flex-1 break-words">
+                      Đã có “{match.code ? `${match.code} ` : ''}
+                      {match.label}” trong kho — chọn mặt hàng này thay vì tạo mới.
+                    </span>
+                    {canUse(r, match) ? (
+                      <Button variant="secondary" onClick={() => onUse(r, match)} data-testid={`${idPrefix}-new-use-${i}`}>
+                        Chọn mặt hàng có sẵn
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * THE ADMIN'S "NHẬP KHO" FOR SEVERAL BRANCHES — each chosen branch with its
+ * own checklist and quantities, and new items for the shared catalog with a
+ * quantity per branch: only the branches given one receive it. One save.
+ */
 function MultiReceiptDialog({ warehouse, onClose, onDone }: { warehouse: Warehouse; onClose: () => void; onDone: (m: string) => Promise<void> }) {
   const [requestId] = useState(newRequestId);
   const [receivedAt, setReceivedAt] = useState(nowLocal);
   const [chosen, setChosen] = useState<number[]>([]);
-  // "branchId:itemId" → the quantity typed.
-  const [qty, setQty] = useState<Record<string, string>>({});
+  // "branchId:itemId" → the quantity typed; present = ticked.
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const [fresh, setFresh] = useState<FreshRow[]>([]);
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => branchesApi.list() });
-  const lines = chosen
-    .map((branchId) => ({
-      branchId,
-      lines: Object.entries(qty)
-        .filter(([k, v]) => k.startsWith(`${branchId}:`) && v !== '')
-        .map(([k, v]) => ({ itemId: k.slice(String(branchId).length + 1), quantity: Number(v) })),
-    }))
-    .filter((b) => b.lines.length > 0);
-  const bad = lines.some((b) => b.lines.some((l) => !Number.isInteger(l.quantity) || l.quantity < 1));
+  const addressOf = (id: number) => branches.data?.branches.find((b) => b.id === id)?.address ?? '';
+  const lists = useQueries({ queries: chosen.map((branchId) => itemsQuery(warehouse, branchId)) });
+  const itemsOf = (branchId: number) => (lists[chosen.indexOf(branchId)]?.data?.items ?? []).filter((i) => !i.archived);
+  const matchIn = (branchId: number, name: string) => itemsOf(branchId).find((i) => i.variant === '' && nameFold(i.name) === nameFold(name));
+  const existingOf = (name: string) => chosen.map((b) => matchIn(b, name)).find(Boolean);
+  const tickedOf = (branchId: number) =>
+    Object.entries(picked)
+      .filter(([k]) => k.startsWith(`${branchId}:`))
+      .map(([k, v]) => ({ itemId: k.slice(String(branchId).length + 1), quantity: v }));
+  const gets = (r: FreshRow, b: number) => (r.qty[String(b)] ?? '') !== '';
+  const plan = chosen.map((branchId) => ({ branchId, lines: tickedOf(branchId) })).filter((b) => b.lines.length > 0 || fresh.some((r) => gets(r, b.branchId)));
+  const problem = plan.some((b) => b.lines.some((l) => !quantityOk(l.quantity)))
+    ? 'Nhập số lượng (từ 1) cho mọi mặt hàng đã chọn.'
+    : freshProblem(fresh, chosen.map(String), existingOf);
   const save = useMutation({
     mutationFn: () =>
-      inventoryApi.createMultiReceipt({ warehouse, requestId, receivedAt: new Date(`${receivedAt}:00+07:00`).toISOString(), branches: lines }),
+      inventoryApi.createMultiReceipt({
+        warehouse,
+        requestId,
+        receivedAt: new Date(`${receivedAt}:00+07:00`).toISOString(),
+        branches: plan.map((b) => ({ branchId: b.branchId, lines: b.lines.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity) })) })),
+        newItems: fresh.map((r) => ({
+          name: r.name.trim(),
+          quantities: chosen.filter((b) => gets(r, b)).map((b) => ({ branchId: b, quantity: Number(r.qty[String(b)]) })),
+        })),
+      }),
     onSuccess: ({ receipts }) => onDone(`Đã nhập kho cho ${receipts.length} chi nhánh.`),
   });
-  const toggle = (id: number) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
+  const toggle = (id: number) => {
+    const off = chosen.includes(id);
+    setChosen((c) => (off ? c.filter((x) => x !== id) : [...c, id]));
+    // A branch taken off takes its ticks and its new-item quantities with it: nothing hidden is sent.
+    if (off) {
+      setPicked((p) => Object.fromEntries(Object.entries(p).filter(([k]) => !k.startsWith(`${id}:`))));
+      setFresh((rs) => rs.map((r) => ({ ...r, qty: Object.fromEntries(Object.entries(r.qty).filter(([b]) => b !== String(id))) })));
+    }
+  };
+  // The existing item in every branch the row would stock: take it there instead.
+  const canUse = (r: FreshRow) => chosen.filter((b) => gets(r, b)).every((b) => matchIn(b, r.name));
+  const use = (r: FreshRow) => {
+    setPicked((p) => {
+      const next = { ...p };
+      for (const b of chosen.filter((x) => gets(r, x))) next[`${b}:${matchIn(b, r.name)!.id}`] = r.qty[String(b)]!;
+      return next;
+    });
+    setFresh((rs) => rs.filter((x) => x.key !== r.key));
+  };
   return (
     <Modal
       open
-      size="xl"
+      size="2xl"
+      anchor="top"
       title={`Nhập kho cho các chi nhánh — ${WAREHOUSE_LABELS[warehouse]}`}
       onClose={onClose}
       footer={
@@ -620,8 +901,8 @@ function MultiReceiptDialog({ warehouse, onClose, onDone }: { warehouse: Warehou
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => save.mutate()} disabled={lines.length === 0 || bad || save.isPending} loading={save.isPending} data-testid="multi-receipt-save">
-            Lưu phiếu nhập ({lines.length} chi nhánh)
+          <Button onClick={() => save.mutate()} disabled={plan.length === 0 || Boolean(problem) || save.isPending} loading={save.isPending} data-testid="multi-receipt-save">
+            Lưu phiếu nhập ({plan.length} chi nhánh)
           </Button>
         </>
       }
@@ -632,79 +913,56 @@ function MultiReceiptDialog({ warehouse, onClose, onDone }: { warehouse: Warehou
         <div className="mt-1 grid gap-1 sm:grid-cols-2">
           {(branches.data?.branches ?? []).map((b) => (
             <label key={b.id} className="flex min-h-[2.75rem] items-center gap-2 rounded-lg border border-line-subtle px-3 py-2 text-sm text-slate-900">
-              <input type="checkbox" checked={chosen.includes(b.id)} onChange={() => toggle(b.id)} className="h-5 w-5 accent-brand-600" data-testid={`multi-receipt-branch-${b.id}`} />
-              {b.address}
+              <input type="checkbox" checked={chosen.includes(b.id)} onChange={() => toggle(b.id)} className="h-5 w-5 shrink-0 accent-brand-600" data-testid={`multi-receipt-branch-${b.id}`} />
+              <span className="min-w-0 break-words">{b.address}</span>
             </label>
           ))}
         </div>
       </fieldset>
       <div className="mt-4 space-y-4">
-        {chosen.map((branchId) => (
-          <BranchReceiptLines
-            key={branchId}
-            warehouse={warehouse}
-            branchId={branchId}
-            address={branches.data?.branches.find((b) => b.id === branchId)?.address ?? ''}
-            qty={qty}
-            onQty={(itemId, v) => setQty((q) => ({ ...q, [`${branchId}:${itemId}`]: v.replace(/\D/g, '') }))}
-          />
-        ))}
+        {chosen.map((branchId, n) => {
+          const q = lists[n]!;
+          const address = addressOf(branchId);
+          return (
+            <section key={branchId} className="rounded-xl border border-line-subtle p-3" data-testid={`multi-receipt-lines-${branchId}`}>
+              <h3 className="mb-2 break-words text-sm font-semibold text-slate-900">{address}</h3>
+              <QueryState isLoading={q.isLoading} isError={q.isError} error={q.error} onRetry={() => void q.refetch()}>
+                <ItemChecklist
+                  items={itemsOf(branchId)}
+                  picked={Object.fromEntries(tickedOf(branchId).map((l) => [l.itemId, l.quantity]))}
+                  onToggle={(itemId) => setPicked((p) => toggleKey(p, `${branchId}:${itemId}`))}
+                  onQty={(itemId, v) => setPicked((p) => ({ ...p, [`${branchId}:${itemId}`]: v }))}
+                  idPrefix={`multi-receipt-${branchId}`}
+                  context={address}
+                />
+              </QueryState>
+            </section>
+          );
+        })}
       </div>
-      {bad ? <p className="mt-2 text-sm text-red-700">Số lượng phải từ 1.</p> : null}
+      {chosen.length > 0 ? (
+        <NewReceiptItems
+          rows={fresh}
+          onRows={setFresh}
+          columns={chosen.map((b) => ({ id: String(b), label: addressOf(b) }))}
+          existingOf={existingOf}
+          canUse={canUse}
+          onUse={use}
+          idPrefix="multi-receipt"
+          hint="Mặt hàng mới vào danh mục dùng chung (có ở mọi chi nhánh); chỉ chi nhánh được nhập số lượng mới có tồn kho. Mã do hệ thống cấp, đơn vị “cái”."
+        />
+      ) : null}
+      {problem ? (
+        <p className="mt-2 text-sm text-red-700" data-testid="multi-receipt-problem">
+          {problem}
+        </p>
+      ) : null}
       {save.isError ? (
         <div className="mt-3">
           <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
         </div>
       ) : null}
     </Modal>
-  );
-}
-
-/** One chosen branch: its own active items of the warehouse, a quantity box each. */
-function BranchReceiptLines({
-  warehouse,
-  branchId,
-  address,
-  qty,
-  onQty,
-}: {
-  warehouse: Warehouse;
-  branchId: number;
-  address: string;
-  qty: Record<string, string>;
-  onQty: (itemId: string, value: string) => void;
-}) {
-  const items = useItems(warehouse, branchId);
-  const list = (items.data?.items ?? []).filter((i) => !i.archived);
-  return (
-    <section className="rounded-xl border border-line-subtle p-3" data-testid={`multi-receipt-lines-${branchId}`}>
-      <h3 className="mb-2 text-sm font-semibold text-slate-900">{address}</h3>
-      <QueryState isLoading={items.isLoading} isError={items.isError} error={items.error} onRetry={() => void items.refetch()}>
-        {list.length === 0 ? (
-          <p className="text-sm text-slate-500">Chi nhánh chưa có mặt hàng nào trong kho này.</p>
-        ) : (
-          <ul className="space-y-1">
-            {list.map((i) => (
-              <li key={i.id} className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 text-sm text-slate-800">
-                  {i.code ? <span className="mr-1.5 font-mono text-slate-500">{i.code}</span> : null}
-                  {i.label}
-                </span>
-                <input
-                  inputMode="numeric"
-                  value={qty[`${branchId}:${i.id}`] ?? ''}
-                  onChange={(e) => onQty(i.id, e.target.value)}
-                  placeholder={i.unit}
-                  aria-label={`Số lượng ${i.label} — ${address}`}
-                  data-testid={`multi-receipt-qty-${branchId}-${i.id}`}
-                  className={`${CONTROL} w-24 text-right tabular-nums`}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-      </QueryState>
-    </section>
   );
 }
 
@@ -807,13 +1065,6 @@ function NewItemsDialog({
   );
 }
 
-interface Line {
-  key: number;
-  itemId: string;
-  quantity: string;
-  note: string;
-}
-
 /** Each item of the warehouse once; one already on another line is not offered again. */
 function ItemSelect({ items, value, taken, onChange, testId }: { items: InventoryItem[]; value: string; taken: Set<string>; onChange: (id: string) => void; testId: string }) {
   return (
@@ -832,16 +1083,24 @@ function ItemSelect({ items, value, taken, onChange, testId }: { items: Inventor
 
 const nowLocal = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 16);
 
-/** "Nhập kho" — the date and time, then each item with its quantity (and a note if needed). One save. */
+/** The branch's own column in a manager's new-item rows. */
+const OWN = 'own';
+
+/**
+ * "NHẬP KHO" — the date and time, then the warehouse's items as one checklist
+ * (tick, type the quantity) and any new item named with its quantity — created
+ * as the branch's own in the same save. One save, all or none.
+ */
 function ReceiptDialog({ warehouse, items, onClose, onDone }: { warehouse: Warehouse; items: InventoryItem[]; onClose: () => void; onDone: (m: string) => Promise<void> }) {
   const [requestId] = useState(newRequestId);
   const [receivedAt, setReceivedAt] = useState(nowLocal);
-  const [lines, setLines] = useState<Line[]>([{ key: 1, itemId: '', quantity: '', note: '' }]);
-  const set = (key: number, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  const filled = lines.filter((l) => l.itemId);
-  const taken = new Set(filled.map((l) => l.itemId));
-  const problems = filled.filter((l) => !/^\d+$/.test(l.quantity) || Number(l.quantity) < 1);
-  const ready = filled.length > 0 && problems.length === 0;
+  // itemId → the quantity typed; present = ticked.
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const [fresh, setFresh] = useState<FreshRow[]>([]);
+  const lines = Object.entries(picked);
+  const existingOf = (name: string) => items.find((i) => i.variant === '' && nameFold(i.name) === nameFold(name));
+  const problem = lines.some(([, v]) => !quantityOk(v)) ? 'Nhập số lượng (từ 1) cho mọi mặt hàng đã chọn.' : freshProblem(fresh, [OWN], existingOf);
+  const count = lines.length + fresh.length;
   const save = useMutation({
     mutationFn: () =>
       inventoryApi.createReceipt({
@@ -849,7 +1108,8 @@ function ReceiptDialog({ warehouse, items, onClose, onDone }: { warehouse: Wareh
         requestId,
         // The wall clock in Asia/Ho_Chi_Minh, as an instant.
         receivedAt: new Date(`${receivedAt}:00+07:00`).toISOString(),
-        lines: filled.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), note: l.note.trim() || undefined })),
+        lines: lines.map(([itemId, q]) => ({ itemId, quantity: Number(q) })),
+        newItems: fresh.map((r) => ({ name: r.name.trim(), quantity: Number(r.qty[OWN]) })),
       }),
     onSuccess: ({ receipt }) => onDone(`Đã nhập kho ${receipt.lines.length} mặt hàng.`),
   });
@@ -857,68 +1117,51 @@ function ReceiptDialog({ warehouse, items, onClose, onDone }: { warehouse: Wareh
     <Modal
       open
       size="xl"
+      anchor="top"
       title={`Nhập kho — ${WAREHOUSE_LABELS[warehouse]}`}
       onClose={onClose}
       footer={
         <>
           <span className="mr-auto text-sm text-slate-600" data-testid="receipt-count">
-            {filled.length} mặt hàng
+            {count} mặt hàng
           </span>
           <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => save.mutate()} disabled={!ready} loading={save.isPending} data-testid="receipt-save">
+          <Button onClick={() => save.mutate()} disabled={count === 0 || Boolean(problem) || save.isPending} loading={save.isPending} data-testid="receipt-save">
             Lưu phiếu nhập
           </Button>
         </>
       }
     >
       <Input label="Ngày giờ nhập hàng" type="datetime-local" value={receivedAt} onChange={(e) => setReceivedAt(e.target.value)} data-testid="receipt-at" />
-      <div className="mt-4 space-y-3" data-testid="receipt-lines">
-        {lines.map((l, i) => {
-          const item = items.find((x) => x.id === l.itemId);
-          const bad = Boolean(l.itemId) && (!/^\d+$/.test(l.quantity) || Number(l.quantity) < 1);
-          return (
-            <div key={l.key} className="space-y-2 rounded-xl border border-line-subtle p-3">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-slate-700">Mặt hàng {i + 1}</span>
-                <button
-                  type="button"
-                  onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== l.key) : [{ key: l.key + 1, itemId: '', quantity: '', note: '' }]))}
-                  className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-red-700"
-                  aria-label="Bỏ dòng này"
-                  data-testid={`receipt-remove-${i}`}
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-              <ItemSelect items={items} value={l.itemId} taken={taken} onChange={(id) => set(l.key, { itemId: id })} testId={`receipt-item-${i}`} />
-              <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2">
-                <input
-                  inputMode="numeric"
-                  value={l.quantity}
-                  onChange={(e) => set(l.key, { quantity: e.target.value.replace(/\D/g, '') })}
-                  placeholder={item ? `Số lượng (${item.unit})` : 'Số lượng'}
-                  aria-label="Số lượng"
-                  aria-invalid={bad ? true : undefined}
-                  data-testid={`receipt-qty-${i}`}
-                  className={`${CONTROL} w-full text-right tabular-nums ${bad ? 'border-red-400' : ''}`}
-                />
-                <input value={l.note} onChange={(e) => set(l.key, { note: e.target.value })} placeholder="Ghi chú (nếu có)" aria-label="Ghi chú" className={`${CONTROL} w-full`} />
-              </div>
-            </div>
-          );
-        })}
-        <Button
-          variant="ghost"
-          onClick={() => setLines((ls) => [...ls, { key: Math.max(...ls.map((x) => x.key)) + 1, itemId: '', quantity: '', note: '' }])}
-          data-testid="receipt-add-line"
-        >
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          Thêm mặt hàng
-        </Button>
+      <div className="mt-4" data-testid="receipt-lines">
+        <ItemChecklist
+          items={items}
+          picked={picked}
+          onToggle={(id) => setPicked((p) => toggleKey(p, id))}
+          onQty={(id, v) => setPicked((p) => ({ ...p, [id]: v }))}
+          idPrefix="receipt"
+        />
       </div>
-      {problems.length > 0 ? <p className="mt-2 text-sm text-red-700">Nhập số lượng (từ 1) cho mọi mặt hàng đã chọn.</p> : null}
+      <NewReceiptItems
+        rows={fresh}
+        onRows={setFresh}
+        columns={[{ id: OWN, label: 'Số lượng' }]}
+        existingOf={existingOf}
+        canUse={() => true}
+        onUse={(r, item) => {
+          setPicked((p) => ({ ...p, [item.id]: r.qty[OWN] || p[item.id] || '' }));
+          setFresh((rs) => rs.filter((x) => x.key !== r.key));
+        }}
+        idPrefix="receipt"
+        hint="Mặt hàng mới là mặt hàng riêng của chi nhánh bạn. Mã do hệ thống cấp, đơn vị “cái”."
+      />
+      {problem ? (
+        <p className="mt-2 text-sm text-red-700" data-testid="receipt-problem">
+          {problem}
+        </p>
+      ) : null}
       {save.isError ? (
         <div className="mt-3">
           <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
@@ -1205,22 +1448,23 @@ function OpeningDialog({ warehouse, items, onClose, onDone }: { warehouse: Wareh
 export function CleaningItemsDialog({ branchId, onClose, onDone }: { branchId?: number; onClose: () => void; onDone: (m: string) => Promise<void> | void }) {
   const list = useQuery({ queryKey: [...INVENTORY_KEY, 'cleaning-items', branchId ?? null], queryFn: () => inventoryApi.cleaningItems(branchId) });
   const choices = list.data?.items ?? [];
-  // The ids chosen, in order — starting from the saved list.
-  const [chosen, setChosen] = useState<string[] | null>(null);
-  const order =
-    chosen ??
-    choices
-      .filter((c) => c.cleaningOrder !== null)
-      .sort((a, b) => a.cleaningOrder! - b.cleaningOrder!)
-      .map((c) => c.id);
-  const byId = new Map(choices.map((c) => [c.id, c]));
-  const toggle = (id: string) => setChosen(order.includes(id) ? order.filter((x) => x !== id) : [...order, id]);
-  const move = (index: number, by: -1 | 1) => {
-    const next = [...order];
-    const [id] = next.splice(index, 1);
-    next.splice(index + by, 0, id!);
-    setChosen(next);
+  const saved = choices
+    .filter((c) => c.cleaningOrder !== null)
+    .sort((a, b) => a.cleaningOrder! - b.cleaningOrder!)
+    .map((c) => c.id);
+  // The ids ticked — starting from the saved list.
+  const [picked, setPicked] = useState<Set<string> | null>(null);
+  const ticked = picked ?? new Set(saved);
+  const toggle = (id: string) => {
+    const next = new Set(ticked);
+    if (!next.delete(id)) next.add(id);
+    setPicked(next);
   };
+  // The saved items keep their order; new ones follow in warehouse, then catalog order.
+  const order = [
+    ...saved.filter((id) => ticked.has(id)),
+    ...WAREHOUSES.flatMap((w) => choices.filter((c) => c.warehouse === w && c.cleaningOrder === null && ticked.has(c.id)).map((c) => c.id)),
+  ];
   const save = useMutation({
     mutationFn: () => inventoryApi.setCleaningItems(order, branchId),
     onSuccess: async ({ items }) => onDone(`Đã lưu ${items.filter((i) => i.cleaningOrder !== null).length} mặt hàng dùng khi dọn phòng.`),
@@ -1242,46 +1486,19 @@ export function CleaningItemsDialog({ branchId, onClose, onDone }: { branchId?: 
         </>
       }
     >
-      <p className="mb-3 text-sm text-slate-600">Các mặt hàng được chọn hiện trên form dọn phòng theo thứ tự dưới đây. Khi phòng “Hoàn thành”, số đã dùng được trừ khỏi kho.</p>
+      <p className="mb-1 text-sm text-slate-600">Các mặt hàng được tích hiện trên form dọn phòng. Khi phòng “Hoàn thành”, số đã dùng được trừ khỏi kho.</p>
       <QueryState isLoading={list.isLoading} isError={list.isError} error={list.error} onRetry={() => void list.refetch()}>
-        <h3 className="text-sm font-semibold text-slate-900">Đã chọn ({order.length})</h3>
-        {order.length === 0 ? (
-          <p className="mt-1 text-sm text-slate-500" data-testid="cleaning-items-chosen">
-            Chưa chọn mặt hàng nào — form dọn phòng sẽ không có mục đếm.
-          </p>
-        ) : (
-          <ol className="mt-1 space-y-1" data-testid="cleaning-items-chosen">
-            {order.map((id, index) => {
-              const c = byId.get(id);
-              return (
-                <li key={id} className="flex items-center gap-2 rounded-lg border border-line-subtle px-3 py-2" data-testid={`cleaning-chosen-${id}`}>
-                  <span className="w-6 text-right text-sm tabular-nums text-slate-500">{index + 1}.</span>
-                  <span className="min-w-0 flex-1 text-sm text-slate-900">
-                    {c?.code ? <span className="mr-1.5 font-mono text-slate-500">{c.code}</span> : null}
-                    {c?.label ?? '—'}
-                  </span>
-                  <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Đưa ${c?.label ?? ''} lên`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-30" data-testid={`cleaning-up-${id}`}>
-                    <ArrowUp className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => move(index, 1)} disabled={index === order.length - 1} aria-label={`Đưa ${c?.label ?? ''} xuống`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-30" data-testid={`cleaning-down-${id}`}>
-                    <ArrowDown className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-        )}
         {WAREHOUSES.map((w) => {
           const ofWarehouse = choices.filter((c) => c.warehouse === w);
           if (ofWarehouse.length === 0) return null;
           return (
-            <fieldset key={w} className="mt-4">
+            <fieldset key={w} className="mt-3">
               <legend className="text-sm font-semibold text-slate-900">{WAREHOUSE_LABELS[w]}</legend>
               <ul className="mt-1 grid gap-1 sm:grid-cols-2">
                 {ofWarehouse.map((c) => (
                   <li key={c.id}>
                     <label className="flex min-h-[2.75rem] items-center gap-2 rounded-lg border border-line-subtle px-3 py-2 text-sm text-slate-900">
-                      <input type="checkbox" checked={order.includes(c.id)} onChange={() => toggle(c.id)} className="h-5 w-5 accent-brand-600" data-testid={`cleaning-pick-${c.id}`} />
+                      <input type="checkbox" checked={ticked.has(c.id)} onChange={() => toggle(c.id)} className="h-5 w-5 accent-brand-600" data-testid={`cleaning-pick-${c.id}`} />
                       {c.code ? <span className="font-mono text-slate-500">{c.code}</span> : null}
                       <span className="min-w-0 flex-1">{c.label}</span>
                       <span className="text-xs tabular-nums text-slate-500">
