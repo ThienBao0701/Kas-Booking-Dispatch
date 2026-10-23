@@ -8,6 +8,7 @@
  * create and read the same `HotelIssue` rows through the same `/api/issues` the
  * technical department works from. There is no second incident system.
  */
+import { departmentLabelOfRole } from '../lib/requestWork';
 import { SeverityBadge, SeverityPicker } from './Severity';
 import { DEFAULT_SEVERITY } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
@@ -1098,9 +1099,18 @@ export function IncidentTable({
               },
             ]
           : []),
+        // "Bộ phận" the incident came from, and "Người tạo" beside it — the reporter's own name, kept after any hand-over.
+        {
+          key: 'department',
+          header: 'Bộ phận',
+          hideBelow: '3xl' as const,
+          coveredByDetail: true,
+          className: 'whitespace-nowrap',
+          render: (i) => departmentLabelOfRole(i.reportedByRole) ?? muted('—'),
+        },
         {
           key: 'reporter',
-          header: 'Người báo',
+          header: 'Người tạo',
           hideBelow: '3xl' as const,
           coveredByDetail: true,
           className: 'min-w-[7rem]',

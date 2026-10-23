@@ -103,6 +103,24 @@ describe('the desk', () => {
     expect(badge.closest('a')).toHaveAttribute('href', '/app/reports');
   });
 
+  it('marks "Buồng phòng" with what Housekeeping reported and is still open — its requests and its incidents, each once', async () => {
+    shell(RECEPTIONIST_USER);
+    renderApp('/app/reminders');
+    // 3 open Housekeeping requests + 1 Housekeeping incident; the desk's own 2 requests and 4 incidents are not its.
+    const badge = await screen.findByTestId('nav-badge-room-collections');
+    expect(badge).toHaveTextContent('4');
+    expect(badge.closest('a')).toHaveAttribute('href', '/app/room-collections');
+  });
+
+  it('hides the "Buồng phòng" badge when nothing Housekeeping reported is open', async () => {
+    shell(RECEPTIONIST_USER, {
+      'GET /api/reception/reports/open-counts': () => ({ status: 200, body: { counts: { guestRequest: { reception: 2, housekeeping: 0 }, complaint: 0 } } }),
+      'GET /api/issues/summary': () => ({ status: 200, body: { summary: { ...SUMMARY, byDepartment: { reception: 5, housekeeping: 0 } } } }),
+    });
+    renderApp('/app/reminders');
+    await screen.findByLabelText(/mục chưa xử lý/);
+    expect(screen.queryByTestId('nav-badge-room-collections')).not.toBeInTheDocument();
+  });
 });
 
 describe('Bell', () => {

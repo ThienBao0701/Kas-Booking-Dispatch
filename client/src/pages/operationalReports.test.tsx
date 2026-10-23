@@ -527,7 +527,9 @@ describe('the overview', () => {
     const requests = await screen.findByTestId('guest-request-table');
     const hk = await within(requests).findByTestId('row-g-hk');
     expect(await within(hk).findByText('Khách phòng 301')).toBeInTheDocument();
-    expect(hk).toHaveTextContent('Buồng phòng · Chị Lan');
+    // Who sent it, beneath the guest: the employee and the department.
+    expect(within(hk).getByTestId('request-reporter-g-hk')).toHaveTextContent('Chị Lan');
+    expect(within(hk).getByTestId('request-reporter-g-hk')).toHaveTextContent('Buồng phòng');
     expect(hk).toHaveTextContent('Buồng phòng xử lý');
     expect(within(hk).queryByTestId('complete-g-hk')).not.toBeInTheDocument();
     expect(within(hk).queryByTestId('edit-g-hk')).not.toBeInTheDocument();
@@ -1868,7 +1870,8 @@ describe('vấn đề khách yêu cầu thực hiện (Request)', () => {
     ]);
     expect(within(table).queryByText('Người tạo')).not.toBeInTheDocument();
     expect(within(table).queryByText('Thao tác')).not.toBeInTheDocument();
-    expect(within(table).queryByText('Nguyễn Văn A')).not.toBeInTheDocument();
+    // No creator COLUMN — the reporter is a line beneath the guest's name, with its department.
+    expect(within(table).getByTestId('request-reporter-g1')).toHaveTextContent('Nguyễn Văn A');
   });
 
   it('completes with "Cách xử lý (nếu có)" left empty, sending no handling', async () => {
@@ -2858,8 +2861,8 @@ describe('hoàn thành vấn đề — the 12-hour completion archive', () => {
     expect(await within(requests).findByText('Khách Cũ')).toBeInTheDocument();
     expect(headersOf(requests)).toEqual(['STT', 'Tên khách', 'Mức độ', 'Mã EZ', 'Nội dung', 'Người nhập vấn đề', 'Người hoàn thành', 'Trạng thái', 'Người xử lý']);
     expect(within(requests).getByText('Đã hoàn thành')).toBeInTheDocument();
-    // Who entered it and who completed it — from the accounts.
-    expect(within(requests).getByText('Nguyễn Văn A')).toBeInTheDocument();
+    // Who entered it and who completed it — from the accounts (the reporter is also beneath the guest).
+    expect(within(requests).getAllByText('Nguyễn Văn A').length).toBeGreaterThan(0);
     expect(within(requests).getByText('Lễ tân Hai')).toBeInTheDocument();
 
     const facility = within(page).getByTestId('completed-facility');

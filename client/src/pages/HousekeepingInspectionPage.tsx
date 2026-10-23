@@ -178,12 +178,6 @@ function WorkGroupList({
                   <Hand className="h-4 w-4" aria-hidden="true" />
                   Nhận công việc
                 </Button>
-              ) : mine && g.awaitingAcceptance ? (
-                // Given to this housekeeper: "Nhận việc" acknowledges it.
-                <Button onClick={() => setAccepting(g)} data-testid={`group-acknowledge-${g.number}`}>
-                  <Hand className="h-4 w-4" aria-hidden="true" />
-                  Nhận việc
-                </Button>
               ) : mine ? (
                 <span className="rounded-full bg-brand-100 px-3 py-1 text-sm font-semibold text-brand-800" data-testid={`group-mine-${g.number}`}>
                   Công việc của bạn

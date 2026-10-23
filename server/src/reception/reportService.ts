@@ -32,6 +32,7 @@ import { notifyOperational, type OperationalNotice } from '../push/pushService';
 import {
   WORK_DEPARTMENT_LABELS,
   departmentOfRole,
+  departmentStaff,
   everyoneOnShift,
   lockBranchRouting,
   onShiftStaff,
@@ -53,6 +54,7 @@ import {
   ACTIVE_PAGE_SIZE,
   ARCHIVE_PAGE_SIZE,
   ARCHIVABLE_CATEGORIES,
+  activeIssueWhere,
   activeJournalWhere,
   archiveCutoff,
   archivedJournalWhere,
@@ -417,6 +419,8 @@ export function serializeReport(row: ReportDetail, now: Date = getClock().now(),
           assignedByName: row.guestRequest.assignedByNameSnapshot,
           /** "Nhận việc" — when the assignee acknowledged it. */
           acknowledgedAt: row.guestRequest.acknowledgedAt?.toISOString() ?? null,
+          /** "Tự nhận" — the holder gave it to itself (at creation, or from the pool). */
+          selfClaimed: row.guestRequest.assigneeUserId !== null && row.guestRequest.assigneeUserId === row.guestRequest.assignedByUserId,
           /** The department of whoever completed it — never the receiving one copied. */
           completedDepartment: row.guestRequest.completedDepartment,
           completedDepartmentLabel: row.guestRequest.completedDepartment ? WORK_DEPARTMENT_LABELS[row.guestRequest.completedDepartment] : null,
@@ -586,12 +590,25 @@ export function reportVisibilityWhere(
       ],
     };
   }
+  // A housekeeper: its own records, what is given to it, and the requests its shift's branch sends to Buồng phòng (the pool every housekeeper there sees).
   if (actor.role === 'HOUSEKEEPING') {
-    return { OR: [{ createdByUserId: actor.id, originDepartment: 'HOUSEKEEPING' }, { guestRequest: { is: { assigneeUserId: actor.id } } }] };
+    return {
+      OR: [
+        { createdByUserId: actor.id, originDepartment: 'HOUSEKEEPING' },
+        { guestRequest: { is: { assigneeUserId: actor.id } } },
+        { branchId: actor.branchId ?? -1, guestRequest: { is: { OR: [{ receivingDepartment: 'HOUSEKEEPING' }, { assigneeDepartment: 'HOUSEKEEPING' }] } } },
+      ],
+    };
   }
-  // Bell: the requests given to it, and nothing else of the journal.
+  // Bell: its branch's requests for Bell — whoever of Bell holds them — and nothing else of the journal.
   if (actor.role === 'BELL') {
-    return { category: 'GUEST_REQUEST', guestRequest: { is: { assigneeUserId: actor.id } } };
+    return {
+      category: 'GUEST_REQUEST',
+      OR: [
+        { guestRequest: { is: { assigneeUserId: actor.id } } },
+        { branchId: actor.branchId ?? -1, guestRequest: { is: { OR: [{ receivingDepartment: 'BELL' }, { assigneeDepartment: 'BELL' }] } } },
+      ],
+    };
   }
   throw ApiError.forbidden('Bạn không có quyền xem báo cáo vận hành lễ tân.');
 }
@@ -876,8 +893,12 @@ export interface GuestRequestInput {
   note: string;
   /** "Mức độ" — Trung bình when omitted. */
   severity?: IssueSeverity;
-  /** "Bộ phận nhận việc" — required on every request recorded live (not on "Nhập bù"). */
-  receivingDepartment?: WorkDepartment;
+  /**
+   * "Bộ phận nhận việc" — required on every request recorded live (not on
+   * "Nhập bù"). 'SELF' — "Tự nhận việc": the writer's own department, given to
+   * the writer at once.
+   */
+  receivingDepartment?: WorkDepartment | 'SELF';
 }
 
 export interface FacilityInput {
@@ -1081,6 +1102,8 @@ export async function createReports(
     createdAt: now,
   };
 
+  // Who to tell of a request left in its department's pool (Buồng phòng), per new record.
+  const pools: StaffMember[][] = [];
   const created = await client.$transaction(async (tx) => {
     const created: ReportDetail[] = [];
     for (const input of inputs) {
@@ -1088,13 +1111,33 @@ export async function createReports(
       // After the item's own checks: whether it may be reported comes before whether it looks repeated.
       if (isHousekeepingReporter(actor.role) && !target.confirmDuplicate) await assertNotDuplicate(input, writer.branchId, now, tx);
       const routing = input.category === 'GUEST_REQUEST' ? await routeNewRequest(tx, input.guestRequest.receivingDepartment, writer.branchId, actor, target.allowUnassigned === true) : null;
+      if (routing?.pool) pools.push(routing.pool);
       const data = await buildCreateData(input, { ...base, category: input.category, task, routing: routing ? { ...routing, by: { id: actor.id, name: actor.fullName }, at: now } : undefined }, tx);
       created.push(await tx.receptionOperationalReport.create({ data, include: REPORT_INCLUDE }));
     }
     return created;
   });
   await notifyRequestAssignees(created.filter((r) => r.guestRequest?.assigneeUserId && r.guestRequest.assigneeUserId !== actor.id), client);
+  const pooled = created.filter((r) => r.guestRequest && !r.guestRequest.assigneeUserId && r.guestRequest.receivingDepartment);
+  for (const [i, r] of pooled.entries()) await notifyPool(r, (pools[i] ?? []).filter((s) => s.id !== actor.id), client);
   return created;
+}
+
+/** "Yêu cầu mới cho Buồng phòng" — each person of the pool once per request. */
+async function notifyPool(row: ReportDetail, people: StaffMember[], client: PrismaClient): Promise<void> {
+  const g = row.guestRequest;
+  if (!g || people.length === 0) return;
+  await notifyOperational(
+    people.map((p) => ({
+      userId: p.id,
+      kind: 'REQUEST_ASSIGNED' as const,
+      title: `Yêu cầu khách mới cho ${g.receivingDepartment ? WORK_DEPARTMENT_LABELS[g.receivingDepartment] : 'bộ phận'}`,
+      body: `${row.branch.address}: ${requestContent(g).slice(0, 140)} — bấm “Nhận việc” để nhận.`,
+      link: requestLinkFor(g.receivingDepartment),
+      dedupeKey: `request-pool:${row.id}:${p.id}`,
+    })),
+    client,
+  );
 }
 
 /**
@@ -1104,21 +1147,31 @@ export async function createReports(
  */
 async function routeNewRequest(
   tx: Prisma.TransactionClient,
-  department: WorkDepartment | undefined,
+  department: WorkDepartment | 'SELF' | undefined,
   branchId: number,
   actor: ReportActor,
   allowUnassigned: boolean,
-): Promise<{ receivingDepartment: WorkDepartment; assignee: StaffMember | null }> {
+): Promise<{ receivingDepartment: WorkDepartment; assignee: StaffMember | null; selfClaim: boolean; pool: StaffMember[] | null }> {
   if (!department) throw ApiError.validation('Vui lòng chọn bộ phận nhận việc.');
+  if (department === 'SELF') {
+    return { receivingDepartment: selfDepartment(actor), assignee: { id: actor.id, fullName: actor.fullName, role: actor.role, department: selfDepartment(actor) }, selfClaim: true, pool: null };
+  }
   await lockBranchRouting(tx, branchId);
-  const assignee = await routeRequest(tx, branchId, department, actor);
-  if (!assignee && !allowUnassigned) {
+  const routed = await routeRequest(tx, branchId, department, actor);
+  if (!routed.available && !allowUnassigned) {
     throw ApiError.conflict(`Hiện không có nhân viên ${WORK_DEPARTMENT_LABELS[department]} nào đang trong ca tại chi nhánh này.`, {
       reason: 'NO_STAFF_ON_SHIFT',
       department,
     });
   }
-  return { receivingDepartment: department, assignee };
+  return { receivingDepartment: department, assignee: routed.assignee, selfClaim: false, pool: routed.assignee ? null : departmentStaff(routed.staff, department) };
+}
+
+/** "Tự nhận việc" is a department's staff's — the writer's own department. */
+function selfDepartment(actor: ReportActor): WorkDepartment {
+  const department = actor.role === 'RECEPTIONIST' || actor.role === 'BELL' || actor.role === 'HOUSEKEEPING' || actor.role === 'HOUSEKEEPING_MANAGER' ? departmentOfRole(actor.role) : null;
+  if (!department) throw ApiError.validation('“Tự nhận việc” chỉ dành cho nhân viên của bộ phận đang làm việc.');
+  return department;
 }
 
 /** Where a request's "Người xử lý" works it. */
@@ -1164,8 +1217,8 @@ async function buildCreateData(
     createdAt: Date;
     /** "Nhập bù" only: the manager who actually entered it, and why. */
     lateEntry?: { userId: number; name: string; role: UserRole; reason: string };
-    /** A live guest request: its receiving department and who it was routed to. */
-    routing?: { receivingDepartment: WorkDepartment; assignee: StaffMember | null; by: { id: number; name: string }; at: Date };
+    /** A live guest request: its receiving department and who it was routed to ("Tự nhận việc": the writer, acknowledged at once). */
+    routing?: { receivingDepartment: WorkDepartment; assignee: StaffMember | null; selfClaim?: boolean; by: { id: number; name: string }; at: Date };
   },
   client: PrismaClient | Prisma.TransactionClient,
 ): Promise<Prisma.ReceptionOperationalReportCreateInput> {
@@ -1227,11 +1280,12 @@ async function buildCreateData(
                   assignedAt: base.routing.at,
                   assignedBy: { connect: { id: base.routing.by.id } },
                   assignedByNameSnapshot: base.routing.by.name,
+                  ...(base.routing.selfClaim ? { acknowledgedAt: base.routing.at } : {}),
                 }
               : {}),
           }
         : // "Nhập bù": the department is kept as recorded; nothing is routed after the fact.
-          { receivingDepartment: input.guestRequest.receivingDepartment ?? null };
+          { receivingDepartment: input.guestRequest.receivingDepartment === 'SELF' ? null : (input.guestRequest.receivingDepartment ?? null) };
       return {
         ...scalars,
         guestRequest: {
@@ -1681,8 +1735,14 @@ export async function listHousekeepingJournal(
             { guestRequest: { is: { OR: [{ receivingDepartment: 'HOUSEKEEPING' }, { assigneeDepartment: 'HOUSEKEEPING' }] } } },
           ],
         },
-        // Open at any age; completed: twelve hours from the COMPLETION.
-        { category: 'GUEST_REQUEST', guestRequest: { is: { OR: [{ completedAt: null }, { completedAt: { gt: archiveCutoff(now) } }] } } },
+        {
+          OR: [
+            // Requests: open at any age; completed: twelve hours from the COMPLETION.
+            { category: 'GUEST_REQUEST', guestRequest: { is: { OR: [{ completedAt: null }, { completedAt: { gt: archiveCutoff(now) } }] } } },
+            // The incidents Buồng phòng itself reported, while active (the incident's own rule).
+            { category: 'FACILITY_ISSUE', originDepartment: 'HOUSEKEEPING', facility: { is: { issue: activeIssueWhere(now) } } },
+          ],
+        },
         ...(options.workDepartment ? [workDepartmentWhere(options.workDepartment)] : []),
       ],
     },
@@ -2448,6 +2508,8 @@ export async function completeReport(
  * branches; a Quản lý buồng phòng at its branch, to its own department's staff.
  * Giving it out never lets the giver complete it.
  */
+const REQUEST_ASSIGNERS: readonly UserRole[] = ['ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING_MANAGER'];
+
 function assertMayAssign(actor: ReportActor, branchId: number): void {
   if (actor.role === 'ADMIN' || isReceptionSupervisor(actor.role)) {
     if (!scopeIncludes(branchScopeOf(actor), branchId)) throw ApiError.branchAccessDenied('Yêu cầu không thuộc phạm vi chi nhánh của bạn.');
@@ -2536,6 +2598,139 @@ export async function assignRequest(
   });
   const updated = await client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
   if (person && person.id !== actor.id) await notifyRequestAssignees([updated], client);
+  return updated;
+}
+
+/**
+ * "NHẬN VIỆC" FROM THE POOL — a request of the actor's department that nobody
+ * holds, at the branch the actor is on shift at. ONE conditional write on
+ * "nobody holds it": of several pressing at once exactly one wins, the others
+ * are told who has it. Audited (ASSIGN, "Tự nhận") like any assignment.
+ */
+export async function claimRequest(id: string, actor: ReportActor, clock: Clock = getClock(), client: PrismaClient = prisma): Promise<ReportDetail> {
+  const row = await client.receptionOperationalReport.findUnique({ where: { id }, include: REPORT_INCLUDE });
+  if (!row || row.category !== 'GUEST_REQUEST' || !row.guestRequest) throw ApiError.notFound('Không tìm thấy yêu cầu.');
+  if (row.voidedAt) throw ApiError.conflict('Yêu cầu đã bị hủy.');
+  if (row.guestRequest.completedAt) throw ApiError.conflict('Yêu cầu đã hoàn thành.');
+  const department = departmentOfRole(actor.role);
+  if (!department || (actor.role !== 'RECEPTIONIST' && actor.role !== 'BELL' && actor.role !== 'HOUSEKEEPING' && actor.role !== 'HOUSEKEEPING_MANAGER')) {
+    throw ApiError.forbidden('Bạn không nhận được yêu cầu này.');
+  }
+  if (row.guestRequest.receivingDepartment !== department) throw ApiError.forbidden('Yêu cầu này không gửi cho bộ phận của bạn.');
+  const staff = await onShiftStaff(client, row.branchId);
+  if (!everyoneOnShift(staff).some((s) => s.id === actor.id)) throw ApiError.forbidden('Bạn cần đang trong ca tại chi nhánh của yêu cầu để nhận việc.');
+  const now = clock.now();
+  const won = await client.$transaction(async (tx) => {
+    const { count } = await tx.guestRequestReport.updateMany({
+      where: { reportId: id, assigneeUserId: null, completedAt: null, report: { is: { voidedAt: null } } },
+      data: {
+        assigneeUserId: actor.id,
+        assigneeNameSnapshot: actor.fullName,
+        assigneeDepartment: department,
+        assignedAt: now,
+        assignedByUserId: actor.id,
+        assignedByNameSnapshot: actor.fullName,
+        acknowledgedAt: now,
+      },
+    });
+    if (count === 0) return false;
+    await tx.receptionReportAudit.create({
+      data: { branchId: row.branchId, reportId: id, action: 'ASSIGN', field: 'assignee', oldValue: null, newValue: actor.fullName, reason: 'Tự nhận', actorUserId: actor.id, actorNameSnapshot: actor.fullName, actorRole: actor.role, createdAt: now },
+    });
+    return true;
+  });
+  if (!won) {
+    const holder = await client.guestRequestReport.findUnique({ where: { reportId: id }, select: { assigneeNameSnapshot: true } });
+    throw ApiError.conflict(`Yêu cầu đã có người nhận${holder?.assigneeNameSnapshot ? `: ${holder.assigneeNameSnapshot}` : ''}.`);
+  }
+  return client.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+}
+
+/**
+ * "BỘ PHẬN NHẬN VIỆC" FROM "SỬA" — an open request sent to a department (an
+ * older one never had one), or "Tự nhận việc". Who may:
+ *   - whoever may give work out (the Admin, the reception managers, a Quản lý
+ *     buồng phòng within its rule), at any time while it is open;
+ *   - whoever may correct the record, only while NOBODY holds it — never taking
+ *     another person's request.
+ * The new department receives it as a new request would (Bell / Lễ tân: given to
+ * one on shift, or left waiting; Buồng phòng: its pool). The creator, origin,
+ * time and branch stay; both changes are audited.
+ */
+export async function setReceivingDepartment(
+  id: string,
+  input: { receivingDepartment: WorkDepartment | 'SELF' },
+  actor: ReportActor,
+  clock: Clock = getClock(),
+  client: PrismaClient = prisma,
+): Promise<ReportDetail> {
+  const row = await client.receptionOperationalReport.findUnique({ where: { id }, include: REPORT_INCLUDE });
+  if (!row || row.category !== 'GUEST_REQUEST' || !row.guestRequest) throw ApiError.notFound('Không tìm thấy yêu cầu.');
+  const assigner = REQUEST_ASSIGNERS.includes(actor.role);
+  if (assigner) assertMayAssign(actor, row.branchId);
+  else await loadOwn(id, actor, client);
+  if (row.voidedAt) throw ApiError.conflict('Yêu cầu đã bị hủy.');
+  if (row.guestRequest.completedAt) throw ApiError.conflict('Yêu cầu đã hoàn thành — không đổi bộ phận nhận việc được.');
+  const before = row.guestRequest;
+  if (!assigner && before.assigneeUserId !== null && before.assigneeUserId !== actor.id) {
+    throw ApiError.forbidden(`Yêu cầu đang do ${before.assigneeNameSnapshot ?? 'người khác'} xử lý — chỉ quản lý mới đổi được.`);
+  }
+  const now = clock.now();
+  const updated = await client.$transaction(async (tx) => {
+    let department: WorkDepartment;
+    let person: StaffMember | null;
+    if (input.receivingDepartment === 'SELF') {
+      department = selfDepartment(actor);
+      const staff = await onShiftStaff(tx, row.branchId);
+      if (!everyoneOnShift(staff).some((s) => s.id === actor.id)) throw ApiError.forbidden('Bạn cần đang trong ca tại chi nhánh của yêu cầu để tự nhận việc.');
+      person = { id: actor.id, fullName: actor.fullName, role: actor.role, department };
+    } else {
+      department = input.receivingDepartment;
+      await lockBranchRouting(tx, row.branchId);
+      // Still with its holder when the holder is of that department; otherwise routed afresh.
+      person =
+        before.assigneeUserId !== null && before.assigneeDepartment === department
+          ? null
+          : (await routeRequest(tx, row.branchId, department, actor)).assignee;
+    }
+    const keepHolder = input.receivingDepartment !== 'SELF' && before.assigneeUserId !== null && before.assigneeDepartment === department;
+    const { count } = await tx.guestRequestReport.updateMany({
+      where: { reportId: id, completedAt: null, assigneeUserId: before.assigneeUserId, report: { is: { voidedAt: null } } },
+      data: {
+        receivingDepartment: department,
+        ...(keepHolder
+          ? {}
+          : {
+              assigneeUserId: person?.id ?? null,
+              assigneeNameSnapshot: person?.fullName ?? null,
+              assigneeDepartment: person?.department ?? null,
+              assignedAt: person ? now : null,
+              assignedByUserId: person ? actor.id : null,
+              assignedByNameSnapshot: person ? actor.fullName : null,
+              acknowledgedAt: input.receivingDepartment === 'SELF' ? now : null,
+            }),
+      },
+    });
+    if (count === 0) throw ApiError.conflict('Yêu cầu vừa được giao hoặc hoàn thành ở nơi khác. Vui lòng tải lại.');
+    const audit = { branchId: row.branchId, reportId: id, actorUserId: actor.id, actorNameSnapshot: actor.fullName, actorRole: actor.role, createdAt: now };
+    if (before.receivingDepartment !== department) {
+      await tx.receptionReportAudit.create({
+        data: { ...audit, action: 'EDIT', field: 'receivingDepartment', oldValue: before.receivingDepartment ? WORK_DEPARTMENT_LABELS[before.receivingDepartment] : null, newValue: WORK_DEPARTMENT_LABELS[department] },
+      });
+    }
+    if (!keepHolder && (person?.id ?? null) !== before.assigneeUserId) {
+      await tx.receptionReportAudit.create({
+        data: { ...audit, action: 'ASSIGN', field: 'assignee', oldValue: before.assigneeNameSnapshot, newValue: person?.fullName ?? null, reason: input.receivingDepartment === 'SELF' ? 'Tự nhận' : null },
+      });
+    }
+    return tx.receptionOperationalReport.findUniqueOrThrow({ where: { id }, include: REPORT_INCLUDE });
+  });
+  const g = updated.guestRequest!;
+  if (g.assigneeUserId && g.assigneeUserId !== actor.id && g.assigneeUserId !== before.assigneeUserId) await notifyRequestAssignees([updated], client);
+  if (!g.assigneeUserId && g.receivingDepartment) {
+    const staff = await onShiftStaff(client, updated.branchId);
+    await notifyPool(updated, departmentStaff(staff, g.receivingDepartment).filter((s) => s.id !== actor.id), client);
+  }
   return updated;
 }
 

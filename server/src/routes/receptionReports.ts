@@ -39,6 +39,8 @@ import {
   dispatchStaff,
   assignRequest,
   acknowledgeRequest,
+  claimRequest,
+  setReceivingDepartment,
   listArchivedJournal,
   listDeletedReports,
   listEditHistory,
@@ -143,8 +145,9 @@ const guestRequestSchema = z.object({
   roomNumber: text(80).optional(),
   note: text(2000).min(1, 'Vui lòng nhập nội dung.'),
   severity: SEVERITY.optional(),
-  // "Bộ phận nhận việc" — required by the service on every live request; a correction never changes it.
-  receivingDepartment: WORK_DEPARTMENT.optional(),
+  // "Bộ phận nhận việc" — required by the service on every live request ('SELF': "Tự nhận việc").
+  // A correction never changes it: that is POST /:id/department, with its own rules.
+  receivingDepartment: z.enum(['BELL', 'RECEPTION', 'HOUSEKEEPING', 'SELF']).optional(),
 });
 
 /**
@@ -563,6 +566,33 @@ export function createReceptionReportsRouter(): Router {
       res.json({ report: serializeReport(updated, clock.now(), user.role) });
     })().catch(next);
   });
+
+  // POST /api/reception/reports/:id/claim — "Nhận việc" from the department's pool: one of several wins.
+  router.post('/reception/reports/:id/claim', requireAuth, requirePasswordChanged, requireAssignable, (req, res, next) => {
+    (async () => {
+      const user = req.currentUser!;
+      const clock = getClock();
+      const claimed = await claimRequest(req.params.id!, actor(user), clock);
+      res.json({ report: serializeReport(claimed, clock.now(), user.role) });
+    })().catch(next);
+  });
+
+  // POST /api/reception/reports/:id/department — "Bộ phận nhận việc" from "Sửa" (or "Tự nhận việc").
+  router.post(
+    '/reception/reports/:id/department',
+    requireAuth,
+    requirePasswordChanged,
+    requireRole('RECEPTIONIST', 'ADMIN', 'RECEPTION_MANAGER', 'RECEPTION_GENERAL_MANAGER', 'HOUSEKEEPING', 'HOUSEKEEPING_MANAGER'),
+    (req, res, next) => {
+      (async () => {
+        const user = req.currentUser!;
+        const input = z.object({ receivingDepartment: z.enum(['BELL', 'RECEPTION', 'HOUSEKEEPING', 'SELF']) }).parse(req.body ?? {});
+        const clock = getClock();
+        const updated = await setReceivingDepartment(req.params.id!, input, actor(user), clock);
+        res.json({ report: serializeReport(updated, clock.now(), user.role) });
+      })().catch(next);
+    },
+  );
 
   // POST /api/reception/reports/:id/acknowledge — "Nhận việc" by the person it is given to.
   router.post('/reception/reports/:id/acknowledge', requireAuth, requirePasswordChanged, requireAssignable, (req, res, next) => {

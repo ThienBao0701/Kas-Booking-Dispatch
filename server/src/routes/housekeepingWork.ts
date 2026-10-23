@@ -89,6 +89,8 @@ const issuesSchema = z.object({
   issues: z.array(z.object({ type: z.string(), note: z.string().optional() })).max(50).default([]),
   // A shared area's inspection is a note, not room findings.
   note: z.string().max(2000).optional(),
+  // "Trang thiết bị nội thất … ở trạng thái tốt" — a positive result, never with findings.
+  goodCondition: z.boolean().optional(),
 });
 
 /** One room / area of a work group: shape only — what each REQUIRES is the service's rule. */
@@ -108,8 +110,6 @@ const workGroupSchema = z.object({
   requestId: z.string().max(64).optional(),
   name: z.string().max(500).optional(),
   items: z.array(groupItemSchema).max(50),
-  // "Giao cho": a housekeeper at once ("Được giao"); absent or null: the pool ("Tự nhận").
-  assigneeUserId: z.number().int().positive().nullable().optional(),
 });
 
 const claimSchema = z.object({ taskIds: z.array(z.string().min(1).max(100)).min(1).max(50) });
@@ -466,8 +466,8 @@ export function createHousekeepingWorkRouter(): Router {
 
   router.post('/housekeeping/work/tasks/:id/inspect', ...gate, (req, res, next) => {
     (async () => {
-      const { issues, note } = issuesSchema.parse(req.body ?? {});
-      res.status(201).json({ task: await inspectTask(actorOf(req), req.params.id!, { issues, note }, getClock()) });
+      const { issues, note, goodCondition } = issuesSchema.parse(req.body ?? {});
+      res.status(201).json({ task: await inspectTask(actorOf(req), req.params.id!, { issues, note, goodCondition }, getClock()) });
     })().catch(next);
   });
 

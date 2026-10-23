@@ -34,6 +34,8 @@ import { SeverityPicker } from './Severity';
 import type { Severity } from '../api/receptionReports';
 import { useAuth } from '../auth/AuthProvider';
 import { can } from '../auth/capabilities';
+import { DepartmentPicker, type DepartmentChoice } from './OperationalForms';
+import { mayChangeDepartment, maySelfClaim } from '../lib/requestWork';
 
 /**
  * "Xóa" asks for a reason and says plainly what it is about to do.
@@ -260,6 +262,15 @@ export function RecordEditDialog({
   );
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /*
+    "BỘ PHẬN NHẬN VIỆC" of an open request — an older one never had one ("Chưa
+    giao"). Its own call: the server routes it, checks who may, and audits it;
+    the creator, origin and time stay.
+  */
+  const currentDepartment = report.guestRequest?.receivingDepartment ?? '';
+  const showDepartment = block === 'guestRequest' && mayChangeDepartment(report, user);
+  const [department, setDepartment] = useState<DepartmentChoice | ''>(currentDepartment);
+  const departmentChanged = showDepartment && department !== '' && (department === 'SELF' || department !== currentDepartment);
   /** A payment's total and methods — one transaction, corrected as a whole. */
   const [money, setMoney] = useState<{ total: string; lines: AllocationLine[] }>(() =>
     report.payment
@@ -270,7 +281,8 @@ export function RecordEditDialog({
   const payout = block === 'payment' && draft.source === EXPENSE_SOURCE;
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      if (departmentChanged) await reportsApi.setDepartment(report.id, department as DepartmentChoice);
       const payload: Record<string, unknown> = {};
       for (const f of fields) {
         const value = draft[f.name] ?? '';
@@ -293,7 +305,7 @@ export function RecordEditDialog({
         payload.method = 'CASH';
       }
       const patch = { [block]: payload, reason: reason.trim() || undefined } as UpdateReportInput;
-      return reportsApi.update(report.id, patch);
+      return await reportsApi.update(report.id, patch);
     },
     onSuccess: async () => {
       setError(null);
@@ -364,12 +376,22 @@ export function RecordEditDialog({
                 )}
               </div>
             ) : f.kind === 'severity' ? (
-              <div key={f.name} className="sm:col-span-2">
+              <div key={f.name} className="space-y-3 sm:col-span-2">
                 <SeverityPicker
                   value={(draft[f.name] ?? '') as Severity | ''}
                   onChange={(v) => setDraft((d) => ({ ...d, [f.name]: v }))}
                   testId={`record-edit-${f.name}`}
                 />
+                {showDepartment ? (
+                  <div>
+                    <DepartmentPicker value={department} onChange={setDepartment} branchId={report.branchId} allowSelf={maySelfClaim(user)} testId="record-edit-department" />
+                    {currentDepartment === '' ? (
+                      <p className="mt-1 text-xs text-amber-800" data-testid="record-edit-department-unset">
+                        Yêu cầu này chưa có bộ phận nhận việc — chọn để giao.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : f.kind === 'money' ? (
               <MoneyInput

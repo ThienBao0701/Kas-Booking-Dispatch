@@ -83,10 +83,10 @@ afterAll(async () => {
 
 /** "Bộ phận nhận việc" as each writer would choose it here: the desk for itself, Buồng phòng for itself. */
 const deptOf = (agent: Agent) => (agent === letan1 || agent === letan2 ? 'RECEPTION' : 'HOUSEKEEPING');
-const guestRequest = (agent: Agent, guestName = 'Khách 301', ezCode = 'EZ301') =>
+const guestRequest = (agent: Agent, guestName = 'Khách 301', ezCode = 'EZ301', receivingDepartment = deptOf(agent)) =>
   agent.post('/api/reception/reports').send({
     category: 'GUEST_REQUEST',
-    guestRequest: { guestName, ezCode, roomNumber: '301', note: `Thêm gối cho ${guestName}`, receivingDepartment: deptOf(agent) },
+    guestRequest: { guestName, ezCode, roomNumber: '301', note: `Thêm gối cho ${guestName}`, receivingDepartment },
   });
 const hkJournal = async (agent: Agent, query = '') =>
   ((await agent.get(`/api/reception/reports/housekeeping${query}`)).body.reports ?? []) as { id: string; category: string }[];
@@ -165,16 +165,17 @@ describe('B. Reception follows Housekeeping’s records — it does not act on t
 });
 
 describe('C. who sees and completes what', () => {
-  it('a housekeeper follows its own; the manager its branch’s; only the person it is given to completes it — never another branch', async () => {
+  it('the housekeepers on shift and the manager follow their branch’s; only the person holding it completes it — never another branch', async () => {
     await startShiftAt(lan, cn1);
     await startShiftAt(hoa, cn1);
-    const mine = (await guestRequest(lan)).body.report.id as string;
-    const hers = (await guestRequest(hoa, 'Khách 302')).body.report.id as string;
-    // No supervisor on shift: shared between the two housekeepers on shift, one each.
+    // Each takes its own ("Tự nhận việc").
+    const mine = (await guestRequest(lan, undefined, undefined, 'SELF')).body.report.id as string;
+    const hers = (await guestRequest(hoa, 'Khách 302', undefined, 'SELF')).body.report.id as string;
     const holderOf = async (id: string) => (await testPrisma.guestRequestReport.findUniqueOrThrow({ where: { reportId: id } })).assigneeUserId;
     expect(await holderOf(mine)).toBe((await testPrisma.user.findUniqueOrThrow({ where: { username: 'lan' } })).id);
     expect(await holderOf(hers)).toBe((await testPrisma.user.findUniqueOrThrow({ where: { username: 'hoa' } })).id);
-    expect((await hkJournal(lan)).map((r) => r.id)).toEqual([mine]);
+    // The department's requests at its branch are every housekeeper on shift there's to follow.
+    expect((await hkJournal(lan)).map((r) => r.id).sort()).toEqual([mine, hers].sort());
     expect((await hkJournal(qlbp1)).map((r) => r.id).sort()).toEqual([mine, hers].sort());
     expect(await hkJournal(qlbp2)).toEqual([]);
     expect((await qlbp2.post(`/api/reception/reports/${mine}/complete`).send({ verdict: 'CORRECT' })).status).toBe(403);
@@ -195,8 +196,8 @@ describe('C. who sees and completes what', () => {
     expect((await letan2.get('/api/reception/reports/archive')).body.reports).toEqual([]);
     expect((await admin.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
     expect((await admin.get('/api/reception/reports/archive?department=HOUSEKEEPING')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
-    // A housekeeper's archive is its own.
-    expect((await hoa.get('/api/reception/reports/archive')).body.reports).toEqual([]);
+    // A housekeeper on shift follows the department's archive at its branch.
+    expect((await hoa.get('/api/reception/reports/archive')).body.reports.map((r: { id: string }) => r.id)).toEqual([mine]);
   });
 });
 

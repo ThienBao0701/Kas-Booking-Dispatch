@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { Branch } from '../auth/types';
+import type { Branch, UserRole } from '../auth/types';
 import type { Actor, Pagination } from './bookings';
 import type { Severity } from './receptionReports';
 
@@ -230,6 +230,8 @@ export interface Issue {
   reportedByName: string | null;
   /** "Người báo" as a person reads it — composed by the server. */
   reporterName: string | null;
+  /** The reporter's role when it reported — the "Bộ phận" it reported from. Null on older incidents. */
+  reportedByRole?: UserRole | null;
   acceptedBy: Actor | null;
   acceptedByName: string | null;
   acceptedAt: string | null;

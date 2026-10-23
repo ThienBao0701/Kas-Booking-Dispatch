@@ -148,6 +148,8 @@ export interface InspectionInput {
   /** Optional: the open shift segment's cleaner is used when absent. */
   staffName?: unknown;
   issues: { type: unknown; note?: unknown }[];
+  /** "Trang thiết bị … ở trạng thái tốt" — a positive result; refused together with any finding. */
+  goodCondition?: unknown;
 }
 
 /** How a room work item's "Kiểm phòng" uses the shared inspection. */
@@ -222,12 +224,18 @@ export async function createInspection(
 
   const now = clock.now();
   const branchId = segment.branchId;
+  // A room in good condition has no finding — both at once is a contradiction, refused rather than guessed.
+  const goodCondition = input.goodCondition === true;
+  if (goodCondition && issues.length > 0) {
+    throw ApiError.validation('“Trạng thái tốt” không đi cùng vấn đề nào — bỏ chọn vấn đề hoặc bỏ chọn “trạng thái tốt”.');
+  }
   const created = await client.$transaction(async (tx) => {
     const row = await tx.roomInspection.create({
       data: {
         branchId,
         roomNumber,
         staffName,
+        goodCondition,
         workSegmentId: segment.id,
         createdByUserId: actor.id,
         createdByNameSnapshot: actor.fullName,

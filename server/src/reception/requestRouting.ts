@@ -10,8 +10,9 @@
  *   a live connection. KAS keeps no presence signal, so it claims none.
  *
  *   ROUTING
- *     Buồng phòng  a supervisor on shift receives it (to give it out); with
- *                  none, the housekeepers on shift share it, least loaded first
+ *     Buồng phòng  the branch's pool: every housekeeper and supervisor on shift
+ *                  sees it, and ONE of them takes it ("Nhận việc", atomic) — or
+ *                  a supervisor gives it to someone
  *     Bell         a Bell on shift, least loaded first — or nobody, and the
  *                  desk is told; never someone of another department
  *     Lễ tân       the receptionist who took it, when on shift here; else the
@@ -129,17 +130,25 @@ export async function lockBranchRouting(tx: Prisma.TransactionClient, branchId: 
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('guest-request-routing'), ${branchId}::int)`;
 }
 
-/** Who receives a new request of `department` at the branch now — or null: nobody of it is on shift. */
+/** Who of a department may take a request from its pool at the branch now. */
+export function departmentStaff(staff: OnShiftStaff, department: WorkDepartment): StaffMember[] {
+  return department === 'HOUSEKEEPING' ? [...staff.supervisors, ...staff.HOUSEKEEPING] : staff[department];
+}
+
+/**
+ * Who receives a new request of `department` at the branch now. `available`:
+ * someone of the department is on shift — for Buồng phòng the request stays in
+ * the pool for one of them to take (`assignee` null); for Bell and Lễ tân it is
+ * given to one at once.
+ */
 export async function routeRequest(
   client: Db,
   branchId: number,
   department: WorkDepartment,
   creator: { id: number },
-): Promise<StaffMember | null> {
+): Promise<{ assignee: StaffMember | null; available: boolean; staff: OnShiftStaff }> {
   const staff = await onShiftStaff(client, branchId);
-  if (department === 'HOUSEKEEPING') {
-    return leastLoaded(client, staff.supervisors.length > 0 ? staff.supervisors : staff.HOUSEKEEPING);
-  }
-  if (department === 'BELL') return leastLoaded(client, staff.BELL);
-  return staff.RECEPTION.find((s) => s.id === creator.id) ?? leastLoaded(client, staff.RECEPTION);
+  if (department === 'HOUSEKEEPING') return { assignee: null, available: departmentStaff(staff, department).length > 0, staff };
+  const assignee = department === 'BELL' ? await leastLoaded(client, staff.BELL) : (staff.RECEPTION.find((s) => s.id === creator.id) ?? (await leastLoaded(client, staff.RECEPTION)));
+  return { assignee, available: assignee !== null, staff };
 }

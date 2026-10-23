@@ -287,6 +287,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     if (item.to === incidentHost) return item.children ? undefined : deskOpen;
     // Bell: the requests given to it and not yet completed.
     if (item.to === '/app/bell') return open?.guestRequest.mine;
+    /*
+      The desk's "Buồng phòng": what Housekeeping REPORTED and is still unresolved,
+      in the desk's branch (the server scopes both counts) — its open guest
+      requests and its unresolved incidents, each record once. A completed
+      request leaves the count at once, even while it stays listed.
+    */
+    if (item.to === '/app/room-collections') {
+      return open && incidents ? open.guestRequest.housekeeping + (incidents.byDepartment?.housekeeping ?? 0) : undefined;
+    }
     if (!counts) return undefined;
     switch (item.to) {
       // Reception's "Đơn mới" and Admin's "Chờ chi nhánh tạo" are the same

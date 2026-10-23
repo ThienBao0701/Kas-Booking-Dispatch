@@ -26,6 +26,8 @@
  * including the correction history. That is what keeps the compact table honest:
  * nothing is dropped, it is one click down rather than eight lines tall.
  */
+import { departmentLabelOfRole } from '../lib/requestWork';
+import type { UserRole } from '../auth/types';
 import { SeverityBadge } from './Severity';
 import type { ReactNode } from 'react';
 import { SourceTag } from './SourceTag';
@@ -602,7 +604,14 @@ export function AdminFacilityJournalTable({ rows, title, grouped, onEdit, onDele
       className: 'whitespace-nowrap',
       render: (r) => text(r.facility?.issue.repairerName),
     },
-    staff('Người báo'),
+    // The department it came from, and who created it — side by side.
+    {
+      key: 'department',
+      header: 'Bộ phận',
+      className: 'whitespace-nowrap',
+      render: (r) => text(departmentLabelOfRole(r.createdByRole as UserRole | null | undefined) ?? r.departmentLabel ?? null),
+    },
+    staff('Người tạo'),
     shift(),
     when('createdAt', 'Thời gian báo cáo', (r) => r.createdAt),
     status('Bản ghi'),

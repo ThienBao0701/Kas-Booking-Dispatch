@@ -822,7 +822,8 @@ describe('each category is a table', () => {
       'Khu vực',
       'Nguyên nhân',
       'Trạng thái',
-      'Người báo',
+      'Bộ phận',
+      'Người tạo',
       'Thời gian báo cáo',
       'Người xử lý',
       'Hoàn thành',
@@ -831,6 +832,9 @@ describe('each category is a table', () => {
     ]) {
       expect(headers).toContain(h);
     }
+    // "Bộ phận" and "Người tạo" side by side; "Người báo" is gone.
+    expect(headers.indexOf('Người tạo')).toBe(headers.indexOf('Bộ phận') + 1);
+    expect(headers).not.toContain('Người báo');
     // One branch on screen: no branch column. Inspection dormant: no "Nghiệm thu" column.
     expect(headers).not.toContain('Chi nhánh');
     expect(headers).not.toContain('Nghiệm thu');

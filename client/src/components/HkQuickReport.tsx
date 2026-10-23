@@ -27,6 +27,15 @@ import { Button } from './Button';
 import { ErrorAlert } from './ErrorAlert';
 import { Modal } from './Modal';
 import { SeverityPicker } from './Severity';
+import { DepartmentPicker, type DepartmentChoice } from './OperationalForms';
+import { maySelfClaim } from '../lib/requestWork';
+
+const SENT_TO: Record<DepartmentChoice, string> = {
+  BELL: 'Đã gửi yêu cầu của khách cho Bell.',
+  RECEPTION: 'Đã gửi yêu cầu của khách cho lễ tân.',
+  HOUSEKEEPING: 'Đã gửi yêu cầu của khách cho Buồng phòng.',
+  SELF: 'Đã ghi nhận yêu cầu — bạn là người xử lý.',
+};
 
 type Kind = 'GUEST_REQUEST' | 'FACILITY_ISSUE';
 
@@ -46,14 +55,22 @@ export function QuickReportDialog({ task, onClose, onDone }: { task: RoomTask; o
   const [kind, setKind] = useState<Kind>('FACILITY_ISSUE');
   const [content, setContent] = useState('');
   const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
+  // "Bộ phận nhận việc" of a guest request — or "Tự nhận việc".
+  const [department, setDepartment] = useState<DepartmentChoice | ''>('');
   // The incident already created by an earlier try: a retry only writes the journal entry.
   const createdIssue = useRef<string | null>(null);
   const send = useMutation({
-    // `confirmDuplicate`: "Vẫn gửi" after the server warned of a possible duplicate.
-    mutationFn: async (confirmDuplicate: boolean = false) => {
+    // `confirmDuplicate`: "Vẫn gửi" after a possible duplicate; `allowUnassigned`: "Vẫn lưu, chờ giao" when nobody is on shift.
+    mutationFn: async ({ confirmDuplicate = false, allowUnassigned = false }: { confirmDuplicate?: boolean; allowUnassigned?: boolean } = {}) => {
       const note = content.trim();
       if (kind === 'GUEST_REQUEST') {
-        await reportsApi.create({ category: 'GUEST_REQUEST', guestRequest: { note, severity }, taskId: task.id, confirmDuplicate });
+        await reportsApi.create({
+          category: 'GUEST_REQUEST',
+          guestRequest: { note, severity, receivingDepartment: department || undefined },
+          taskId: task.id,
+          confirmDuplicate,
+          ...(allowUnassigned ? { allowUnassigned } : {}),
+        });
         return;
       }
       if (!createdIssue.current) {
@@ -64,10 +81,11 @@ export function QuickReportDialog({ task, onClose, onDone }: { task: RoomTask; o
     },
     onSuccess: async () => {
       await Promise.all([queryClient.invalidateQueries({ queryKey: REPORTS_KEY }), queryClient.invalidateQueries({ queryKey: FACILITY_BOARD_KEY })]);
-      onDone(kind === 'GUEST_REQUEST' ? 'Đã gửi yêu cầu của khách cho lễ tân.' : 'Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.');
+      onDone(kind === 'GUEST_REQUEST' && department ? SENT_TO[department] : 'Đã gửi báo cáo sự cố cho bộ phận kỹ thuật.');
     },
   });
-  const ready = content.trim().length > 0 && !send.isPending && !send.isSuccess;
+  const ready = content.trim().length > 0 && (kind !== 'GUEST_REQUEST' || department !== '') && !send.isPending && !send.isSuccess;
+  const noStaff = send.error instanceof ApiError && (send.error.details as { reason?: string } | undefined)?.reason === 'NO_STAFF_ON_SHIFT';
   const fact = (label: string, value: string) => (
     <div>
       <dt className="text-xs font-medium text-slate-500">{label}</dt>
@@ -84,7 +102,7 @@ export function QuickReportDialog({ task, onClose, onDone }: { task: RoomTask; o
           <Button variant="secondary" onClick={onClose} disabled={send.isPending}>
             Hủy
           </Button>
-          <Button onClick={() => send.mutate(false)} disabled={!ready} loading={send.isPending} data-testid="quick-report-send">
+          <Button onClick={() => send.mutate({})} disabled={!ready} loading={send.isPending} data-testid="quick-report-send">
             Gửi báo cáo
           </Button>
         </>
@@ -122,6 +140,13 @@ export function QuickReportDialog({ task, onClose, onDone }: { task: RoomTask; o
             ))}
           </div>
         </fieldset>
+        {kind === 'GUEST_REQUEST' ? (
+          <DepartmentPicker value={department} onChange={setDepartment} allowSelf={maySelfClaim(me)} testId="quick-report-department" />
+        ) : (
+          <p className="text-xs text-slate-500" data-testid="quick-report-facility-route">
+            Sự cố cơ sở vật chất được chuyển cho bộ phận kỹ thuật xử lý.
+          </p>
+        )}
         <SeverityPicker value={severity} onChange={setSeverity} testId="quick-report-severity" />
         <label className="block text-sm font-medium text-slate-700">
           Mô tả
@@ -138,8 +163,16 @@ export function QuickReportDialog({ task, onClose, onDone }: { task: RoomTask; o
         {send.error instanceof ApiError && send.error.code === 'POSSIBLE_DUPLICATE' ? (
           <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950" role="alert" data-testid="quick-report-duplicate">
             <p>{send.error.message}</p>
-            <Button variant="secondary" onClick={() => send.mutate(true)} loading={send.isPending} data-testid="quick-report-confirm-duplicate">
+            <Button variant="secondary" onClick={() => send.mutate({ confirmDuplicate: true })} loading={send.isPending} data-testid="quick-report-confirm-duplicate">
               Vẫn gửi
+            </Button>
+          </div>
+        ) : noStaff ? (
+          <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950" role="alert" data-testid="quick-report-no-staff">
+            <p>{send.error?.message}</p>
+            <p className="text-xs">Chọn bộ phận khác, hoặc lưu để quản lý giao người xử lý sau.</p>
+            <Button variant="secondary" onClick={() => send.mutate({ allowUnassigned: true })} loading={send.isPending} data-testid="quick-report-save-unassigned">
+              Vẫn lưu, chờ giao
             </Button>
           </div>
         ) : send.isError ? (

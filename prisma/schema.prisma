@@ -3371,6 +3371,11 @@ model RoomInspection {
   /// Null on inspections recorded before shifts existed.
   workSegmentId String?
 
+  /// "Trang thiết bị nội thất trong phòng ở trạng thái tốt, không có thiệt hại
+  /// vật chất." — the inspector's explicit positive result. Never with findings,
+  /// and never a finding itself. False on every inspection made before it existed.
+  goodCondition Boolean @default(false)
+
   branch      Branch                   @relation(fields: [branchId], references: [id])
   createdBy   User                     @relation("RoomInspectionCreatedBy", fields: [createdByUserId], references: [id])
   issues      RoomInspectionIssue[]
@@ -3396,8 +3401,7 @@ model HousekeepingWorkSession {
   /// Null while the workday is open ("Kết thúc ca" closes it).
   endedAt   DateTime?
   /// How it ended: null — "Kết thúc ca" (and every workday before this was
-  /// recorded); "NO_WORK" — the server, when the housekeeper's work and the
-  /// branch's pool ran out; "CUTOFF_20H" — the server, at 20:00.
+  /// recorded); "CUTOFF_20H" — the server, at 20:00 (shiftAutoEnd.ts).
   endReason String?
 
   user     User                      @relation("HousekeepingSessionUser", fields: [userId], references: [id])
@@ -3686,9 +3690,8 @@ model HousekeepingWorkGroup {
   branch    Branch                 @relation(fields: [branchId], references: [id])
   assignee  User?                  @relation("WorkGroupAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
   createdBy User                   @relation("WorkGroupCreatedBy", fields: [createdByUserId], references: [id])
-  /// Who gave it out ("Được giao") — null when the housekeeper took it itself
-  /// ("Tự nhận"), or on groups given out before this was recorded (then a held
-  /// group with no `acceptedAt` is read as given out).
+  /// UNUSED — written by an assignment-at-creation flow that was withdrawn.
+  /// Kept (nullable, additive) rather than dropped: dropping a column is destructive.
   assignedBy User?                 @relation("WorkGroupAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
   tasks     HousekeepingRoomTask[]
 

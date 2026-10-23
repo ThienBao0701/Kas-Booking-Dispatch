@@ -121,6 +121,8 @@ export interface GuestRequestDetail {
   assignedByName?: string | null;
   /** "Nhận việc" — when the assignee acknowledged it. */
   acknowledgedAt?: string | null;
+  /** "Tự nhận" — the holder gave it to itself (at creation, or from the pool). */
+  selfClaimed?: boolean;
   /** The department of whoever completed it. */
   completedDepartment?: WorkDepartment | null;
   completedDepartmentLabel?: string | null;
@@ -249,6 +251,8 @@ export interface OperationalReport {
   sourceLabel?: string | null;
   /** Which department's journal it belongs to. */
   originDepartment?: 'RECEPTION' | 'HOUSEKEEPING';
+  /** The origin department's label ("Lễ tân", "Buồng phòng"). */
+  departmentLabel?: string;
   /** The housekeeping work item it was reported from ("+ Báo cáo vấn đề"). */
   taskId?: string | null;
   createdAt: string;
@@ -371,8 +375,8 @@ export interface NewGuestRequestInput {
 
   note: string;
   severity?: Severity;
-  /** "Bộ phận nhận việc" — required on every request recorded live. */
-  receivingDepartment?: WorkDepartment;
+  /** "Bộ phận nhận việc" — required on every request recorded live. 'SELF': "Tự nhận việc". */
+  receivingDepartment?: WorkDepartment | 'SELF';
 }
 
 export interface NewComplaintInput {
@@ -486,6 +490,13 @@ export const reportsApi = {
 
   /** "Nhận việc" — by the person it is given to. */
   acknowledge: (id: string) => api.post<{ report: OperationalReport }>(`/reception/reports/${id}/acknowledge`, {}),
+
+  /** "Nhận việc" from the department's pool — one of several wins. */
+  claim: (id: string) => api.post<{ report: OperationalReport }>(`/reception/reports/${id}/claim`, {}),
+
+  /** "Bộ phận nhận việc" from "Sửa" — or 'SELF', "Tự nhận việc". */
+  setDepartment: (id: string, receivingDepartment: WorkDepartment | 'SELF') =>
+    api.post<{ report: OperationalReport }>(`/reception/reports/${id}/department`, { receivingDepartment }),
 
   /**
    * "Hoàn thành vấn đề": the completed ones, 12 hours or more after receipt —

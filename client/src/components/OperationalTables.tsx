@@ -39,7 +39,13 @@ import { completionText } from '../lib/completionVerdict';
 import { formatDateTime, formatHcmDateTimeSeconds } from '../lib/format';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { QueryState } from './PageState';
-import { REQUEST_ASSIGNER_ROLES, mayAcknowledgeRequest, mayCompleteRequest, outsideViewerJournal } from '../lib/requestWork';
+import { REQUEST_ASSIGNER_ROLES, departmentLabelOfRole, mayAcknowledgeRequest, mayClaimRequest, mayCompleteRequest, outsideViewerJournal } from '../lib/requestWork';
+import type { UserRole } from '../auth/types';
+
+/** The reporting employee's department ("Lễ tân", "Buồng phòng", "Bell", "Admin"…), from the role recorded with the report. */
+function reporterDepartment(r: OperationalReport): string | null {
+  return departmentLabelOfRole(r.createdByRole as UserRole | null | undefined) ?? r.departmentLabel ?? null;
+}
 import { reportsApi } from '../api/receptionReports';
 import { toUserMessage } from '../api/errors';
 import { Button } from './Button';
@@ -171,12 +177,16 @@ function RequestAssignee({
   onAssign,
   onAcknowledge,
   acknowledging,
+  onClaim,
+  claiming,
 }: {
   row: OperationalReport;
   mayAssign: boolean;
   onAssign: () => void;
   onAcknowledge: () => void;
   acknowledging: boolean;
+  onClaim: () => void;
+  claiming: boolean;
 }) {
   const request = row.guestRequest;
   const { user } = useAuth();
@@ -192,8 +202,20 @@ function RequestAssignee({
       ) : (
         <span className="block italic text-amber-800">Chưa giao{request.receivingDepartmentLabel ? ` · ${request.receivingDepartmentLabel}` : ''}</span>
       )}
+      {assignee && request.selfClaimed ? (
+        <span className="mt-0.5 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800" data-testid={`request-self-${row.id}`}>
+          Tự nhận
+        </span>
+      ) : null}
       {assignee && !request.completed ? (
         <span className="block text-xs text-slate-500">{request.acknowledgedAt ? 'Đã nhận việc' : 'Chờ nhận việc'}</span>
+      ) : null}
+      {mayClaimRequest(row, user) ? (
+        // Its department's pool: any one on shift may take it; the server lets exactly one win.
+        <RowAction onClick={onClaim} disabled={claiming} testId={`claim-${row.id}`}>
+          <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+          Nhận việc
+        </RowAction>
       ) : null}
       {mayAcknowledgeRequest(row, user) ? (
         <RowAction onClick={onAcknowledge} disabled={acknowledging} testId={`acknowledge-${row.id}`}>
@@ -374,6 +396,18 @@ export function GuestRequestTable({
     },
     onError: (e) => onToast(toUserMessage(e)),
   });
+  const claim = useMutation({
+    mutationFn: (id: string) => reportsApi.claim(id),
+    onSuccess: async () => {
+      await onChanged();
+      onToast('Đã nhận việc — bạn là người xử lý.');
+    },
+    // Someone was faster: say who, and show the list as it now is.
+    onError: async (e) => {
+      onToast(toUserMessage(e));
+      await onChanged();
+    },
+  });
   const assignee: DataColumn<OperationalReport> = {
     key: 'assignee',
     header: 'Người xử lý',
@@ -385,6 +419,8 @@ export function GuestRequestTable({
         onAssign={() => setAssigning(r)}
         onAcknowledge={() => acknowledge.mutate(r.id)}
         acknowledging={acknowledge.isPending}
+        onClaim={() => claim.mutate(r.id)}
+        claiming={claim.isPending}
       />
     ),
   };
@@ -408,6 +444,11 @@ export function GuestRequestTable({
       return (
         <span data-testid={`request-guest-${r.id}`}>
           {name ?? <span className="font-normal italic text-amber-800">Chưa xác định khách</span>}
+          {/* Who reported it — the employee, apart from the guest — and their department. */}
+          <span className="mt-0.5 block text-xs font-normal text-slate-500" data-testid={`request-reporter-${r.id}`}>
+            {r.createdByName}
+            {reporterDepartment(r) ? <span className="block">{reporterDepartment(r)}</span> : null}
+          </span>
           {/* "Admin tạo" beside the guest, as on every desk record; a housekeeping source is under the content. */}
           {fromHousekeeping(r) ? null : <SourceTag label={r.sourceLabel} />}
           <RecordLateEntryBadge row={r} />
@@ -449,7 +490,8 @@ export function GuestRequestTable({
       <>
         <span className="whitespace-pre-wrap [overflow-wrap:anywhere] text-slate-800">{r.guestRequest?.content || '—'}</span>
         <span className="mt-0.5 block text-xs text-slate-500" data-testid={`request-meta-${r.id}`}>
-          {fromHousekeeping(r) && r.sourceLabel ? `${r.sourceLabel} · ` : ''}
+          {/* With no guest column, who reported it (and from which department) is said here; otherwise it is beneath the guest. */}
+          {housekeeping ? `${r.createdByName}${reporterDepartment(r) ? ` · ${reporterDepartment(r)}` : ''} · ` : ''}
           <span className="whitespace-nowrap">Ghi nhận: {formatHcmDateTimeSeconds(r.createdAt)}</span>
         </span>
         <VoidedNote report={r} />

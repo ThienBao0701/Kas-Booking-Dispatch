@@ -184,6 +184,8 @@ export interface RoomTask {
     createdAt: string;
     inspectorId: number;
     inspectorName: string;
+    /** "Trang thiết bị nội thất … ở trạng thái tốt" — the inspector's positive result. */
+    goodCondition?: boolean;
     findings: TaskFinding[];
   } | null;
   cleaning: CleaningForm | null;
@@ -251,13 +253,6 @@ export interface WorkGroup {
   assignee: { id: number; name: string } | null;
   acceptedAt: string | null;
   status: { code: 'UNASSIGNED' | 'ACCEPTED' | 'IN_PROGRESS' | 'DONE'; label: string };
-  /** "Được giao" — given out by a manager; "Tự nhận" — taken from the pool. Null while nobody holds it. */
-  origin?: 'ASSIGNED' | 'SELF' | null;
-  originLabel?: string | null;
-  /** Given out and not yet acknowledged with "Nhận việc". */
-  awaitingAcceptance?: boolean;
-  assignedByName?: string | null;
-  assignedAt?: string | null;
   floors: string[];
   counts: { items: number; completed: number; noCleanPending: number };
   /** Every place, removed ones included (`voided`). */
@@ -411,8 +406,7 @@ export const roomWorkApi = {
   workGroups: (p: { date: string; branchId?: number }) =>
     api.get<{ groups: WorkGroup[] }>(`/housekeeping/manager/work-groups${query({ ...p })}`),
   /** "Tạo công việc": one group, its places; `requestId` makes a repeat harmless. */
-  /** `assigneeUserId`: "Giao cho" a housekeeper at once ("Được giao"); absent: the pool ("Tự nhận"). */
-  createWorkGroup: (input: { branchId?: number; workDate: string; requestId: string; name?: string; items: GroupItemInput[]; assigneeUserId?: number }) =>
+  createWorkGroup: (input: { branchId?: number; workDate: string; requestId: string; name?: string; items: GroupItemInput[] }) =>
     api.post<{ duplicate: boolean; group: WorkGroup }>('/housekeeping/manager/work-groups', input),
   renameWorkGroup: (id: string, name: string | null) => api.patch<{ group: WorkGroup }>(`/housekeeping/manager/work-groups/${id}`, { name }),
   addWorkGroupItems: (id: string, items: GroupItemInput[]) =>
@@ -478,13 +472,13 @@ export const roomWorkApi = {
   beginInspection: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/begin-inspection`, {}),
   task: (id: string) => api.get<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}`),
   open: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/open`, {}),
-  inspect: (id: string, issues: { type: RoomIssueType; note?: string }[], note?: string) =>
-    api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, note ? { issues, note } : { issues }),
+  /** `goodCondition`: "Trang thiết bị nội thất … ở trạng thái tốt" — only with no issue. */
+  inspect: (id: string, issues: { type: RoomIssueType; note?: string }[], note?: string, goodCondition?: boolean) =>
+    api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/inspect`, { issues, ...(note ? { note } : {}), ...(goodCondition ? { goodCondition } : {}) }),
   /** "Bắt đầu dọn" — the one action that starts the cleaning time. */
   start: (id: string) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/start`, {}),
   saveCleaning: (id: string, form: CleaningInput) => api.put<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/cleaning`, form),
-  /** `shiftEnded`: that was the housekeeper's last work and nothing is left to take — the server ended its shift. */
-  complete: (id: string, form: CleaningInput) => api.post<{ task: RoomTask & { shiftEnded?: boolean } }>(`/housekeeping/work/tasks/${id}/complete`, form),
+  complete: (id: string, form: CleaningInput) => api.post<{ task: RoomTask }>(`/housekeeping/work/tasks/${id}/complete`, form),
   /** The items this room's cleaning counts — the branch's list, with what is on hand. */
   cleaningItems: (id: string) => api.get<{ items: CleaningItem[] }>(`/housekeeping/work/tasks/${id}/cleaning-items`),
   myKpi: (p: { from: string; to: string }) =>

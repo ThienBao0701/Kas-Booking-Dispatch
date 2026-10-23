@@ -19,6 +19,7 @@ import { DEFAULT_SEVERITY } from '../lib/severity';
 import type { Severity } from '../api/receptionReports';
 import { useReportSubmitOverride } from '../lib/reportSubmit';
 import { useAuth } from '../auth/AuthProvider';
+import { maySelfClaim } from '../lib/requestWork';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useDebounced } from '../hooks/useDebounced';
@@ -154,12 +155,29 @@ function useCreateReport(onCreated: () => void | Promise<void>, branchId?: numbe
   return { mutation, error, setError, confirmDuplicate, confirmUnassigned };
 }
 
+/** A department, or "Tự nhận việc" — the writer takes the request itself. */
+export type DepartmentChoice = WorkDepartment | 'SELF';
+const SELF_OPTION = { code: 'SELF' as const, label: 'Tự nhận việc' };
+
 /**
  * "BỘ PHẬN NHẬN VIỆC" — required, beside "Mức độ". Under it, who is "đang
  * trong ca" at the branch in each department (an open shift — not an online
  * status), so the desk sees before saving when a department has nobody.
+ * `allowSelf`: offers "Tự nhận việc" (a department's own staff).
  */
-function DepartmentPicker({ value, onChange, branchId }: { value: WorkDepartment | ''; onChange: (value: WorkDepartment) => void; branchId?: number }) {
+export function DepartmentPicker({
+  value,
+  onChange,
+  branchId,
+  allowSelf = false,
+  testId = 'guest-request-department',
+}: {
+  value: DepartmentChoice | '';
+  onChange: (value: DepartmentChoice) => void;
+  branchId?: number;
+  allowSelf?: boolean;
+  testId?: string;
+}) {
   const staff = useQuery({
     queryKey: ['reception', 'dispatch-staff', branchId ?? null],
     queryFn: () => reportsApi.dispatchStaff(branchId),
@@ -167,14 +185,15 @@ function DepartmentPicker({ value, onChange, branchId }: { value: WorkDepartment
     refetchInterval: 60_000,
   });
   const onShift = staff.data?.onShift;
-  const nobody = value !== '' && onShift !== undefined && onShift[value].length === 0;
+  const nobody = value !== '' && value !== 'SELF' && onShift !== undefined && onShift[value].length === 0;
+  const options: { code: DepartmentChoice; label: string }[] = [...WORK_DEPARTMENT_OPTIONS, ...(allowSelf ? [SELF_OPTION] : [])];
   return (
-    <fieldset data-testid="guest-request-department">
+    <fieldset data-testid={testId}>
       <legend className="mb-1.5 block text-sm font-medium text-slate-700">
         Bộ phận nhận việc <span className="text-rose-600">*</span>
       </legend>
-      <div role="radiogroup" aria-label="Bộ phận nhận việc" className="inline-flex overflow-hidden rounded-xl border border-line-strong">
-        {WORK_DEPARTMENT_OPTIONS.map((o, i) => {
+      <div role="radiogroup" aria-label="Bộ phận nhận việc" className="inline-flex flex-wrap overflow-hidden rounded-xl border border-line-strong">
+        {options.map((o, i) => {
           const on = value === o.code;
           return (
             <button
@@ -183,7 +202,7 @@ function DepartmentPicker({ value, onChange, branchId }: { value: WorkDepartment
               role="radio"
               aria-checked={on}
               onClick={() => onChange(o.code)}
-              data-testid={`guest-request-department-${o.code}`}
+              data-testid={`${testId}-${o.code}`}
               className={`inline-flex min-h-[2.5rem] items-center px-3.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600 ${
                 i > 0 ? 'border-l border-line-strong' : ''
               } ${on ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}
@@ -194,12 +213,13 @@ function DepartmentPicker({ value, onChange, branchId }: { value: WorkDepartment
         })}
       </div>
       {onShift ? (
-        <p className="mt-1 text-xs text-slate-500" data-testid="guest-request-on-shift">
+        <p className="mt-1 text-xs text-slate-500" data-testid={testId === 'guest-request-department' ? 'guest-request-on-shift' : `${testId}-on-shift`}>
           Đang trong ca: {WORK_DEPARTMENT_OPTIONS.map((o) => `${o.label} ${onShift[o.code].length}`).join(' · ')}
         </p>
       ) : null}
+      {value === 'SELF' ? <p className="mt-1 text-xs text-slate-600">Bạn là người xử lý yêu cầu này.</p> : null}
       {nobody ? (
-        <p className="mt-1 text-xs font-medium text-amber-800" role="status" data-testid="guest-request-no-staff-hint">
+        <p className="mt-1 text-xs font-medium text-amber-800" role="status" data-testid={testId === 'guest-request-department' ? 'guest-request-no-staff-hint' : `${testId}-no-staff-hint`}>
           Hiện không có nhân viên {WORK_DEPARTMENT_OPTIONS.find((o) => o.code === value)?.label} nào đang trong ca tại chi nhánh này.
         </p>
       ) : null}
@@ -264,7 +284,8 @@ export function GuestRequestForm({
   const [ezCode, setEzCode] = useState('');
   const [content, setContent] = useState('');
   const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
-  const [department, setDepartment] = useState<WorkDepartment | ''>('');
+  const [department, setDepartment] = useState<DepartmentChoice | ''>('');
+  const allowSelf = maySelfClaim(useAuth().user);
   const { mutation, error, confirmDuplicate, confirmUnassigned } = useCreateReport(async () => {
     setGuestName('');
     setEzCode('');
@@ -307,7 +328,7 @@ export function GuestRequestForm({
       )}
       <div className="flex flex-wrap gap-x-6 gap-y-3">
         <SeverityPicker value={severity} onChange={setSeverity} testId="guest-request-severity" />
-        <DepartmentPicker value={department} onChange={setDepartment} branchId={branchId} />
+        <DepartmentPicker value={department} onChange={setDepartment} branchId={branchId} allowSelf={allowSelf} />
       </div>
       <div>
         <TextArea

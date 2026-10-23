@@ -209,3 +209,62 @@ describe('"Bộ phận nhận việc" with nobody on shift', () => {
     expect(posted[1]).toMatchObject({ allowUnassigned: true, guestRequest: { receivingDepartment: 'BELL' } });
   });
 });
+
+describe('the department pool, "Tự nhận" and "Bộ phận nhận việc" in "Sửa"', () => {
+  const HK_USER = { id: 6, username: 'buongphong', fullName: 'Buồng phòng Một', role: 'HOUSEKEEPING', branch: BRANCH, active: true, mustChangePassword: false };
+  const pooled = () =>
+    request({ assignee: null, receivingDepartment: 'HOUSEKEEPING', receivingDepartmentLabel: 'Buồng phòng' });
+
+  it('lets a housekeeper take a request sent to Buồng phòng that nobody holds — and the desk only follows it', async () => {
+    const claimed: string[] = [];
+    renderTable(HK_USER, [pooled()], {
+      'POST /api/reception/reports/r1/claim': () => {
+        claimed.push('r1');
+        return { status: 200, body: { report: request({ receivingDepartment: 'HOUSEKEEPING', assignee: { id: 6, name: 'Buồng phòng Một', department: 'HOUSEKEEPING', departmentLabel: 'Buồng phòng' }, selfClaimed: true }) } };
+      },
+    });
+    expect(await screen.findByTestId('request-assignee-r1')).toHaveTextContent('Chưa giao · Buồng phòng');
+    await userEvent.click(await screen.findByTestId('claim-r1'));
+    await waitFor(() => expect(claimed).toEqual(['r1']));
+  });
+
+  it('offers no "Nhận việc" to another department, nor once someone holds it — and marks a self-claimed one "Tự nhận"', async () => {
+    renderTable(RECEPTIONIST_USER, [pooled(), request({ selfClaimed: true }, 'r2')]);
+    expect(await screen.findByTestId('request-assignee-r1')).toBeInTheDocument();
+    expect(screen.queryByTestId('claim-r1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('claim-r2')).not.toBeInTheDocument();
+    expect(screen.getByTestId('request-self-r2')).toHaveTextContent('Tự nhận');
+  });
+
+  it('sends an older request with no department to one from "Sửa" — the department first, then the correction', async () => {
+    const calls: string[] = [];
+    const legacy = request({ assignee: null, receivingDepartment: null, receivingDepartmentLabel: null });
+    renderTable(RECEPTIONIST_USER, [legacy], {
+      'GET /api/reception/reports/dispatch-staff?branchId=1': () => ({ status: 200, body: { branchId: 1, onShift: { BELL: [{ id: 21, name: 'Bell Một', department: 'BELL' }], RECEPTION: [], HOUSEKEEPING: [] } } }),
+      'POST /api/reception/reports/r1/department': (init) => {
+        calls.push(`department:${JSON.parse(String(init.body)).receivingDepartment}`);
+        return { status: 200, body: { report: legacy } };
+      },
+      'PATCH /api/reception/reports/r1': () => {
+        calls.push('update');
+        return { status: 200, body: { report: legacy } };
+      },
+    });
+    await userEvent.click(await screen.findByTestId('edit-r1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Sửa bản ghi' });
+    expect(within(dialog).getByTestId('record-edit-department-unset')).toHaveTextContent('chưa có bộ phận nhận việc');
+    expect(within(within(dialog).getByTestId('record-edit-department')).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Bell', 'Lễ tân', 'Buồng phòng', 'Tự nhận việc']);
+    await userEvent.click(within(dialog).getByTestId('record-edit-department-BELL'));
+    await userEvent.click(within(dialog).getByTestId('record-edit-save'));
+    await waitFor(() => expect(calls).toEqual(['department:BELL', 'update']));
+  });
+
+  it('does not offer the department of a request someone else holds to anyone but a manager', async () => {
+    renderTable(RECEPTIONIST_USER, [request({ assignee: { id: 21, name: 'Bell Một', department: 'BELL', departmentLabel: 'Bell' } })]);
+    // The desk is not the holder: no "Hoàn thành" — and no edit shows the department either.
+    expect(await screen.findByTestId('request-holder-r1')).toHaveTextContent('Bell Một xử lý');
+    await userEvent.click(screen.getByTestId('edit-r1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Sửa bản ghi' });
+    expect(within(dialog).queryByTestId('record-edit-department')).not.toBeInTheDocument();
+  });
+});

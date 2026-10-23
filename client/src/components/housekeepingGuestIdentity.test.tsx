@@ -87,9 +87,16 @@ describe('a Housekeeping request at the desk', () => {
     expect(table).not.toHaveTextContent('Khu vực');
     expect(table).not.toHaveTextContent('Phòng - 101');
     expect(screen.getByTestId('request-guest-r1')).toHaveTextContent('Chưa xác định khách');
-    // Never the reporter or the content as the guest.
-    expect(screen.getByTestId('request-guest-r1')).not.toHaveTextContent('Chị Lan');
-    expect(screen.getByTestId('request-meta-r1')).toHaveTextContent('Buồng phòng · Chị Lan · Ghi nhận: 05/10/2026 09:03:07');
+    // Never the reporter or the content as the guest: the reporter is its own line beneath, with its department.
+    expect(screen.getByTestId('request-guest-r1').firstChild).toHaveTextContent('Chưa xác định khách');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Chị Lan');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Buồng phòng');
+    expect(screen.getByTestId('request-guest-r1').firstChild).not.toHaveTextContent('Chị Lan');
+    // The time beneath the content; who sent it is beneath the guest ("Chị Lan", "Buồng phòng") — not twice.
+    expect(screen.getByTestId('request-meta-r1')).toHaveTextContent('Ghi nhận: 05/10/2026 09:03:07');
+    expect(screen.getByTestId('request-meta-r1')).not.toHaveTextContent('Chị Lan');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Chị Lan');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Buồng phòng');
     // Who reported it: once in the row.
     expect(within(table).getAllByText(/Chị Lan/)).toHaveLength(1);
     expect(within(table).queryByTestId('source-tag')).not.toBeInTheDocument();
@@ -120,7 +127,11 @@ describe('a Housekeeping request at the desk', () => {
     expect(screen.getByTestId('request-guest-r1')).toHaveTextContent(/^Nguyễn Văn B/);
     const row = screen.getByTestId('request-guest-r1').closest('tr')!;
     expect(within(row).getByText('EZ900')).toBeInTheDocument();
-    expect(screen.getByTestId('request-meta-r1')).toHaveTextContent('Buồng phòng · Chị Lan · Ghi nhận: 05/10/2026 09:03:07');
+    // The time beneath the content; who sent it is beneath the guest ("Chị Lan", "Buồng phòng") — not twice.
+    expect(screen.getByTestId('request-meta-r1')).toHaveTextContent('Ghi nhận: 05/10/2026 09:03:07');
+    expect(screen.getByTestId('request-meta-r1')).not.toHaveTextContent('Chị Lan');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Chị Lan');
+    expect(screen.getByTestId('request-reporter-r1')).toHaveTextContent('Buồng phòng');
   });
 
   it('shows Housekeeping no guest columns and no way to name one', async () => {

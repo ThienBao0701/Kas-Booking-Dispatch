@@ -33,7 +33,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Ban, Check, ClipboardCheck, Hourglass, Megaphone, Minus, Pencil, Play, Plus, Save, Sparkles, UserRoundPlus } from 'lucide-react';
-import { HOUSEKEEPING_SHIFT_KEY, ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
+import { ROOM_ISSUE_TYPES, type RoomIssueType } from '../api/housekeeping';
 import { ROOM_WORK_KEY, formatMinutes, roomWorkApi, type CleaningForm, type CleaningInput, type CleaningItem, type RoomTask, type RoomWorkCatalog } from '../api/roomWork';
 import { toUserMessage } from '../api/errors';
 import { useAuth } from '../auth/AuthProvider';
@@ -155,6 +155,7 @@ export function HousekeepingRoomPage() {
             ) : active === 'inspect' ? (
               <InspectPanel
                 task={t}
+                onReport={() => setReporting(true)}
                 onSaved={(next) => {
                   refresh(next);
                   setTab('clean');
@@ -178,10 +179,7 @@ export function HousekeepingRoomPage() {
                 onReport={() => setReporting(true)}
                 onSaved={(next, done) => {
                   refresh(next);
-                  const ended = done && (next as RoomTask & { shiftEnded?: boolean }).shiftEnded === true;
-                  // The server ended the shift (nothing left to do or take): the screens follow it.
-                  if (ended) void queryClient.invalidateQueries({ queryKey: HOUSEKEEPING_SHIFT_KEY });
-                  setToast(ended ? 'Đã hoàn thành dọn phòng. Bạn đã hết việc — ca làm việc được tự động kết thúc.' : done ? 'Đã hoàn thành dọn phòng.' : 'Đã lưu tạm.');
+                  setToast(done ? 'Đã hoàn thành dọn phòng.' : 'Đã lưu tạm.');
                 }}
               />
             )}
@@ -334,6 +332,9 @@ function StartPanel({ task, onStarted, onRelease }: { task: RoomTask; onStarted:
 
 /* --------------------------------- Kiểm phòng -------------------------------- */
 
+/** The inspector's explicit positive result — saved with the inspection, never as a finding. */
+const GOOD_CONDITION_LABEL = 'Trang thiết bị nội thất trong phòng ở trạng thái tốt, không có thiệt hại vật chất.';
+
 /** "+ Báo cáo vấn đề" — beside the flags and the note; it reports and changes nothing else. */
 function ReportButton({ onClick }: { onClick: () => void }) {
   return (
@@ -392,8 +393,10 @@ function AreaInspectPanel({ task, onSaved, onReport }: { task: RoomTask; onSaved
   );
 }
 
-function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomTask) => void }) {
+function InspectPanel({ task, onSaved, onReport }: { task: RoomTask; onSaved: (task: RoomTask) => void; onReport: () => void }) {
   const [checked, setChecked] = useState<Partial<Record<RoomIssueType, string>>>({});
+  // "Trạng thái tốt" and the issues exclude each other: choosing one clears the other.
+  const [good, setGood] = useState(false);
   const selected = ROOM_ISSUE_TYPES.filter((t) => checked[t.code] !== undefined);
   const otherMissing = checked.OTHER !== undefined && !checked.OTHER.trim();
   const save = useMutation({
@@ -401,6 +404,8 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
       roomWorkApi.inspect(
         task.id,
         selected.map((t) => ({ type: t.code, ...(checked[t.code]?.trim() ? { note: checked[t.code]!.trim() } : {}) })),
+        undefined,
+        good || undefined,
       ),
     onSuccess: ({ task: next }) => onSaved(next),
   });
@@ -410,7 +415,11 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
       <section className="rounded-2xl border border-line bg-white p-4" data-testid="inspection-saved">
         <h2 className="text-base font-semibold text-slate-900">Đã kiểm phòng lúc {formatDateTime(task.inspection.createdAt)}</h2>
         <p className="text-sm text-slate-600">Bởi {task.inspection.inspectorName}</p>
-        {task.inspection.findings.length === 0 ? (
+        {task.inspection.goodCondition ? (
+          <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-base text-emerald-900" data-testid="inspection-good">
+            {GOOD_CONDITION_LABEL}
+          </p>
+        ) : task.inspection.findings.length === 0 ? (
           <p className="mt-2 text-base text-slate-700">Không có vấn đề.</p>
         ) : (
           <ul className="mt-2 space-y-1.5">
@@ -422,6 +431,8 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
             ))}
           </ul>
         )}
+        {/* Reporting stays open while the room is checked — it changes nothing of the inspection. */}
+        <div className="mt-3">{task.voided ? null : <ReportButton onClick={onReport} />}</div>
       </section>
     );
   }
@@ -444,14 +455,15 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
                 <input
                   type="checkbox"
                   checked={on}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    if (e.target.checked) setGood(false);
                     setChecked((prev) => {
                       const next = { ...prev };
                       if (e.target.checked) next[t.code] = '';
                       else delete next[t.code];
                       return next;
-                    })
-                  }
+                    });
+                  }}
                   data-testid={`inspection-type-${t.code}`}
                   className="h-6 w-6 accent-amber-600"
                 />
@@ -471,6 +483,22 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
             </div>
           );
         })}
+        {/* The positive result: the room was checked and is in good condition — not an issue, never reported. */}
+        <div className={`rounded-xl border-2 px-3 py-2.5 ${good ? 'border-emerald-500 bg-emerald-50' : 'border-line bg-white'}`}>
+          <label className="flex min-h-[2.5rem] cursor-pointer items-center gap-3 text-base font-medium text-slate-900">
+            <input
+              type="checkbox"
+              checked={good}
+              onChange={(e) => {
+                setGood(e.target.checked);
+                if (e.target.checked) setChecked({});
+              }}
+              data-testid="inspection-good-condition"
+              className="h-6 w-6 accent-emerald-600"
+            />
+            {GOOD_CONDITION_LABEL}
+          </label>
+        </div>
       </fieldset>
       <p className="mt-3 text-sm text-slate-600">Không chọn mục nào nghĩa là phòng không có vấn đề.</p>
       {save.isError ? (
@@ -478,6 +506,10 @@ function InspectPanel({ task, onSaved }: { task: RoomTask; onSaved: (task: RoomT
           <ErrorAlert>{toUserMessage(save.error)}</ErrorAlert>
         </div>
       ) : null}
+      {/* "+ Báo cáo vấn đề" during the inspection too — before or without saving it. */}
+      <div className="mt-4">
+        <ReportButton onClick={onReport} />
+      </div>
       <div className="sticky bottom-0 -mx-4 mt-4 border-t border-line bg-white/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
         <Button type="submit" className="w-full min-h-[3rem] text-base" loading={save.isPending} disabled={otherMissing} data-testid="inspection-save">
           <ClipboardCheck className="h-5 w-5" aria-hidden="true" />

@@ -739,8 +739,6 @@ describe('K. a place in an open item is not given to a second group — until it
   it('offers the room again once its work is resolved: reviewed, "Không cần dọn" approved, or removed — not before', async () => {
     // 1. Cleaned by a housekeeper: held while it waits for "Đạt / Không đạt", free once reviewed.
     const g1 = await group([room('101', ['OUT'])]);
-    // Waiting in the pool meanwhile — so finishing 101 does not end the housekeeper's shift (shiftAutoEnd).
-    const g2 = await group([room('102', ['OC'])]);
     await startShiftAt(lan, cn1);
     expect((await accept(lan, g1.id)).status).toBe(200);
     const [p101] = g1.items;
@@ -753,6 +751,7 @@ describe('K. a place in an open item is not given to a second group — until it
     expect((await createGroup([room('101', ['VC'])])).status).toBe(201);
 
     // 2. "Không cần dọn": held while it waits for the manager, free once approved.
+    const g2 = await group([room('102', ['OC'])]);
     expect((await accept(lan, g2.id)).status).toBe(200);
     const [p102] = g2.items;
     expect((await lan.post(`${url(p102!.id)}/no-clean`).send({ reason: 'Khách không muốn dọn' })).status).toBe(200);

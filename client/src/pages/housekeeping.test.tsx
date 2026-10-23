@@ -47,6 +47,7 @@ afterEach(() => {
 type Handler = (init: RequestInit) => { status: number; body?: unknown };
 
 const BRANCH = { id: 1, code: 'TD', hotelName: 'KAS', address: '05 Trương Định', branchNumber: 1 };
+const GOOD = 'Trang thiết bị nội thất trong phòng ở trạng thái tốt, không có thiệt hại vật chất.';
 
 function roomIssue(id: string, over: Record<string, unknown> = {}) {
   return {
@@ -402,38 +403,6 @@ describe('Bộ phận buồng phòng — "Vào ca" and the day’s work groups',
     expect(screen.queryByText('Tài khoản chưa được gán chi nhánh')).not.toBeInTheDocument();
   });
 
-  it('marks "Được giao" and "Tự nhận" apart — and lets the housekeeper a group was given to press "Nhận việc"', async () => {
-    const acked: string[] = [];
-    const given = group('g4', 4, [item('w6', { roomNumber: '401', floor: '4', assignee: MINE, phase: 'ACCEPTED', phaseLabel: 'Đã nhận / Chờ kiểm tra' })], {
-      assignee: MINE,
-      status: { code: 'ACCEPTED', label: 'Đã giao' },
-      origin: 'ASSIGNED',
-      originLabel: 'Được giao',
-      awaitingAcceptance: true,
-      assignedByName: 'Quản lý',
-    });
-    const taken = { ...G3, origin: 'SELF', originLabel: 'Tự nhận', awaitingAcceptance: false };
-    installApiMock(
-      routes({
-        [GROUPS]: () => ({ status: 200, body: { working: true, groups: [G1, given, taken] } }),
-        'POST /api/housekeeping/work/groups/g4/accept': () => {
-          acked.push('g4');
-          return { status: 200, body: { group: { ...given, acceptedAt: new Date().toISOString(), awaitingAcceptance: false, status: { code: 'ACCEPTED', label: 'Đã nhận' } } } };
-        },
-      }),
-    );
-    renderApp('/app/inspections');
-    expect(await screen.findByTestId('group-origin-4')).toHaveTextContent('Được giao · chờ nhận việc');
-    expect(screen.getByTestId('group-origin-3')).toHaveTextContent('Tự nhận');
-    // A pool group has no origin yet — it is free to take.
-    expect(screen.queryByTestId('group-origin-1')).not.toBeInTheDocument();
-    // Only the one given to this housekeeper offers "Nhận việc"; another's group is not offered at all.
-    expect(screen.queryByTestId('group-acknowledge-3')).not.toBeInTheDocument();
-    await userEvent.click(screen.getByTestId('group-acknowledge-4'));
-    await userEvent.click(await screen.findByTestId('group-accept-confirm'));
-    await waitFor(() => expect(acked).toEqual(['g4']));
-  });
-
   it('"Nhận công việc" confirms the whole group, every place in it, and takes it', async () => {
     const accepted: string[] = [];
     installApiMock(
@@ -699,6 +668,31 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
       ...extra,
     });
 
+  it('offers "+ Báo cáo vấn đề" while the room is still being checked — before the inspection is saved — with "Tự nhận việc"', async () => {
+    const reports: Record<string, unknown>[] = [];
+    installApiMock(
+      routes(roomTask('t1'), {
+        'POST /api/reception/reports': (init) => {
+          reports.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { report: { id: 'r1' } } };
+        },
+      }),
+    );
+    renderApp('/app/inspections/room/t1');
+    // The inspection form is open and nothing is saved yet.
+    expect(await screen.findByTestId('inspection-save')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('room-report-open'));
+    const dialog = await screen.findByTestId('quick-report');
+    await userEvent.click(within(dialog).getByTestId('quick-report-kind-GUEST_REQUEST'));
+    await userEvent.type(within(dialog).getByTestId('quick-report-content'), 'Khách cần thêm khăn');
+    await userEvent.click(within(dialog).getByTestId('quick-report-department-SELF'));
+    await userEvent.click(screen.getByTestId('quick-report-send'));
+    await waitFor(() => expect(reports).toHaveLength(1));
+    expect(reports[0]).toMatchObject({ category: 'GUEST_REQUEST', taskId: 't1', guestRequest: { receivingDepartment: 'SELF' } });
+    // The inspection is still there to finish.
+    expect(await screen.findByTestId('inspection-save')).toBeInTheDocument();
+  });
+
   it('offers the six conditions; saving the inspection makes the room "Đã kiểm tra" — only "Bắt đầu dọn" starts the clock', async () => {
     const posted: unknown[] = [];
     const starts: unknown[] = [];
@@ -729,6 +723,7 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
       'Khách quên đồ',
       'Phòng có khách nhưng hệ thống không có',
       'Vấn đề khác',
+      GOOD,
     ]);
     // No name is asked: the account is the inspector.
     expect(within(form).queryByLabelText(/Người dọn|Tên người/)).not.toBeInTheDocument();
@@ -748,6 +743,36 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     expect(await screen.findByTestId('cleaning-form')).toBeInTheDocument();
     expect(screen.getByTestId('room-state')).toHaveTextContent('Đang dọn');
     expect(starts).toEqual([1]);
+  });
+
+  it('"trạng thái tốt" excludes every issue both ways and is saved with the inspection — not as a finding', async () => {
+    const posted: unknown[] = [];
+    const inspection = { id: 'in1', createdAt: new Date().toISOString(), inspectorId: 6, inspectorName: 'Buồng phòng Một', findings: [], goodCondition: true };
+    installApiMock(
+      routes(roomTask('t1'), {
+        'POST /api/housekeeping/work/tasks/t1/inspect': (init) => {
+          posted.push(JSON.parse(String(init.body)));
+          return { status: 201, body: { task: roomTask('t1', { state: 'INSPECTED', stateLabel: 'Đã kiểm tra', startedAt: null, inspection }) } };
+        },
+      }),
+    );
+    renderApp('/app/inspections/room/t1');
+    const good = await screen.findByTestId('inspection-good-condition');
+    // An issue, then "tốt": the issue is cleared.
+    await userEvent.click(screen.getByTestId('inspection-type-SMOKING'));
+    await userEvent.click(good);
+    expect(good).toBeChecked();
+    expect(screen.getByTestId('inspection-type-SMOKING')).not.toBeChecked();
+    // "Tốt", then an issue: "tốt" is cleared.
+    await userEvent.click(screen.getByTestId('inspection-type-ODOR'));
+    expect(good).not.toBeChecked();
+    await userEvent.click(good);
+    expect(screen.getByTestId('inspection-type-ODOR')).not.toBeChecked();
+    await userEvent.click(screen.getByTestId('inspection-save'));
+    await waitFor(() => expect(posted).toEqual([{ issues: [], goodCondition: true }]));
+    // The saved result, under "Kiểm tra": the positive statement, no finding.
+    await userEvent.click(await screen.findByTestId('room-tab-inspect'));
+    expect(await screen.findByTestId('inspection-good')).toHaveTextContent(GOOD);
   });
 
   const ITEMS = [
@@ -857,9 +882,13 @@ describe('Bộ phận buồng phòng — one room: Kiểm phòng | Dọn phòng'
     await userEvent.click(within(dialog).getByTestId('quick-report-kind-GUEST_REQUEST'));
     await userEvent.type(within(dialog).getByTestId('quick-report-content'), 'Khách xin thêm gối');
     const send = screen.getByTestId('quick-report-send');
+    // "Bộ phận nhận việc" is required — Bell, Lễ tân, Buồng phòng or "Tự nhận việc".
+    expect(send).toBeDisabled();
+    expect(within(within(dialog).getByTestId('quick-report-department')).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Bell', 'Lễ tân', 'Buồng phòng', 'Tự nhận việc']);
+    await userEvent.click(within(dialog).getByTestId('quick-report-department-RECEPTION'));
     await userEvent.dblClick(send);
     await waitFor(() => expect(reports).toHaveLength(1));
-    expect(reports[0]).toMatchObject({ category: 'GUEST_REQUEST', taskId: 't1', guestRequest: { note: 'Khách xin thêm gối' } });
+    expect(reports[0]).toMatchObject({ category: 'GUEST_REQUEST', taskId: 't1', guestRequest: { note: 'Khách xin thêm gối', receivingDepartment: 'RECEPTION' } });
     expect((reports[0] as { guestRequest: Record<string, unknown> }).guestRequest).not.toHaveProperty('guestName');
     expect(issues).toEqual([]);
     expect(await screen.findByText('Đã gửi yêu cầu của khách cho lễ tân.')).toBeInTheDocument();

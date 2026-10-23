@@ -292,10 +292,7 @@ describe('the room work', () => {
     expect(done.status).toBe(200);
     // The cleaning time runs from the start, not from the inspection.
     expect(done.body.task).toMatchObject({ durationSeconds: 30 * 60, cleanedBy: { id: worker2Id }, inspection: { inspectorId: workerId } });
-    // Its only room, nothing left to take: the shift ended by itself (shiftAutoEnd).
-    expect(done.body.task.shiftEnded).toBe(true);
-    // A duplicate completion — even back on shift — writes nothing twice.
-    await onShift(worker2, cn1);
+    // A duplicate completion writes nothing twice.
     expect((await worker2.post(`/api/housekeeping/work/tasks/${task!.id}/complete`).send({})).status).toBe(409);
     expect(await testPrisma.housekeepingRoomTaskEvent.count({ where: { taskId: task!.id, type: 'COMPLETED' } })).toBe(1);
   });

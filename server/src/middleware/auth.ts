@@ -147,7 +147,7 @@ function supervisorMayReach(req: Request): boolean {
 const HOUSEKEEPING_REPORT_ROUTES = [
   /^\/api\/reception\/reports$/,
   /^\/api\/reception\/reports\/(options|housekeeping|guest|archive|open-counts|assigned|dispatch-staff)$/,
-  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge|assignee)$/,
+  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge|assignee|claim|department)$/,
   /^\/api\/issues$/,
   /^\/api\/issues\/similar$/,
   /^\/api\/confidential-reports(\/|$)/,
@@ -194,7 +194,7 @@ const BELL_ROUTES = [
   /^\/api\/reception\/shifts\/(options|current|check-in|end-preview|close)$/,
   /^\/api\/reception\/shifts\/current\/name$/,
   /^\/api\/reception\/reports\/(assigned|open-counts)$/,
-  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge)$/,
+  /^\/api\/reception\/reports\/[^/]+\/(complete|acknowledge|claim)$/,
   /^\/api\/nav-badges$/,
   /^\/api\/notifications(\/|$)/,
   /^\/api\/push(\/|$)/,

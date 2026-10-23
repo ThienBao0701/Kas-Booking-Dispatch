@@ -121,8 +121,10 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     expect(document.body).not.toHaveTextContent('Thu tiền thanh toán');
     expect(document.body).not.toHaveTextContent('Vấn đề về chất lượng và dịch vụ');
     expect(screen.getByTestId('hk-report-title')).toHaveTextContent('Vấn đề khách yêu cầu');
-    const table = await screen.findByTestId('guest-request-table');
+    // Its own request: under "Công việc bộ phận buồng phòng báo cáo vấn đề", not under what others sent.
+    const table = within(await screen.findByTestId('hk-reported')).getByTestId('guest-request-table');
     expect(await within(table).findByText('Thêm gối')).toBeInTheDocument();
+    expect(within(screen.getByTestId('hk-incoming')).queryByText('Thêm gối')).not.toBeInTheDocument();
     expect(table).not.toHaveTextContent('Chưa xác định khách');
     expect(within(table).queryByRole('columnheader', { name: 'Tên khách' })).not.toBeInTheDocument();
     expect(within(table).queryByRole('columnheader', { name: 'Mã EZ' })).not.toBeInTheDocument();
@@ -229,7 +231,7 @@ describe('"Báo cáo vấn đề" of Bộ phận buồng phòng', () => {
     installApiMock(shell(ADMIN_USER));
     renderApp('/app/hk/reports');
     expect(await screen.findByTestId('hk-reports-branch')).toBeInTheDocument();
-    const table = await screen.findByTestId('guest-request-table');
+    const table = within(await screen.findByTestId('hk-reported')).getByTestId('guest-request-table');
     // The Admin is not Housekeeping: the request says it has no guest yet, who sent it and when it was recorded.
     expect(await within(table).findByText('Chưa xác định khách')).toBeInTheDocument();
     expect(within(table).getByTestId('request-meta-r1')).toHaveTextContent('Ghi nhận: 05/10/2026 09:00:00');

@@ -30,6 +30,47 @@ import { PageHeader } from '../components/PageState';
 import { BranchPicker } from '../components/ReportFilter';
 import { DeliveryForm, GuestRequestForm } from '../components/OperationalForms';
 import { GuestRequestTable } from '../components/OperationalTables';
+import { DataTable, type DataColumn } from '../components/DataTable';
+import { SeverityBadge } from '../components/Severity';
+import { IssueStageBadge } from '../components/IssueViews';
+import type { OperationalReport } from '../api/receptionReports';
+
+/**
+ * The facility incidents Buồng phòng reported — part of "Công việc bộ phận
+ * buồng phòng báo cáo vấn đề". The incident itself is Bộ phận kỹ thuật's to
+ * repair: shown live (stage, who repairs it), with who reported it.
+ */
+function HousekeepingFacilityReports({ rows, isLoading }: { rows: OperationalReport[]; isLoading: boolean }) {
+  const columns: DataColumn<OperationalReport>[] = [
+    { key: 'stt', header: 'STT', className: 'w-[1%] whitespace-nowrap text-slate-400', render: (_r, i) => i + 1 },
+    { key: 'place', header: 'Khu vực', className: 'min-w-[7rem] font-medium text-slate-800', render: (r) => r.facility?.issue.locationLabel ?? '—' },
+    { key: 'issue', header: 'Sự cố', className: 'min-w-[10rem] whitespace-pre-wrap [overflow-wrap:anywhere]', render: (r) => r.facility?.issue.description ?? '—' },
+    {
+      key: 'severity',
+      header: 'Mức độ',
+      className: 'w-[1%] whitespace-nowrap',
+      render: (r) => (r.facility ? <SeverityBadge severity={r.facility.issue.severity} label={r.facility.issue.severityLabel} /> : '—'),
+    },
+    { key: 'stage', header: 'Trạng thái', className: 'min-w-[6rem]', render: (r) => (r.facility ? <IssueStageBadge issue={r.facility.issue} /> : '—') },
+    { key: 'receiver', header: 'Bộ phận nhận việc', className: 'whitespace-nowrap', render: () => 'Kỹ thuật' },
+    { key: 'repairer', header: 'Người xử lý', className: 'whitespace-nowrap', render: (r) => r.facility?.issue.repairerName ?? '—' },
+    { key: 'department', header: 'Bộ phận', className: 'whitespace-nowrap', render: (r) => r.departmentLabel ?? '—' },
+    { key: 'creator', header: 'Người tạo', className: 'whitespace-nowrap', render: (r) => r.createdByName },
+  ];
+  return (
+    <DataTable
+      testId="hk-reported-facility"
+      title="Sự cố cơ sở vật chất Buồng phòng đã báo"
+      badge={rows.length}
+      columns={columns}
+      rows={rows}
+      rowKey={(r) => r.id}
+      isLoading={isLoading}
+      emptyTitle="Chưa có sự cố nào"
+      emptyMessage="Sự cố Buồng phòng báo từ phòng hoặc khu vực sẽ hiện ở đây."
+    />
+  );
+}
 import { FacilityIssueBoard } from '../components/FacilityIssueBoard';
 import { DeliveryTable } from '../components/HotelDelivery';
 import { useDeliveries } from '../hooks/useDeliveries';
@@ -143,13 +184,32 @@ export function HousekeepingReportsPage() {
             </Modal>
           ) : null}
           <WorkDepartmentFilter value={department} onChange={setDepartment} testId="hk-department" className="mb-3 w-full sm:w-60" />
-          <GuestRequestTable
-            rows={of('GUEST_REQUEST')}
-            title="Danh sách vấn đề khách yêu cầu"
-            {...tableState}
-            // The Admin reads; who reported and who completed are beside the status.
-            {...(isAdmin ? { variant: 'summary' as const, showActors: true } : {})}
-          />
+          {/*
+            TWO TABLES, ONE RECORD EACH. A: what other departments sent to
+            Buồng phòng — every housekeeper of the branch sees it, one takes it.
+            B: what Buồng phòng itself reported — whoever it went to. A request
+            is under ONE of them (by where it came from), never both.
+          */}
+          <section className="space-y-2" data-testid="hk-incoming">
+            <GuestRequestTable
+              rows={of('GUEST_REQUEST').filter((r) => r.originDepartment !== 'HOUSEKEEPING')}
+              title="Bộ phận buồng xử lý"
+              emptyTitle="Chưa có yêu cầu nào gửi cho Buồng phòng"
+              {...tableState}
+              // The Admin reads; who reported and who completed are beside the status.
+              {...(isAdmin ? { variant: 'summary' as const, showActors: true } : {})}
+            />
+          </section>
+          <section className="mt-6 space-y-3" data-testid="hk-reported">
+            <GuestRequestTable
+              rows={of('GUEST_REQUEST').filter((r) => r.originDepartment === 'HOUSEKEEPING')}
+              title="Công việc bộ phận buồng phòng báo cáo vấn đề"
+              emptyTitle="Buồng phòng chưa báo cáo yêu cầu nào"
+              {...tableState}
+              {...(isAdmin ? { variant: 'summary' as const, showActors: true } : {})}
+            />
+            <HousekeepingFacilityReports rows={of('FACILITY_ISSUE')} isLoading={tableState.isLoading} />
+          </section>
         </>
       ) : null}
 
